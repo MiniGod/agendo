@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Enforce Conventional Commits on every commit message.
+# Installed by the "prepare" npm script: `git config core.hooksPath .githooks`.
+bunx commitlint --edit "$1"

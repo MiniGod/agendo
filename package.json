@@ -1,0 +1,48 @@
+{
+  "name": "agendo",
+  "version": "0.1.0",
+  "description": "Terminal UI to launch/resume Claude and Copilot agent sessions for Azure DevOps work items",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MiniGod/agendo.git"
+  },
+  "homepage": "https://github.com/MiniGod/agendo#readme",
+  "bugs": {
+    "url": "https://github.com/MiniGod/agendo/issues"
+  },
+  "type": "module",
+  "bin": {
+    "agendo": "./src/index.tsx"
+  },
+  "license": "MIT",
+  "keywords": ["claude", "copilot", "azure-devops", "tmux", "agent", "cli", "ink"],
+  "files": ["src"],
+  "scripts": {
+    "start": "bun run src/index.tsx",
+    "dev": "bun run src/index.tsx",
+    "typecheck": "tsc --noEmit",
+    "commitlint": "commitlint",
+    "release": "commit-and-tag-version",
+    "prepare": "git config core.hooksPath .githooks || true",
+    "typecheck:e2e": "tsc --noEmit -p e2e/tsconfig.json",
+    "test:e2e": "playwright test",
+    "test:e2e:setup": "playwright install chromium"
+  },
+  "dependencies": {
+    "ink": "^5.0.1",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.0",
+    "@commitlint/config-conventional": "^21.2.0",
+    "@playwright/test": "1.61.0",
+    "@types/node": "^26.0.0",
+    "@types/react": "^18.3.3",
+    "@wterm/core": "^0.3.0",
+    "@wterm/dom": "^0.3.0",
+    "bun-types": "^1.3.14",
+    "commit-and-tag-version": "^12.7.3",
+    "node-pty": "1.1.0",
+    "typescript": "^5.5.0"
+  }
+}

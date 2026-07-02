@@ -1,0 +1,27 @@
+agendo ⟨bold⟩[GitHub]  ⟨cyan⟩ 1 Issues ⟨dim⟩  2 PRs ⟨black,bg:cyan,bold⟩  3 Sessions ⟨dim⟩
+↑/↓ move · → expand · ⇥ view · g group · s sort: created · / search · enter open · o browser · , settings · r refresh ·…⟨dim⟩
+as ⟨magenta⟩Ada Lovelace (you)⟨bold⟩
+  ID       APPROVE    CI / MERGE   TITLE                                     CONTEXT           CREATED AGENT      ⟨dim⟩
+ ⟨dim⟩
+▌ PRs on your issues⟨blue,bold⟩
+▾ #401     ✓ 1/1      ✓ pass       ⟨green⟩Add login form validation                 #301 Issue        <ago> ⟨gray⟩● 1/1      ⟨green⟩
+    ▾ ● [claude] Implement login form  <ago>  (ready → attach)⟨black,bg:cyan⟩
+      dir     ⟨gray,dim⟩<HOME>/repos/appweb/.claude/worktrees/login⟨dim⟩
+      repo    ⟨gray,dim⟩appweb⟨dim⟩
+      branch  ⟨gray,dim⟩feature/login⟨dim⟩
+      profile ⟨gray,dim⟩.claude⟨dim⟩
+      continue⟨gray,dim⟩press c → convert & resume in copilot⟨dim⟩
+      ↳ "Add a login form with validation"⟨dim⟩
+       <ago>⟨gray⟩        ⟨gray,dim⟩Thinking  ⟨magenta⟩~100 tokens⟨dim⟩
+       <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Read      ⟨gray⟩…/src/login.tsx⟨dim⟩
+       <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Edit      ⟨yellow⟩…/src/login.tsx⟨dim⟩
+       <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Bash      ⟨cyan⟩bun test login⟨dim⟩
+       <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Claude    ⟨white⟩Done — login form added with validation.⟨dim⟩
+    + start a fresh session…⟨gray⟩
+
+▌ Awaiting your review⟨blue,bold⟩  review requested⟨bold,dim⟩
+▸ #377     ⟨magenta⟩✓ 0/1      ⟨yellow⟩✓ pass       ⟨green⟩Upgrade the build toolchain               you               ⟨cyan⟩<ago> —          ⟨gray⟩
+
+▌ PRs without an issue⟨blue,bold⟩
+▸ #402     ⟨magenta⟩✓ 0/1      ● running    ⟨yellow⟩Add request rate limiting to the API      appweb:ada/rate-… <ago> —          ⟨gray⟩
+ ⟨dim⟩

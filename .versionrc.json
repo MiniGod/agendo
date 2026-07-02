@@ -1,0 +1,16 @@
+{
+  "$comment": "commit-and-tag-version config. Version is bumped from the conventional-commit git log since the last vX.Y.Z tag; the first release tags package.json as-is (0.1.0) via `--first-release`.",
+  "types": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "section": "Refactoring" },
+    { "type": "docs", "section": "Documentation" },
+    { "type": "build", "section": "Build System" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "ci", "hidden": true },
+    { "type": "test", "hidden": true },
+    { "type": "chore", "hidden": true },
+    { "type": "style", "hidden": true }
+  ]
+}

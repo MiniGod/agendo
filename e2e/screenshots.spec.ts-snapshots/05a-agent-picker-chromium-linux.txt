@@ -1,0 +1,5 @@
+Fresh session — #101 — Add login screen⟨bold⟩
+Which agent should run this session?  ·  ↑/↓ move · enter select · esc back⟨dim⟩
+
+❯ ⟨black,bg:cyan⟩Claude    ⟨black,bg:cyan,bold⟩  claude --session-id …⟨black,bg:cyan⟩
+  Copilot   ⟨bold⟩  copilot --session-id …⟨bold,dim⟩

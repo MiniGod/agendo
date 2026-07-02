@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+// Fake `gh` (GitHub CLI) for the e2e harness. Like the fake az/tmux, it touches
+// no network: `auth status` reflects a flag, and `api user` / `issue list` /
+// `pr list` are answered from a JSON state file (FAKE_GH_STATE). Every call is
+// appended to FAKE_CALL_LOG so tests can assert what the GitHub backend invoked.
+//
+// FAKE_GH_STATE shape (all optional):
+//   {
+//     "authed": true,
+//     "user": { "login": "ada", "name": "Ada Lovelace" },
+//     "issues": { "ada/appweb": [ { ...issue json... } ] },
+//     "prs":    { "ada/appweb": { "author:ada": [ {...} ], "review-requested:ada": [ {...} ] } }
+//   }
+// `issues`/`prs` are keyed by the `--repo` slug; `prs` is further keyed by a
+// substring of the `--search` query (author: / review-requested: / involves:),
+// so the three PR queries the backend makes can return distinct sets. A missing
+// key yields an empty array — the backend treats that repo as having nothing.
+import fs from "node:fs";
+
+const argv = process.argv.slice(2);
+const LOG = process.env.FAKE_CALL_LOG;
+if (LOG) { try { fs.appendFileSync(LOG, "gh " + JSON.stringify(argv) + "\n"); } catch {} }
+
+function state() {
+  try { return JSON.parse(fs.readFileSync(process.env.FAKE_GH_STATE, "utf-8")); } catch { return {}; }
+}
+function flag(name) {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+
+const s = state();
+const [cmd, sub] = argv;
+
+// `gh auth status` — exit 0 iff authenticated (stderr text is what the real CLI
+// prints; the backend only reads the exit code).
+if (cmd === "auth" && sub === "status") {
+  if (s.authed) { process.stderr.write("✓ Logged in to github.com as " + (s.user?.login ?? "user") + "\n"); process.exit(0); }
+  process.stderr.write("You are not logged into any GitHub hosts.\n");
+  process.exit(1);
+}
+
+// `gh api user` — the authenticated identity.
+if (cmd === "api" && sub === "user") {
+  process.stdout.write(JSON.stringify(s.user ?? { login: "user", name: "User" }));
+  process.exit(0);
+}
+
+// `gh issue list --repo <slug> [--author X] --state open --json ... --limit N`
+if (cmd === "issue" && sub === "list") {
+  const slug = flag("--repo");
+  process.stdout.write(JSON.stringify((s.issues ?? {})[slug] ?? []));
+  process.exit(0);
+}
+
+// `gh pr list --repo <slug> --search "<query>" --json ... --limit N`
+if (cmd === "pr" && sub === "list") {
+  const slug = flag("--repo");
+  const search = flag("--search") ?? "";
+  const perRepo = (s.prs ?? {})[slug] ?? {};
+  // Pick the list whose key appears in the search query (author: / review-
+  // requested: / involves:); fall back to a bare "*" bucket, else empty.
+  let list = perRepo["*"] ?? [];
+  for (const key of Object.keys(perRepo)) {
+    if (key !== "*" && search.includes(key)) { list = perRepo[key]; break; }
+  }
+  process.stdout.write(JSON.stringify(list));
+  process.exit(0);
+}
+
+// Any other subcommand: succeed silently.
+process.exit(0);

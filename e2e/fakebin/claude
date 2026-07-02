@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake `claude` — records the invocation and exits. The launcher only ever hands
+# this to a (faked) tmux new-session/new-window, so it normally isn't executed
+# directly; provided for completeness and to catch accidental direct launches.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "claude $*" >> "$FAKE_CALL_LOG"; fi
+exit 0

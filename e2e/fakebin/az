@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake `az` — returns a static access token for the token-minting call the
+# launcher makes, so no real Azure login is required.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "az $*" >> "$FAKE_CALL_LOG"; fi
+case "$*" in
+  *get-access-token*) echo "fake-ado-token" ;;
+  *) : ;;
+esac
+exit 0

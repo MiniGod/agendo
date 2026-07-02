@@ -1,0 +1,6 @@
+Fresh session in appweb — #101 — Add login screen⟨bold⟩
+New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back⟨dim⟩
+
+branch: worktree-add-login-screen-101⟨cyan⟩
+
+→ claude · worktree at <HOME>/repos/appweb/.claude/worktrees/add-login-screen-101⟨dim⟩
