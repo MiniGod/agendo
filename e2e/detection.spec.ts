@@ -15,6 +15,7 @@ import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { managedKind, sessionName, shortId, paneReadiness } from "../src/tmux.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
+import { resolveContext, isUnderRoot, tmuxSafeName } from "../src/context.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -278,5 +279,80 @@ test.describe("freshName / prFreshName: repo scoping of managed window names", (
   test("scoped names still classify to the right kind (attribution survives scoping)", () => {
     expect(managedKind(freshName(101, "owner/repo"))).toBe("workitem");
     expect(managedKind(prFreshName(5, "owner/repo"))).toBe("pr");
+  });
+});
+
+// Path-scoped launchers: a `[path]` argument resolves to (filterRoot, hostSession)
+// and the segment-aware prefix match decides which sessions a scoped launcher
+// shows. These are the pure core the TUI filter and `agendo list <dir>` share.
+test.describe("resolveContext: path → (filterRoot, hostSession)", () => {
+  test("no path is the global launcher (null root, default session)", () => {
+    expect(resolveContext(undefined, "/home/me")).toEqual({ filterRoot: null, hostSession: "agendo" });
+    expect(resolveContext("", "/home/me")).toEqual({ filterRoot: null, hostSession: "agendo" });
+  });
+
+  test("a relative path resolves against cwd; host session is agendo-<basename>", () => {
+    expect(resolveContext(".", "/home/me/repos/appweb")).toEqual({
+      filterRoot: "/home/me/repos/appweb",
+      hostSession: "agendo-appweb",
+    });
+    expect(resolveContext("work", "/home/me")).toEqual({
+      filterRoot: "/home/me/work",
+      hostSession: "agendo-work",
+    });
+  });
+
+  test("an absolute path is used as-is", () => {
+    expect(resolveContext("/home/me/work", "/anywhere")).toEqual({
+      filterRoot: "/home/me/work",
+      hostSession: "agendo-work",
+    });
+  });
+
+  test("-s overrides the derived host session name verbatim (basename collisions)", () => {
+    // The override is honored as-is (no `agendo-` prefix) — it's the explicit
+    // escape hatch for naming a launcher, e.g. disambiguating basename clashes.
+    expect(resolveContext("/a/proj", "/x", "left")).toEqual({ filterRoot: "/a/proj", hostSession: "left" });
+    // A bare -s with no path names a global launcher.
+    expect(resolveContext(undefined, "/x", "scratch")).toEqual({ filterRoot: null, hostSession: "scratch" });
+  });
+
+  test("basename is prefixed and sanitized to a tmux-safe session name", () => {
+    // tmux forbids `.`/`:` in session names — collapsed to `-`, then prefixed.
+    expect(resolveContext("/repos/my.app", "/x").hostSession).toBe("agendo-my-app");
+    // A path whose basename sanitizes to nothing falls back to the bare default.
+    expect(resolveContext("/", "/x").hostSession).toBe("agendo");
+  });
+});
+
+test.describe("tmuxSafeName", () => {
+  test("collapses forbidden chars and trims dashes", () => {
+    expect(tmuxSafeName("my.repo")).toBe("my-repo");
+    expect(tmuxSafeName("a:b c")).toBe("a-b-c");
+    expect(tmuxSafeName("...")).toBe("");
+    expect(tmuxSafeName("plain")).toBe("plain");
+  });
+});
+
+test.describe("isUnderRoot: segment-aware prefix match", () => {
+  test("a path is under itself and under an ancestor", () => {
+    expect(isUnderRoot("/home/me/work", "/home/me/work")).toBe(true);
+    expect(isUnderRoot("/home/me/work/repo/.claude/worktrees/x", "/home/me/work")).toBe(true);
+    expect(isUnderRoot("/home/me/work/repo", "/home/me")).toBe(true);
+  });
+
+  test("a sibling with a shared prefix does NOT match (the ~/work vs ~/workshop guard)", () => {
+    expect(isUnderRoot("/home/me/workshop", "/home/me/work")).toBe(false);
+    expect(isUnderRoot("/home/me/work-notes", "/home/me/work")).toBe(false);
+  });
+
+  test("an ancestor is not under its descendant", () => {
+    expect(isUnderRoot("/home/me", "/home/me/work")).toBe(false);
+  });
+
+  test("root '/' contains every absolute path; trailing slashes are normalized", () => {
+    expect(isUnderRoot("/anything/here", "/")).toBe(true);
+    expect(isUnderRoot("/home/me/work/", "/home/me/work")).toBe(true);
+    expect(isUnderRoot("/home/me/work", "/home/me/work/")).toBe(true);
   });
 });

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
+import { LOGIN_SESSION_ID, COPILOT_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const SHORT_ID = LOGIN_SESSION_ID.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
@@ -91,6 +91,45 @@ test("agendo send refuses a compacting session unless forced", async ({ mock }) 
   const forced = agendo(mock.env, "send", "-f", SHORT_ID, "run the tests");
   expect(forced.status).toBe(0);
   expect(forced.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+});
+
+test("agendo list [dir] scopes the listing to sessions under the dir", async ({ mock }) => {
+  // Two running managed windows under two different repo roots: the login claude
+  // session (appweb) and the experiment copilot session (applib). `agendo list`
+  // shows both; `agendo list <root>` shows only the sessions under that root —
+  // the CLI mirror of the TUI's path filter (segment-aware, via isUnderRoot).
+  const appweb = join(mock.home, "repos", "appweb");
+  const applib = join(mock.home, "repos", "applib");
+  const loginTarget = sessionName("claude", LOGIN_SESSION_ID); // === RUNNING_TARGET
+  const expTarget = sessionName("copilot", COPILOT_SESSION_ID);
+  const ready = ["  ─────────────", "  ❯ ", "  ─────────────"].join("\n");
+  await mock.setTmuxState({
+    sessions: [loginTarget, expTarget],
+    windows: [],
+    panes: [
+      { session: loginTarget, window: loginTarget, cwd: join(appweb, ".claude", "worktrees", "login"), placeholder: false },
+      { session: expTarget, window: expTarget, cwd: join(applib, ".claude", "worktrees", "experiment"), placeholder: false },
+    ],
+    captures: { [loginTarget]: ready, [expTarget]: ready },
+  });
+
+  // No dir → both sessions listed.
+  const all = agendo(mock.env, "list");
+  expect(all.status).toBe(0);
+  expect(all.stdout).toContain("Implement login form"); // appweb (claude)
+  expect(all.stdout).toContain("Experiment spike"); // applib (copilot)
+
+  // Scoped to appweb → only the login session.
+  const inAppweb = agendo(mock.env, "list", appweb);
+  expect(inAppweb.status).toBe(0);
+  expect(inAppweb.stdout).toContain("Implement login form");
+  expect(inAppweb.stdout).not.toContain("Experiment spike");
+
+  // Scoped to applib → only the experiment session.
+  const inApplib = agendo(mock.env, "list", applib);
+  expect(inApplib.status).toBe(0);
+  expect(inApplib.stdout).toContain("Experiment spike");
+  expect(inApplib.stdout).not.toContain("Implement login form");
 });
 
 test("agendo status on an unknown id fails cleanly", async ({ mock }) => {
