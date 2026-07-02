@@ -1,0 +1,5 @@
+Open in browser — #101 — Add login screen⟨bold⟩
+Pick what to open · esc/q cancel⟨dim⟩
+
+  p⟨magenta,bold⟩  PR !5001
+  i⟨cyan,bold⟩  issue #101

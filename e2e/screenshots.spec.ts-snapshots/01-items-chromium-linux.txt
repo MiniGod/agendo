@@ -1,0 +1,11 @@
+clops ⟨bold⟩[Azure DevOps]  ⟨cyan⟩ 1 Work items ⟨black,bg:cyan,bold⟩  2 PRs ⟨dim⟩  3 Sessions ⟨dim⟩
+↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit⟨dim⟩
+as ⟨magenta⟩Ada Lovelace (you)⟨bold⟩
+  ID       TYPE       STATE        TITLE                                         PR                    AGENT      ⟨dim⟩
+ ⟨dim⟩
+▌ Current sprint⟨blue,bold⟩  Sprint 42⟨bold,dim⟩
+▸ #101     User Story In Progress  Add login screen                              !5001 1/1 ✓           ● 1/1      ⟨black,bg:cyan⟩
+▸ #102     Bug        ⟨gray⟩Active       ⟨white⟩Fix crash on startup                          —                     1 sess     ⟨gray⟩
+
+▸ Everything else assigned (1)⟨blue,bold⟩
+ ⟨dim⟩

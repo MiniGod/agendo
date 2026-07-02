@@ -1,0 +1,109 @@
+name: Release
+
+# Manual only. Bumps the version from the conventional-commit git log, writes
+# the changelog, tags, publishes to npm, and cuts a GitHub release.
+on:
+  workflow_dispatch:
+    inputs:
+      first-release:
+        description: "Initial release: tag package.json's current version (0.1.0) as-is, no bump. Use this once."
+        type: boolean
+        default: false
+      release-as:
+        description: "Force a version or bump (patch | minor | major | x.y.z). Leave blank to auto-bump from commits."
+        type: string
+        default: ""
+      dry-run:
+        description: "Compute and print the next version without tagging or publishing."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Version & publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Falls back to GITHUB_TOKEN (github-actions[bot], a ruleset bypass
+          # actor). Set a RELEASE_TOKEN PAT secret if you later remove that bypass.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      # Playwright runner + node-pty native addon run under Node (see the e2e gate).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: |
+          bun run typecheck
+          bun run typecheck:e2e
+
+      # Gate the release on the full e2e suite — runs before any tag/publish/push,
+      # so a red suite aborts the release with nothing shipped.
+      - name: Install Playwright Chromium + OS deps
+        run: bunx playwright install --with-deps chromium
+
+      - name: E2E gate
+        run: bun run test:e2e
+
+      - name: Upload e2e artifacts on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-release
+          path: |
+            e2e/.artifacts
+            e2e/screenshots
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version, changelog & tag
+        run: |
+          ARGS=""
+          [ "${{ inputs.first-release }}" = "true" ] && ARGS="$ARGS --first-release"
+          [ -n "${{ inputs.release-as }}" ] && ARGS="$ARGS --release-as ${{ inputs.release-as }}"
+          [ "${{ inputs.dry-run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          echo "commit-and-tag-version $ARGS"
+          bunx commit-and-tag-version $ARGS
+
+      - name: Stop here on dry run
+        if: ${{ inputs.dry-run }}
+        run: echo "Dry run complete — nothing tagged or published." && exit 0
+
+      - name: Push commit & tag
+        if: ${{ !inputs.dry-run }}
+        run: git push --follow-tags origin HEAD:master
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry-run }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="v$(node -p "require('./package.json').version")"
+          gh release create "$VERSION" --title "$VERSION" --generate-notes

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Typecheck (app)
+        run: bun run typecheck
+      - name: Typecheck (e2e harness)
+        run: bun run typecheck:e2e
+
+  e2e:
+    name: E2E (browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # Playwright's test runner and node-pty's native addon run under Node; the
+      # app-under-test and the wterm WASM bundle step run under bun. Both needed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - name: Install Playwright Chromium + OS deps
+        run: bunx playwright install --with-deps chromium
+      - name: Run e2e suite
+        # CI is set automatically by GitHub → the Playwright config enables
+        # forbidOnly, 2 workers, and 2 retries for the known keystroke-timing flake.
+        run: bun run test:e2e
+      - name: Upload e2e artifacts on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            e2e/.artifacts
+            e2e/screenshots
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,6 @@
+Fresh session — #101 — Add login screen⟨bold⟩
+Pick a repo to create the worktree in  ·  ↑/↓ move · enter select · esc back⟨dim⟩
+
+❯ ⟨black,bg:cyan⟩appweb                ⟨black,bg:cyan,bold⟩   2 sessions (2 claude, 0 copilot)  <HOME>/repos/appweb⟨black,bg:cyan⟩
+  applib                ⟨bold⟩   1 sessions⟨green⟩ (0 claude, 1 copilot)⟨gray⟩  <HOME>/repos/applib⟨dim⟩
+  standalone            ⟨bold⟩   1 sessions⟨green⟩ (1 claude, 0 copilot)⟨gray⟩  <HOME>/repos/standalone⟨dim⟩

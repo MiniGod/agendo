@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake `xdg-open` — records the URL the launcher tried to open in a browser so
+# the open-in-browser flow can be asserted without spawning a real browser.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "xdg-open $*" >> "$FAKE_CALL_LOG"; fi
+exit 0

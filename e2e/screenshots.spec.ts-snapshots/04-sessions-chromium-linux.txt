@@ -1,0 +1,13 @@
+clops ⟨bold⟩[Azure DevOps]  ⟨cyan⟩ 1 Work items ⟨dim⟩  2 PRs ⟨dim⟩  3 Sessions ⟨black,bg:cyan,bold⟩
+↑/↓ move · → expand · ⇥ switch view · g ungroup · s sort: updated · / search · n new · enter resume · c →other agent · …⟨dim⟩
+ ⟨dim⟩
+＋ new session⟨black,bg:cyan,bold⟩
+▌ Running now⟨blue,bold⟩  (1) — enter to attach⟨bold,dim⟩
+    ▸ ⟨gray⟩● ⟨green⟩[claude] ⟨dim⟩Implement login form  !5001 → WI 101⟨magenta⟩  <ago>⟨dim⟩  (ready → attach)⟨green⟩
+
+▸ appweb (2)⟨blue,bold⟩  <ago>⟨gray,bold⟩
+
+▸ applib (1)⟨blue,bold⟩  <ago>⟨gray,bold⟩
+
+▸ standalone (1)⟨blue,bold⟩  <ago>⟨gray,bold⟩
+ ⟨dim⟩

@@ -1,0 +1,15 @@
+clops ⟨bold⟩[Azure DevOps]  ⟨cyan⟩ 1 Work items ⟨dim⟩  2 PRs ⟨black,bg:cyan,bold⟩  3 Sessions ⟨dim⟩
+↑/↓ move · → expand · ⇥ view · g group · s sort: created · / search · enter open · o browser · , settings · r refresh ·…⟨dim⟩
+as ⟨magenta⟩Ada Lovelace (you)⟨bold⟩
+  ID       APPROVE    CI / MERGE   TITLE                                     CONTEXT           CREATED AGENT      ⟨dim⟩
+ ⟨dim⟩
+▌ PRs on your work items⟨blue,bold⟩
+▸ !5001    ✓ 1/1      ✓ pass       Add login screen                          #101 User Story   <ago> ● 1/1      ⟨black,bg:cyan⟩
+
+▌ Awaiting your review⟨blue,bold⟩  you + your teams⟨bold,dim⟩
+▸ !7001    ⟨magenta⟩✓ 0/1      ● running    ⟨yellow⟩Refactor the parser                       you               ⟨cyan⟩<ago> —          ⟨gray⟩
+▸ !7002    ✓ 1/1      ✓ pass       ⟨green⟩Speed up startup                          you               ⟨cyan⟩<ago> —          ⟨gray⟩
+
+▌ PRs without a work item⟨blue,bold⟩
+▸ !6001    ⟨magenta⟩—          draft        ⟨gray⟩Experiment spike                          applib:draft/exp… <ago> 1 sess     ⟨gray⟩
+ ⟨dim⟩
