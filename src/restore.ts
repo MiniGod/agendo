@@ -18,21 +18,37 @@ import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { STATE_DIR, OLD_STATE_DIR } from "./config.ts";
 import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
+import { tmuxSafeName } from "./context.ts";
 import { resumeArgv } from "./launch.ts";
 import type { SessionIndex } from "./sessions.ts";
 import type { AgentSession } from "./types.ts";
 
 /**
- * Where restore reads from and writes to. Reads try the new `~/.clops/` path
- * first and fall back to the historical `~/.claude-launcher/` so an existing
- * snapshot survives the rename; writes always go to the new path.
+ * Restore snapshots are kept PER HOST SESSION so parallel path-scoped launchers
+ * don't clobber each other's tabs. Each host session's snapshot lives in its own
+ * file under `~/.clops/restore/<session>.json` (separate files avoid concurrent
+ * launchers racing on a shared map). For the default `clops` session, reads fall
+ * back to the historical single-file snapshots (`~/.clops/restore.json`, then
+ * `~/.claude-launcher/restore.json`) so an existing install keeps working across
+ * the format change. Writes always go to the new per-session location.
  */
-const NEW_RESTORE_PATH = join(STATE_DIR, "restore.json");
-const OLD_RESTORE_PATH = join(OLD_STATE_DIR, "restore.json");
-function restorePath(): string {
-  if (existsSync(NEW_RESTORE_PATH)) return NEW_RESTORE_PATH;
-  if (existsSync(OLD_RESTORE_PATH)) return OLD_RESTORE_PATH;
-  return NEW_RESTORE_PATH;
+const RESTORE_DIR = join(STATE_DIR, "restore");
+const LEGACY_RESTORE_PATHS = [join(STATE_DIR, "restore.json"), join(OLD_STATE_DIR, "restore.json")];
+
+/** The per-session snapshot file (always the write target for a session). */
+function restoreFileFor(session: string): string {
+  return join(RESTORE_DIR, `${tmuxSafeName(session) || session}.json`);
+}
+
+/** Where to READ a session's snapshot from, honoring the legacy fallback. */
+function restoreReadPath(session: string): string {
+  const perSession = restoreFileFor(session);
+  if (existsSync(perSession)) return perSession;
+  // Only the default host session inherits the pre-context single-file snapshot.
+  if (session === LAUNCHER_SESSION) {
+    for (const p of LEGACY_RESTORE_PATHS) if (existsSync(p)) return p;
+  }
+  return perSession;
 }
 
 /** One persisted tab: a managed window name + how to (lazily) resume it. */
@@ -55,8 +71,8 @@ export interface RestoreTab {
   argv: string[];
 }
 
-export function loadRestore(): RestoreTab[] {
-  const path = restorePath();
+export function loadRestore(session: string = LAUNCHER_SESSION): RestoreTab[] {
+  const path = restoreReadPath(session);
   if (!existsSync(path)) return [];
   try {
     const data = JSON.parse(readFileSync(path, "utf-8"));
@@ -71,10 +87,10 @@ export function loadRestore(): RestoreTab[] {
   }
 }
 
-function saveRestore(tabs: RestoreTab[]): void {
+function saveRestore(session: string, tabs: RestoreTab[]): void {
   try {
-    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(NEW_RESTORE_PATH, JSON.stringify({ tabs }, null, 2));
+    if (!existsSync(RESTORE_DIR)) mkdirSync(RESTORE_DIR, { recursive: true });
+    writeFileSync(restoreFileFor(session), JSON.stringify({ tabs }, null, 2));
   } catch {
     // Persisting the tab snapshot is best-effort; ignore write failures.
   }
@@ -130,15 +146,15 @@ export function resolveWindowSession(
  * No-op when the canonical session isn't running, so a standalone menu never
  * clobbers a snapshot saved by the real launcher session.
  */
-export function captureRestore(index: SessionIndex): void {
-  const windows = launcherWindowPaths();
-  // A live tmux session always has ≥1 window, so an empty list means the
-  // canonical session isn't running — skip so a standalone menu never clobbers
-  // a saved snapshot. (Also avoids a separate `tmux has-session` spawn per load.)
+export function captureRestore(index: SessionIndex, hostSession: string = LAUNCHER_SESSION): void {
+  const windows = launcherWindowPaths(hostSession);
+  // A live tmux session always has ≥1 window, so an empty list means the host
+  // session isn't running — skip so a standalone menu never clobbers a saved
+  // snapshot. (Also avoids a separate `tmux has-session` spawn per load.)
   if (windows.length === 0) return;
   // Pass the current snapshot so buildTabs can preserve a just-recorded session
   // whose on-disk log doesn't exist yet (see recordLaunchedSession).
-  saveRestore(buildTabs(windows, index.all, loadRestore()));
+  saveRestore(hostSession, buildTabs(windows, index.all, loadRestore(hostSession)));
 }
 
 /**
@@ -214,8 +230,9 @@ export function buildTabs(
 export function recordLaunchedSession(
   info: { id: string; cwd: string; title?: string; configDir?: string; source?: AgentSession["source"] },
   tmuxName: string,
+  hostSession: string = LAUNCHER_SESSION,
 ): void {
-  if (!launcherWindowPaths().some((w) => w.name === tmuxName)) return;
+  if (!launcherWindowPaths(hostSession).some((w) => w.name === tmuxName)) return;
   const s: AgentSession = {
     id: info.id,
     source: info.source ?? "claude",
@@ -232,9 +249,9 @@ export function recordLaunchedSession(
     argv: resumeArgv(s),
   };
   // Dedup by canonical name: drop any prior tab for this session, then append.
-  const tabs = loadRestore().filter((t) => t.name !== canonical);
+  const tabs = loadRestore(hostSession).filter((t) => t.name !== canonical);
   tabs.push(tab);
-  saveRestore(tabs);
+  saveRestore(hostSession, tabs);
 }
 
 /** POSIX single-quote a string so it survives a `bash -c` script verbatim. */
@@ -261,13 +278,13 @@ function placeholderArgv(tab: RestoreTab): string[] {
 }
 
 /**
- * Recreate the saved agent tabs as lazy placeholder windows in the canonical
- * session — each a real tmux tab that stays unloaded until you open it. Called
- * once, right after the canonical session is freshly created (an existing
+ * Recreate the saved agent tabs as lazy placeholder windows in the launcher
+ * host session — each a real tmux tab that stays unloaded until you open it.
+ * Called once, right after the host session is freshly created (an existing
  * session already has its live windows, so there's nothing to restore).
  */
-export function restoreTabs(): void {
-  for (const tab of loadRestore()) {
+export function restoreTabs(hostSession: string = LAUNCHER_SESSION): void {
+  for (const tab of loadRestore(hostSession)) {
     // The saved cwd may have been deleted or moved since the snapshot (e.g. a
     // pruned worktree). `tmux new-window -c <gone>` either silently falls back to
     // a different start-directory (resuming in the wrong place) or fails outright
@@ -278,9 +295,9 @@ export function restoreTabs(): void {
       console.error(`restore: skipping ${tab.name} — working dir gone: ${tab.cwd}`);
       continue;
     }
-    newWindowIn(LAUNCHER_SESSION, tab.name, tab.cwd, placeholderArgv(tab));
+    newWindowIn(hostSession, tab.name, tab.cwd, placeholderArgv(tab));
     // Mark it as an unloaded placeholder so isRunning doesn't report the idle
     // bash window as a running session (the placeholder script clears this on resume).
-    markPlaceholder(`${LAUNCHER_SESSION}:${tab.name}`);
+    markPlaceholder(`${hostSession}:${tab.name}`);
   }
 }

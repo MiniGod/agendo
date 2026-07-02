@@ -9,7 +9,7 @@ import { WebTerminal } from "./wterm.ts";
 
 interface Fixtures {
   mock: MockEnv;
-  launch: (opts?: { cols?: number; rows?: number }) => Promise<WebTerminal>;
+  launch: (opts?: { cols?: number; rows?: number; args?: string[] }) => Promise<WebTerminal>;
 }
 
 export const test = base.extend<Fixtures>({
@@ -20,14 +20,15 @@ export const test = base.extend<Fixtures>({
   },
   launch: async ({ page, mock }, use) => {
     const terminals: WebTerminal[] = [];
-    const factory = async (opts: { cols?: number; rows?: number } = {}) => {
+    const factory = async (opts: { cols?: number; rows?: number; args?: string[] } = {}) => {
       const wt = await WebTerminal.launch({
         page,
         command: "bun",
         // --no-tmux: render the menu inline (tmux mode is the default now), which
         // is the path these specs drive. insideTmux() is still false here (TMUX
         // is unset in the mock env), so the outside-tmux behaviour is unchanged.
-        args: ["run", join(REPO_ROOT, "src", "index.tsx"), "--no-tmux"],
+        // Extra `args` (e.g. a `[path]` to scope the launcher) follow the entrypoint.
+        args: ["run", join(REPO_ROOT, "src", "index.tsx"), "--no-tmux", ...(opts.args ?? [])],
         cwd: REPO_ROOT,
         env: mock.env,
         cols: opts.cols,

@@ -86,6 +86,12 @@ export interface LoadModelOptions {
   provider: ProviderName;
   /** Whose work items / PRs to show; null ⇒ the authenticated user. */
   identity: Identity | null;
+  /**
+   * The launcher's tmux host session, whose open tabs are snapshotted for
+   * browser-style restore. Defaults to the canonical `clops` session; a
+   * path-scoped launcher passes its own host session so restore stays isolated.
+   */
+  hostSession?: string;
 }
 
 export function isRunning(s: AgentSession, live: Set<string>): boolean {
@@ -203,10 +209,10 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     ]);
   const { live, liveKinds, liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
 
-  // Snapshot the canonical session's open agent tabs so a future startup can
-  // lazily restore them (browser-style). Cheap, idempotent, and no-op outside
-  // the canonical session — fine to run on every (re)load.
-  captureRestore(index);
+  // Snapshot the host session's open agent tabs so a future startup can lazily
+  // restore them (browser-style). Cheap, idempotent, and no-op when that host
+  // session isn't running — fine to run on every (re)load.
+  captureRestore(index, opts.hostSession);
 
   // Collect sessions for a work item: via each PR's branch, plus any session
   // whose branch/worktree embeds the work-item id (covers items with no PR).

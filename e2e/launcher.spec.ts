@@ -7,6 +7,36 @@ import { join } from "node:path";
 import { test, expect, KEY } from "./harness/test.ts";
 import { RUNNING_TARGET } from "./harness/fixtures.ts";
 
+// A path-scoped launcher (`clops <path>`) filters the TUI to sessions under the
+// path, and `a` toggles back to the global view. The fixture home has sessions
+// under three repos (appweb ×2, applib ×1, standalone ×1); scoping to appweb
+// hides the other two until the toggle reveals them again.
+test("path scope: clops <path> filters sessions; 'a' toggles global", async ({ launch, mock }) => {
+  const appweb = join(mock.home, "repos", "appweb");
+  const wt = await launch({ args: [appweb], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  wt.write("3"); // Sessions view
+  let screen = await wt.waitForText("appweb (2)");
+
+  // Scoped: the scope line names the host session + advertises the toggle; only
+  // the appweb repo is present — applib / standalone are filtered out.
+  expect(screen).toContain("show all"); // scoped-state hint (a → show all)
+  expect(screen).toContain("Implement login form"); // running appweb session
+  expect(screen).not.toContain("applib (1)");
+  expect(screen).not.toContain("standalone (1)");
+
+  // Toggle to global with `a`: the other repos reappear, and the scope line flips.
+  wt.write("a");
+  screen = await wt.waitForText("applib (1)");
+  expect(screen).toContain("standalone (1)");
+  expect(screen).toContain("global — all paths");
+
+  // Toggle back: scoped again, other repos hidden once more.
+  wt.write("a");
+  screen = await wt.waitForText("show all");
+  expect(screen).not.toContain("applib (1)");
+});
+
 // Poll an async predicate until it's true, or fail. Used for side effects that
 // land in the fake-bin logs slightly after a keystroke.
 async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
