@@ -104,9 +104,21 @@ export async function materializeHome(home: string): Promise<void> {
       { type: "user", message: { role: "user", content: "Add a login form with validation" }, cwd: p.loginCwd, gitBranch: "worktree-login-101", timestamp: "2026-06-20T10:00:05.000Z" },
       { type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "x".repeat(400) }] }, cwd: p.loginCwd, gitBranch: "worktree-login-101", timestamp: "2026-06-20T10:00:10.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: join(p.loginCwd, "src/login.tsx") } }] }, timestamp: "2026-06-20T10:00:12.000Z" },
+      // An early TodoWrite checklist — SUPERSEDED by the later one below, proving
+      // only the LATEST TodoWrite is surfaced (the whole list, not a diff).
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TodoWrite", input: { todos: [
+        { content: "Write the login form", activeForm: "Writing the login form", status: "in_progress" },
+        { content: "Add validation", activeForm: "Adding validation", status: "pending" },
+      ] } }] }, timestamp: "2026-06-20T10:00:15.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: join(p.loginCwd, "src/login.tsx") } }] }, timestamp: "2026-06-20T10:00:20.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "bun test login" } }] }, timestamp: "2026-06-20T10:00:25.000Z" },
-      { type: "assistant", message: { content: [{ type: "text", text: "Done — login form added with validation." }] }, cwd: p.loginCwd, gitBranch: "feature/login", timestamp: "2026-06-20T10:00:30.000Z" },
+      // The authoritative checklist: one done, one in-progress, one pending.
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TodoWrite", input: { todos: [
+        { content: "Write the login form", activeForm: "Writing the login form", status: "completed" },
+        { content: "Add validation", activeForm: "Adding validation", status: "in_progress" },
+        { content: "Wire up the submit handler", activeForm: "Wiring up the submit handler", status: "pending" },
+      ] } }] }, timestamp: "2026-06-20T10:00:27.000Z" },
+      { type: "assistant", message: { content: [{ type: "text", text: "Done — login form added with validation. " + "x".repeat(400) }] }, cwd: p.loginCwd, gitBranch: "feature/login", timestamp: "2026-06-20T10:00:30.000Z" },
     ]),
   );
 
@@ -120,6 +132,18 @@ export async function materializeHome(home: string): Promise<void> {
       { type: "ai-title", aiTitle: "Investigate startup crash", timestamp: "2026-06-19T09:00:01.000Z" },
       { type: "user", message: { content: "App crashes on startup" }, cwd: p.crashCwd, gitBranch: "worktree-fix-crash-102", timestamp: "2026-06-19T09:00:05.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "bun run start" } }] }, timestamp: "2026-06-19T09:00:08.000Z" },
+      // No TodoWrite here: the checklist is reconstructed from des-workflow
+      // TaskCreate/TaskUpdate events. Mirrors REAL transcripts — TaskCreate carries
+      // only a subject (the taskId is assigned in the tool_result, not the input),
+      // and TaskUpdate references tasks by the ordinal ids "1","2" handed out in
+      // creation order. This exercises the create↔update correlation, last status
+      // winning; a third task is deleted mid-way and must NOT appear.
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskCreate", input: { subject: "Reproduce the crash" } }] }, timestamp: "2026-06-19T09:00:09.000Z" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskCreate", input: { subject: "Patch the null deref" } }] }, timestamp: "2026-06-19T09:00:10.000Z" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskCreate", input: { subject: "Write a regression test" } }] }, timestamp: "2026-06-19T09:00:10.500Z" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "1", status: "completed" } }] }, timestamp: "2026-06-19T09:00:11.000Z" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "2", status: "active" } }] }, timestamp: "2026-06-19T09:00:12.000Z" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "3", status: "deleted" } }] }, timestamp: "2026-06-19T09:00:13.000Z" },
     ]),
   );
 

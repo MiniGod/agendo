@@ -24,6 +24,7 @@ import type {
   PullRequest,
   ReviewPRWithSessions,
   SessionActivity,
+  TaskItem,
   TeamMember,
   WorkItem,
 } from "../types.ts";
@@ -137,9 +138,19 @@ function verbStyle(verb: string): { color: string } {
 
 // Cheap structural equality check to skip re-renders when the log hasn't changed.
 // "loading"/"error"/undefined are never equal so any state transition always fires.
+function sameTasks(a: TaskItem[] | undefined, b: TaskItem[] | undefined): boolean {
+  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
+  if (!a || !b) return true;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].label !== b[i].label || a[i].status !== b[i].status) return false;
+  }
+  return true;
+}
+
 function sameActivity(a: Activity | undefined, b: Activity | undefined): boolean {
   if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
   if (a.lastPrompt !== b.lastPrompt) return false;
+  if (!sameTasks(a.tasks, b.tasks)) return false;
   if (a.actions.length !== b.actions.length) return false;
   if (a.actions.length === 0) return true;
   // Compare both ends of the (capped) rolling window: when the list is pinned at
@@ -375,6 +386,7 @@ type Row =
   | { kind: "session"; key: string; session: AgentSession; running: boolean; expanded: boolean; open?: OpenTargets; timeField?: "lastUsed" | "created"; showLink?: boolean; placeholder?: boolean }
   | { kind: "sessmeta"; key: string; label: string; value: string }
   | { kind: "sessprompt"; key: string; prompt: string }
+  | { kind: "task"; key: string; task: TaskItem }
   | { kind: "action"; key: string; action: ActionLine }
   | { kind: "sessnote"; key: string; text: string }
   | { kind: "fresh"; key: string; target: FreshTarget }
@@ -418,8 +430,12 @@ function pushSession(
     return;
   }
   if (act.lastPrompt) rows.push({ kind: "sessprompt", key: `${key}:prompt`, prompt: act.lastPrompt });
+  // The task checklist (Claude only) sits above the action stream so it reads as
+  // the session's overall plan rather than another recent-action line.
+  if (act.tasks?.length) act.tasks.forEach((t, i) => rows.push({ kind: "task", key: `${key}:t${i}`, task: t }));
   if (act.actions.length === 0) {
-    rows.push({ kind: "sessnote", key: `${key}:note`, text: "no recent activity" });
+    // Tasks alone are still worth showing; only note "empty" when nothing at all.
+    if (!act.tasks?.length) rows.push({ kind: "sessnote", key: `${key}:note`, text: "no recent activity" });
     return;
   }
   act.actions.forEach((a, i) => rows.push({ kind: "action", key: `${key}:a${i}`, action: a }));
@@ -923,6 +939,29 @@ function ActionRow({ action }: { action: ActionLine }) {
         <Text color="gray" dimColor>{("  " + fmtDelta(action.deltaMs)).padEnd(8)}</Text>
         <Text color={color}>{action.verb.slice(0, 9).padEnd(10)}</Text>
         <Text dimColor>{action.detail.replace(/\s+/g, " ")}</Text>
+      </Text>
+    </Box>
+  );
+}
+
+// A single task-checklist line under an expanded session: a status checkbox and
+// the item text. The three states are distinguished by both glyph and color so
+// progress reads at a glance (and stays legible without color).
+const TASK_STYLE: Record<TaskItem["status"], { glyph: string; color: string; dim: boolean }> = {
+  completed: { glyph: "✔", color: "green", dim: true },
+  in_progress: { glyph: "◐", color: "yellow", dim: false },
+  pending: { glyph: "☐", color: "gray", dim: true },
+};
+
+function TaskRow({ task }: { task: TaskItem }) {
+  const style = TASK_STYLE[task.status] ?? TASK_STYLE.pending;
+  return (
+    <Box marginLeft={6}>
+      <Text wrap="truncate">
+        <Text color={style.color}>{`${style.glyph} `}</Text>
+        <Text color={task.status === "in_progress" ? "yellow" : undefined} dimColor={style.dim} bold={task.status === "in_progress"}>
+          {task.label.replace(/\s+/g, " ")}
+        </Text>
       </Text>
     </Box>
   );
@@ -2279,6 +2318,9 @@ export default function App({
               <Text wrap="truncate" dimColor>{`↳ "${row.prompt.replace(/\s+/g, " ")}"`}</Text>
             </Box>
           );
+        }
+        if (row.kind === "task") {
+          return <TaskRow key={row.key} task={row.task} />;
         }
         if (row.kind === "action") {
           return <ActionRow key={row.key} action={row.action} />;

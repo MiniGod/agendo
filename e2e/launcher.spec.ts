@@ -222,6 +222,23 @@ test("expanding a work item reveals its session and lazily-loaded activity", asy
   await wt.screenshot(join(import.meta.dirname, "screenshots", "launcher.png"));
 });
 
+test("expanded session shows the agent's task checklist with per-item status", async ({ launch }) => {
+  const wt = await launch();
+  await wt.waitForText("Add login screen", 20000);
+  await wt.waitForStable();
+  await wt.press(KEY.enter); // expand WI 101
+  await wt.waitForText("Implement login form");
+  await wt.press(KEY.down); // move onto the session row
+  await wt.press(KEY.right); // expand it → lazy activity load (incl. checklist)
+
+  // The latest TodoWrite checklist renders as three rows with distinct glyphs:
+  // ✔ completed, ◐ in-progress, ☐ pending.
+  const screen = await wt.waitForText("Wire up the submit handler", 8000);
+  expect(screen).toMatch(/✔\s*Write the login form/);
+  expect(screen).toMatch(/◐\s*Add validation/);
+  expect(screen).toMatch(/☐\s*Wire up the submit handler/);
+});
+
 test("open-in-browser dialog opens the work item via xdg-open", async ({ launch, mock }) => {
   const wt = await launch();
   await wt.waitForText("Add login screen", 20000);

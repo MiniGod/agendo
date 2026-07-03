@@ -38,9 +38,11 @@ Usage:
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
-  agendo status <id>           Show a session's state + recent activity, including
-                                input readiness. <id> is the session id or a tmux
+  agendo status <id>           Show a session's state, task checklist, recent
+                                activity + full final response, and input
+                                readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
+      --full, -F                Don't truncate the prompt / activity details
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
                                 its input is idle/ready (not mid-turn, no open
                                 question, nothing already typed).
@@ -51,6 +53,13 @@ Usage:
 
 Sessions are listed in the menu and marked running → attach. Background sessions
 carry a {bg} badge, manually-started ones {new}.`;
+
+/** CLI glyphs for the three task states (plain ASCII markers stay greppable). */
+const STATUS_GLYPH: Record<string, string> = {
+  completed: "[x]",
+  in_progress: "[~]",
+  pending: "[ ]",
+};
 
 /** Short kind labels for the `list` columns, matching the menu's {bg}/{new} badges. */
 const KIND_LABEL: Record<SessionKind, string> = {
@@ -81,7 +90,10 @@ if (!tmuxAvailable()) {
 // `status <id>`: print a session's state + the same recent-activity summary the
 // menu shows, so an agent that launched a background session can poll it.
 if (process.argv[2] === "status") {
-  await runStatus(process.argv[3]);
+  const rest = process.argv.slice(3);
+  const full = rest.includes("--full") || rest.includes("-F");
+  const token = rest.find((a) => a !== "--full" && a !== "-F");
+  await runStatus(token, full);
   process.exit(0);
 }
 
@@ -251,9 +263,9 @@ if (!process.argv.includes("--no-tmux")) {
  * written its log yet — if so we still report it as running from its live tmux
  * window. `token` may be a full session id, a short id, or a `cl-…-<id>` name.
  */
-async function runStatus(token: string | undefined): Promise<void> {
+async function runStatus(token: string | undefined, full = false): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id>`);
+    console.error(`usage: ${SELF_CMD} status <id> [--full]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
@@ -270,7 +282,7 @@ async function runStatus(token: string | undefined): Promise<void> {
   }
   const target = liveTargetForShortId(shortId(s.id));
   const running = !!target || liveTargets().has(sessionName(s));
-  const act = await loadActivity(s);
+  const act = await loadActivity(s, { full });
   console.log(`${running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
   console.log(`  id:     ${s.id}`);
   console.log(`  dir:    ${s.cwd}`);
@@ -283,12 +295,28 @@ async function runStatus(token: string | undefined): Promise<void> {
     if (shells > 0) console.log(`  shells: ${shells} background shell${shells > 1 ? "s" : ""} running (e.g. a monitor)`);
   }
   if (act.lastPrompt) console.log(`\n  last prompt: ${act.lastPrompt}`);
+  // Task checklist, if the agent kept one. A plain glyph per status keeps it
+  // greppable in plain-text CLI output.
+  if (act.tasks && act.tasks.length) {
+    console.log(`\n  tasks:`);
+    for (const t of act.tasks) console.log(`    ${STATUS_GLYPH[t.status]} ${t.label}`);
+  }
   if (act.actions.length) {
     console.log(`\n  recent activity:`);
     for (const a of act.actions) console.log(`    ${a.verb}${a.detail ? `  ${a.detail}` : ""}`);
   } else {
     console.log(`\n  (no recent activity)`);
   }
+  // The FULL final response, always untruncated — the key orchestrator read.
+  if (act.finalResponse) console.log(`\n  final response:\n${indent(act.finalResponse)}`);
+}
+
+/** Indent every line of a block by four spaces for the status output. */
+function indent(text: string): string {
+  return text
+    .split("\n")
+    .map((l) => `    ${l}`)
+    .join("\n");
 }
 
 /**
