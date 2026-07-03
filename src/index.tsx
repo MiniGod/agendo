@@ -7,14 +7,18 @@ import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   liveManagedPaths, managedKind, capturePane, sendToPane, paneReadiness, paneShells, stripAnsi,
-  sessionRoot, currentSessionName,
-  type SessionKind,
+  sessionRoot, currentSessionName, killWindow,
+  type SessionKind, type Readiness,
 } from "./tmux.ts";
-import { launchTask, llmGuide, SELF_CMD, type OpenPlan } from "./launch.ts";
+import { launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
-import type { AgentSession, AgentSource } from "./types.ts";
+import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
+import { resolveInitialProvider } from "./provider.ts";
+import { loadState } from "./config.ts";
+import { repoRootForCwd } from "./repos.ts";
+import type { AgentSession, AgentSource, Identity } from "./types.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
 
@@ -38,6 +42,26 @@ Usage:
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
+      --json                    Emit machine-readable JSON (with branch + linked
+                                PR + work-item/issue per session).
+      --all, --include-idle     Also list idle (not-running) sessions, each marked
+                                running vs idle.
+      --pr <n>                  Only sessions linked to PR #n (resolved via the
+                                backend, so gh/az data is fetched).
+      --issue, --work-item <n>  Only sessions linked to that issue / work item.
+  agendo resume <id>           Headless resume of an idle session in its own tmux
+                                window (detached). <id> as for status.
+      --attach, -a              Switch/attach to it immediately (default: detached)
+  agendo wait [id...]          Poll until the target session(s) settle to a non-busy
+                                state, then exit 0; exit non-zero on timeout. With
+                                no ids, select with --all / --prefix / --repo.
+      --state <ready|busy|…>    Wait for exactly this readiness (default: non-busy)
+      --not <state>             Wait until readiness is anything but this
+      --timeout <dur>           Give up after this long (default 120s)
+      --interval <dur>          Poll cadence (default 2s). Durations: 500ms, 2s, 5m…
+      --all                     All running sessions
+      --prefix <p>              Sessions whose dir basename starts with p
+      --repo <name>             Sessions whose repo root basename is name
   agendo status <id>           Show a session's state, task checklist, recent
                                 activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
@@ -69,6 +93,23 @@ const KIND_LABEL: Record<SessionKind, string> = {
   pr: "pr",
   resumed: "—",
 };
+
+/**
+ * Readiness states that mean the session is actively working (not settled) — the
+ * default "still busy" set `agendo wait` polls against. Declared here, before the
+ * subcommand dispatch runs, so the hoisted `waitSatisfied` never reads it in the
+ * temporal dead zone during an early `wait` invocation.
+ */
+const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
+
+/** Compact "last used" age for the list columns (matches the menu's timeAgo). */
+function timeAgo(d: Date): string {
+  const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
 
 if (process.argv.includes("--help") || process.argv.includes("-h") || process.argv[2] === "help") {
   console.log(HELP);
@@ -190,14 +231,102 @@ if (process.argv[2] === "send") {
 
 // `list` (alias `ls`): print the managed sessions that are running right now —
 // one per line, with input readiness and how each was started — so an agent (or
-// human) can discover the background sessions it can `status`/`send` to. Only
-// live sessions are shown; resuming idle ones is deliberately not exposed.
+// human) can discover the background sessions it can `status`/`send` to. The
+// default stays live-only and model-free (fast, no backend auth needed); the
+// flags below opt into richer, association-resolving output for orchestrators.
 if (process.argv[2] === "list" || process.argv[2] === "ls") {
-  // Optional `[dir]` scopes the listing to sessions whose cwd is under it,
-  // mirroring the TUI's path filter. Resolved against the current directory.
-  const dirArg = process.argv[3];
-  const filterRoot = dirArg && !dirArg.startsWith("-") ? resolveContext(dirArg, process.cwd()).filterRoot : null;
-  await runList(filterRoot);
+  let json = false;
+  let all = false;
+  let pr: number | undefined;
+  let item: number | undefined;
+  // Optional `[dir]` positional scopes the listing to sessions whose cwd is under
+  // it, mirroring the TUI's path filter; resolved against the current directory.
+  let dirArg: string | undefined;
+  const rest = process.argv.slice(3);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--json") json = true;
+    else if (a === "--all" || a === "--include-idle") all = true;
+    else if (a === "--pr") pr = Number(rest[++i]);
+    else if (a === "--issue" || a === "--work-item" || a === "--workitem") item = Number(rest[++i]);
+    else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
+    else {
+      console.error(`list: unknown argument "${a}"`);
+      process.exit(1);
+    }
+  }
+  if ((pr !== undefined && !Number.isFinite(pr)) || (item !== undefined && !Number.isFinite(item))) {
+    console.error(`list: --pr/--issue/--work-item need a numeric id`);
+    process.exit(1);
+  }
+  const filterRoot = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
+  await runList({ json, all, pr, item, filterRoot });
+  process.exit(0);
+}
+
+// `resume <id>`: headless resume of an idle (or already-running) session. By
+// default we create/attach its tmux window *detached* — the orchestrator gets
+// the session back running without stealing the terminal — and print how to
+// reach it. `--attach` hands the terminal over the way `launch --attach` does.
+if (process.argv[2] === "resume") {
+  let attach = false;
+  let id: string | undefined;
+  const rest = process.argv.slice(3);
+  for (const a of rest) {
+    if (a === "--attach" || a === "-a") attach = true;
+    else if (id === undefined) id = a;
+  }
+  await runResume(id, attach);
+  process.exit(0);
+}
+
+// `wait [id...]`: block until the selected session(s) reach a desired non-busy
+// state (like `gh run watch`), then exit 0; exit non-zero on timeout. Progress
+// goes to stderr, the final per-session state to stdout, so it composes in
+// scripts. Targets: explicit ids, or --all / --prefix / --repo selectors.
+if (process.argv[2] === "wait") {
+  let all = false;
+  let prefix: string | undefined;
+  let repo: string | undefined;
+  let state: string | undefined;
+  let not: string | undefined;
+  let timeoutMs = 120_000;
+  let intervalMs = 2_000;
+  const ids: string[] = [];
+  const rest = process.argv.slice(3);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--all") all = true;
+    else if (a === "--prefix") prefix = rest[++i];
+    else if (a === "--repo") repo = rest[++i];
+    else if (a === "--state") state = rest[++i];
+    else if (a === "--not") not = rest[++i];
+    else if (a === "--timeout") timeoutMs = requireDuration("--timeout", rest[++i]);
+    else if (a === "--interval") intervalMs = requireDuration("--interval", rest[++i]);
+    else if (a === "--") { ids.push(...rest.slice(i + 1)); break; }
+    else ids.push(a);
+  }
+  const valid: Readiness[] = ["ready", "busy", "compacting", "queued", "dialog", "unknown"];
+  for (const [flag, v] of [["--state", state], ["--not", not]] as const) {
+    if (v !== undefined && !valid.includes(v as Readiness)) {
+      console.error(`wait: ${flag} must be one of ${valid.join("|")}, got "${v}"`);
+      process.exit(1);
+    }
+  }
+  if (state !== undefined && not !== undefined) {
+    console.error(`wait: use only one of --state / --not`);
+    process.exit(1);
+  }
+  await runWait({
+    ids,
+    all,
+    prefix,
+    repo,
+    state: state as Readiness | undefined,
+    not: not as Readiness | undefined,
+    timeoutMs,
+    intervalMs,
+  });
   process.exit(0);
 }
 
@@ -348,16 +477,190 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   console.log(`▸ sent to ${target}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
 }
 
+interface ListOptions {
+  /** Emit JSON instead of a human table. */
+  json: boolean;
+  /** Also include idle (not-running) sessions. */
+  all: boolean;
+  /** Only sessions linked to this PR id (implies the enriched, model-backed path). */
+  pr?: number;
+  /** Only sessions linked to this work-item / issue id (enriched path). */
+  item?: number;
+  /** Scope to sessions whose cwd is under this absolute root (TUI path filter). */
+  filterRoot: string | null;
+}
+
+/** One session as reported by the enriched (`--json` / `--all` / query) list. */
+interface ListRow {
+  id: string;
+  shortId: string;
+  source: AgentSource;
+  running: boolean;
+  /** Input readiness from the live pane, or null when idle (no pane to read). */
+  readiness: Readiness | null;
+  /** Background shells the running pane reports (0 when idle/unknown). */
+  shells: number;
+  /** How it was launched, when running (from the live-tmux reconciliation). */
+  kind: SessionKind | null;
+  branch: string | null;
+  cwd: string;
+  dir: string;
+  title: string;
+  /** When the session was last active (ISO 8601), for machine consumers. */
+  lastUsed: string;
+  /** Linked PR, resolved through the model's reverse index (null if none/unknown). */
+  pr: { id: number; url: string } | null;
+  /** Linked work item / issue, resolved through the model's reverse index. */
+  workItem: { id: number; url: string } | null;
+}
+
 /**
- * Print the managed sessions that are running right now, one per line. We walk
- * the live `cl-…` tmux targets and resolve each back to its session — id-bearing
- * names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by embedded short id,
- * work-item / PR names by working directory (as in model.ts) — then report
- * readiness, kind, id, location and title. Running-only by design: idle sessions
- * (and resuming them) are intentionally not exposed here.
+ * Model-load options mirroring what the TUI (App.tsx) resolves: the persisted
+ * backend (falling back to whichever CLI is installed) and the persisted
+ * identity, if any. Used by the association-resolving `list` modes so their
+ * gh/az fetch set matches what the menu would show.
  */
-async function runList(filterRoot: string | null = null): Promise<void> {
+function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProvider>; identity: Identity | null } {
+  const st = loadState();
+  const provider = resolveInitialProvider(st.provider);
+  const identity: Identity | null = st.identityId
+    ? { id: st.identityId, displayName: st.identityName ?? "?", uniqueName: st.identityUniqueName ?? "" }
+    : null;
+  return { provider, identity };
+}
+
+/**
+ * List sessions. The default (no flags) is unchanged: the live `cl-…` tmux
+ * targets, one per line, resolved back to their session and reported with
+ * readiness/kind/id/dir/title — fast and needing no backend auth. The `--json`,
+ * `--all`/`--include-idle`, and `--pr`/`--issue`/`--work-item` query flags opt
+ * into the enriched path, which loads the model so each row carries its branch
+ * and linked PR / work item (via `sessionLinks`) and can include idle sessions.
+ * An optional `filterRoot` scopes every mode to sessions whose cwd is under it.
+ */
+async function runList(opts: ListOptions): Promise<void> {
   const index = await SessionIndex.build();
+  const enriched = opts.json || opts.all || opts.pr !== undefined || opts.item !== undefined;
+  if (!enriched) return runPlainList(index, opts.filterRoot);
+
+  const isQuery = opts.pr !== undefined || opts.item !== undefined;
+  // Associations come from the model's reverse index. A query MUST have it (the
+  // whole point); the other enriched modes degrade gracefully if the backend is
+  // unreachable — we still list sessions, just without PR/work-item links.
+  let model: LoadedModel | null = null;
+  try {
+    model = await loadModel(currentModelOptions());
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    if (isQuery) {
+      console.error(`list: could not resolve associations from the backend: ${msg}`);
+      process.exit(1);
+    }
+    console.error(`list: continuing without PR/work-item associations (${msg})`);
+  }
+
+  const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
+  const linkOf = (s: AgentSession) => model?.sessionLinks.get(`${s.source}:${s.id}`);
+
+  let sessions: AgentSession[];
+  if (isQuery) {
+    // Resolve the query against the model's FORWARD associations (the same lists
+    // the TUI shows), NOT `sessionLinks` — that reverse index keeps only one
+    // PR + one work item per session, so a session on a PR linked to two items
+    // (or a branch matching two PRs) would be missed. `model` is guaranteed here
+    // (a failed load already exited above). Dedupe by source:id across lists.
+    const m = model!;
+    const matched = new Map<string, AgentSession>();
+    if (opts.pr !== undefined) {
+      for (const pr of [...m.linkedPrs, ...m.orphanPrs, ...m.reviewPrs])
+        if (pr.id === opts.pr) for (const s of pr.sessions) matched.set(`${s.source}:${s.id}`, s);
+    }
+    if (opts.item !== undefined) {
+      for (const it of [...m.current, ...m.other, ...m.prLinked])
+        if (it.id === opts.item) for (const s of it.sessions) matched.set(`${s.source}:${s.id}`, s);
+    }
+    sessions = [...matched.values()];
+  } else if (opts.all) {
+    sessions = [...index.all];
+  } else {
+    sessions = index.all.filter((s) => live.has(sessionName(s)));
+  }
+  // Path scoping (the `[dir]` positional): keep only sessions under the root.
+  if (opts.filterRoot) sessions = sessions.filter((s) => isUnderRoot(s.cwd, opts.filterRoot!));
+  sessions.sort((a, b) => b.lastUsed.getTime() - a.lastUsed.getTime());
+
+  const rows: ListRow[] = sessions.map((s) => {
+    const canon = sessionName(s);
+    const running = live.has(canon);
+    const window = liveWindows.get(canon);
+    let readiness: Readiness | null = null;
+    let shells = 0;
+    if (running && window) {
+      const raw = capturePane(window);
+      readiness = paneReadiness(raw);
+      shells = paneShells(raw);
+    }
+    const l = linkOf(s);
+    return {
+      id: s.id,
+      shortId: shortId(s.id),
+      source: s.source,
+      running,
+      readiness,
+      shells,
+      kind: running ? liveKinds.get(canon) ?? null : null,
+      branch: s.branch ?? null,
+      cwd: s.cwd,
+      dir: basename(s.cwd) || s.cwd,
+      title: s.title.replace(/\s+/g, " ").trim(),
+      lastUsed: s.lastUsed.toISOString(),
+      pr: l?.pr ?? null,
+      workItem: l?.workItem ?? null,
+    };
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (rows.length === 0) {
+    console.log(
+      isQuery
+        ? "No sessions linked to that item (query covers open PRs / work items in the current identity's scope)."
+        : "No sessions.",
+    );
+    return;
+  }
+  const itemLabel = model?.provider === "github" ? "issue" : "wi";
+  console.log(
+    ["", "ready".padEnd(10), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+  );
+  for (const r of rows) {
+    console.log(
+      [
+        r.running ? "●" : "○",
+        (r.readiness ?? "-").padEnd(10),
+        (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
+        r.shortId.padEnd(12),
+        timeAgo(new Date(r.lastUsed)).padEnd(8),
+        r.dir.slice(0, 20).padEnd(20),
+        (r.pr ? `!${r.pr.id}` : "-").padEnd(6),
+        (r.workItem ? `#${r.workItem.id}` : "-").padEnd(6),
+        r.title.slice(0, 44) + (r.shells > 0 ? `  ⛁${r.shells}` : ""),
+      ].join("  ").trimEnd(),
+    );
+  }
+}
+
+/**
+ * The default, unchanged `list`: the managed sessions running right now, one per
+ * line. We walk the live `cl-…` tmux targets and resolve each back to its
+ * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by
+ * embedded short id, work-item / PR names by working directory (as in model.ts)
+ * — then report readiness, kind, id, location and title. Running-only and
+ * model-free by design. An optional `filterRoot` scopes to sessions under it.
+ */
+function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
   const seen = new Set<string>();
   const rows: string[] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
@@ -384,6 +687,7 @@ async function runList(filterRoot: string | null = null): Promise<void> {
         paneReadiness(raw).padEnd(10),
         KIND_LABEL[kind].padEnd(3),
         shortId(s.id),
+        timeAgo(s.lastUsed).padEnd(8),
         (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
         s.title.replace(/\s+/g, " ").slice(0, 44),
         shells > 0 ? `⛁${shells}` : "",
@@ -392,6 +696,197 @@ async function runList(filterRoot: string | null = null): Promise<void> {
   }
   if (rows.length === 0) console.log("No running sessions.");
   else rows.forEach((r) => console.log(r));
+}
+
+/**
+ * Resolve a session by id-or-tmux-name and resume it. Mirrors `runStatus`'s
+ * resolution. Detached by default: `openSession` creates (or navigates to) the
+ * session's tmux window without handing over the terminal, so an orchestrator
+ * gets it running again headlessly; we then record it into the restore snapshot
+ * (a no-op unless it landed in the canonical launcher session) and print how to
+ * reach it. `--attach` runs the handover the way `launch --attach` does.
+ *
+ * We resolve the session's actual live window through `refreshLiveTmux` (the same
+ * reconciliation the menu uses) and pass it to `openSession`, so a session
+ * already running under a non-id-bearing window (`cl-wi-…`/`cl-pr-…`) is
+ * navigated to rather than duplicated. A restored-but-unopened placeholder squats
+ * the canonical name but isn't a real agent, so we kill it first — otherwise
+ * `openSession` would "navigate" onto the idle bash pane and falsely report success.
+ */
+async function runResume(token: string | undefined, attach: boolean): Promise<void> {
+  if (!token) {
+    console.error(`usage: ${SELF_CMD} resume <id> [--attach]`);
+    process.exit(1);
+  }
+  const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
+  const index = await SessionIndex.build();
+  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  if (!s) {
+    console.error(`No session found for "${token}".`);
+    process.exit(1);
+  }
+  const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  const canon = sessionName(s);
+  const liveWindow = liveWindows.get(canon);
+  // A dormant placeholder holds the canonical name but no live agent; drop it so
+  // the resume actually starts one instead of no-op'ing onto the idle bash pane.
+  if (!liveWindow && livePlaceholders.has(canon)) killWindow(canon);
+  const plan = openSession(s, liveWindow);
+  if (attach) {
+    const [cmd, ...args] = plan.handover;
+    spawnSync(cmd, args, { stdio: "inherit" });
+    return;
+  }
+  // Detached: persist a restore tab so the resumed window survives a relaunch
+  // (no-op outside the canonical session), then print machine-readable next steps.
+  recordLaunchedSession(
+    { id: s.id, cwd: s.cwd, title: s.title, source: s.source, configDir: s.configDir },
+    plan.tmuxName,
+  );
+  console.log(`▸ resumed session ${shortId(s.id)}${plan.alreadyRunning ? " (was already running)" : ""}`);
+  console.log(`  window:  ${plan.tmuxName}   (in ${s.cwd})`);
+  console.log(`  status:  ${SELF_CMD} status ${shortId(s.id)}`);
+}
+
+interface WaitOptions {
+  ids: string[];
+  all: boolean;
+  prefix?: string;
+  repo?: string;
+  /** Desired readiness (exact match). Overrides the default non-busy predicate. */
+  state?: Readiness;
+  /** Wait until readiness is anything but this. */
+  not?: Readiness;
+  timeoutMs: number;
+  intervalMs: number;
+}
+
+/** Whether a pane's readiness satisfies the wait predicate. The default (no
+ *  `--state`/`--not`) waits for a *known, settled* non-busy state — "unknown" is
+ *  excluded so a blank, not-yet-drawn, or closed pane doesn't count as "done"
+ *  and report a false success. */
+function waitSatisfied(r: Readiness, o: WaitOptions): boolean {
+  if (o.state) return r === o.state;
+  if (o.not) return r !== o.not;
+  return !BUSY_STATES.has(r) && r !== "unknown";
+}
+
+/** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
+ *  if the string is missing or malformed, so the caller can reject it loudly
+ *  rather than silently fall back to a default the user didn't ask for. */
+function parseDuration(s: string | undefined): number | null {
+  if (!s) return null;
+  const m = s.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  switch ((m[2] ?? "s").toLowerCase()) {
+    case "ms": return n;
+    case "s": return n * 1_000;
+    case "m": return n * 60_000;
+    case "h": return n * 3_600_000;
+    default: return null;
+  }
+}
+
+/** Parse a required duration flag, exiting with a clear error on bad/missing input. */
+function requireDuration(flag: string, s: string | undefined): number {
+  const ms = parseDuration(s);
+  if (ms === null) {
+    console.error(`wait: ${flag} needs a duration like 500ms, 2s, 5m, 1h (got "${s ?? ""}")`);
+    process.exit(1);
+  }
+  return ms;
+}
+
+/**
+ * Poll the selected session(s) until they all satisfy the wait predicate, then
+ * exit 0; exit non-zero on timeout. Only running sessions can be waited on (an
+ * idle session has no pane to read), so selectors filter to live targets;
+ * explicit ids that aren't running are an error. Progress lines go to stderr and
+ * the final per-session `<id>\t<state>` to stdout, so it composes in scripts.
+ */
+async function runWait(o: WaitOptions): Promise<void> {
+  const index = await SessionIndex.build();
+  let sessions: AgentSession[];
+  if (o.ids.length) {
+    sessions = [];
+    const missing: string[] = [];
+    for (const tok of o.ids) {
+      const sid = tok.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(tok);
+      const s = index.all.find((x) => x.id === tok || shortId(x.id) === sid);
+      if (s) sessions.push(s);
+      else missing.push(tok);
+    }
+    if (missing.length) {
+      console.error(`wait: no session found for ${missing.join(", ")}`);
+      process.exit(1);
+    }
+  } else if (o.all) {
+    sessions = [...index.all];
+  } else if (o.prefix !== undefined || o.repo !== undefined) {
+    sessions = index.all.filter((s) => {
+      if (o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
+      if (o.repo !== undefined && basename(repoRootForCwd(s.cwd)) !== o.repo) return false;
+      return true;
+    });
+  } else {
+    console.error(
+      `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> ` +
+        `[--state <s>] [--not <s>] [--timeout <dur>] [--interval <dur>]`,
+    );
+    process.exit(1);
+  }
+
+  // Only running sessions have a pane to poll. Resolve each session's live
+  // window via the same reconciliation the menu uses (`refreshLiveTmux`), NOT
+  // `liveTargetForShortId`: that only matches id-bearing names, so a session
+  // running under a work-item / PR window (`cl-wi-…`/`cl-pr-…`, attributed by
+  // cwd) would be wrongly seen as not-running. `liveWindows` also excludes
+  // restored-but-unopened placeholders (idle bash), so we never "wait" on those.
+  // For explicit ids a non-running target can never settle, so it's an error;
+  // selectors just skip idle ones.
+  const { liveWindows } = refreshLiveTmux(index.all);
+  const targets: { s: AgentSession; target: string }[] = [];
+  const notRunning: AgentSession[] = [];
+  for (const s of sessions) {
+    const target = liveWindows.get(sessionName(s));
+    if (target) targets.push({ s, target });
+    else notRunning.push(s);
+  }
+  if (o.ids.length && notRunning.length) {
+    console.error(`wait: not running (no live window): ${notRunning.map((s) => shortId(s.id)).join(", ")}`);
+    process.exit(1);
+  }
+  if (targets.length === 0) {
+    console.error("wait: no running sessions matched — nothing to wait on.");
+    process.exit(1);
+  }
+
+  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : "non-busy";
+  console.error(`waiting for ${targets.length} session(s) to be ${desc} (timeout ${Math.round(o.timeoutMs / 1000)}s)…`);
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // Floor the poll interval so a `--interval 0` can't spin a hot capture loop.
+  const interval = Math.max(100, o.intervalMs);
+  const deadline = Date.now() + o.timeoutMs;
+  while (true) {
+    const states = targets.map((t) => ({ ...t, r: paneReadiness(capturePane(t.target)) }));
+    const pending = states.filter((x) => !waitSatisfied(x.r, o));
+    if (pending.length === 0) {
+      for (const x of states) console.log(`${shortId(x.s.id)}\t${x.r}`);
+      process.exit(0);
+    }
+    if (Date.now() >= deadline) {
+      console.error(
+        `wait: timed out after ${Math.round(o.timeoutMs / 1000)}s; still pending: ` +
+          pending.map((x) => `${shortId(x.s.id)}(${x.r})`).join(", "),
+      );
+      process.exit(1);
+    }
+    console.error(`  pending: ${pending.map((x) => `${shortId(x.s.id)}=${x.r}`).join(", ")}`);
+    // Never sleep past the deadline: bounds the timeout overrun to ~0 even when
+    // the interval is large relative to the remaining time.
+    await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
+  }
 }
 // Quit if our input stream goes away — e.g. the controlling terminal/PTY closed
 // because a parent process died, orphaning us. Without this, Ink keeps the
