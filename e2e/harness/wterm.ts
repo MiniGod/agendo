@@ -305,6 +305,24 @@ export class WebTerminal {
     } catch {
       /* already gone */
     }
+    // Wait for the launcher to ACTUALLY exit before returning. Otherwise the
+    // fixture's temp-dir removal (mockEnv.cleanup) can race a final write from
+    // the still-dying process — most notably `captureRestore` flushing
+    // `~/.agendo/restore/*.json` into the temp tree — which surfaces as an
+    // intermittent `ENOTEMPTY` rmdir under CI's parallel workers. A short
+    // timeout keeps teardown from hanging if exit is never reported.
+    if (!this.exited) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        this.proc.onExit(done);
+        setTimeout(done, 2000);
+      });
+    }
     untrackPty(this.proc);
     await new Promise<void>((r) => this.server.close(() => r()));
   }
