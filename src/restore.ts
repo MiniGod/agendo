@@ -18,7 +18,7 @@ import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { STATE_DIR, PREV_STATE_DIR, OLD_STATE_DIR } from "./config.ts";
 import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
-import { tmuxSafeName } from "./context.ts";
+import { tmuxSafeName, normalizeCwd } from "./context.ts";
 import { resumeArgv } from "./launch.ts";
 import type { SessionIndex } from "./sessions.ts";
 import type { AgentSession } from "./types.ts";
@@ -107,11 +107,16 @@ function saveRestore(session: string, tabs: RestoreTab[]): void {
  * — named after a work item / PR / slug rather than a session id — back to the
  * session most likely running in it. Exported as the single source of truth for
  * this cwd+lastUsed pick (refreshLiveTmux in model.ts shares the same heuristic).
+ *
+ * Matches on the NORMALIZED cwd (see `normalizeCwd`) so a path-representation
+ * difference between tmux's report and the session's recorded cwd can't drop an
+ * actually-running session to "not running".
  */
 export function bestSessionForCwd(sessions: AgentSession[], cwd: string): AgentSession | undefined {
+  const want = normalizeCwd(cwd);
   let best: AgentSession | undefined;
   for (const s of sessions) {
-    if (s.cwd === cwd && (!best || s.lastUsed.getTime() > best.lastUsed.getTime())) best = s;
+    if (normalizeCwd(s.cwd) === want && (!best || s.lastUsed.getTime() > best.lastUsed.getTime())) best = s;
   }
   return best;
 }

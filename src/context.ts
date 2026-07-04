@@ -6,7 +6,7 @@
 //
 // These are pure functions (no tmux / fs), so the path→(filterRoot, hostSession)
 // resolution and the segment-aware prefix match are unit-testable in isolation.
-import { basename, resolve } from "path";
+import { basename, resolve, posix } from "path";
 import { LAUNCHER_SESSION } from "./tmux.ts";
 
 export interface LauncherContext {
@@ -68,13 +68,31 @@ export function resolveContext(
 }
 
 /**
+ * Canonicalize a working-directory path for equality/prefix comparison. Paths
+ * that reach the launcher come from different sources — tmux's
+ * `pane_current_path`, a session's recorded cwd, `path.resolve` of a CLI arg — so
+ * a raw compare is brittle to representation drift between them: a trailing slash,
+ * doubled slashes, or `.`/`..` segments. Collapse those (POSIX, no filesystem
+ * access — symlinks are already resolved on both sides, since these are real
+ * process cwds) so equal directories always compare equal. Absolute, already-clean
+ * paths pass through unchanged. This is the single normalizer shared by the
+ * live-session attribution (`bestSessionForCwd`) and the path-scope filter below,
+ * so the two can't disagree about whether a session sits in a given directory.
+ */
+export function normalizeCwd(cwd: string): string {
+  if (!cwd) return cwd;
+  const n = posix.normalize(cwd).replace(/\/+$/, "");
+  return n || "/";
+}
+
+/**
  * Whether `cwd` is `root` itself or nested under it. Segment-aware after
- * trailing-slash normalization, so `~/work` does NOT match `~/workshop` (a plain
- * `startsWith` would). `root === "/"` matches every absolute path.
+ * normalization, so `~/work` does NOT match `~/workshop` (a plain `startsWith`
+ * would). `root === "/"` matches every absolute path.
  */
 export function isUnderRoot(cwd: string, root: string): boolean {
-  const a = cwd.replace(/\/+$/, "") || "/";
-  const b = root.replace(/\/+$/, "") || "/";
+  const a = normalizeCwd(cwd);
+  const b = normalizeCwd(root);
   if (a === b) return true;
   if (b === "/") return a.startsWith("/");
   return a.startsWith(b + "/");

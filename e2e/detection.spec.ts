@@ -15,7 +15,7 @@ import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { managedKind, sessionName, shortId, paneReadiness } from "../src/tmux.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
-import { resolveContext, isUnderRoot, tmuxSafeName } from "../src/context.ts";
+import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -73,6 +73,66 @@ test.describe("bestSessionForCwd", () => {
     expect(bestSessionForCwd([a, b, c], "/repo")).toBe(b);
     expect(bestSessionForCwd([a, b, c], "/elsewhere")).toBe(c);
     expect(bestSessionForCwd([a, b, c], "/missing")).toBeUndefined();
+  });
+});
+
+// Regression guard for the "session-detection regresses often" area: a launcher
+// context whose basename contains a DOT (`kappflug.is-2`). The host session name
+// is slugified (`.`→`-`), but attribution must key on the pane cwd / session id —
+// never a lossy slug — and must survive path-representation drift between tmux's
+// `pane_current_path` and the session's recorded cwd.
+test.describe("dotted-basename contexts detect running sessions", () => {
+  const DOT_REPO = "/home/me/git/kappflug.is-2";
+  const DOT_WT = "/home/me/git/kappflug.is-2/.claude/worktrees/add-keppni-7";
+
+  test("normalizeCwd collapses representation drift but preserves dots", () => {
+    // Dots in a basename are meaningful path chars — never touched.
+    expect(normalizeCwd(DOT_REPO)).toBe(DOT_REPO);
+    // Trailing slash, doubled slashes, and `.`/`..` segments all canonicalize.
+    expect(normalizeCwd(DOT_REPO + "/")).toBe(DOT_REPO);
+    expect(normalizeCwd("/home/me/git//kappflug.is-2")).toBe(DOT_REPO);
+    expect(normalizeCwd("/home/me/git/kappflug.is-2/x/..")).toBe(DOT_REPO);
+    expect(normalizeCwd("/")).toBe("/");
+  });
+
+  test("a session in a dotted-basename context is in scope (segment-aware)", () => {
+    expect(isUnderRoot(DOT_REPO, DOT_REPO)).toBe(true); // the root itself
+    expect(isUnderRoot(DOT_WT, DOT_REPO)).toBe(true); // a worktree under it
+    expect(isUnderRoot(DOT_WT + "/", DOT_REPO)).toBe(true); // + trailing-slash drift
+    // Not fooled by a look-alike sibling that merely shares the dotted prefix.
+    expect(isUnderRoot("/home/me/git/kappflug.is-2-backup/x", DOT_REPO)).toBe(false);
+  });
+
+  test("an id-less cl-wi window at a dotted worktree attributes to its session", () => {
+    // The exact repro shape: session on disk in a dotted worktree, running under a
+    // work-item window (cwd-attributed, the fragile path). It must be detected.
+    const s = sess("keppni7id", DOT_WT, 5_000);
+    const canon = sessionName(s); // cl-claude-keppni7id
+    const managed: Managed[] = [{ name: "cl-wi-42", cwd: DOT_WT, placeholder: false }];
+    const r = reconcileLive(new Set(["cl-wi-42"]), managed, [s]);
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveKinds.get(canon)).toBe("workitem");
+    expect(r.liveWindows.get(canon)).toBe("cl-wi-42");
+  });
+
+  test("attribution survives cwd representation drift (trailing slash / dot segments)", () => {
+    // tmux reports the pane cwd with a trailing slash; the session recorded it
+    // clean. A raw `===` would miss this and show the session cold — normalizeCwd
+    // makes them compare equal.
+    const s = sess("driftid", DOT_WT, 5_000);
+    const canon = sessionName(s);
+    const managed: Managed[] = [{ name: "cl-pr-9", cwd: DOT_WT + "/", placeholder: false }];
+    const r = reconcileLive(new Set(["cl-pr-9"]), managed, [s]);
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveWindows.get(canon)).toBe("cl-pr-9");
+  });
+
+  test("resolveContext derives a slugified host session for a dotted path", () => {
+    // The host name loses the dot (tmux-safe), but that must not feed attribution.
+    expect(resolveContext(DOT_REPO, "/anywhere")).toEqual({
+      filterRoot: DOT_REPO,
+      hostSession: "agendo-kappflug-is-2",
+    });
   });
 });
 

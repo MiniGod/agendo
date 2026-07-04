@@ -4,8 +4,62 @@
 // keystrokes and asserts on what the browser actually shows, or on what the
 // launcher tried to spawn (recorded by the fake-bin shims).
 import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
 import { RUNNING_TARGET } from "./harness/fixtures.ts";
+
+// Regression guard for the "session-detection regresses often" area: a launcher
+// scoped to a repo whose BASENAME CONTAINS A DOT (`kappflug.is-2`). The host
+// session name is slugified (`.`→`-`), but live-session detection must key on the
+// pane cwd / session id — never the lossy slug — so a session actually running in
+// that context is detected as running and attachable, not shown cold.
+test("path scope: a running session in a dotted-basename repo is detected as running", async ({ launch, mock }) => {
+  // Keep the backend on ADO so this stays a pure detection test (a github.com
+  // remote would force the GitHub backend — covered by its own test).
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // A repo whose basename has a dot, plus a worktree under it.
+  const repo = join(mock.home, "git", "kappflug.is-2");
+  const worktree = join(repo, ".claude", "worktrees", "add-keppni-7");
+  const SID = "11112222-3333-4444-5555-666677778888";
+  const shortId = SID.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12); // → 111122223333
+
+  // Write an on-disk claude session whose cwd is the dotted worktree.
+  const logDir = join(mock.home, ".claude", "projects", "kappflug-dot");
+  await mkdir(logDir, { recursive: true });
+  await writeFile(
+    join(logDir, `${SID}.jsonl`),
+    JSON.stringify({ type: "summary", cwd: worktree, gitBranch: "worktree-add-keppni-7", timestamp: "2026-06-25T10:00:00.000Z" }) +
+      "\n" +
+      JSON.stringify({ type: "ai-title", aiTitle: "Add keppni scoring", timestamp: "2026-06-25T10:00:01.000Z" }) +
+      "\n",
+  );
+
+  // Make it live via an ID-LESS work-item window (`cl-wi-…`) whose pane cwd is the
+  // dotted worktree — the cwd-attribution path (the fragile one), inside a
+  // slugified host session `agendo-kappflug-is-2`.
+  const READY = ["  ● Add keppni scoring", "  ────────────────────────────", "  ❯ ", "  ────────────────────────────", "  ? for shortcuts"].join("\n");
+  await mock.setTmuxState({
+    sessions: [RUNNING_TARGET, "agendo-kappflug-is-2"],
+    windows: [{ session: "agendo-kappflug-is-2", index: 1, name: "cl-wi-777" }],
+    panes: [
+      { session: RUNNING_TARGET, window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+      { session: "agendo-kappflug-is-2", window: "cl-wi-777", cwd: worktree, placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: READY, "cl-wi-777": READY },
+  });
+
+  const wt = await launch({ args: [repo], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  wt.write("3"); // Sessions view
+  // The dotted-repo session must appear AND be detected running (green ● / attach),
+  // not cold. `shortId` is unused here but documents the canonical name it maps to.
+  const screen = await wt.waitForText("Add keppni scoring");
+  expect(shortId).toBe("111122223333");
+  expect(screen).toContain("kappflug.is-2"); // scoped to the dotted context
+  // The session row for it shows a running marker, not the cold ○.
+  expect(screen).toMatch(/●[^\n]*Add keppni scoring|Add keppni scoring[^\n]*(attach|running)/);
+  expect(screen).toContain("Running now"); // it surfaces in the running section
+});
 
 // A path-scoped launcher (`agendo <path>`) filters the TUI to sessions under the
 // path, and `a` toggles back to the global view. The fixture home has sessions

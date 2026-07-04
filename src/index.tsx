@@ -12,7 +12,7 @@ import {
 } from "./tmux.ts";
 import { launchTask, llmGuide, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
-import { restoreTabs, recordLaunchedSession } from "./restore.ts";
+import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
 import type { AgentSession, AgentSource } from "./types.ts";
 
@@ -338,15 +338,10 @@ async function runList(filterRoot: string | null = null): Promise<void> {
     // Skip restored-but-unopened placeholder windows — they're idle bash waiting
     // for a keypress, not running agents, so listing them would mislead.
     if (placeholder) continue;
-    const idMatch = name.match(/^cl-(?:claude|copilot|bg|new)-(.+)$/);
-    let s: AgentSession | undefined;
-    if (idMatch) {
-      s = index.all.find((x) => shortId(x.id) === idMatch[1]);
-    } else {
-      // cl-wi-/cl-pr-: attribute to the most-recently-used session in this dir.
-      for (const x of index.all)
-        if (x.cwd === cwd && (!s || x.lastUsed.getTime() > s.lastUsed.getTime())) s = x;
-    }
+    // Same attribution the TUI uses (id-bearing → exact session; id-less
+    // cl-wi-/cl-pr- → MRU session in the pane's cwd, matched on a normalized
+    // path). Shared so the CLI list can't drift from the menu's running state.
+    const s = resolveWindowSession(index.all, name, cwd);
     if (!s) continue;
     // Path scoping: skip sessions whose cwd isn't under the requested dir.
     if (filterRoot && !isUnderRoot(s.cwd, filterRoot)) continue;
