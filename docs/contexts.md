@@ -95,6 +95,28 @@ untouched. Filtering never removes a session before attribution — it only hide
 already-attributed sessions from the view. `isRunning(s, live)` keeps using the
 full live set.
 
+### Provider detection from the git remote
+
+When the context is a path (a `filterRoot`), the launcher inspects that path's
+git `origin` remote and **forces the GitHub backend** when the origin host is
+github.com — handling both SSH (`git@github.com:owner/repo`) and HTTPS
+(`https://github.com/owner/repo`) forms. This overrides the persisted/default
+provider (which may be Azure DevOps), so opening `agendo .` inside a GitHub
+checkout lands you on the GitHub backend without a manual toggle.
+
+The override is deliberately **one-directional**: `detectRepoProvider` returns
+`"github"` or `null` — never `"ado"`. An ADO remote (`dev.azure.com` /
+`*.visualstudio.com`), any other host, a repo with no `origin`, or a non-repo
+path all yield `null`, leaving the configured default untouched. It is also
+gated on the `gh` CLI being installed (via `resolveInitialProvider`'s `forced`
+argument) so a GitHub repo without `gh` falls back rather than stranding the
+launcher on an unauthenticatable backend.
+
+**Precedence:** the git-remote detection overrides the persisted default. There
+is no explicit per-invocation provider flag today; the persisted `state.json`
+provider is the "configured default" that a GitHub remote overrides. Bare
+`agendo` (no `filterRoot`) never runs detection — it keeps the persisted choice.
+
 ### Global toggle
 
 `a` toggles between the scoped view and the global (unfiltered) view at runtime.
@@ -134,6 +156,7 @@ so a launch from inside a scoped host session is restored by that same launcher.
 | `src/tmux.ts` | `LAUNCHER_SESSION` stays the default; `launcherWindowPaths`/`launcherWindowLive`/`spawnLauncherWindow`/`enterLauncherSession` take a `session` param (defaulted). New `sessionRoot`/`setSessionRoot` (`@cl_root`) and `currentSessionName`. |
 | `src/restore.ts` | Restore keyed per host session; legacy fallback; `captureRestore`/`restoreTabs`/`recordLaunchedSession` take a session name. Attribution helpers (`resolveWindowSession`, `bestSessionForCwd`) unchanged. |
 | `src/model.ts` | `LoadModelOptions.hostSession`; passed to `captureRestore`. Reconciliation unchanged. |
+| `src/provider.ts` | New `detectRepoProvider(path)` (github.com remote → `"github"`, else `null`). `resolveInitialProvider` gains a `forced?` arg that overrides the persisted default when its CLI is installed. |
 | `src/index.tsx` | Parse `[path]`/`-s`; build the context; thread it into the default tmux-host bootstrap (collision check + `restoreTabs`), the `--no-tmux` menu render (App props), and `launch`. Subcommands stay global. |
 | `src/ui/App.tsx` | `filterRoot`/`hostSession` props; `globalView` state + `a` toggle; scope filter applied in the row builders and repo picker; header/status scope indicator. `openTarget` (launch.ts) needs no change — the host session is set by `enterLauncherSession`, and inside-tmux `new-window` already targets the current session. |
 

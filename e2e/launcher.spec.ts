@@ -12,6 +12,9 @@ import { RUNNING_TARGET } from "./harness/fixtures.ts";
 // under three repos (appweb ×2, applib ×1, standalone ×1); scoping to appweb
 // hides the other two until the toggle reveals them again.
 test("path scope: agendo <path> filters sessions; 'a' toggles global", async ({ launch, mock }) => {
+  // appweb has an ADO origin here, so the path context does NOT force GitHub — it
+  // keeps the persisted ADO default (see the github-forcing test below).
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const appweb = join(mock.home, "repos", "appweb");
   const wt = await launch({ args: [appweb], cols: 140, rows: 40 });
   await wt.waitForText("Current sprint", 20000);
@@ -38,6 +41,36 @@ test("path scope: agendo <path> filters sessions; 'a' toggles global", async ({ 
   wt.write("a");
   screen = await wt.waitForText("show all");
   expect(screen).not.toContain("applib (1)");
+});
+
+// When the path context is a github.com repo, the launcher FORCES the GitHub
+// backend even though the persisted default is ADO — proving provider detection
+// from the git remote overrides the configured default for a path context.
+test("path scope: a github.com remote forces the GitHub backend over the ADO default", async ({ launch, mock }) => {
+  // Persisted default stays ADO (fixture seeds provider: "ado"); we do NOT call
+  // setProvider. The default git shim serves a github.com origin for the repo, so
+  // detectRepoProvider → "github" wins. Seed the fake gh so the GitHub view loads.
+  mock.env.FAKE_GIT_ORIGIN_HOST = "github";
+  await mock.setGhState({
+    authed: true,
+    user: { login: "ada", name: "Ada Lovelace" },
+    issues: {
+      "ada/appweb": [
+        { number: 301, title: "Header overlaps on mobile", state: "OPEN", url: "https://github.com/ada/appweb/issues/301", labels: [], author: { login: "ada" } },
+      ],
+    },
+    prs: { "ada/appweb": { "involves:ada": [], "author:ada": [], "review-requested:ada": [] } },
+  });
+
+  const appweb = join(mock.home, "repos", "appweb");
+  const wt = await launch({ args: [appweb], cols: 140, rows: 40 });
+
+  // GitHub vocab proves the override: ADO would show "Current sprint" / "Work
+  // items"; GitHub shows "Created by me" / "Issues", and the issue from gh.
+  const screen = await wt.waitForText("Created by me", 20000);
+  expect(screen).toContain("Issues"); // GitHub itemsTab (ADO would say "Work items")
+  expect(screen).not.toContain("Current sprint"); // the ADO primary header is gone
+  expect(screen).toContain("Header overlaps on mobile"); // data pulled via the gh code path
 });
 
 // Poll an async predicate until it's true, or fail. Used for side effects that

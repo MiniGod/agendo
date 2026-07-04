@@ -11,7 +11,7 @@ import { loadState, saveState } from "../config.ts";
 import { repoRootForCwd, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
-import { detectProviders, resolveInitialProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
+import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
 import type {
   ActionLine,
@@ -1002,7 +1002,12 @@ export default function App({
   // its CLI is still installed, else the first installed one (see provider.ts).
   // `available` is probed once at mount and drives the provider picker.
   const [available] = useState<Set<ProviderName>>(() => detectProviders());
-  const [provider, setProvider] = useState<ProviderName>(() => resolveInitialProvider(loadState().provider));
+  // When scoped to a path context, a github.com git remote there forces the
+  // GitHub backend, overriding the persisted default (which may be ADO). Bare
+  // launchers (no filterRoot) never force — they keep the persisted choice.
+  const [provider, setProvider] = useState<ProviderName>(() =>
+    resolveInitialProvider(loadState().provider, filterRoot ? detectRepoProvider(filterRoot) : null),
+  );
   // Per-backend auth status for the Settings page: absent ⇒ not yet probed,
   // "checking" ⇒ probe in flight, boolean ⇒ result. Refreshed each time the
   // Settings page opens (auth can change out from under us between opens).
