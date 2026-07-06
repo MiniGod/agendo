@@ -55,12 +55,36 @@ export interface ActionLine {
   deltaMs?: number;
 }
 
+/** Status of a checklist item, normalized across sources. */
+export type TaskStatus = "pending" | "in_progress" | "completed";
+
+/**
+ * One item in the agent's task checklist. Reconstructed for Claude sessions
+ * from the latest TodoWrite tool call, or (fallback) by replaying des-workflow
+ * TaskCreate/TaskUpdate events. Copilot sessions have none.
+ */
+export interface TaskItem {
+  label: string;
+  status: TaskStatus;
+}
+
 /** A session's recent activity, loaded lazily when its row is expanded. */
 export interface SessionActivity {
   /** The most recent human prompt, if any (shown as a header line). */
   lastPrompt?: string;
   /** Recent actions, chronological (oldest → newest), capped to the last N. */
   actions: ActionLine[];
+  /**
+   * The agent's current task checklist, in the order the agent listed it.
+   * Empty/absent when the session recorded no tasks (always for Copilot).
+   */
+  tasks?: TaskItem[];
+  /**
+   * The FULL, untruncated text of the last assistant text block — the agent's
+   * final response. Surfaced verbatim by `agendo status` so an orchestrator can
+   * read the whole answer (the action lines above are truncated for display).
+   */
+  finalResponse?: string;
 }
 
 export type PRStatus = "active" | "completed" | "abandoned" | "unknown";

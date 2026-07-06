@@ -8,7 +8,7 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import type { ActionLine, AgentSession, AgentSource, SessionActivity } from "./types.ts";
+import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus } from "./types.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");
 
@@ -99,6 +99,7 @@ async function parseClaudeMeta(
     } catch {
       continue;
     }
+    if (!e || typeof e !== "object") continue;
     if (!cwd && e.cwd) cwd = e.cwd;
     if (!createdAt && e.timestamp) {
       const d = new Date(e.timestamp);
@@ -284,14 +285,98 @@ export class SessionIndex {
 // time so it's only paid for sessions the user actually opens.
 const ACTIVITY_LIMIT = 12; // recent actions surfaced per session
 
-function clean(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+function clean(s: unknown): string {
+  return String(s ?? "").replace(/\s+/g, " ").trim();
 }
 
 // Shorten a file path to its last couple of components for compact display.
-function shortPath(p: string): string {
-  const parts = p.replace(/^\/home\/[^/]+\//, "~/").split("/");
+function shortPath(p: unknown): string {
+  const parts = String(p ?? "").replace(/^\/home\/[^/]+\//, "~/").split("/");
   return parts.length > 3 ? "…/" + parts.slice(-2).join("/") : parts.join("/");
+}
+
+// ── task checklist reconstruction (Claude only) ─────────────────────────────
+// Normalize the several status vocabularies we see (Claude's TodoWrite uses
+// pending|in_progress|completed; des-workflow TaskUpdate uses active/closed/…)
+// into the three the UI renders. Match tokens EXACTLY (after folding spaces and
+// dashes to underscores) so "not_started"/"inactive" don't false-positive into
+// in_progress via a substring like "started"/"active".
+const IN_PROGRESS = new Set(["in_progress", "inprogress", "active", "doing", "current", "started", "working"]);
+const COMPLETED = new Set(["completed", "complete", "done", "closed", "resolved", "finished"]);
+function normalizeTaskStatus(raw: unknown): TaskStatus {
+  const s = String(raw ?? "").toLowerCase().trim().replace(/[\s-]+/g, "_");
+  if (IN_PROGRESS.has(s)) return "in_progress";
+  if (COMPLETED.has(s)) return "completed";
+  return "pending";
+}
+
+// Statuses that mean "this task no longer exists" (des-workflow TaskUpdate).
+const REMOVED_STATUS = new Set(["deleted", "cancelled", "canceled", "removed"]);
+function isRemovedStatus(raw: unknown): boolean {
+  return REMOVED_STATUS.has(String(raw ?? "").toLowerCase().trim());
+}
+
+// A TodoWrite tool_use carries the WHOLE checklist in input.todos[]; the latest
+// one in the log is authoritative. Returns null for anything that isn't a
+// well-formed todo list, so a malformed/partial record is simply ignored.
+function todosToTasks(input: any): TaskItem[] | null {
+  const todos = input?.todos;
+  if (!Array.isArray(todos)) return null;
+  const tasks: TaskItem[] = [];
+  for (const t of todos) {
+    if (!t || typeof t !== "object") continue;
+    const label = clean(t.content ?? t.activeForm ?? t.task);
+    if (!label) continue;
+    tasks.push({ label, status: normalizeTaskStatus(t.status) });
+  }
+  return tasks;
+}
+
+// Mutable state for the TaskCreate/TaskUpdate fallback replay.
+interface TaskReplay {
+  map: Map<string, TaskItem>;
+  order: string[];
+  /** Count of TaskCreate calls seen, used to synthesize ids for the common case. */
+  created: number;
+}
+
+// Fallback checklist: replay des-workflow TaskCreate/TaskUpdate tool calls,
+// keyed by taskId, final status winning, creation order preserved.
+//
+// The wrinkle: a real TaskCreate tool_use input carries only {subject,
+// description} — the taskId is assigned in the tool_result we don't parse. Those
+// ids are handed out as "1", "2", … in creation order, and TaskUpdate references
+// them by that id. So we synthesize the same ordinal id for each create; an
+// explicit taskId on the create (some variants include one) still takes
+// precedence. This makes create↔update actually correlate on real transcripts.
+function recordTaskEvent(name: string, input: any, st: TaskReplay): void {
+  const subject = input?.subject ?? input?.title;
+  if (name === "TaskCreate") {
+    const key = String(input?.taskId ?? input?.id ?? ++st.created).trim();
+    if (!key) return;
+    const status = input?.status != null ? normalizeTaskStatus(input.status) : "pending";
+    if (!st.map.has(key)) st.order.push(key);
+    st.map.set(key, { label: clean(subject ?? `Task ${key}`), status });
+    return;
+  }
+  // TaskUpdate
+  const key = String(input?.taskId ?? input?.id ?? subject ?? "").trim();
+  if (!key) return;
+  if (isRemovedStatus(input?.status)) {
+    if (st.map.delete(key)) {
+      const i = st.order.indexOf(key);
+      if (i >= 0) st.order.splice(i, 1);
+    }
+    return;
+  }
+  const existing = st.map.get(key);
+  if (!existing) {
+    st.order.push(key);
+    st.map.set(key, { label: clean(subject ?? `Task ${key}`), status: normalizeTaskStatus(input?.status ?? "pending") });
+    return;
+  }
+  if (input?.status != null) existing.status = normalizeTaskStatus(input.status);
+  if (subject) existing.label = clean(subject);
 }
 
 // The most recent human prompt (string content, or text blocks — never a
@@ -308,14 +393,18 @@ function userText(content: any): string | undefined {
   return undefined;
 }
 
-function claudeAction(b: any, ts: Date): ActionLine | null {
+function claudeAction(b: any, ts: Date, full = false): ActionLine | null {
   if (b.type === "thinking" && b.thinking?.length > 0) {
     return { timestamp: ts, verb: "Thinking", detail: `~${Math.round(b.thinking.length / 4)} tokens` };
   }
-  if (b.type === "text" && b.text?.trim()) {
-    return { timestamp: ts, verb: "Claude", detail: clean(b.text).slice(0, 200) };
+  if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
+    const txt = clean(b.text);
+    return { timestamp: ts, verb: "Claude", detail: full ? txt : txt.slice(0, 200) };
   }
   if (b.type !== "tool_use") return null;
+  // TodoWrite is surfaced as the task checklist (see loadClaudeActivity), not as
+  // an action line — its input is the whole todo list, useless as a one-liner.
+  if (b.name === "TodoWrite") return null;
   const inp = b.input ?? {};
   let verb = String(b.name ?? "?");
   let detail = "";
@@ -325,9 +414,11 @@ function claudeAction(b: any, ts: Date): ActionLine | null {
     case "Read":
       detail = shortPath(inp.file_path ?? "");
       break;
-    case "Bash":
-      detail = clean(inp.command ?? "").slice(0, 120);
+    case "Bash": {
+      const cmd = clean(inp.command ?? "");
+      detail = full ? cmd : cmd.slice(0, 120);
       break;
+    }
     case "Agent": {
       const at = inp.subagent_type ? `[${inp.subagent_type}] ` : "";
       detail = at + (inp.description ?? "");
@@ -340,13 +431,15 @@ function claudeAction(b: any, ts: Date): ActionLine | null {
       verb = `Task #${inp.taskId ?? inp.id ?? "?"}`;
       detail = `→ ${inp.status ?? ""}`;
       break;
-    default:
-      detail = clean(Object.values(inp).slice(0, 1).map(String).join("")).slice(0, 80);
+    default: {
+      const d = clean(Object.values(inp).slice(0, 1).map(String).join(""));
+      detail = full ? d : d.slice(0, 80);
+    }
   }
   return { timestamp: ts, verb, detail };
 }
 
-async function loadClaudeActivity(path?: string): Promise<SessionActivity> {
+async function loadClaudeActivity(path?: string, full = false): Promise<SessionActivity> {
   if (!path) return { actions: [] };
   let raw: string;
   try {
@@ -356,6 +449,11 @@ async function loadClaudeActivity(path?: string): Promise<SessionActivity> {
   }
   const actions: ActionLine[] = [];
   let lastPrompt: string | undefined;
+  let finalResponse: string | undefined;
+  // Task checklist: the latest non-empty TodoWrite wins; the Task* replay is the
+  // fallback for des-workflow sessions that never call TodoWrite.
+  let latestTodos: TaskItem[] | null = null;
+  const replay: TaskReplay = { map: new Map(), order: [], created: 0 };
   for (const line of raw.split("\n")) {
     const t = line.trim();
     if (!t) continue;
@@ -365,21 +463,44 @@ async function loadClaudeActivity(path?: string): Promise<SessionActivity> {
     } catch {
       continue;
     }
+    // JSON.parse("null")/"42"/"\"x\"" succeed but aren't records — skip them so a
+    // stray primitive line can't crash the field access below.
+    if (!e || typeof e !== "object") continue;
     const ts = e.timestamp ? new Date(e.timestamp) : new Date(0);
     if (e.type === "user") {
       const txt = userText(e.message?.content);
-      if (txt) lastPrompt = txt.slice(0, 200);
+      // A genuine new human prompt (not a tool_result) starts a fresh turn, so
+      // the previous turn's answer is no longer "the final response".
+      if (txt) {
+        lastPrompt = full ? txt : txt.slice(0, 200);
+        finalResponse = undefined;
+      }
     } else if (e.type === "assistant" && Array.isArray(e.message?.content)) {
       for (const b of e.message.content) {
-        const a = claudeAction(b, ts);
+        const a = claudeAction(b, ts, full);
         if (a) actions.push(a);
+        // Keep the full text of the last assistant message for orchestrators.
+        if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
+          finalResponse = b.text.trim();
+        }
+        if (b?.type === "tool_use") {
+          if (b.name === "TodoWrite") {
+            const parsed = todosToTasks(b.input);
+            // Only a non-empty list supersedes; an empty/all-malformed todos[]
+            // must not blank out a Task*-derived checklist via the ?? below.
+            if (parsed && parsed.length) latestTodos = parsed;
+          } else if (b.name === "TaskCreate" || b.name === "TaskUpdate") {
+            recordTaskEvent(b.name, b.input ?? {}, replay);
+          }
+        }
       }
     }
   }
-  return finalizeActivity(lastPrompt, actions);
+  const tasks = latestTodos ?? replay.order.map((k) => replay.map.get(k)!).filter(Boolean);
+  return finalizeActivity(lastPrompt, actions, { tasks, finalResponse });
 }
 
-function copilotAction(tr: any, ts: Date): ActionLine {
+function copilotAction(tr: any, ts: Date, full = false): ActionLine {
   const name = String(tr.name ?? "?");
   const args = tr.arguments ?? {};
   let verb = name;
@@ -397,10 +518,12 @@ function copilotAction(tr: any, ts: Date): ActionLine {
       verb = "Edit";
       detail = shortPath(args.path ?? "");
       break;
-    case "bash":
+    case "bash": {
       verb = "Bash";
-      detail = clean(args.command ?? "").slice(0, 120);
+      const cmd = clean(args.command ?? "");
+      detail = full ? cmd : cmd.slice(0, 120);
       break;
+    }
     case "grep":
       verb = "Grep";
       detail = args.pattern ?? "";
@@ -423,13 +546,15 @@ function copilotAction(tr: any, ts: Date): ActionLine {
       verb = "Intent";
       detail = args.intent ?? "";
       break;
-    default:
-      detail = clean(Object.values(args).slice(0, 1).map(String).join("")).slice(0, 80);
+    default: {
+      const d = clean(Object.values(args).slice(0, 1).map(String).join(""));
+      detail = full ? d : d.slice(0, 80);
+    }
   }
   return { timestamp: ts, verb, detail };
 }
 
-async function loadCopilotActivity(dir?: string): Promise<SessionActivity> {
+async function loadCopilotActivity(dir?: string, full = false): Promise<SessionActivity> {
   if (!dir) return { actions: [] };
   let raw: string;
   try {
@@ -439,6 +564,7 @@ async function loadCopilotActivity(dir?: string): Promise<SessionActivity> {
   }
   const actions: ActionLine[] = [];
   let lastPrompt: string | undefined;
+  let finalResponse: string | undefined;
   for (const line of raw.split("\n")) {
     const t = line.trim();
     if (!t) continue;
@@ -448,36 +574,61 @@ async function loadCopilotActivity(dir?: string): Promise<SessionActivity> {
     } catch {
       continue;
     }
+    if (!e || typeof e !== "object") continue;
     const ts = e.timestamp ? new Date(e.timestamp) : new Date(0);
     const data = e.data ?? {};
     if (e.type === "user.message") {
       const c = String(data.content ?? "");
-      if (c.trim()) lastPrompt = clean(c).slice(0, 200);
-    } else if (e.type === "assistant.message") {
-      const content = String(data.content ?? "");
-      const reqs = Array.isArray(data.toolRequests) ? data.toolRequests : [];
-      if (content.trim() && reqs.length === 0) {
-        actions.push({ timestamp: ts, verb: "Copilot", detail: clean(content).slice(0, 200) });
+      if (c.trim()) {
+        lastPrompt = full ? clean(c) : clean(c).slice(0, 200);
+        finalResponse = undefined; // a new prompt starts a fresh turn
       }
-      for (const tr of reqs) actions.push(copilotAction(tr, ts));
+    } else if (e.type === "assistant.message") {
+      const content = typeof data.content === "string" ? data.content : "";
+      const reqs = Array.isArray(data.toolRequests) ? data.toolRequests : [];
+      if (content.trim()) finalResponse = content.trim();
+      if (content.trim() && reqs.length === 0) {
+        actions.push({ timestamp: ts, verb: "Copilot", detail: full ? clean(content) : clean(content).slice(0, 200) });
+      }
+      for (const tr of reqs) actions.push(copilotAction(tr, ts, full));
     }
   }
-  // Drop low-signal intent pings, then finalize.
-  return finalizeActivity(lastPrompt, actions.filter((a) => a.verb !== "Intent"));
+  // Copilot has no task checklist; only a final response. Drop low-signal
+  // intent pings, then finalize.
+  return finalizeActivity(lastPrompt, actions.filter((a) => a.verb !== "Intent"), { finalResponse });
 }
 
 // Compute inter-action deltas across the FULL log, then keep only the tail so
 // the first surfaced line still shows the real gap from the action before it.
-function finalizeActivity(lastPrompt: string | undefined, actions: ActionLine[]): SessionActivity {
+// The task checklist and final response are NOT capped — they describe overall
+// state, not the rolling window of recent actions.
+function finalizeActivity(
+  lastPrompt: string | undefined,
+  actions: ActionLine[],
+  extra: { tasks?: TaskItem[]; finalResponse?: string } = {},
+): SessionActivity {
   for (let i = 1; i < actions.length; i++) {
     const prev = actions[i - 1].timestamp.getTime();
     const cur = actions[i].timestamp.getTime();
     if (prev > 0 && cur > 0) actions[i].deltaMs = Math.max(0, cur - prev);
   }
-  return { lastPrompt, actions: actions.slice(-ACTIVITY_LIMIT) };
+  return {
+    lastPrompt,
+    actions: actions.slice(-ACTIVITY_LIMIT),
+    tasks: extra.tasks && extra.tasks.length ? extra.tasks : undefined,
+    finalResponse: extra.finalResponse,
+  };
+}
+
+/** Options for on-demand activity loading. `full` skips display truncation. */
+export interface LoadActivityOpts {
+  /** When true, don't truncate the last prompt or action details (for `agendo status --full`). */
+  full?: boolean;
 }
 
 /** Parse a session's recent activity on demand (called when its row expands). */
-export function loadActivity(s: AgentSession): Promise<SessionActivity> {
-  return s.source === "claude" ? loadClaudeActivity(s.logPath) : loadCopilotActivity(s.logPath);
+export function loadActivity(s: AgentSession, opts: LoadActivityOpts = {}): Promise<SessionActivity> {
+  return s.source === "claude"
+    ? loadClaudeActivity(s.logPath, opts.full)
+    : loadCopilotActivity(s.logPath, opts.full);
 }

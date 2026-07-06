@@ -7,10 +7,11 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { LOGIN_SESSION_ID, COPILOT_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { LOGIN_SESSION_ID, COPILOT_SESSION_ID, CRASH_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const SHORT_ID = LOGIN_SESSION_ID.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+const CRASH_SHORT_ID = CRASH_SESSION_ID.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
 
 function agendo(env: Record<string, string>, ...args: string[]) {
   return spawnSync("bun", ["run", join(REPO_ROOT, "src", "index.tsx"), ...args], {
@@ -56,6 +57,42 @@ test("agendo status reports running state + recent activity", async ({ mock }) =
   expect(r.stdout).toContain("feature/login"); // branch
   // The most recent human prompt + a parsed action from the JSONL log.
   expect(r.stdout).toContain("Add a login form with validation");
+});
+
+test("agendo status prints the agent's TodoWrite checklist (latest wins)", async ({ mock }) => {
+  const r = agendo(mock.env, "status", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("tasks:");
+  // The LATEST TodoWrite is authoritative: the form task is done, validation is
+  // in progress, and a third task that only exists in the later list is present —
+  // proving we surface the whole latest list, not the superseded earlier one.
+  expect(r.stdout).toContain("[x] Write the login form");
+  expect(r.stdout).toContain("[~] Add validation");
+  expect(r.stdout).toContain("[ ] Wire up the submit handler");
+});
+
+test("agendo status prints the FULL untruncated final response", async ({ mock }) => {
+  const r = agendo(mock.env, "status", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("final response:");
+  expect(r.stdout).toContain("Done — login form added with validation.");
+  // The final text is >400 chars; it must not be clipped at the 200-char action
+  // truncation (the orchestrator needs the whole thing).
+  expect(r.stdout).toContain("x".repeat(400));
+});
+
+test("agendo status reconstructs a checklist from Task events when no TodoWrite exists", async ({ mock }) => {
+  // The crash session (idle) recorded des-workflow TaskCreate/TaskUpdate calls,
+  // not a TodoWrite — the fallback replays them by taskId, last status winning.
+  const r = agendo(mock.env, "status", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("tasks:");
+  expect(r.stdout).toContain("[x] Reproduce the crash"); // update on ordinal id "1" → completed
+  expect(r.stdout).toContain("[~] Patch the null deref"); // update on ordinal id "2", active → in_progress
+  // A task deleted via TaskUpdate status:"deleted" must be dropped from the
+  // checklist (it still appears in the raw activity log as its TaskCreate line —
+  // that's accurate history — so scope the check to checklist rows `[…] label`).
+  expect(r.stdout).not.toMatch(/\[.\] Write a regression test/);
 });
 
 test("agendo send delivers a prompt to a ready session", async ({ mock }) => {
