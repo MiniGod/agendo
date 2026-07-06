@@ -6,10 +6,11 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePane, sendToPane, paneReadiness, paneShells, stripAnsi,
+  liveManagedPaths, managedKind, capturePane, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
   sessionRoot, currentSessionName, killWindow,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
+import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
@@ -78,6 +79,10 @@ Usage:
                                 its input is idle/ready (not mid-turn, no open
                                 question, nothing already typed).
       --force, -f               Send even if the input doesn't look ready
+  agendo unblock <id>          Nudge a session at its usage limit to continue:
+                                sends <esc>continue<enter>. Refuses unless the
+                                pane is still showing the usage-limit notice.
+      --force, -f               Unblock even if it doesn't look limited
   agendo --llm                 Print agent-facing instructions for the background-
                                 session workflow (what the system prompt points to)
   agendo --help, -h            Show this help
@@ -308,6 +313,21 @@ if (process.argv[2] === "resume") {
   process.exit(0);
 }
 
+// `unblock <id>`: nudge a session sitting at its usage limit to continue — sends
+// <esc>continue<enter>. Distinct from `resume` (which relaunches an idle session
+// in a fresh window); this pokes a live, limited pane. Refuses unless the pane is
+// still showing the usage-limit notice, so a recovered session isn't clobbered.
+if (process.argv[2] === "unblock") {
+  let id: string | undefined;
+  let force = false;
+  for (const a of process.argv.slice(3)) {
+    if (a === "--force" || a === "-f") force = true;
+    else if (id === undefined) id = a;
+  }
+  await runUnblock(id, force);
+  process.exit(0);
+}
+
 // `wait [id...]`: block until the selected session(s) reach a desired non-busy
 // state (like `gh run watch`), then exit 0; exit non-zero on timeout. Progress
 // goes to stderr, the final per-session state to stdout, so it composes in
@@ -447,7 +467,14 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
   if (target) {
     const raw = capturePane(target);
-    console.log(`  ready:  ${paneReadiness(raw)}`);
+    const readiness = paneReadiness(raw);
+    console.log(`  ready:  ${readiness}`);
+    if (readiness === "limited") {
+      const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
+      console.log(
+        `  limit:  usage limit reached${resetAt !== null ? ` — resets at ${new Date(resetAt).toISOString()}` : " — no reset time parsed (cannot auto-resume)"}`,
+      );
+    }
     const shells = paneShells(raw);
     if (shells > 0) console.log(`  shells: ${shells} background shell${shells > 1 ? "s" : ""} running (e.g. a monitor)`);
   }
@@ -503,6 +530,35 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   }
   sendToPane(target, prompt);
   console.log(`▸ sent to ${target}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
+}
+
+/**
+ * Send the resume keystrokes (`<esc>continue<enter>`) to a session sitting at
+ * its usage limit. Refuses unless the pane still reads "limited" (so a session
+ * that already recovered isn't clobbered), overridable with `--force`.
+ */
+async function runUnblock(token: string | undefined, force: boolean): Promise<void> {
+  if (!token) {
+    console.error(`usage: ${SELF_CMD} unblock <id> [--force]`);
+    process.exit(1);
+  }
+  const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
+  const target = liveTargetForShortId(sid);
+  if (!target) {
+    console.error(`Session ${token} is not running (no live tmux window to unblock).`);
+    process.exit(1);
+  }
+  const raw = capturePane(target);
+  const readiness = paneReadiness(raw);
+  if (readiness !== "limited" && !force) {
+    console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
+    process.exit(2);
+  }
+  sendResume(target);
+  const resetAt = readiness === "limited" ? parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS) : null;
+  console.log(
+    `▸ unblocked ${target}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
+  );
 }
 
 interface ListOptions {
