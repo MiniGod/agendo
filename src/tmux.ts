@@ -8,6 +8,7 @@
 // whose first window runs the menu, so every agent ends up as a tab next to it.
 import { spawnSync } from "child_process";
 import type { AgentSession } from "./types.ts";
+import { isUsageLimited } from "./usageLimit.ts";
 
 /**
  * The default host session the `--tmux` flag creates/attaches when the launcher
@@ -115,8 +116,28 @@ export function sendToPane(target: string, text: string): void {
   tmuxQuiet(["send-keys", "-t", target, "Enter"]);
 }
 
+/**
+ * The tmux `send-keys` argv sequence that nudges a usage-limited session to
+ * resume: press Escape (drop any partial input / dismiss the notice), type
+ * `continue`, then Enter. Split from the runner (`sendResume`) so it can be
+ * asserted directly in tests without touching a real tmux server. `-l` forces
+ * "continue" to be sent as literal characters, not looked up as a key name.
+ */
+export function resumeKeystrokes(target: string): string[][] {
+  return [
+    ["send-keys", "-t", target, "Escape"],
+    ["send-keys", "-t", target, "-l", "continue"],
+    ["send-keys", "-t", target, "Enter"],
+  ];
+}
+
+/** Send the resume keystrokes (`<esc>continue<enter>`) to a target pane. */
+export function sendResume(target: string): void {
+  for (const argv of resumeKeystrokes(target)) tmuxQuiet(argv);
+}
+
 /** Whether a captured claude TUI pane can accept a freshly-sent prompt. */
-export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "unknown";
+export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "limited" | "unknown";
 
 /**
  * Real (user-typed) text on the claude input line, ignoring the `❯` marker and
@@ -213,19 +234,98 @@ export function paneReadiness(raw: string): Readiness {
     /esc to interrupt/i.test(plain)
   )
     return "busy";
+  // Usage/token window exhausted — the 5-hour or weekly cap. Only when the notice
+  // is the *active* bottom-most content (not stale scrollback from a session that
+  // already resumed — see paneUsageLimited). Checked after busy (a session
+  // generating again must read "busy") but before the input-box read: an active
+  // notice sits just above the otherwise-idle box, so it would otherwise read
+  // "ready" and invite a doomed send. See usageLimit.ts for the matched wording.
+  if (paneUsageLimited(raw)) return "limited";
   // An open interactive menu / confirmation (not mere prose — these footers and
   // the numbered selection cursor only appear in real dialogs).
-  if (/Enter to confirm|Esc to (reject|cancel|go back)|Press Enter to continue/i.test(plain) || /^\s*❯\s*\d+\.\s/m.test(plain))
-    return "dialog";
+  if (isDialog(plain)) return "dialog";
   // Read the input box: the lines between the last two horizontal rules.
+  const input = inputBox(raw);
+  if (input === null) return "unknown";
+  return inputRealText(input) === "" ? "ready" : "queued";
+}
+
+/** Footers / a numbered selection cursor that only appear in a real dialog. */
+function isDialog(plain: string): boolean {
+  return (
+    /Enter to confirm|Esc to (reject|cancel|go back)|Press Enter to continue/i.test(plain) ||
+    /^\s*❯\s*\d+\.\s/m.test(plain)
+  );
+}
+
+/**
+ * The input-box region — the lines between the last two horizontal rules, which
+ * bound the `❯` prompt — or null if there's no recognizable box. `raw` must keep
+ * its SGR escapes (inputRealText reads them to tell real text from a suggestion).
+ */
+function inputBox(raw: string): string | null {
   const lines = raw.replace(/\r/g, "").split("\n");
   const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
-  if (rules.length === 0) return "unknown";
+  if (rules.length === 0) return null;
   const bottom = rules[rules.length - 1];
   const top = rules.length >= 2 ? rules[rules.length - 2] : bottom - 2;
   const input = lines.slice(top + 1, bottom).join("\n");
-  if (!input.includes("❯")) return "unknown";
-  return inputRealText(input) === "" ? "ready" : "queued";
+  return input.includes("❯") ? input : null;
+}
+
+/**
+ * How many contiguous non-blank lines above the input box count as the "active"
+ * block — the usage-limit notice must render here to be the current state.
+ */
+const LIMIT_ACTIVE_MAX_LINES = 12;
+
+/**
+ * Whether the pane is CURRENTLY at a usage limit — the notice is the active,
+ * bottom-most content, not a stale line left in scrollback after the session
+ * resumed. The message persists in history once the user continues, so a plain
+ * whole-screen match would keep flagging a recovered, idle session as limited.
+ *
+ * When an input box is present we look only at the block of content immediately
+ * above it — the contiguous run of non-blank lines just before the box's top
+ * rule (bounded by LIMIT_ACTIVE_MAX_LINES). An active limit renders its notice
+ * right there; a recovered session has a later completed turn (and its typed
+ * `❯ continue`) between the old notice and the box, so the block above the box
+ * is that turn's tail, not the notice. With no input box to anchor on, fall back
+ * to scanning the whole capture (permissive — better to flag than to miss).
+ * `raw` must include SGR escapes (see capturePane).
+ */
+export function paneUsageLimited(raw: string): boolean {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
+  if (rules.length === 0) return isUsageLimited(stripAnsi(raw));
+  const top = rules.length >= 2 ? rules[rules.length - 2] : rules[rules.length - 1] - 2;
+  const block: string[] = [];
+  for (let i = top - 1; i >= 0 && block.length < LIMIT_ACTIVE_MAX_LINES; i--) {
+    const line = stripAnsi(lines[i]).trim();
+    if (line === "") {
+      if (block.length) break; // reached the blank gap above the last block
+      continue; // skip trailing blanks between the last block and the box
+    }
+    block.unshift(line);
+  }
+  return isUsageLimited(block.join(" "));
+}
+
+/**
+ * Whether it's safe to auto-send the resume keystrokes to a captured pane:
+ * still *actively* at the usage limit (so a recovered session — notice only in
+ * scrollback — is never clobbered), with no open dialog (Escape would dismiss
+ * it) and an *empty* input box (so a draft the user queued for after reset isn't
+ * wiped). Stricter than `paneReadiness` alone, which reports "limited" even over
+ * a lingering dialog / queued text because the limit check outranks both. `raw`
+ * must include SGR escapes (see capturePane).
+ */
+export function paneResumeSafe(raw: string): boolean {
+  if (!paneUsageLimited(raw)) return false;
+  const plain = stripAnsi(raw);
+  if (isDialog(plain)) return false;
+  const input = inputBox(raw);
+  return input !== null && inputRealText(input) === "";
 }
 
 /**

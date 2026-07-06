@@ -4,7 +4,8 @@ import { execFile } from "child_process";
 import { loadModel, isRunning, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName, capturePane, paneReadiness, paneShells, type SessionKind, type Readiness } from "../tmux.ts";
+import { sessionName, capturePane, sendResume, paneReadiness, paneResumeSafe, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
+import { parseResetTime, shouldAutoResume, RESET_LOOKBACK_MS } from "../usageLimit.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
@@ -251,7 +252,7 @@ type Activity = SessionActivity | "loading" | "error";
 
 // A running session's live pane snapshot: input readiness + how many background
 // shells (e.g. a monitor loop) it has going. Polled together from one capture.
-interface PaneState { readiness: Readiness; shells: number }
+interface PaneState { readiness: Readiness; shells: number; resetAt?: number | null }
 
 function stateColor(state: string): string {
   const s = state.toLowerCase();
@@ -878,8 +879,17 @@ function runningStatus(r: Readiness | undefined): { label: string; color: string
     case "busy": return { label: "busy…", color: "yellow" };
     case "queued": return { label: "queued", color: "cyan" };
     case "dialog": return { label: "needs input", color: "magenta" };
+    case "limited": return { label: "usage limit", color: "red" };
     default: return { label: "running → attach", color: "green" };
   }
+}
+
+// Trailing detail for a usage-limited row: the reset time (local clock) when we
+// could parse one, else a note that we can't (and so won't auto-resume).
+function limitSuffix(resetAt: number | null | undefined): string {
+  if (resetAt == null) return " · no reset time";
+  const t = new Date(resetAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return resetAt <= Date.now() ? ` · reset passed ${t}` : ` · resets ${t}`;
 }
 
 // The PR / work item a session links back to, as a compact one-line badge
@@ -920,7 +930,7 @@ function SessionRow({
         <Text>{session.title.replace(/\s+/g, " ").slice(0, 50)}</Text>
         {link ? <Text color={selected ? "black" : "magenta"}>{`  ${link}`}</Text> : null}
         <Text dimColor={!selected}>{`  ${timeAgo(displayTime)}`}</Text>
-        {status ? <Text color={selected ? "black" : status.color}>{`  (${status.label})`}</Text> : null}
+        {status ? <Text color={selected ? "black" : status.color}>{`  (${status.label}${pane?.readiness === "limited" ? limitSuffix(pane.resetAt) : ""})`}</Text> : null}
         {shells > 0 ? <Text color={selected ? "black" : "blue"}>{`  ⛁ ${shells} shell${shells > 1 ? "s" : ""}`}</Text> : null}
         {placeholder ? <Text color={selected ? "black" : "gray"} dimColor={!selected}>{"  restored · press to resume"}</Text> : null}
       </Text>
@@ -1037,6 +1047,9 @@ export default function App({
   // session, by canonical name. Polled on a short timer independent of the
   // ADO-backed model reload.
   const [panes, setPanes] = useState<Map<string, PaneState>>(new Map());
+  // Auto-resume a session once its usage-limit window reopens (default OFF,
+  // toggled on the Settings page). Persisted in LauncherState.
+  const [autoResume, setAutoResume] = useState<boolean>(() => loadState().autoResumeOnUsageLimit ?? false);
   // Which backend the launcher talks to. Resolved from the persisted choice if
   // its CLI is still installed, else the first installed one (see provider.ts).
   // `available` is probed once at mount and drives the provider picker.
@@ -1100,14 +1113,16 @@ export default function App({
     };
   }, [mode.kind]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const persist = (next: { provider?: ProviderName; identity?: Identity | null }) => {
+  const persist = (next: { provider?: ProviderName; identity?: Identity | null; autoResume?: boolean }) => {
     const p = next.provider !== undefined ? next.provider : provider;
     const id = next.identity !== undefined ? next.identity : identity;
+    const ar = next.autoResume !== undefined ? next.autoResume : autoResume;
     saveState({
       provider: p,
       identityId: id?.id,
       identityName: id?.displayName,
       identityUniqueName: id?.uniqueName,
+      autoResumeOnUsageLimit: ar,
     });
   };
 
@@ -1125,6 +1140,18 @@ export default function App({
   // Mirror `model` into a ref so the mount-only liveness interval reads the
   // current sessions without a stale closure and without re-arming the timer.
   const modelRef = useRef<LoadedModel | null>(null);
+  // Mirror the setting into a ref so the readiness poll's interval closure reads
+  // the current value without re-arming the timer.
+  const autoResumeRef = useRef(autoResume);
+  useEffect(() => { autoResumeRef.current = autoResume; }, [autoResume]);
+  // Per-limited-session bookkeeping for auto-resume, keyed by canonical name:
+  //   • limitWindows — the frozen reset instant for the current limit window
+  //     (null when no reset time was parseable, so we know not to auto-resume);
+  //   • resumeFired  — the reset instant we've already sent `continue` for, so a
+  //     single window fires at most once. Both are cleared when a session leaves
+  //     the limited state, so its next limit window starts fresh.
+  const limitWindows = useRef<Map<string, number | null>>(new Map());
+  const resumeFired = useRef<Map<string, number>>(new Map());
   const ensureActivity = (s: AgentSession) => {
     const id = sessionId(s);
     if (requested.current.has(id)) return;
@@ -1141,7 +1168,7 @@ export default function App({
 
   // The actionable rows of the Settings page, in display order. Kept in one
   // place so the input handler (cursor / enter) and the renderer stay in lockstep.
-  const settingsItems: Array<"provider" | "identity"> = ["provider", "identity"];
+  const settingsItems: Array<"provider" | "identity" | "autoResume"> = ["provider", "identity", "autoResume"];
   const providerLabel = PROVIDER_INFO.find((p) => p.name === provider)?.label ?? provider;
 
   // Whether the path filter is active right now (a root exists and the global
@@ -1284,20 +1311,68 @@ export default function App({
     const windows = model?.liveWindows;
     if (!windows || windows.size === 0) {
       setPanes((p) => (p.size === 0 ? p : new Map()));
+      // No live windows to attribute to — drop all auto-resume bookkeeping so a
+      // relaunched session can't inherit a stale (possibly past) reset instant.
+      limitWindows.current.clear();
+      resumeFired.current.clear();
       return;
     }
     const sample = () => {
       // Capture each pane once (outside the state updater, which must stay pure)
-      // and derive both readiness and shell count from the same snapshot.
+      // and derive readiness, shell count, and — when limited — the reset time
+      // from the same snapshot. Auto-resume is folded in here so it rides the
+      // same cadence and the same fresh capture.
       const next = new Map<string, PaneState>();
       for (const [canon, win] of windows) {
         const raw = capturePane(win);
-        next.set(canon, { readiness: paneReadiness(raw), shells: paneShells(raw) });
+        const readiness = paneReadiness(raw);
+        let resetAt: number | null | undefined;
+        if (readiness === "limited") {
+          // Freeze the reset instant on first *successful* parse of this limit
+          // window: a bare "3pm" parses as the next 3pm, which would jump to
+          // tomorrow the moment the clock passes it — freezing keeps a stable
+          // target to fire on. Re-parse while still null (a first capture can
+          // race the TUI paint and miss the reset line) so a transient miss
+          // doesn't permanently disable auto-resume for the window.
+          const frozen = limitWindows.current.get(canon);
+          if (frozen != null) resetAt = frozen;
+          else {
+            resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
+            limitWindows.current.set(canon, resetAt ?? null);
+          }
+          // Auto-resume: once the frozen reset has passed (plus grace) and we
+          // haven't already fired for it, re-verify the pane is STILL safely
+          // limited — empty input box, no open dialog (guarding the sample→act
+          // gap and never clobbering a draft/dialog) — then send `continue`.
+          if (autoResumeRef.current) {
+            const fired = resumeFired.current.get(canon) ?? null;
+            if (shouldAutoResume({ enabled: true, readiness, resetAt: resetAt ?? null, now: Date.now(), firedFor: fired })) {
+              if (paneResumeSafe(capturePane(win))) {
+                sendResume(win);
+                resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
+              }
+            }
+          }
+        } else if (readiness !== "busy" && readiness !== "unknown") {
+          // Definitively recovered (ready / queued / dialog / compacting): drop
+          // the frozen window + fire record so a *future* limit window starts
+          // fresh. We deliberately keep them through "busy" (the generation our
+          // own `continue` kicks off) and "unknown" (a transient blank capture),
+          // so a single flicker can't wipe the fire-once guard and re-fire.
+          limitWindows.current.delete(canon);
+          resumeFired.current.delete(canon);
+        }
+        next.set(canon, { readiness, shells: paneShells(raw), resetAt });
       }
+      // A window that vanished between reloads leaves stale bookkeeping; prune it.
+      for (const canon of [...limitWindows.current.keys()]) if (!windows.has(canon)) limitWindows.current.delete(canon);
+      for (const canon of [...resumeFired.current.keys()]) if (!windows.has(canon)) resumeFired.current.delete(canon);
       setPanes((prev) => {
         const same =
           prev.size === next.size &&
-          [...next].every(([k, v]) => prev.get(k)?.readiness === v.readiness && prev.get(k)?.shells === v.shells);
+          [...next].every(
+            ([k, v]) => prev.get(k)?.readiness === v.readiness && prev.get(k)?.shells === v.shells && prev.get(k)?.resetAt === v.resetAt,
+          );
         return same ? prev : next;
       });
     };
@@ -1725,10 +1800,18 @@ export default function App({
         return setMode((p) => (p.kind === "settings" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
       if (key.downArrow || input === "j")
         return setMode((p) => (p.kind === "settings" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) {
+      if (key.return || input === " ") {
         const item = settingsItems[mode.cursor];
         if (item === "provider") return enterProvider(true);
         if (item === "identity") return enterIdentity(true);
+        if (item === "autoResume") {
+          setAutoResume((v) => {
+            const nv = !v;
+            persist({ autoResume: nv });
+            return nv;
+          });
+          return;
+        }
       }
       return;
     }
@@ -2020,16 +2103,18 @@ export default function App({
   }
 
   if (mode.kind === "settings") {
-    const settingValue = (item: "provider" | "identity"): { text: string; color?: string } =>
+    const settingValue = (item: "provider" | "identity" | "autoResume"): { text: string; color?: string } =>
       item === "provider"
         ? { text: providerLabel, color: "cyan" }
-        : { text: `${model.identity.displayName}${model.identity.id === model.me.id ? " (you)" : ""}` };
-    const settingLabel = (item: "provider" | "identity") =>
-      item === "provider" ? "Backend" : "Viewing as";
+        : item === "identity"
+          ? { text: `${model.identity.displayName}${model.identity.id === model.me.id ? " (you)" : ""}` }
+          : { text: autoResume ? "on" : "off", color: autoResume ? "green" : "gray" };
+    const settingLabel = (item: "provider" | "identity" | "autoResume") =>
+      item === "provider" ? "Backend" : item === "identity" ? "Viewing as" : "Auto-resume on usage limit";
     return (
       <Box flexDirection="column">
         <Text bold>Settings</Text>
-        <Text dimColor>{"↑/↓ move · enter change · esc back"}</Text>
+        <Text dimColor>{"↑/↓ move · enter change/toggle · esc back"}</Text>
         <Box marginTop={1} flexDirection="column">
           {settingsItems.map((item, i) => {
             const sel = i === mode.cursor;
@@ -2037,7 +2122,7 @@ export default function App({
             return (
               <Text key={item} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
                 {sel ? "❯ " : "  "}
-                <Text bold>{settingLabel(item).padEnd(22).slice(0, 22)}</Text>
+                <Text bold>{settingLabel(item).padEnd(28).slice(0, 28)}</Text>
                 <Text color={sel ? "black" : v.color}>{v.text}</Text>
               </Text>
             );

@@ -86,6 +86,12 @@ export interface LauncherState {
   identityName?: string;
   /** Cached unique name (email) of the selected identity, used in WIQL. */
   identityUniqueName?: string;
+  /**
+   * When true, a session detected at its usage limit (with a parseable reset
+   * time) is automatically nudged to continue once that reset passes. Default
+   * OFF — toggled from the Settings page. See src/usageLimit.ts.
+   */
+  autoResumeOnUsageLimit?: boolean;
 }
 
 export function loadState(): LauncherState {

@@ -202,6 +202,56 @@ test("agendo list [dir] scopes the listing to sessions under the dir", async ({ 
   expect(inApplib.stdout).not.toContain("Implement login form");
 });
 
+// The usage-limit notice a throttled Claude Code pane shows — VERBATIM wording
+// captured read-only from a real limited session (⎿ result block, NBSP padding,
+// "hit your session limit" + "/usage-credits"), above the still-present input box.
+const LIMIT_PANE = [
+  "  ⎿  You've hit your session limit · resets 7:20pm (Atlantic/Reykjavik)",
+  "     /usage-credits to finish what you’re working on.",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+].join("\n");
+
+test("agendo list/status report a usage-limited session", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+
+  const list = agendo(mock.env, "list");
+  expect(list.status).toBe(0);
+  expect(list.stdout).toContain("limited");
+
+  const status = agendo(mock.env, "status", SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stdout).toContain("limited");
+  expect(status.stdout).toContain("usage limit reached");
+  expect(status.stdout).toContain("resets at"); // reset time was parsed
+});
+
+test("agendo unblock sends <esc>continue<enter> to a limited session", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+
+  const r = agendo(mock.env, "unblock", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`unblocked ${RUNNING_TARGET}`);
+
+  // The exact keystroke sequence reached tmux, to the right window: Escape, then
+  // the literal word "continue", then Enter.
+  const tmux = await mock.tmuxLog();
+  const sendKeys = tmux.filter((argv) => argv[0] === "send-keys" && argv.includes(RUNNING_TARGET));
+  expect(sendKeys).toContainEqual(["send-keys", "-t", RUNNING_TARGET, "Escape"]);
+  expect(sendKeys).toContainEqual(["send-keys", "-t", RUNNING_TARGET, "-l", "continue"]);
+  expect(sendKeys).toContainEqual(["send-keys", "-t", RUNNING_TARGET, "Enter"]);
+});
+
+test("agendo unblock refuses a session that isn't limited (no clobber)", async ({ mock }) => {
+  // Default fixture pane is idle/ready — unblock must decline rather than inject.
+  const r = agendo(mock.env, "unblock", SHORT_ID);
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("not limited");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "send-keys" && argv.includes("continue"))).toBe(false);
+});
+
 test("agendo status on an unknown id fails cleanly", async ({ mock }) => {
   const r = agendo(mock.env, "status", "no-such-session");
   expect(r.status).toBe(1);
