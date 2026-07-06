@@ -24,8 +24,14 @@ if (args[0] === "remote" && args[1] === "get-url") {
   // The GitHub backend derives a repo slug from origin. We serve a github.com
   // URL owned by `ada` (the fake gh login) named after the repo's directory, so
   // repoRef resolves `ada/<repo>` — the slug the fake gh keys its fixtures on.
-  // FAKE_GIT_ORIGIN_HOST=none makes origin absent (non-git / non-github repo).
-  if (process.env.FAKE_GIT_ORIGIN_HOST === "none") { process.stderr.write("error: No such remote 'origin'\n"); process.exit(1); }
+  // FAKE_GIT_ORIGIN_HOST selects the origin host so tests can exercise the
+  // path-context provider detection (provider.ts detectRepoProvider):
+  //   • unset / "github" → a github.com remote (default; forces the GitHub backend)
+  //   • "ado"            → an Azure DevOps remote (leaves the default provider)
+  //   • "none"           → no origin at all (non-git / no-remote repo)
+  const host = process.env.FAKE_GIT_ORIGIN_HOST;
+  if (host === "none") { process.stderr.write("error: No such remote 'origin'\n"); process.exit(1); }
+  if (host === "ado") { process.stdout.write(`https://dev.azure.com/innovamps/proj/_git/${path.basename(root)}\n`); process.exit(0); }
   process.stdout.write(`https://github.com/ada/${path.basename(root)}.git\n`);
   process.exit(0);
 }

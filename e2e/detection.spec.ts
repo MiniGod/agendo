@@ -15,6 +15,7 @@ import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { managedKind, sessionName, shortId, paneReadiness } from "../src/tmux.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
+import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -72,6 +73,66 @@ test.describe("bestSessionForCwd", () => {
     expect(bestSessionForCwd([a, b, c], "/repo")).toBe(b);
     expect(bestSessionForCwd([a, b, c], "/elsewhere")).toBe(c);
     expect(bestSessionForCwd([a, b, c], "/missing")).toBeUndefined();
+  });
+});
+
+// Regression guard for the "session-detection regresses often" area: a launcher
+// context whose basename contains a DOT (`kappflug.is-2`). The host session name
+// is slugified (`.`→`-`), but attribution must key on the pane cwd / session id —
+// never a lossy slug — and must survive path-representation drift between tmux's
+// `pane_current_path` and the session's recorded cwd.
+test.describe("dotted-basename contexts detect running sessions", () => {
+  const DOT_REPO = "/home/me/git/kappflug.is-2";
+  const DOT_WT = "/home/me/git/kappflug.is-2/.claude/worktrees/add-keppni-7";
+
+  test("normalizeCwd collapses representation drift but preserves dots", () => {
+    // Dots in a basename are meaningful path chars — never touched.
+    expect(normalizeCwd(DOT_REPO)).toBe(DOT_REPO);
+    // Trailing slash, doubled slashes, and `.`/`..` segments all canonicalize.
+    expect(normalizeCwd(DOT_REPO + "/")).toBe(DOT_REPO);
+    expect(normalizeCwd("/home/me/git//kappflug.is-2")).toBe(DOT_REPO);
+    expect(normalizeCwd("/home/me/git/kappflug.is-2/x/..")).toBe(DOT_REPO);
+    expect(normalizeCwd("/")).toBe("/");
+  });
+
+  test("a session in a dotted-basename context is in scope (segment-aware)", () => {
+    expect(isUnderRoot(DOT_REPO, DOT_REPO)).toBe(true); // the root itself
+    expect(isUnderRoot(DOT_WT, DOT_REPO)).toBe(true); // a worktree under it
+    expect(isUnderRoot(DOT_WT + "/", DOT_REPO)).toBe(true); // + trailing-slash drift
+    // Not fooled by a look-alike sibling that merely shares the dotted prefix.
+    expect(isUnderRoot("/home/me/git/kappflug.is-2-backup/x", DOT_REPO)).toBe(false);
+  });
+
+  test("an id-less cl-wi window at a dotted worktree attributes to its session", () => {
+    // The exact repro shape: session on disk in a dotted worktree, running under a
+    // work-item window (cwd-attributed, the fragile path). It must be detected.
+    const s = sess("keppni7id", DOT_WT, 5_000);
+    const canon = sessionName(s); // cl-claude-keppni7id
+    const managed: Managed[] = [{ name: "cl-wi-42", cwd: DOT_WT, placeholder: false }];
+    const r = reconcileLive(new Set(["cl-wi-42"]), managed, [s]);
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveKinds.get(canon)).toBe("workitem");
+    expect(r.liveWindows.get(canon)).toBe("cl-wi-42");
+  });
+
+  test("attribution survives cwd representation drift (trailing slash / dot segments)", () => {
+    // tmux reports the pane cwd with a trailing slash; the session recorded it
+    // clean. A raw `===` would miss this and show the session cold — normalizeCwd
+    // makes them compare equal.
+    const s = sess("driftid", DOT_WT, 5_000);
+    const canon = sessionName(s);
+    const managed: Managed[] = [{ name: "cl-pr-9", cwd: DOT_WT + "/", placeholder: false }];
+    const r = reconcileLive(new Set(["cl-pr-9"]), managed, [s]);
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveWindows.get(canon)).toBe("cl-pr-9");
+  });
+
+  test("resolveContext derives a slugified host session for a dotted path", () => {
+    // The host name loses the dot (tmux-safe), but that must not feed attribution.
+    expect(resolveContext(DOT_REPO, "/anywhere")).toEqual({
+      filterRoot: DOT_REPO,
+      hostSession: "agendo-kappflug-is-2",
+    });
   });
 });
 
@@ -278,5 +339,80 @@ test.describe("freshName / prFreshName: repo scoping of managed window names", (
   test("scoped names still classify to the right kind (attribution survives scoping)", () => {
     expect(managedKind(freshName(101, "owner/repo"))).toBe("workitem");
     expect(managedKind(prFreshName(5, "owner/repo"))).toBe("pr");
+  });
+});
+
+// Path-scoped launchers: a `[path]` argument resolves to (filterRoot, hostSession)
+// and the segment-aware prefix match decides which sessions a scoped launcher
+// shows. These are the pure core the TUI filter and `agendo list <dir>` share.
+test.describe("resolveContext: path → (filterRoot, hostSession)", () => {
+  test("no path is the global launcher (null root, default session)", () => {
+    expect(resolveContext(undefined, "/home/me")).toEqual({ filterRoot: null, hostSession: "agendo" });
+    expect(resolveContext("", "/home/me")).toEqual({ filterRoot: null, hostSession: "agendo" });
+  });
+
+  test("a relative path resolves against cwd; host session is agendo-<basename>", () => {
+    expect(resolveContext(".", "/home/me/repos/appweb")).toEqual({
+      filterRoot: "/home/me/repos/appweb",
+      hostSession: "agendo-appweb",
+    });
+    expect(resolveContext("work", "/home/me")).toEqual({
+      filterRoot: "/home/me/work",
+      hostSession: "agendo-work",
+    });
+  });
+
+  test("an absolute path is used as-is", () => {
+    expect(resolveContext("/home/me/work", "/anywhere")).toEqual({
+      filterRoot: "/home/me/work",
+      hostSession: "agendo-work",
+    });
+  });
+
+  test("-s overrides the derived host session name verbatim (basename collisions)", () => {
+    // The override is honored as-is (no `agendo-` prefix) — it's the explicit
+    // escape hatch for naming a launcher, e.g. disambiguating basename clashes.
+    expect(resolveContext("/a/proj", "/x", "left")).toEqual({ filterRoot: "/a/proj", hostSession: "left" });
+    // A bare -s with no path names a global launcher.
+    expect(resolveContext(undefined, "/x", "scratch")).toEqual({ filterRoot: null, hostSession: "scratch" });
+  });
+
+  test("basename is prefixed and sanitized to a tmux-safe session name", () => {
+    // tmux forbids `.`/`:` in session names — collapsed to `-`, then prefixed.
+    expect(resolveContext("/repos/my.app", "/x").hostSession).toBe("agendo-my-app");
+    // A path whose basename sanitizes to nothing falls back to the bare default.
+    expect(resolveContext("/", "/x").hostSession).toBe("agendo");
+  });
+});
+
+test.describe("tmuxSafeName", () => {
+  test("collapses forbidden chars and trims dashes", () => {
+    expect(tmuxSafeName("my.repo")).toBe("my-repo");
+    expect(tmuxSafeName("a:b c")).toBe("a-b-c");
+    expect(tmuxSafeName("...")).toBe("");
+    expect(tmuxSafeName("plain")).toBe("plain");
+  });
+});
+
+test.describe("isUnderRoot: segment-aware prefix match", () => {
+  test("a path is under itself and under an ancestor", () => {
+    expect(isUnderRoot("/home/me/work", "/home/me/work")).toBe(true);
+    expect(isUnderRoot("/home/me/work/repo/.claude/worktrees/x", "/home/me/work")).toBe(true);
+    expect(isUnderRoot("/home/me/work/repo", "/home/me")).toBe(true);
+  });
+
+  test("a sibling with a shared prefix does NOT match (the ~/work vs ~/workshop guard)", () => {
+    expect(isUnderRoot("/home/me/workshop", "/home/me/work")).toBe(false);
+    expect(isUnderRoot("/home/me/work-notes", "/home/me/work")).toBe(false);
+  });
+
+  test("an ancestor is not under its descendant", () => {
+    expect(isUnderRoot("/home/me", "/home/me/work")).toBe(false);
+  });
+
+  test("root '/' contains every absolute path; trailing slashes are normalized", () => {
+    expect(isUnderRoot("/anything/here", "/")).toBe(true);
+    expect(isUnderRoot("/home/me/work/", "/home/me/work")).toBe(true);
+    expect(isUnderRoot("/home/me/work", "/home/me/work/")).toBe(true);
   });
 });

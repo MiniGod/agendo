@@ -115,11 +115,34 @@ export function detectProviders(): Set<ProviderName> {
   return avail;
 }
 
-/** Pick the backend to start on: the persisted choice if its CLI is still
- *  installed, else the first installed one, else the persisted/first as a last
- *  resort (so the UI can still render and surface the "CLI not installed" hint). */
-export function resolveInitialProvider(persisted?: ProviderName): ProviderName {
+/**
+ * Detect the provider implied by a path's git `origin` remote, or `null` when
+ * there is nothing to force. Returns `"github"` only when the origin host is
+ * github.com — handling both SSH (`git@github.com:owner/repo(.git)`) and HTTPS
+ * (`https://github.com/owner/repo(.git)`) forms. An Azure DevOps remote
+ * (`dev.azure.com` / `*.visualstudio.com`), any other host, a repo with no
+ * `origin`, or a non-repo path all yield `null` so the configured default
+ * stands. One-directional by design: we only ever *force* GitHub, never ADO.
+ */
+export function detectRepoProvider(path: string): ProviderName | null {
+  const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf-8" });
+  if (r.status !== 0) return null; // no origin remote, or not a git repo at all
+  // github.com must sit immediately after the scheme (`//`), an SSH user (`@`),
+  // or the string start, and be delimited by `:`/`/` — so `evilgithub.com` and
+  // `github.com.example.org` don't false-positive.
+  return /(^|@|\/\/)github\.com[:/]/i.test(r.stdout.trim()) ? "github" : null;
+}
+
+/** Pick the backend to start on. A `forced` provider (e.g. GitHub detected from
+ *  a path context's git remote) overrides the persisted/default choice, but only
+ *  when its CLI is installed — so a github repo without `gh` still falls back
+ *  rather than stranding the user on an unauthenticatable backend. Otherwise: the
+ *  persisted choice if its CLI is still installed, else the first installed one,
+ *  else the persisted/first as a last resort (so the UI can still render and
+ *  surface the "CLI not installed" hint). */
+export function resolveInitialProvider(persisted?: ProviderName, forced?: ProviderName | null): ProviderName {
   const avail = detectProviders();
+  if (forced && avail.has(forced)) return forced;
   if (persisted && avail.has(persisted)) return persisted;
   for (const info of PROVIDER_INFO) if (avail.has(info.name)) return info.name;
   return persisted ?? PROVIDER_INFO[0].name;

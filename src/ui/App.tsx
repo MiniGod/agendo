@@ -9,8 +9,9 @@ import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
 import { repoRootForCwd, type RepoInfo } from "../repos.ts";
+import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
-import { detectProviders, resolveInitialProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
+import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
 import type {
   ActionLine,
@@ -444,12 +445,16 @@ function pushItem(
   expanded: Set<string>,
   live: Set<string>,
   activity: Map<string, Activity>,
+  inScope: (cwd: string) => boolean,
 ) {
   const isOpen = expanded.has(`wi:${item.id}`);
-  const running = item.sessions.filter((s) => isRunning(s, live)).length;
+  // Path scoping filters the session LIST (and its running count), but keeps the
+  // work-item row — items are backend-scoped and may have no in-scope sessions.
+  const sessions = item.sessions.filter((s) => inScope(s.cwd));
+  const running = sessions.filter((s) => isRunning(s, live)).length;
   const open = wiOpen(item);
   rows.push({ kind: "item", item, expanded: isOpen, running, open });
-  if (isOpen) pushSessions(rows, item.sessions, live, wiTarget(item), `wi${item.id}`, expanded, activity, open);
+  if (isOpen) pushSessions(rows, sessions, live, wiTarget(item), `wi${item.id}`, expanded, activity, open);
 }
 
 function pushPr(
@@ -458,13 +463,15 @@ function pushPr(
   expanded: Set<string>,
   live: Set<string>,
   activity: Map<string, Activity>,
+  inScope: (cwd: string) => boolean,
   contextCell?: Cell,
 ) {
   const isOpen = expanded.has(`pr:${pr.id}`);
-  const running = pr.sessions.filter((s) => isRunning(s, live)).length;
+  const sessions = pr.sessions.filter((s) => inScope(s.cwd));
+  const running = sessions.filter((s) => isRunning(s, live)).length;
   const open = prOpen(pr);
   rows.push({ kind: "pr", pr, expanded: isOpen, running, contextCell, open });
-  if (isOpen) pushSessions(rows, pr.sessions, live, prTarget(pr), `pr${pr.id}`, expanded, activity, open);
+  if (isOpen) pushSessions(rows, sessions, live, prTarget(pr), `pr${pr.id}`, expanded, activity, open);
 }
 
 // ── per-view row models ─────────────────────────────────────────────────────
@@ -476,6 +483,7 @@ function buildItemsRows(
   toggles: Set<string>,
   activity: Map<string, Activity>,
   query: string,
+  inScope: (cwd: string) => boolean,
 ): Row[] {
   const rows: Row[] = [];
   const live = model.liveTmux;
@@ -495,7 +503,7 @@ function buildItemsRows(
       rows.push({ kind: "header", label: `  (no matching ${V.itemsTab.toLowerCase()})` });
       return rows;
     }
-    matches.forEach((it) => pushItem(rows, it, expanded, live, activity));
+    matches.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
     return rows;
   }
 
@@ -505,17 +513,17 @@ function buildItemsRows(
     sub: V.primaryShowsIteration ? model.currentIterationName ?? undefined : undefined,
   });
   if (model.current.length === 0) rows.push({ kind: "header", label: `  ${V.primaryEmpty}` });
-  model.current.forEach((it) => pushItem(rows, it, expanded, live, activity));
+  model.current.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
 
   rows.push({ kind: "spacer" });
   const otherOpen = toggles.has("other");
   rows.push({ kind: "toggle", id: "other", label: V.secondaryToggle, count: model.other.length, open: otherOpen });
-  if (otherOpen) model.other.forEach((it) => pushItem(rows, it, expanded, live, activity));
+  if (otherOpen) model.other.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
 
   if (model.prLinked.length > 0) {
     rows.push({ kind: "spacer" });
     rows.push({ kind: "header", label: "▌ Linked via your PRs", sub: "not assigned to you" });
-    model.prLinked.forEach((it) => pushItem(rows, it, expanded, live, activity));
+    model.prLinked.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
   }
 
   return rows;
@@ -554,6 +562,7 @@ function pushPrsByRepo<T extends PRWithSessions>(
   activity: Map<string, Activity>,
   sectionKey: string,
   sort: PrSort,
+  inScope: (cwd: string) => boolean,
   contextCellFor?: (pr: T) => Cell | undefined,
 ) {
   const byRepo = new Map<string, T[]>();
@@ -572,7 +581,7 @@ function pushPrsByRepo<T extends PRWithSessions>(
     const open = toggles.has(id);
     const active = list.filter((p) => !p.isDraft).length;
     rows.push({ kind: "toggle", id, label: repo, count: list.length, open, indent: 2, sub: `${active} active` });
-    if (open) for (const pr of sortPrs(list, sort)) pushPr(rows, pr, expanded, live, activity, contextCellFor?.(pr));
+    if (open) for (const pr of sortPrs(list, sort)) pushPr(rows, pr, expanded, live, activity, inScope, contextCellFor?.(pr));
   }
 }
 
@@ -584,6 +593,7 @@ function buildPrsRows(
   sort: PrSort,
   activity: Map<string, Activity>,
   query: string,
+  inScope: (cwd: string) => boolean,
 ): Row[] {
   const rows: Row[] = [];
   const live = model.liveTmux;
@@ -615,15 +625,15 @@ function buildPrsRows(
       rows.push({ kind: "header", label: "  (no matching PRs)" });
       return rows;
     }
-    matches.forEach((pr) => pushPr(rows, pr, expanded, live, activity, ctxFor(pr)));
+    matches.forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, ctxFor(pr)));
     return rows;
   }
 
   // ── PRs on your work items / issues ──
   rows.push({ kind: "header", label: `▌ ${V.linkedHeader}` });
   if (model.linkedPrs.length === 0) rows.push({ kind: "header", label: `  ${V.linkedEmpty}` });
-  else if (grouped) pushPrsByRepo(rows, model.linkedPrs, expanded, toggles, live, activity, "linked", sort, linkedCtx);
-  else sortPrs(model.linkedPrs, sort).forEach((pr) => pushPr(rows, pr, expanded, live, activity, linkedCtx(pr)));
+  else if (grouped) pushPrsByRepo(rows, model.linkedPrs, expanded, toggles, live, activity, "linked", sort, inScope, linkedCtx);
+  else sortPrs(model.linkedPrs, sort).forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, linkedCtx(pr)));
 
   // ── Awaiting your review ──
   rows.push({ kind: "spacer" });
@@ -631,16 +641,16 @@ function buildPrsRows(
   if (model.reviewPrs.length === 0) {
     rows.push({ kind: "header", label: `  ${V.reviewEmpty}` });
   } else if (grouped) {
-    pushPrsByRepo(rows, model.reviewPrs, expanded, toggles, live, activity, "review", sort, reviewCtx);
+    pushPrsByRepo(rows, model.reviewPrs, expanded, toggles, live, activity, "review", sort, inScope, reviewCtx);
   } else {
     // Active PRs up top (sorted); drafts (sorted) tucked into a collapsed group.
     const sorted = sortPrs(model.reviewPrs, sort);
-    sorted.filter((p) => !p.isDraft).forEach((pr) => pushPr(rows, pr, expanded, live, activity, reviewCtx(pr)));
+    sorted.filter((p) => !p.isDraft).forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, reviewCtx(pr)));
     const drafts = sorted.filter((p) => p.isDraft);
     if (drafts.length) {
       const open = toggles.has("review-drafts");
       rows.push({ kind: "toggle", id: "review-drafts", label: "Drafts", count: drafts.length, open, indent: 2 });
-      if (open) drafts.forEach((pr) => pushPr(rows, pr, expanded, live, activity, reviewCtx(pr)));
+      if (open) drafts.forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, reviewCtx(pr)));
     }
   }
 
@@ -648,8 +658,8 @@ function buildPrsRows(
   rows.push({ kind: "spacer" });
   rows.push({ kind: "header", label: `▌ ${V.orphanHeader}` });
   if (model.orphanPrs.length === 0) rows.push({ kind: "header", label: `  ${V.orphanEmpty}` });
-  else if (grouped) pushPrsByRepo(rows, model.orphanPrs, expanded, toggles, live, activity, "orphan", sort);
-  else sortPrs(model.orphanPrs, sort).forEach((pr) => pushPr(rows, pr, expanded, live, activity));
+  else if (grouped) pushPrsByRepo(rows, model.orphanPrs, expanded, toggles, live, activity, "orphan", sort, inScope);
+  else sortPrs(model.orphanPrs, sort).forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope));
 
   return rows;
 }
@@ -662,6 +672,7 @@ function buildSessionsRows(
   activity: Map<string, Activity>,
   sort: SessionSort,
   query: string,
+  inScope: (cwd: string) => boolean,
 ): Row[] {
   const rows: Row[] = [];
   const live = model.liveTmux;
@@ -673,11 +684,18 @@ function buildSessionsRows(
   // awaiting a keypress) — shown as restored-but-unopened, not running.
   const isPlaceholder = (s: AgentSession) => model.livePlaceholders.has(sessionName(s));
 
+  // Apply the path scope up front: filter each group's sessions and drop groups
+  // that end up empty. Everything below reads `groups` instead of the raw model,
+  // so the running section, flat list, and per-repo groups all scope uniformly.
+  const groups = model.sessionGroups
+    .map((g) => ({ ...g, sessions: g.sessions.filter((s) => inScope(s.cwd)) }))
+    .filter((g) => g.sessions.length > 0);
+
   const q = query.trim();
 
   if (!q) rows.push({ kind: "newsess" });
 
-  if (model.sessionGroups.length === 0) {
+  if (groups.length === 0) {
     rows.push({ kind: "header", label: "  (no local sessions found)" });
     return rows;
   }
@@ -686,7 +704,7 @@ function buildSessionsRows(
   // and the running section are suppressed so results read top-to-bottom).
   if (q) {
     const matches = sortSessions(
-      model.sessionGroups.flatMap((g) => g.sessions).filter((s) => sessionMatches(s, q)),
+      groups.flatMap((g) => g.sessions).filter((s) => sessionMatches(s, q)),
       sort,
     );
     rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
@@ -704,7 +722,7 @@ function buildSessionsRows(
   // "running now" semantically; they're badged ⏸ so they read as open-but-not-
   // yet-resumed. Additive — these also appear in the grouped/flat lists below.
   const openWindows = sortSessions(
-    model.sessionGroups.flatMap((g) => g.sessions).filter((s) => isRunning(s, live) || isPlaceholder(s)),
+    groups.flatMap((g) => g.sessions).filter((s) => isRunning(s, live) || isPlaceholder(s)),
     sort,
   );
   if (openWindows.length > 0) {
@@ -715,14 +733,14 @@ function buildSessionsRows(
 
   if (!grouped) {
     // Flat: every session across all repos, sorted by active sort.
-    const all = sortSessions(model.sessionGroups.flatMap((g) => g.sessions), sort);
+    const all = sortSessions(groups.flatMap((g) => g.sessions), sort);
     rows.push({ kind: "header", label: "▌ All sessions", sub: `(${all.length})` });
     for (const s of all) pushSession(rows, s, `sess:${s.source}:${s.id}`, live, expanded, activity, linkOf(s), timeField, true, isPlaceholder(s));
     return rows;
   }
 
   // Grouped by repo: collapsible, collapsed by default (empty `toggles`).
-  model.sessionGroups.forEach((g, gi) => {
+  groups.forEach((g, gi) => {
     if (gi > 0) rows.push({ kind: "spacer" });
     const id = `grp:${g.root}`;
     const open = toggles.has(id);
@@ -933,7 +951,21 @@ const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
 ];
 
 // ── main app ──────────────────────────────────────────────────────────────────
-export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
+/**
+ * `filterRoot` scopes the launcher to sessions under a path (null = the global
+ * launcher, bare `agendo`). `hostSession` is the tmux host session the menu runs
+ * in — passed to loadModel so restore snapshots the right session's tabs. The
+ * `a` key toggles the runtime scoped↔global view (see `globalView`).
+ */
+export default function App({
+  onOpen,
+  filterRoot = null,
+  hostSession,
+}: {
+  onOpen: (plan: OpenPlan) => void;
+  filterRoot?: string | null;
+  hostSession?: string;
+}) {
   const { exit } = useApp();
   const [model, setModel] = useState<LoadedModel | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -946,6 +978,10 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
   const [mode, setMode] = useState<Mode>({ kind: "list" });
   const [scrollTop, setScrollTop] = useState(0);
   const [grouped, setGrouped] = useState(true); // Sessions view: group by repo
+  // Path-scope toggle: when a filterRoot exists, `a` flips between the scoped
+  // view (sessions under the root) and the global view (every session). Bare
+  // `agendo` has no root, so it's always effectively global.
+  const [globalView, setGlobalView] = useState(false);
   const [prsGrouped, setPrsGrouped] = useState(false); // PRs view: repo subgroups
   const [prSort, setPrSort] = useState<PrSort>("created"); // PRs view: sort order
   const [sessionSort, setSessionSort] = useState<SessionSort>("updated"); // Sessions view: sort order
@@ -966,7 +1002,12 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
   // its CLI is still installed, else the first installed one (see provider.ts).
   // `available` is probed once at mount and drives the provider picker.
   const [available] = useState<Set<ProviderName>>(() => detectProviders());
-  const [provider, setProvider] = useState<ProviderName>(() => resolveInitialProvider(loadState().provider));
+  // When scoped to a path context, a github.com git remote there forces the
+  // GitHub backend, overriding the persisted default (which may be ADO). Bare
+  // launchers (no filterRoot) never force — they keep the persisted choice.
+  const [provider, setProvider] = useState<ProviderName>(() =>
+    resolveInitialProvider(loadState().provider, filterRoot ? detectRepoProvider(filterRoot) : null),
+  );
   // Per-backend auth status for the Settings page: absent ⇒ not yet probed,
   // "checking" ⇒ probe in flight, boolean ⇒ result. Refreshed each time the
   // Settings page opens (auth can change out from under us between opens).
@@ -986,7 +1027,7 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
     setError(null);
     setModel(null);
     let cancelled = false;
-    loadModel({ provider, identity })
+    loadModel({ provider, identity, hostSession })
       .then((m) => !cancelled && setModel(m))
       .catch((e) => !cancelled && setError(String(e?.message ?? e)));
     return () => {
@@ -1064,12 +1105,30 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
   const settingsItems: Array<"provider" | "identity"> = ["provider", "identity"];
   const providerLabel = PROVIDER_INFO.find((p) => p.name === provider)?.label ?? provider;
 
+  // Whether the path filter is active right now (a root exists and the global
+  // toggle is off), and the predicate that decides if a session cwd is in scope.
+  // Applied as a pure display overlay — tmux reconciliation stays global, so
+  // window→session attribution is never gated by the filter.
+  const scoped = !!filterRoot && !globalView;
+  const inScope = useMemo<(cwd: string) => boolean>(
+    () => (scoped ? (cwd: string) => isUnderRoot(cwd, filterRoot!) : () => true),
+    [scoped, filterRoot],
+  );
+  // Repos offered by the fresh-session picker, scoped the same way: a repo is in
+  // scope if its root is under the filter root (parent-folder case) or the filter
+  // root is under it (inside-a-repo case).
+  const scopedRepos = useMemo<RepoInfo[]>(() => {
+    if (!model) return [];
+    if (!scoped) return model.repos;
+    return model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root));
+  }, [model, scoped, filterRoot]);
+
   const rows = useMemo(() => {
     if (!model) return [];
-    if (view === "prs") return buildPrsRows(model, expanded, toggles, prsGrouped, prSort, activity, search.text);
-    if (view === "sessions") return buildSessionsRows(model, toggles, grouped, expanded, activity, sessionSort, search.text);
-    return buildItemsRows(model, expanded, toggles, activity, search.text);
-  }, [model, view, expanded, toggles, grouped, prsGrouped, prSort, sessionSort, activity, search.text]);
+    if (view === "prs") return buildPrsRows(model, expanded, toggles, prsGrouped, prSort, activity, search.text, inScope);
+    if (view === "sessions") return buildSessionsRows(model, toggles, grouped, expanded, activity, sessionSort, search.text, inScope);
+    return buildItemsRows(model, expanded, toggles, activity, search.text, inScope);
+  }, [model, view, expanded, toggles, grouped, prsGrouped, prSort, sessionSort, activity, search.text, inScope]);
   const selectableIdx = useMemo(
     () => rows.map((r, i) => (SELECTABLE.has(r.kind) ? i : -1)).filter((i) => i >= 0),
     [rows],
@@ -1215,8 +1274,12 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
   // (items/prs only) and an occasional notice line.
   const termRows = stdout?.rows ?? 24;
   // Non-sessions views also reserve a line for the "viewing as / filter" status.
-  // The search box (shown while a search is active) takes one extra line.
-  const pageSize = Math.max(3, termRows - (view === "sessions" ? 6 : 8) - (searchFocus ? 1 : 0));
+  // The search box (shown while a search is active) takes one extra line, and a
+  // path-scoped launcher shows one scope line.
+  const pageSize = Math.max(
+    3,
+    termRows - (view === "sessions" ? 6 : 8) - (searchFocus ? 1 : 0) - (filterRoot ? 1 : 0),
+  );
   useEffect(() => {
     setScrollTop((prev) => {
       let next = prev;
@@ -1323,8 +1386,12 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
 
   const enterNewSession = () => {
     setNotice(null);
-    if (!model || model.repos.length === 0) {
-      setNotice("No known repos yet — open or resume a session in a repo first.");
+    if (!model || scopedRepos.length === 0) {
+      setNotice(
+        scoped
+          ? "No repos under this path — press a to widen to all repos, or open a session here first."
+          : "No known repos yet — open or resume a session in a repo first.",
+      );
       return;
     }
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
@@ -1534,7 +1601,7 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
 
     // ── repo picker ──
     if (mode.kind === "repo") {
-      const repos = model?.repos ?? [];
+      const repos = scopedRepos;
       const len = repos.length || 1;
       if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
       if (key.upArrow || input === "k")
@@ -1679,6 +1746,13 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
     if (input === "1") return switchView("items");
     if (input === "2") return switchView("prs");
     if (input === "3") return switchView("sessions");
+
+    // toggle path scope ↔ global (only when the launcher is scoped to a path;
+    // bare `agendo` is already global, so there's nothing to toggle). `a` = "all".
+    if (input === "a" && filterRoot) {
+      setCursor(0);
+      return setGlobalView((v) => !v);
+    }
 
     // toggle repo grouping (Sessions: whole view · PRs: subgroups per section)
     if (input === "g" && (view === "sessions" || view === "prs")) {
@@ -1861,7 +1935,7 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
         <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
         <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
         <Box marginTop={1} flexDirection="column">
-          {(model.repos ?? []).map((r, i) => {
+          {scopedRepos.map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
@@ -2084,6 +2158,16 @@ export default function App({ onOpen }: { onOpen: (plan: OpenPlan) => void }) {
         <Text> </Text>
         {tab("sessions", "3 Sessions")}
       </Box>
+      {filterRoot ? (
+        <Box>
+          <Text wrap="truncate">
+            <Text color={scoped ? "green" : "yellow"}>
+              {scoped ? `⊙ ${hostSession}: ${homeShort(filterRoot)}` : "⊙ global — all paths"}
+            </Text>
+            <Text dimColor>{`  · a ${scoped ? "show all" : `rescope to ${hostSession}`}`}</Text>
+          </Text>
+        </Box>
+      ) : null}
       <Box>
         <Text wrap="truncate" dimColor>
           {searchFocus === "input"

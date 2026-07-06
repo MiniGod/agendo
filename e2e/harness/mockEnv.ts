@@ -93,7 +93,10 @@ export async function createMockEnv(): Promise<MockEnv> {
     callLog: () => parseLog(callLogPath),
     async cleanup() {
       await ado.close();
-      await rm(tmpDir, { recursive: true, force: true });
+      // `maxRetries` rides out a transient `ENOTEMPTY`/`EBUSY` if a just-killed
+      // launcher writes into the tree as we delete it (belt-and-suspenders — the
+      // terminal is already awaited to full exit in WebTerminal.close).
+      await rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       untrackDir(tmpDir);
     },
   };

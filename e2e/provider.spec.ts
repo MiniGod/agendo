@@ -14,7 +14,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vocab } from "../src/vocab.ts";
-import { detectProviders, resolveInitialProvider, PROVIDER_INFO } from "../src/provider.ts";
+import { detectProviders, resolveInitialProvider, detectRepoProvider, PROVIDER_INFO } from "../src/provider.ts";
 
 test.describe("vocab: per-backend UI terminology", () => {
   test("ADO speaks work-items / sprint / '!' PRs", () => {
@@ -54,7 +54,7 @@ test.describe("vocab: per-backend UI terminology", () => {
 // probe resolves under a PATH that has ONLY this dir — no real gh/az leaks in) and
 // a stub for each CLI we want to appear "installed". Stubs are executable so the
 // Bun.which fast path (if the runner is Bun) finds them too.
-function fakePath(installed: string[]): string {
+function fakePath(installed: string[], gitOrigin?: string | null): string {
   const dir = mkdtempSync(join(tmpdir(), "agendo-provider-"));
   // A `which <cmd>` that succeeds iff a file named <cmd> exists in this same dir.
   // The dir is baked in so it works regardless of how $0 is resolved.
@@ -64,7 +64,27 @@ function fakePath(installed: string[]): string {
     writeFileSync(join(dir, cli), "#!/bin/sh\nexit 0\n");
     chmodSync(join(dir, cli), 0o755);
   }
+  // A stub `git` for detectRepoProvider: `remote get-url origin` prints the given
+  // origin URL, or exits non-zero (undefined/null) to mimic a no-remote / non-repo.
+  const git =
+    gitOrigin == null
+      ? "#!/bin/sh\nexit 1\n"
+      : `#!/bin/sh\ncase "$*" in *"remote get-url origin"*) echo "${gitOrigin}"; exit 0;; esac\nexit 0\n`;
+  writeFileSync(join(dir, "git"), git);
+  chmodSync(join(dir, "git"), 0o755);
   return dir;
+}
+
+// Run `fn` with PATH pointed at a fake bin dir whose stub `git` reports the given
+// origin URL (or null = no remote / not a repo), then restore PATH.
+function withGitOrigin(origin: string | null, fn: () => void): void {
+  const saved = process.env.PATH;
+  process.env.PATH = fakePath(["gh", "az"], origin);
+  try {
+    fn();
+  } finally {
+    process.env.PATH = saved;
+  }
 }
 
 // Run `fn` with process.env.PATH pointed only at a fake bin dir, then restore it.
@@ -114,5 +134,60 @@ test.describe("detectProviders / resolveInitialProvider: which backend boots", (
       expect(resolveInitialProvider("ado")).toBe("ado");
       expect(resolveInitialProvider()).toBe("github"); // last-resort: PROVIDER_INFO[0]
     });
+  });
+});
+
+test.describe("detectRepoProvider: force GitHub from a path context's git remote", () => {
+  test("a github.com origin → github (both HTTPS and SSH forms)", () => {
+    withGitOrigin("https://github.com/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
+    withGitOrigin("git@github.com:ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
+    withGitOrigin("ssh://git@github.com/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
+  });
+
+  test("an Azure DevOps origin → null (leave the configured default untouched)", () => {
+    withGitOrigin("https://dev.azure.com/innovamps/proj/_git/appweb", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+    withGitOrigin("git@ssh.dev.azure.com:v3/innovamps/proj/appweb", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+    withGitOrigin("https://innovamps.visualstudio.com/proj/_git/appweb", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+  });
+
+  test("a look-alike host is not mistaken for github.com", () => {
+    // The host must be exactly github.com, delimited — not a substring.
+    withGitOrigin("https://evilgithub.com/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+    withGitOrigin("https://github.com.example.org/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+  });
+
+  test("no origin remote / not a git repo → null", () => {
+    withGitOrigin(null, () => expect(detectRepoProvider("/repo")).toBeNull());
+  });
+});
+
+test.describe("resolveInitialProvider: a repo-detected provider overrides the default", () => {
+  test("a forced github overrides a persisted ado when gh is installed", () => {
+    withPath(["gh", "az"], () => expect(resolveInitialProvider("ado", "github")).toBe("github"));
+  });
+
+  test("no forced provider keeps the persisted default", () => {
+    withPath(["gh", "az"], () => expect(resolveInitialProvider("ado", null)).toBe("ado"));
+  });
+
+  test("a forced provider whose CLI is missing falls back (never strands the user)", () => {
+    // github detected but gh not installed → don't force; keep the working default.
+    withPath(["az"], () => expect(resolveInitialProvider("ado", "github")).toBe("ado"));
   });
 });

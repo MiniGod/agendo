@@ -7,17 +7,24 @@ import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   liveManagedPaths, managedKind, capturePane, sendToPane, paneReadiness, paneShells, stripAnsi,
+  sessionRoot, currentSessionName,
   type SessionKind,
 } from "./tmux.ts";
 import { launchTask, llmGuide, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
-import { restoreTabs, recordLaunchedSession } from "./restore.ts";
+import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
+import { resolveContext, isUnderRoot } from "./context.ts";
 import type { AgentSession, AgentSource } from "./types.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
 
 Usage:
-  agendo                       Open the launcher in its own tmux session (default)
+  agendo [path]                Open the launcher in its own tmux session (default:
+                                session "agendo"). With a path, scope the launcher
+                                to sessions under it (host session "agendo-<basename>").
+                                Toggle scoped↔global at runtime with the a key.
+      --session, -s <name>      Override the derived host session name (e.g. on a
+                                basename collision between two paths)
   agendo --no-tmux             Open the menu inline, without a tmux session
   agendo launch [opts] <prompt>
                               Start a background session: own git worktree + a
@@ -28,8 +35,9 @@ Usage:
       --no-worktree             Run in the current checkout instead of a new worktree
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
-  agendo list, ls              List the sessions running right now, one per line
-                                (readiness, kind, id, dir, title).
+  agendo list, ls [dir]        List the sessions running right now, one per line
+                                (readiness, kind, id, dir, title). With a dir,
+                                only sessions whose cwd is under it are shown.
   agendo status <id>           Show a session's state + recent activity, including
                                 input readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
@@ -131,6 +139,9 @@ if (process.argv[2] === "launch") {
         configDir: agent === "claude" ? process.env.CLAUDE_CONFIG_DIR : undefined,
       },
       plan.tmuxName,
+      // Record into the restore bucket of the host session the window landed in
+      // (the current tmux session), so a scoped launcher restores its own tabs.
+      currentSessionName() ?? undefined,
     );
   }
   if (attach) {
@@ -170,14 +181,19 @@ if (process.argv[2] === "send") {
 // human) can discover the background sessions it can `status`/`send` to. Only
 // live sessions are shown; resuming idle ones is deliberately not exposed.
 if (process.argv[2] === "list" || process.argv[2] === "ls") {
-  await runList();
+  // Optional `[dir]` scopes the listing to sessions whose cwd is under it,
+  // mirroring the TUI's path filter. Resolved against the current directory.
+  const dirArg = process.argv[3];
+  const filterRoot = dirArg && !dirArg.startsWith("-") ? resolveContext(dirArg, process.cwd()).filterRoot : null;
+  await runList(filterRoot);
   process.exit(0);
 }
 
-// By default agendo runs inside a single canonical tmux session (named `agendo`):
-// the menu lives in tab 1 and every agent opens as another tab in the same
-// session. We (re-)enter that session here — creating it if needed, attaching
-// from outside tmux or switch-client from inside — then run the menu inside its
+// By default agendo runs inside a single canonical tmux host session — `agendo`
+// unscoped, or `agendo-<basename of [path]>` when scoped — with the menu in its
+// first window and every agent opening as another window in the same session.
+// We (re-)enter that session here — creating it if needed, attaching from
+// outside tmux or switch-client from inside — then run the menu inside its
 // first window by re-invoking this entrypoint with `--no-tmux`. On a fresh
 // create, previously-open agent tabs are lazily restored (see restore.ts).
 //
@@ -185,8 +201,47 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
 // agent then runs as its own detached session we attach to). `--tmux` is still
 // accepted for muscle memory — it's simply the default now. Subcommands above
 // have already exited, so this only governs the interactive menu.
+//
+// The optional `[path]` positional + `-s/--session` override scope the menu
+// (both the tmux-host bootstrap below and the bare menu render further down).
+// Parsed here, once, so the two entry paths share one interpretation. A
+// positional is a path only if it isn't a known subcommand — those were all
+// handled above and exited, so anything reaching here is a path. Flags
+// (`--tmux`, `--no-tmux`, `-s`, etc.) are skipped.
+function parseMenuArgs(): { pathArg?: string; session?: string } {
+  let pathArg: string | undefined;
+  let session: string | undefined;
+  const rest = process.argv.slice(2);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "-s" || a === "--session") session = rest[++i];
+    else if (!a.startsWith("-") && pathArg === undefined) pathArg = a;
+  }
+  return { pathArg, session };
+}
+const { pathArg, session } = parseMenuArgs();
+const ctx = resolveContext(pathArg, process.cwd(), session);
+
 if (!process.argv.includes("--no-tmux")) {
-  enterLauncherSession(process.cwd(), [process.argv[0], process.argv[1], "--no-tmux"], restoreTabs);
+  // Basename collision guard: refuse to attach a differently-rooted launcher to
+  // an existing host session, so two paths sharing a basename don't merge. The
+  // user disambiguates with `-s <name>`.
+  if (ctx.filterRoot) {
+    const existingRoot = sessionRoot(ctx.hostSession);
+    if (existingRoot && existingRoot !== ctx.filterRoot) {
+      console.error(`A launcher session "${ctx.hostSession}" is already scoped to ${existingRoot}.`);
+      console.error(`Pass a distinct name:  agendo ${pathArg ?? "."} -s <name>`);
+      process.exit(1);
+    }
+  }
+  const menuArgs = [...(pathArg ? [pathArg] : []), ...(session ? ["-s", session] : []), "--no-tmux"];
+  enterLauncherSession(
+    ctx.hostSession,
+    ctx.filterRoot,
+    process.cwd(),
+    [process.argv[0], process.argv[1], ...menuArgs],
+    () => restoreTabs(ctx.hostSession),
+  );
   process.exit(0);
 }
 
@@ -273,7 +328,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
  * readiness, kind, id, location and title. Running-only by design: idle sessions
  * (and resuming them) are intentionally not exposed here.
  */
-async function runList(): Promise<void> {
+async function runList(filterRoot: string | null = null): Promise<void> {
   const index = await SessionIndex.build();
   const seen = new Set<string>();
   const rows: string[] = [];
@@ -283,16 +338,13 @@ async function runList(): Promise<void> {
     // Skip restored-but-unopened placeholder windows — they're idle bash waiting
     // for a keypress, not running agents, so listing them would mislead.
     if (placeholder) continue;
-    const idMatch = name.match(/^cl-(?:claude|copilot|bg|new)-(.+)$/);
-    let s: AgentSession | undefined;
-    if (idMatch) {
-      s = index.all.find((x) => shortId(x.id) === idMatch[1]);
-    } else {
-      // cl-wi-/cl-pr-: attribute to the most-recently-used session in this dir.
-      for (const x of index.all)
-        if (x.cwd === cwd && (!s || x.lastUsed.getTime() > s.lastUsed.getTime())) s = x;
-    }
+    // Same attribution the TUI uses (id-bearing → exact session; id-less
+    // cl-wi-/cl-pr- → MRU session in the pane's cwd, matched on a normalized
+    // path). Shared so the CLI list can't drift from the menu's running state.
+    const s = resolveWindowSession(index.all, name, cwd);
     if (!s) continue;
+    // Path scoping: skip sessions whose cwd isn't under the requested dir.
+    if (filterRoot && !isUnderRoot(s.cwd, filterRoot)) continue;
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -329,7 +381,9 @@ process.stdin.on("error", quitOnInputLoss);
 function runMenu(): Promise<OpenPlan | null> {
   return new Promise((resolve) => {
     const chosen: { plan: OpenPlan | null } = { plan: null };
-    const { waitUntilExit } = render(<App onOpen={(p) => { chosen.plan = p; }} />);
+    const { waitUntilExit } = render(
+      <App onOpen={(p) => { chosen.plan = p; }} filterRoot={ctx.filterRoot} hostSession={ctx.hostSession} />,
+    );
     waitUntilExit().then(() => resolve(chosen.plan));
   });
 }

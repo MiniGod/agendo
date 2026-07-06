@@ -9,8 +9,21 @@
 import { spawnSync } from "child_process";
 import type { AgentSession } from "./types.ts";
 
-/** The one canonical session the `--tmux` flag creates/attaches. */
+/**
+ * The default host session the `--tmux` flag creates/attaches when the launcher
+ * is unscoped (bare `agendo`). Path-scoped launchers derive their own host
+ * session name (see context.ts), so every launcher-session helper below takes an
+ * explicit session param defaulting to this — keeping the bare-`agendo` path
+ * byte-identical to before.
+ */
 export const LAUNCHER_SESSION = "agendo";
+
+/**
+ * tmux *session* option storing the absolute path a launcher host session is
+ * scoped to. Set once when the session is created; read to detect basename
+ * collisions (two different roots wanting the same host session name).
+ */
+export const ROOT_OPTION = "@cl_root";
 
 /**
  * tmux *window* user-option that flags a restored-but-unopened placeholder
@@ -287,18 +300,38 @@ export function hasSession(name: string): boolean {
   return spawnSync("tmux", ["has-session", "-t", name]).status === 0;
 }
 
+/** The tmux session the caller is currently inside, or null (outside tmux). */
+export function currentSessionName(): string | null {
+  if (!insideTmux()) return null;
+  const r = spawnSync("tmux", ["display-message", "-p", "#{session_name}"], { encoding: "utf-8" });
+  const name = r.status === 0 ? (r.stdout ?? "").trim() : "";
+  return name || null;
+}
+
+/** The absolute root a launcher host session is scoped to (`@cl_root`), or null. */
+export function sessionRoot(session: string): string | null {
+  const r = spawnSync("tmux", ["show-options", "-t", session, "-v", ROOT_OPTION], { encoding: "utf-8" });
+  const v = r.status === 0 ? (r.stdout ?? "").trim() : "";
+  return v || null;
+}
+
+/** Record the absolute root a launcher host session is scoped to (`@cl_root`). */
+export function setSessionRoot(session: string, root: string): void {
+  tmuxQuiet(["set-option", "-t", session, ROOT_OPTION, root]);
+}
+
 /**
- * Live windows of the canonical launcher session, each paired with the working
+ * Live windows of a launcher host session, each paired with the working
  * directory of its active pane. Dead windows (a `remain-on-exit` corpse) are
  * skipped. Empty if the session isn't running. Used to snapshot the open agent
  * tabs for browser-style restore (see restore.ts).
  */
-export function launcherWindowPaths(): { name: string; cwd: string }[] {
+export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name: string; cwd: string }[] {
   const out: { name: string; cwd: string }[] = [];
   for (const line of tmuxLines([
     "list-windows",
     "-t",
-    LAUNCHER_SESSION,
+    session,
     "-F",
     "#{window_name}\t#{pane_current_path}\t#{pane_dead}",
   ])) {
@@ -370,13 +403,13 @@ export function newWindowIn(session: string, name: string, cwd: string, argv: st
 }
 
 /**
- * Whether the canonical session currently has a live window running the menu.
+ * Whether a launcher host session currently has a live window running the menu.
  * The menu window is pinned to the name "launcher"; tmux destroys a window when
  * its program exits (default `remain-on-exit off`), so a missing — or dead, if a
  * config kept it around — "launcher" window means the menu isn't running.
  */
-export function launcherWindowLive(): boolean {
-  for (const line of tmuxLines(["list-windows", "-t", LAUNCHER_SESSION, "-F", "#{window_name}\t#{pane_dead}"])) {
+export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean {
+  for (const line of tmuxLines(["list-windows", "-t", session, "-F", "#{window_name}\t#{pane_dead}"])) {
     const [name, dead] = line.split("\t");
     if (name === "launcher" && dead !== "1") return true;
   }
@@ -384,63 +417,72 @@ export function launcherWindowLive(): boolean {
 }
 
 /**
- * (Re)create the menu window inside the canonical session, preferring index 0 so
- * it sits at the front the way the original first window did; if 0 is taken, let
- * tmux pick the next free index. Any leftover (dead) "launcher" window is cleared
- * first so we never end up with two. Detached — the caller selects/attaches after.
+ * (Re)create the menu window inside a launcher host session, preferring index 0
+ * so it sits at the front the way the original first window did; if 0 is taken,
+ * let tmux pick the next free index. Any leftover (dead) "launcher" window is
+ * cleared first so we never end up with two. Detached — the caller selects/
+ * attaches after.
  */
-function spawnLauncherWindow(cwd: string, launcherArgv: string[]): void {
-  tmuxQuiet(["kill-window", "-t", `${LAUNCHER_SESSION}:launcher`]); // no-op if none exists
+function spawnLauncherWindow(session: string, cwd: string, launcherArgv: string[]): void {
+  tmuxQuiet(["kill-window", "-t", `${session}:launcher`]); // no-op if none exists
   const at0 = spawnSync(
     "tmux",
-    ["new-window", "-d", "-t", `${LAUNCHER_SESSION}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+    ["new-window", "-d", "-t", `${session}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
     { stdio: "ignore" },
   );
   if (at0.status !== 0) {
     spawnSync(
       "tmux",
-      ["new-window", "-d", "-t", LAUNCHER_SESSION, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+      ["new-window", "-d", "-t", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "ignore" },
     );
   }
-  pinName(`${LAUNCHER_SESSION}:launcher`);
+  pinName(`${session}:launcher`);
 }
 
 /**
- * Bring the user into the single canonical launcher session, creating it (with
- * its first window running `launcherArgv`) if it doesn't exist yet. Backs the
- * `--tmux` flag. Outside tmux this attaches (blocks until you detach); inside
- * tmux it switches the current client to the canonical session.
+ * Bring the user into a launcher host session, creating it (with its first
+ * window running `launcherArgv`) if it doesn't exist yet. Backs the `--tmux`
+ * flag. Outside tmux this attaches (blocks until you detach); inside tmux it
+ * switches the current client to the host session. Defaults to the canonical
+ * `agendo` session (bare `agendo`); a path-scoped launcher passes its own name.
  *
  * If the session exists but its menu window is gone (e.g. the user quit the
  * launcher while agent windows kept the session alive), the menu is recreated —
  * so `--tmux` is always a way *back into* the launcher, not just an attach to a
  * launcher-less session. The client always lands on the menu window itself.
  *
- * `onFreshCreate` runs once, only when the canonical session is created from
- * scratch — the moment to lazily restore previously-open agent tabs (see
- * restore.ts). It's skipped when attaching to an existing session, whose windows
- * are already live. Kept as a callback so tmux.ts stays free of a restore.ts
- * import (restore.ts depends on tmux.ts).
+ * When the session is created fresh and `root` is non-null (a path-scoped
+ * launcher), the absolute root is recorded as `@cl_root` so a later attach can
+ * detect a basename collision.
+ *
+ * `onFreshCreate` runs once, only when the session is created from scratch — the
+ * moment to lazily restore previously-open agent tabs (see restore.ts). It's
+ * skipped when attaching to an existing session, whose windows are already live.
+ * Kept as a callback so tmux.ts stays free of a restore.ts import (restore.ts
+ * depends on tmux.ts).
  */
 export function enterLauncherSession(
+  session: string,
+  root: string | null,
   cwd: string,
   launcherArgv: string[],
   onFreshCreate?: () => void,
 ): void {
-  if (!hasSession(LAUNCHER_SESSION)) {
+  if (!hasSession(session)) {
     spawnSync(
       "tmux",
-      ["new-session", "-d", "-s", LAUNCHER_SESSION, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+      ["new-session", "-d", "-s", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "inherit" },
     );
-    pinName(`${LAUNCHER_SESSION}:launcher`);
+    pinName(`${session}:launcher`);
+    if (root) setSessionRoot(session, root);
     onFreshCreate?.();
-  } else if (!launcherWindowLive()) {
-    spawnLauncherWindow(cwd, launcherArgv);
+  } else if (!launcherWindowLive(session)) {
+    spawnLauncherWindow(session, cwd, launcherArgv);
   }
   // Land on the menu window specifically, not whatever window was last active.
-  tmuxQuiet(["select-window", "-t", `${LAUNCHER_SESSION}:launcher`]);
+  tmuxQuiet(["select-window", "-t", `${session}:launcher`]);
   const verb = insideTmux() ? ["switch-client"] : ["attach-session"];
-  spawnSync("tmux", [...verb, "-t", LAUNCHER_SESSION], { stdio: "inherit" });
+  spawnSync("tmux", [...verb, "-t", session], { stdio: "inherit" });
 }
