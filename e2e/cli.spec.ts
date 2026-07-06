@@ -13,6 +13,7 @@ import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET,
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
 const SHORT_ID = shortIdOf(LOGIN_SESSION_ID);
 const CRASH_SHORT_ID = shortIdOf(CRASH_SESSION_ID);
+const COP_SHORT_ID = shortIdOf(COPILOT_SESSION_ID);
 
 // A mid-generation TUI: the live token counter is the reliable "busy" signal, so
 // `paneReadiness` classifies this as "busy" (not sendable / not settled).
@@ -340,4 +341,178 @@ test("agendo resume navigates to a session already running under a cl-wi- window
   expect(
     tmux.some((argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`)),
   ).toBe(false);
+});
+
+// ── `list pr` / `list issues` resource views ──────────────────────────────────
+// These enumerate the backend's own PRs / work items (not local sessions) and
+// hang the associated session off each, so an orchestrator can see what's in
+// flight and which item it can delegate to. Model-backed → agendoAsync (the
+// in-process ADO server would deadlock a blocking spawnSync). Both provider
+// vocabs are exercised: ADO here (default fixtures), GitHub below.
+
+test("agendo list pr lists my open PRs (ADO) with the session on each branch", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "list", "pr").done;
+  expect(r.code).toBe(0);
+  // PR 5001 (linked to WI 101) with ADO's `!` prefix, its branch, and the running
+  // login session working it. PR 6001 is my orphan draft.
+  expect(r.stdout).toContain("!5001");
+  expect(r.stdout).toContain("feature/login");
+  expect(r.stdout).toContain(SHORT_ID);
+  expect(r.stdout).toContain("Add login screen");
+  expect(r.stdout).toContain("!6001");
+  expect(r.stdout).toContain("[draft]");
+  expect(r.stdout).toContain("●"); // the login session is running
+  // Review PRs (Grace's, where I'm only a reviewer) are NOT my PRs → excluded.
+  expect(r.stdout).not.toContain("!7001");
+  expect(r.stdout).not.toContain("!7002");
+});
+
+test("agendo list pr --json carries PR id + associated sessions (ADO)", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "list", "pr", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const byId = new Map(rows.map((p) => [p.id, p]));
+  // My two created PRs, no review PRs.
+  expect([...byId.keys()].sort((a, b) => a - b)).toEqual([5001, 6001]);
+  const login = byId.get(5001);
+  expect(login.branch).toBe("feature/login");
+  expect(login.sessions[0].shortId).toBe(SHORT_ID);
+  expect(login.sessions[0].source).toBe("claude");
+  expect(login.sessions[0].running).toBe(true);
+  // The orphan draft is flagged and carries its (idle) copilot session.
+  const exp = byId.get(6001);
+  expect(exp.isDraft).toBe(true);
+  expect(exp.sessions[0].shortId).toBe(COP_SHORT_ID);
+  expect(exp.sessions[0].running).toBe(false);
+});
+
+test("agendo list issues uses ADO's 'work item' vocab and associates sessions", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "list", "issues").done;
+  expect(r.code).toBe(0);
+  // ADO vocab in the header — not GitHub's "issue" (no fixture title uses it).
+  expect(r.stdout).toContain("work item");
+  expect(r.stdout).not.toContain("issue");
+  // My assigned items across sprints, each with its state.
+  expect(r.stdout).toContain("#101");
+  expect(r.stdout).toContain("In Progress");
+  expect(r.stdout).toContain("#102");
+  expect(r.stdout).toContain("#103");
+  // WI 101 → running login session; WI 102 → idle crash session.
+  expect(r.stdout).toContain(SHORT_ID);
+  expect(r.stdout).toContain(CRASH_SHORT_ID);
+});
+
+test("agendo list wi is an alias for list issues", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "list", "wi").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toMatch(/\bwork item\b/);
+  expect(r.stdout).toContain("#101");
+});
+
+test("agendo list issues --json carries item id + associated sessions (ADO)", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "list", "issues", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const byId = new Map(rows.map((i) => [i.id, i]));
+  expect(byId.has(101)).toBe(true);
+  expect(byId.has(102)).toBe(true);
+  expect(byId.has(103)).toBe(true);
+  const wi101 = byId.get(101);
+  expect(wi101.state).toBe("In Progress");
+  expect(wi101.sessions[0].shortId).toBe(SHORT_ID);
+  expect(wi101.sessions[0].running).toBe(true);
+  expect(byId.get(102).sessions[0].shortId).toBe(CRASH_SHORT_ID);
+  expect(byId.get(103).sessions).toEqual([]); // no session on the docs task
+});
+
+// GitHub vocab: flip the backend, wire the fake gh with an issue and a PR that
+// closes it on the login session's branch, so the association resolves the same
+// way it does in the TUI. Repo scope comes from the local sessions' origin slug
+// (ada/appweb), matching the login session's repo.
+async function seedGitHubList(mock: {
+  setProvider: (n: "github") => Promise<void>;
+  setGhState: (s: unknown) => Promise<void>;
+}) {
+  const PR = {
+    number: 401,
+    title: "Wire up the login screen",
+    url: "https://github.com/ada/appweb/pull/401",
+    headRefName: "feature/login", // the running login session's branch
+    isDraft: false,
+    reviewDecision: "REVIEW_REQUIRED",
+    reviews: [],
+    statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }],
+    mergeStateStatus: "CLEAN",
+    createdAt: "2026-06-20T10:00:00.000Z",
+    updatedAt: "2026-06-21T10:00:00.000Z",
+    author: { login: "ada" },
+    closingIssuesReferences: [{ number: 301 }], // links the PR to issue 301
+    body: "",
+  };
+  await mock.setProvider("github");
+  await mock.setGhState({
+    authed: true,
+    user: { login: "ada", name: "Ada Lovelace" },
+    issues: {
+      "ada/appweb": [
+        { number: 301, title: "Header overlaps on mobile", state: "OPEN", url: "https://github.com/ada/appweb/issues/301", labels: [], author: { login: "ada" } },
+      ],
+    },
+    prs: {
+      "ada/appweb": {
+        "involves:ada": [PR], // linkedIssues scan → files PR 401 under issue 301
+        "author:ada": [PR], // fetchActivePRs
+        "review-requested:ada": [],
+      },
+    },
+  });
+}
+
+test("agendo list pr (GitHub) uses the '#' prefix and the login session on its branch", async ({ mock }) => {
+  await seedGitHubList(mock);
+  const r = await agendoAsync(mock.env, "list", "pr", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const pr = rows.find((p) => p.id === 401);
+  expect(pr).toBeTruthy();
+  expect(pr.branch).toBe("feature/login");
+  expect(pr.sessions[0].shortId).toBe(SHORT_ID);
+  expect(pr.sessions[0].running).toBe(true);
+
+  const table = await agendoAsync(mock.env, "list", "pr").done;
+  expect(table.code).toBe(0);
+  expect(table.stdout).toContain("#401"); // GitHub's `#` PR prefix (ADO uses `!`)
+  expect(table.stdout).toContain(SHORT_ID);
+});
+
+test("agendo list issues (GitHub) uses 'issue' vocab and associates the session", async ({ mock }) => {
+  await seedGitHubList(mock);
+  const r = await agendoAsync(mock.env, "list", "issues").done;
+  expect(r.code).toBe(0);
+  // GitHub vocab — the header says "issue", never ADO's "work item".
+  expect(r.stdout).toMatch(/\bissue\b/);
+  expect(r.stdout).not.toMatch(/\bwork item\b/);
+  expect(r.stdout).toContain("#301");
+  expect(r.stdout).toContain("Header overlaps on mobile");
+  // Issue 301's closing PR is on the running login session's branch → associated.
+  expect(r.stdout).toContain(SHORT_ID);
+
+  const json = await agendoAsync(mock.env, "list", "issues", "--json").done;
+  const rows = JSON.parse(json.stdout) as any[];
+  const iss = rows.find((i) => i.id === 301);
+  expect(iss).toBeTruthy();
+  expect(iss.sessions[0].shortId).toBe(SHORT_ID);
+  expect(iss.sessions[0].running).toBe(true);
+});
+
+test("agendo list rejects unknown sub-flags; a non-keyword positional is a dir filter", async ({ mock }) => {
+  // `pr`/`issues`/`wi` route to the resource views; any other non-dash positional
+  // falls through to the session list's `[dir]` path filter (path-scoped launchers),
+  // so `list <dir>` must succeed (empty when nothing runs under it), not error.
+  const dir = agendo(mock.env, "list", "no-such-dir");
+  expect(dir.status).toBe(0);
+
+  const badFlag = agendo(mock.env, "list", "pr", "--nope");
+  expect(badFlag.status).not.toBe(0);
+  expect(badFlag.stderr).toContain('unknown argument "--nope"');
 });

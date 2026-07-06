@@ -18,7 +18,7 @@ import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState } from "./config.ts";
 import { repoRootForCwd } from "./repos.ts";
-import type { AgentSession, AgentSource, Identity } from "./types.ts";
+import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem } from "./types.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
 
@@ -49,6 +49,13 @@ Usage:
       --pr <n>                  Only sessions linked to PR #n (resolved via the
                                 backend, so gh/az data is fetched).
       --issue, --work-item <n>  Only sessions linked to that issue / work item.
+  agendo list pr, prs          List your open pull requests from the active backend,
+                                each with its associated running session (pr#, ci,
+                                approvals, branch, session, title). --json for full rows.
+  agendo list issues           List issues / work items with any associated session
+       (aliases: wi,            (id, state, session, title). Vocab follows the backend:
+        work-items)             GitHub says "issue", Azure DevOps "work item".
+                                --json for full rows (id + sessions[]).
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status.
       --attach, -a              Switch/attach to it immediately (default: detached)
@@ -235,6 +242,27 @@ if (process.argv[2] === "send") {
 // default stays live-only and model-free (fast, no backend auth needed); the
 // flags below opt into richer, association-resolving output for orchestrators.
 if (process.argv[2] === "list" || process.argv[2] === "ls") {
+  // Subcommand routing: `list pr|prs` and `list issues|wi|work-items|…` are
+  // resource lists (open PRs / issues-work-items and their associated sessions),
+  // distinct from the default session list. Only the exact keywords route here;
+  // any other non-dash positional falls through to the session list's `[dir]`
+  // path filter, and the dashed `--pr`/`--issue` stay session-list query flags.
+  const sub = process.argv[3];
+  const PR_SUBS = new Set(["pr", "prs"]);
+  const ISSUE_SUBS = new Set(["issue", "issues", "wi", "work-item", "work-items", "workitem", "workitems"]);
+  if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub))) {
+    let json = false;
+    for (const a of process.argv.slice(4)) {
+      if (a === "--json") json = true;
+      else {
+        console.error(`list ${sub}: unknown argument "${a}"`);
+        process.exit(1);
+      }
+    }
+    if (PR_SUBS.has(sub)) await runListPrs({ json });
+    else await runListIssues({ json });
+    process.exit(0);
+  }
   let json = false;
   let all = false;
   let pr: number | undefined;
@@ -696,6 +724,163 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
   }
   if (rows.length === 0) console.log("No running sessions.");
   else rows.forEach((r) => console.log(r));
+}
+
+/** A session working a PR / issue's branch, as reported by the resource lists. */
+interface AssocSession {
+  id: string;
+  shortId: string;
+  source: AgentSource;
+  running: boolean;
+}
+
+/**
+ * The sessions matched onto a PR / work item, ranked best-first: running before
+ * idle, then most-recently-used. The human table shows only the first (the one
+ * an orchestrator would poke); JSON keeps them all, first being the best pick.
+ */
+function assocSessions(sessions: AgentSession[], live: Set<string>): AssocSession[] {
+  return [...sessions]
+    .sort((a, b) => {
+      const ra = live.has(sessionName(a));
+      const rb = live.has(sessionName(b));
+      if (ra !== rb) return ra ? -1 : 1;
+      return b.lastUsed.getTime() - a.lastUsed.getTime();
+    })
+    .map((s) => ({ id: s.id, shortId: shortId(s.id), source: s.source, running: live.has(sessionName(s)) }));
+}
+
+/**
+ * `list pr|prs`: the current identity's OPEN pull requests from the active
+ * backend, each with the session working its branch (running one preferred) — an
+ * orchestrator's "what PRs are in flight and which can I delegate to / poke". We
+ * reuse the model's forward PR lists (linkedPrs + orphanPrs — PRs I created;
+ * review PRs are someone else's, so excluded) and its live-tmux set for the
+ * association, so there's no new matcher. `--json` emits the full rows (id +
+ * branch + status + ci + sessions[]) for scripting.
+ */
+async function runListPrs(opts: { json: boolean }): Promise<void> {
+  let model: LoadedModel;
+  try {
+    model = await loadModel(currentModelOptions());
+  } catch (e) {
+    console.error(`list pr: could not load pull requests from the backend: ${(e as Error)?.message ?? e}`);
+    process.exit(1);
+    return;
+  }
+  // PRs I created: linked-to-a-work-item + orphans. Dedupe by repo:id — GitHub PR
+  // numbers are per-repo, so id alone can collide across repos.
+  const seen = new Set<string>();
+  const prs: PRWithSessions[] = [];
+  for (const pr of [...model.linkedPrs, ...model.orphanPrs]) {
+    const key = `${pr.repositoryId}:${pr.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    prs.push(pr);
+  }
+  prs.sort((a, b) => b.updatedDate - a.updatedDate || b.id - a.id);
+
+  const prPrefix = model.provider === "github" ? "#" : "!";
+  const rows = prs.map((pr) => ({
+    id: pr.id,
+    title: pr.title.replace(/\s+/g, " ").trim(),
+    status: pr.status,
+    isDraft: pr.isDraft,
+    ci: pr.ci,
+    approvedCount: pr.approvedCount,
+    requiredCount: pr.requiredCount,
+    branch: pr.branch,
+    repositoryId: pr.repositoryId,
+    repositoryName: pr.repositoryName ?? null,
+    url: pr.url,
+    sessions: assocSessions(pr.sessions, model.liveTmux),
+  }));
+
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (rows.length === 0) {
+    console.log("No open pull requests.");
+    return;
+  }
+  console.log(
+    ["", "pr".padEnd(6), "ci".padEnd(8), "appr".padEnd(5), "branch".padEnd(24), "session".padEnd(12), "title"].join("  "),
+  );
+  for (const r of rows) {
+    const best = r.sessions[0];
+    console.log(
+      [
+        best?.running ? "●" : r.sessions.length ? "○" : " ",
+        `${prPrefix}${r.id}`.padEnd(6),
+        r.ci.padEnd(8),
+        `${r.approvedCount}/${r.requiredCount}`.padEnd(5),
+        r.branch.slice(0, 24).padEnd(24),
+        (best?.shortId ?? "-").padEnd(12),
+        (r.isDraft ? "[draft] " : "") + r.title.slice(0, 44),
+      ].join("  ").trimEnd(),
+    );
+  }
+}
+
+/**
+ * `list issues` (aliases `wi` / `work-items`): issues / work items known to the
+ * active backend, each with any associated session. Provider-aware vocab —
+ * GitHub says "issue", Azure DevOps "work item". Reuses the model's item lists
+ * (current + other + prLinked) and its live-tmux set; `--json` emits full rows
+ * (id + state + sessions[]).
+ */
+async function runListIssues(opts: { json: boolean }): Promise<void> {
+  let model: LoadedModel;
+  try {
+    model = await loadModel(currentModelOptions());
+  } catch (e) {
+    console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);
+    process.exit(1);
+    return;
+  }
+  const label = model.provider === "github" ? "issue" : "work item";
+  const seen = new Set<number>();
+  const items: WorkItem[] = [];
+  for (const it of [...model.current, ...model.other, ...model.prLinked]) {
+    if (seen.has(it.id)) continue;
+    seen.add(it.id);
+    items.push(it);
+  }
+  items.sort((a, b) => b.id - a.id);
+
+  const rows = items.map((it) => ({
+    id: it.id,
+    type: it.type,
+    title: it.title.replace(/\s+/g, " ").trim(),
+    state: it.state,
+    url: it.url,
+    sessions: assocSessions(it.sessions, model.liveTmux),
+  }));
+
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (rows.length === 0) {
+    console.log(`No ${label}s found.`);
+    return;
+  }
+  console.log(
+    ["", "id".padEnd(7), "state".padEnd(14), "session".padEnd(12), label].join("  "),
+  );
+  for (const r of rows) {
+    const best = r.sessions[0];
+    console.log(
+      [
+        best?.running ? "●" : r.sessions.length ? "○" : " ",
+        `#${r.id}`.padEnd(7),
+        (r.state || "-").slice(0, 14).padEnd(14),
+        (best?.shortId ?? "-").padEnd(12),
+        r.title.slice(0, 50),
+      ].join("  ").trimEnd(),
+    );
+  }
 }
 
 /**
