@@ -320,6 +320,12 @@ export function setSessionRoot(session: string, root: string): void {
   tmuxQuiet(["set-option", "-t", session, ROOT_OPTION, root]);
 }
 
+/** Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
+ *  dormant restore placeholder before a headless resume recreates it for real. */
+export function killWindow(name: string): void {
+  tmuxQuiet(["kill-window", "-t", name]);
+}
+
 /**
  * Live windows of a launcher host session, each paired with the working
  * directory of its active pane. Dead windows (a `remain-on-exit` corpse) are
