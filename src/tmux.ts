@@ -170,8 +170,11 @@ function inputRealText(line: string): string {
  *    render below the mode bar. The box can be empty even while busy, so busy is
  *    checked first and independently.
  * `raw` must include SGR escapes (see `capturePane`). Busy/dialog use specific,
- * transient markers so scanning the whole visible screen is safe (claude's prose
- * questions don't match them, and a finished turn drops the live counter).
+ * transient markers so scanning the whole visible screen is safe: claude's prose
+ * questions don't match them, and while a *finished* turn keeps a token count in
+ * its result summary (`✔ Goal achieved (1m · 1 turn · 4.6k tokens)`), that
+ * summary never carries the live counter's directional ↑/↓ arrow — which the
+ * busy check requires — so an idle post-turn pane isn't mistaken for a live one.
  */
 export function paneReadiness(raw: string): Readiness {
   const plain = stripAnsi(raw);
@@ -183,9 +186,17 @@ export function paneReadiness(raw: string): Readiness {
   // `✻ Compacting conversation…` above a `▰▰▱▱ N%` progress bar.
   if (/compacting conversation/i.test(plain)) return "compacting";
   // Actively generating — a live token/time counter (or an interrupt hint).
+  // The counter always wears a directional ↑/↓ arrow (bytes flowing this turn):
+  // `✢ Tinkering… (58s · ↓ 3.9k tokens)`. That arrow is the load-bearing
+  // distinction from a FINISHED-turn *result* summary — `✔ Goal achieved (1m ·
+  // 1 turn · 4.6k tokens)` — which wears the identical `(<time> · … tokens)`
+  // shape (and leads with a ✔/✗ glyph + an "N turn(s)" count) but never an
+  // arrow. So both checks REQUIRE the arrow: matching the bare parenthesized
+  // shape alone read an idle, done-with-its-turn pane as "busy" and blocked
+  // `agendo send`.
   if (
     /[↑↓]\s*[\d.,]+\s*k?\s*tokens?\b/i.test(plain) ||
-    /\(\s*\d[\dhms\s]*·[^)]*\btokens?\b/i.test(plain) ||
+    /\(\s*\d[^)]*[↑↓][^)]*\btokens?\b[^)]*\)/i.test(plain) ||
     /esc to interrupt/i.test(plain)
   )
     return "busy";

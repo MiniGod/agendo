@@ -194,6 +194,70 @@ test.describe("paneReadiness: compacting vs the states it must outrank", () => {
   });
 });
 
+// A FINISHED turn leaves a result summary — `✔ Goal achieved (1m · 1 turn · 4.6k
+// tokens)` — that wears the SAME `(<time> · … tokens)` shape as the live spinner
+// counter, differing only by the directional ↑/↓ arrow (present live, absent in
+// the summary) and the ✔/✗ + "N turn(s)" wording. The busy check used to match
+// that shape unconditionally, so an idle pane sitting at an empty prompt read as
+// "busy" — blocking `agendo send` and showing the wrong state. The fix requires
+// the arrow. This area regresses often; these pin the distinction verbatim.
+test.describe("paneReadiness: finished-turn summary is idle, not a live counter", () => {
+  const rule = "  ─────────────────────────────────────────";
+  // Real capture (window cl-claude-3df67d819fd1): done, sitting at an empty box.
+  const doneSummary = [
+    "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
+    "  ✻ Baked for 2m 38s",
+    rule,
+    "  ❯ ",
+    rule,
+    "  ⏵⏵ auto mode on (shift+tab to cycle)",
+  ].join("\n");
+
+  test("a done-summary pane at an empty prompt reads 'ready' (was the bug: 'busy')", () => {
+    expect(paneReadiness(doneSummary)).toBe("ready");
+  });
+
+  test("a genuinely generating pane (live ↑/↓ counter) still reads 'busy'", () => {
+    // Real active spinner: the ↓ arrow on the token counter is the live signal.
+    const busy = [
+      "  ✢ Tinkering… (58s · ↓ 3.9k tokens)",
+      rule,
+      "  ❯ ",
+      rule,
+      "  esc to interrupt",
+    ].join("\n");
+    expect(paneReadiness(busy)).toBe("busy");
+  });
+
+  test("a live counter with no 'esc to interrupt' hint is still 'busy' (arrow alone)", () => {
+    const busy = ["  ✽ Baking… (2s · ↑ 1.2k tokens)", rule, "  ❯ ", rule].join("\n");
+    expect(paneReadiness(busy)).toBe("busy");
+  });
+
+  test("a done-summary pane with unsent text queued reads 'queued', not 'busy'", () => {
+    const queued = [
+      "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
+      rule,
+      "  ❯ a follow-up question",
+      rule,
+    ].join("\n");
+    expect(paneReadiness(queued)).toBe("queued");
+  });
+
+  test("an open dialog still reads 'dialog' even next to a done summary", () => {
+    const dialog = [
+      "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
+      "  Do you want to proceed?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      rule,
+      "  ❯ ",
+      rule,
+    ].join("\n");
+    expect(paneReadiness(dialog)).toBe("dialog");
+  });
+});
+
 // GitHub issue/PR numbers collide across repos, so GitHub launches scope the tmux
 // window name with the repo (cc05391); ADO ids are globally unique and pass no
 // scope, keeping their names unchanged. tmux forbids `.`/`:`, so the scope is
