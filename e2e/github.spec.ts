@@ -101,3 +101,43 @@ test("GitHub identity + settings reflect the authenticated gh user", async ({ la
   const auth = await wt.waitForText("gh installed · authenticated", 8000);
   expect(auth).toContain("gh installed · authenticated ✓");
 });
+
+// Regression: GitHub issue numbers are only unique per repo, so two repos can
+// each have an issue #16. The items view keyed rows (and the expand state) by
+// the bare number, so the two rows collided — React printed "Encountered two
+// children with the same key, `i16`" above the UI, and expanding one #16
+// expanded both. Keys are now scoped by repo (itemKey/prKey in src/model.ts).
+test("issues sharing a number across repos: no duplicate React keys, independent rows", async ({ launch, mock }) => {
+  await mock.setProvider("github");
+  const issue = (slug: string, title: string) => ({
+    number: 16, title, state: "OPEN",
+    url: `https://github.com/${slug}/issues/16`,
+    labels: [], author: { login: ME.login },
+  });
+  await mock.setGhState({
+    authed: true,
+    user: ME,
+    issues: {
+      "ada/appweb": [issue("ada/appweb", "Appweb bug sixteen")],
+      "ada/applib": [issue("ada/applib", "Applib bug sixteen")],
+    },
+    prs: {},
+  });
+  const wt = await launch();
+
+  // Both #16s render — they are distinct issues, one row each.
+  const screen = await wt.waitForText("Appweb bug sixteen", 20000);
+  expect(screen).toContain("Applib bug sixteen");
+  await wt.waitForStable();
+
+  // React must not have complained about colliding row keys. screen() can miss
+  // the one-shot warning (redraws overwrite it), so scan the raw PTY stream.
+  expect(wt.output()).not.toContain("Encountered two children with the same key");
+
+  // Expand state is also scoped: opening the first #16 must not open the other.
+  // One expanded empty item shows exactly one "start a fresh session" child row
+  // — under the shared-key bug both items expanded, showing two.
+  await wt.press(KEY.right, 400);
+  const expanded = await wt.waitForText("start a fresh session");
+  expect(expanded.match(/start a fresh session/g)).toHaveLength(1);
+});
