@@ -6,8 +6,9 @@
 // both resume natively (Claude via `claude --resume`, Copilot via
 // `copilot --resume=<id>`); see launch.ts:resumeArgv.
 import { readdir, readFile, stat } from "fs/promises";
-import { join } from "path";
+import { basename, join } from "path";
 import { homedir } from "os";
+import { repoRootForCwd } from "./repos.ts";
 import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus } from "./types.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");
@@ -271,11 +272,37 @@ export class SessionIndex {
    * working directory (e.g. branch `worktree-…-231938`, worktree dir `…-231938`).
    * Used to surface sessions for items that have no PR to match on. The digit
    * boundaries prevent #231938 from matching e.g. 1231938 or 2319380.
+   *
+   * `repo` (optional) scopes the match to the item's own repository. It's needed
+   * for backends whose item ids are small and collide across repos: a GitHub
+   * issue #2 would otherwise match a branch/cwd like `app2` or `v2-fixes`, and a
+   * repoA #7 would match an unrelated repoB #7. Pass the item's `owner/repo` slug
+   * (or bare repo name) to require the session to live in that repo. ADO ids are
+   * globally unique, so it passes null and the match stays unscoped (unchanged).
    */
-  forWorkItem(id: number): AgentSession[] {
+  forWorkItem(id: number, repo?: string | null): AgentSession[] {
     const re = new RegExp(`(^|[^0-9])${id}([^0-9]|$)`);
-    return this.all.filter((s) => (s.branch && re.test(s.branch)) || re.test(s.cwd));
+    const wanted = repo ? bareRepoName(repo) : null;
+    return this.all.filter((s) => {
+      if (wanted && !sessionRepoNames(s).includes(wanted)) return false;
+      return (s.branch && re.test(s.branch)) || re.test(s.cwd);
+    });
   }
+}
+
+/** Reduce a repo identifier (an `owner/repo` slug or a bare name) to its bare,
+ *  lowercased repo name, for repo-scoped matching. */
+function bareRepoName(repo: string): string {
+  return (repo.includes("/") ? repo.split("/").pop()! : repo).toLowerCase();
+}
+
+/** The repo name(s) a session belongs to: the basename of its worktree's main
+ *  repo root, plus (Copilot) its recorded `repository`, all as bare lowercased
+ *  names. Used to repo-scope the work-item↔session join. */
+function sessionRepoNames(s: AgentSession): string[] {
+  const names = [basename(repoRootForCwd(s.cwd)).toLowerCase()];
+  if (s.repository) names.push(bareRepoName(s.repository));
+  return names;
 }
 
 // ── On-demand activity (recent action lines) ────────────────────────────────
