@@ -296,3 +296,44 @@ export function shouldAutoResume(i: AutoResumeInput): boolean {
   if (i.firedFor === i.resetAt) return false;
   return i.now >= i.resetAt + (i.graceMs ?? RESET_GRACE_MS);
 }
+
+// ── dialog reveal decision ───────────────────────────────────────────────────────
+// The numbered limit dialog (usageLimit.ts form A) carries NO reset time — it only
+// appears once the dialog is dismissed, in the esc-revealed text form. So a session
+// parked in the dialog reads "limited" yet never yields a resetAt, and shouldAutoResume
+// (which requires resetAt) can never fire: the session sits blocked forever. To make
+// auto-resume fully hands-off we send ONE Escape to reveal the "resets <time>" notice,
+// then let the normal freeze/fire machinery take over on the next poll. This is the
+// pure gate for that one nudge.
+
+export interface RevealDialogInput {
+  /** Whether the user enabled auto-resume (default OFF). */
+  enabled: boolean;
+  /** The pane's current readiness (must be "limited"). */
+  readiness: Readiness;
+  /** Whether the pane is the ACTIVE limit dialog (paneLimitDialogActive). */
+  dialogActive: boolean;
+  /** Reset instant parsed/frozen for this window, or null if still unknown. */
+  resetAt: number | null;
+  /** Whether we've already sent the reveal Escape for this limit window. */
+  revealed: boolean;
+}
+
+/**
+ * Pure decision: should we send the single reveal Escape now? True only when
+ * auto-resume is on, the pane is limited *and* showing the active numbered dialog,
+ * no reset time is known yet (the dialog hides it — that's the whole reason to
+ * reveal), and we haven't already revealed this window. Once a reset time lands
+ * (resetAt != null) this returns false and shouldAutoResume takes over; if the
+ * timestamp never appears the session simply parks (revealed stays true, so no
+ * infinite Escape loop). The `revealed` guard is kept SEPARATE from the resume
+ * fire-once guard so the reveal Escape can't be mistaken for the later
+ * Escape→continue→Enter resume.
+ */
+export function shouldRevealDialog(i: RevealDialogInput): boolean {
+  if (!i.enabled) return false;
+  if (i.readiness !== "limited") return false;
+  if (!i.dialogActive) return false;
+  if (i.resetAt != null) return false;
+  return !i.revealed;
+}

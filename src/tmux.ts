@@ -143,6 +143,23 @@ export function sendResume(target: string): void {
   for (const argv of resumeKeystrokes(target)) tmuxQuiet(argv);
 }
 
+/**
+ * The `send-keys` argv for the dialog-reveal nudge: a SINGLE Escape. On the
+ * numbered limit dialog this dismisses the menu and reveals the "resets <time>"
+ * notice (verified live) — the timestamp the dialog itself hides — so the next
+ * poll can parse and freeze a reset instant and the normal auto-resume machinery
+ * can fire. Deliberately just Escape: no `continue` is sent on the reveal tick.
+ * Split from the runner so it can be asserted directly in tests.
+ */
+export function dialogRevealKeystrokes(target: string): string[][] {
+  return [["send-keys", "-t", target, "Escape"]];
+}
+
+/** Send the dialog-reveal nudge (a single `<esc>`) to a target pane. */
+export function sendDialogReveal(target: string): void {
+  for (const argv of dialogRevealKeystrokes(target)) tmuxQuiet(argv);
+}
+
 /** Whether a captured claude TUI pane can accept a freshly-sent prompt. */
 export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "limited" | "unknown";
 
@@ -310,6 +327,17 @@ function isActiveLimitDialog(lines: string[]): boolean {
     if (/─{20,}/.test(lines[i])) return false;
   }
   return true;
+}
+
+/**
+ * Whether a captured pane is showing the ACTIVE numbered limit dialog (the
+ * public, raw-string form of isActiveLimitDialog). Exposed so callers — the
+ * auto-resume poll in particular — can key the dialog-reveal nudge off the same
+ * structural check the readiness classifier uses, rather than re-deriving it.
+ * `raw` may include SGR escapes (see capturePane).
+ */
+export function paneLimitDialogActive(raw: string): boolean {
+  return isActiveLimitDialog(raw.replace(/\r/g, "").split("\n"));
 }
 
 /**

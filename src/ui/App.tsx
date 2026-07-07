@@ -4,8 +4,8 @@ import { execFile } from "child_process";
 import { loadModel, isRunning, refreshLiveTmux, itemKey, prKey, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName, capturePane, sendResume, paneReadiness, paneResumeSafe, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
-import { parseResetTime, shouldAutoResume, RESET_LOOKBACK_MS } from "../usageLimit.ts";
+import { sessionName, capturePane, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
+import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
@@ -1148,10 +1148,16 @@ export default function App({
   //   • limitWindows — the frozen reset instant for the current limit window
   //     (null when no reset time was parseable, so we know not to auto-resume);
   //   • resumeFired  — the reset instant we've already sent `continue` for, so a
-  //     single window fires at most once. Both are cleared when a session leaves
-  //     the limited state, so its next limit window starts fresh.
+  //     single window fires at most once.
+  //   • dialogRevealed — canonical names we've already sent the one reveal Escape
+  //     to (the numbered dialog hides its reset time; one Escape reveals it). Kept
+  //     SEPARATE from resumeFired so the reveal can't be confused with the later
+  //     Escape→continue→Enter resume, and so a reset time that never appears just
+  //     parks (no repeat Escape). All three are cleared when a session leaves the
+  //     limited state, so its next limit window starts fresh.
   const limitWindows = useRef<Map<string, number | null>>(new Map());
   const resumeFired = useRef<Map<string, number>>(new Map());
+  const dialogRevealed = useRef<Set<string>>(new Set());
   const ensureActivity = (s: AgentSession) => {
     const id = sessionId(s);
     if (requested.current.has(id)) return;
@@ -1315,6 +1321,7 @@ export default function App({
       // relaunched session can't inherit a stale (possibly past) reset instant.
       limitWindows.current.clear();
       resumeFired.current.clear();
+      dialogRevealed.current.clear();
       return;
     }
     const sample = () => {
@@ -1351,6 +1358,26 @@ export default function App({
                 sendResume(win);
                 resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
               }
+            } else if (
+              // No reset time yet AND we're parked in the numbered dialog (which
+              // hides it): send ONE Escape to reveal the "resets <time>" notice, so
+              // the NEXT poll can parse+freeze it and shouldAutoResume can fire.
+              // Never sends `continue` this tick — just reveals.
+              shouldRevealDialog({
+                enabled: true,
+                readiness,
+                dialogActive: paneLimitDialogActive(raw),
+                resetAt: resetAt ?? null,
+                revealed: dialogRevealed.current.has(canon),
+              })
+            ) {
+              // Re-capture fresh to guard the sample→act gap, and confirm it's STILL
+              // the active dialog before pressing Escape (only ever Escape a pane
+              // whose own "Esc to cancel" affordance is showing).
+              if (paneLimitDialogActive(capturePane(win))) {
+                sendDialogReveal(win);
+                dialogRevealed.current.add(canon);
+              }
             }
           }
         } else if (readiness !== "busy" && readiness !== "unknown") {
@@ -1361,12 +1388,14 @@ export default function App({
           // so a single flicker can't wipe the fire-once guard and re-fire.
           limitWindows.current.delete(canon);
           resumeFired.current.delete(canon);
+          dialogRevealed.current.delete(canon);
         }
         next.set(canon, { readiness, shells: paneShells(raw), resetAt });
       }
       // A window that vanished between reloads leaves stale bookkeeping; prune it.
       for (const canon of [...limitWindows.current.keys()]) if (!windows.has(canon)) limitWindows.current.delete(canon);
       for (const canon of [...resumeFired.current.keys()]) if (!windows.has(canon)) resumeFired.current.delete(canon);
+      for (const canon of [...dialogRevealed.current]) if (!windows.has(canon)) dialogRevealed.current.delete(canon);
       setPanes((prev) => {
         const same =
           prev.size === next.size &&

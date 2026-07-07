@@ -13,8 +13,8 @@
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, resumeKeystrokes } from "../src/tmux.ts";
-import { parseResetTime, shouldAutoResume, isLimitDialog, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes } from "../src/tmux.ts";
+import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import type { AgentSession } from "../src/types.ts";
@@ -736,6 +736,90 @@ test.describe("resumeKeystrokes: the continue sequence", () => {
       ["send-keys", "-t", "cl-claude-abc", "-l", "continue"],
       ["send-keys", "-t", "cl-claude-abc", "Enter"],
     ]);
+  });
+});
+
+test.describe("dialogRevealKeystrokes: the one-Escape reveal nudge", () => {
+  test("is exactly a single Escape to the target — no 'continue'", () => {
+    expect(dialogRevealKeystrokes("cl-claude-abc")).toEqual([
+      ["send-keys", "-t", "cl-claude-abc", "Escape"],
+    ]);
+  });
+});
+
+test.describe("paneLimitDialogActive: raw-string wrapper of the structural check", () => {
+  test("true only for the active numbered dialog, not text/dismissed forms", () => {
+    expect(paneLimitDialogActive(LIMIT_DIALOG_PANE)).toBe(true);
+    expect(paneLimitDialogActive(DISMISSED_DIALOG_PANE)).toBe(false); // box below ⇒ scrollback
+    expect(paneLimitDialogActive(ESC_REVEALED_PANE)).toBe(false); // text form, no dialog options
+    expect(paneLimitDialogActive(BLOCKED_PANE)).toBe(false);
+  });
+});
+
+// The dialog carries NO reset time, so shouldAutoResume can never fire on it. The
+// reveal nudge (one Escape) exists to surface the timestamp; once it lands, this
+// gate steps aside and shouldAutoResume takes over. These pin the whole gate.
+test.describe("shouldRevealDialog: one-shot reveal of the dialog's hidden reset time", () => {
+  const base = {
+    enabled: true,
+    readiness: "limited" as const,
+    dialogActive: true,
+    resetAt: null as number | null,
+    revealed: false,
+  };
+
+  test("fires when ON, limited, active dialog, no reset time, not yet revealed", () => {
+    expect(shouldRevealDialog(base)).toBe(true);
+  });
+
+  test("off by default: disabled never reveals", () => {
+    expect(shouldRevealDialog({ ...base, enabled: false })).toBe(false);
+  });
+
+  test("only for the active dialog — never a text-form or non-dialog limited pane", () => {
+    expect(shouldRevealDialog({ ...base, dialogActive: false })).toBe(false);
+  });
+
+  test("never when the pane isn't limited", () => {
+    for (const r of ["ready", "busy", "queued", "dialog", "compacting", "unknown"] as const)
+      expect(shouldRevealDialog({ ...base, readiness: r })).toBe(false);
+  });
+
+  test("once a reset time is known, it steps aside (shouldAutoResume's job now)", () => {
+    expect(shouldRevealDialog({ ...base, resetAt: Date.now() + 3600_000 })).toBe(false);
+  });
+
+  test("once-only: already revealed → never re-Escape (parks if the time never shows)", () => {
+    expect(shouldRevealDialog({ ...base, revealed: true })).toBe(false);
+  });
+});
+
+// The reveal→resume handoff end to end (pure): after the Escape reveals the text
+// form, parseResetTime freezes an instant, shouldRevealDialog stops, and once the
+// reset (plus grace) has passed shouldAutoResume fires into a resume-safe pane.
+test.describe("reveal → resume handoff on the esc-revealed text form", () => {
+  test("esc-revealed 'resets 2:10pm' → resetAt parses, reveal stops, resume fires", () => {
+    const now = new Date("2026-07-07T15:00:00Z"); // past 2:10pm (14:10) in Reykjavik (UTC+0)
+    const resetAt = parseResetTime(ESC_REVEALED_PANE, now, RESET_LOOKBACK_MS);
+    expect(resetAt).not.toBeNull();
+    expect(resetAt!).toBeLessThan(now.getTime()); // already reopened
+
+    // Reveal no longer applies — a reset time is known.
+    expect(
+      shouldRevealDialog({
+        enabled: true,
+        readiness: "limited",
+        dialogActive: paneLimitDialogActive(ESC_REVEALED_PANE), // false anyway
+        resetAt,
+        revealed: true,
+      }),
+    ).toBe(false);
+
+    // The normal fire path takes over: reset passed + grace, pane is resume-safe.
+    expect(paneResumeSafe(ESC_REVEALED_PANE)).toBe(true);
+    expect(
+      shouldAutoResume({ enabled: true, readiness: "limited", resetAt, now: now.getTime(), firedFor: null }),
+    ).toBe(true);
   });
 });
 

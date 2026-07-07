@@ -6,7 +6,7 @@
 import { join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
-import { RUNNING_TARGET } from "./harness/fixtures.ts";
+import { RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
 
 // Regression guard for the "session-detection regresses often" area: a launcher
 // scoped to a repo whose BASENAME CONTAINS A DOT (`kappflug.is-2`). The host
@@ -309,4 +309,72 @@ test("renders identically with the running session flipped off", async ({ launch
   expect(screen).not.toContain("● 1/1");
   // Sanity: the canonical target we toggled is the login session's.
   expect(RUNNING_TARGET).toBe("cl-claude-loginsession");
+});
+
+// ── hands-off auto-resume from the numbered limit dialog ────────────────────────
+// The numbered limit dialog hides its reset time, so the resetAt-gated resume can
+// never fire on it. With auto-resume ON the readiness poll must send ONE Escape to
+// reveal the "resets <time>" notice, exactly once per limit window, and never a
+// stray `continue`. These drive the real Ink poll against the fake tmux and assert
+// on the recorded send-keys — the end-to-end proof the wiring closes the gap.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// The active numbered dialog (a `─`-ruled table above it, no input-box rule below).
+const LIMIT_DIALOG = [
+  "  ● Done. Work item created.",
+  "  ┌───────────┬─────────────────────────────────────┐",
+  "  │ State     │ In Review                           │",
+  "  └───────────┴─────────────────────────────────────┘",
+  "  What do you want to do?",
+  "  ❯ 1. Stop and wait for limit to reset",
+  "    2. Add funds to continue with usage credits",
+  "  Enter to confirm · Esc to cancel",
+].join("\n");
+
+// send-keys argv (from the fake-tmux log) aimed at the login window.
+const keysTo = async (mock: { tmuxLog: () => Promise<string[][]> }, target: string) =>
+  (await mock.tmuxLog()).filter((a) => a[0] === "send-keys" && a.includes(target));
+
+test("auto-resume ON: the limit dialog is revealed with exactly ONE Escape, never 'continue'", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // Persist auto-resume ON (the poll reads the setting at mount); keep the ADO
+  // backend the fixture pins so the model still loads.
+  await writeFile(join(mock.home, ".agendo", "state.json"), JSON.stringify({ provider: "ado", autoResumeOnUsageLimit: true }));
+  // Park the running session in the numbered dialog (no reset time shown).
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_DIALOG } });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+
+  // The poll sends the reveal Escape.
+  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).some((a) => a.includes("Escape")));
+  // Several more poll cycles (READINESS_MS = 1500ms) must NOT re-send: once-only.
+  await sleep(4000);
+  let keys = await keysTo(mock, RUNNING_TARGET);
+  expect(keys.filter((a) => a.includes("Escape"))).toHaveLength(1); // exactly one reveal
+  expect(keys.some((a) => a.includes("continue"))).toBe(false); // never continue on reveal
+  expect(keys.some((a) => a.includes("Enter"))).toBe(false);
+
+  // Recovery clears the reveal guard: flip to a ready pane, then back to the dialog.
+  await mock.setTmuxState({ ...tmuxState }); // default READY pane → "ready"
+  await sleep(3000); // let the poll observe recovery and clear the guard
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_DIALOG } });
+  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).filter((a) => a.includes("Escape")).length >= 2);
+  keys = await keysTo(mock, RUNNING_TARGET);
+  expect(keys.filter((a) => a.includes("Escape"))).toHaveLength(2); // re-revealed for the new window
+  expect(keys.some((a) => a.includes("continue"))).toBe(false);
+});
+
+test("auto-resume OFF: the limit dialog is left untouched (no Escape, no keystrokes)", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // Setting OFF (default) — write it explicitly for clarity.
+  await writeFile(join(mock.home, ".agendo", "state.json"), JSON.stringify({ provider: "ado", autoResumeOnUsageLimit: false }));
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_DIALOG } });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  // Give the poll several cycles; with the setting off it must never mutate the pane.
+  await sleep(4000);
+  const keys = await keysTo(mock, RUNNING_TARGET);
+  expect(keys).toHaveLength(0);
 });
