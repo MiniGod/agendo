@@ -83,6 +83,30 @@ test("PR view groups by repo on demand", async ({ launch }) => {
   expect(screen).not.toContain("Refactor the parser"); // hidden in a collapsed group
 });
 
+test("PR view re-reads mutable PR state on refresh — a completed PR drops out (G2)", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("2"); // PR view
+  // PR 5001 ("Add login screen") is linked to WI 101 → under "PRs on your work items".
+  await wt.waitForText("PRs on your work items");
+  let screen = await wt.waitForText("Add login screen");
+  expect(screen).toContain("!5001");
+
+  // The PR completes server-side. Its status lives behind ADO's per-load PR
+  // cache, which used to freeze at "active" for the whole process — so a reload
+  // kept showing it as an in-flight linked PR (while it vanished from orphans).
+  mock.setAdoPr(5001, { status: "completed" });
+  await wt.press("r"); // manual reload → loadModel → clearPrCache (the fix)
+
+  // With the cache invalidated on reload, the completed PR is re-read and hidden
+  // (the linked view is only about work still in flight).
+  await waitUntil(async () => !(await wt.screen()).includes("Add login screen"), 15000);
+  screen = await wt.screen();
+  expect(screen).not.toContain("Add login screen");
+  expect(screen).not.toContain("!5001");
+});
+
 test("sessions view sort toggles between updated and created", async ({ launch }) => {
   const wt = await launch();
   await wt.waitForText("Current sprint", 20000);
