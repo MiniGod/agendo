@@ -5,19 +5,34 @@
 // looks stalled (idle input box, no spinner), so we classify it explicitly and,
 // when configured, nudge it to continue the moment the window reopens.
 //
-// The wording we match, verbatim from throttled Claude Code panes, covers the
-// caps Claude Code prints. The one observed on a REAL limited session (captured
-// read-only from a live pane) is the session/credit cap, rendered inside a tool
-// result block (a leading ⎿ glyph, NBSP padding, a `·` separator):
-//   ⎿  You've hit your session limit · resets 7:20pm (Atlantic/Reykjavik)
-//      /usage-credits to finish what you're working on.
-// Plus the historically-worded caps:
-//   • 5-hour:  "Claude usage limit reached. Your limit will reset at 3pm (America/Santiago)."
-//   • weekly:  "You've reached your weekly limit" / "Resets by 4:00 AM Friday Apr 24"
+// A limited session shows the cap in one of two observed forms, and BOTH must
+// classify as "limited":
+//
+//  (A) The NUMBERED CHOICE DIALOG — the primary, interactive state a limited
+//      session sits in (captured verbatim, read-only, from a live limited pane):
+//        What do you want to do?
+//        ❯ 1. Stop and wait for limit to reset
+//          2. Add funds to continue with usage credits
+//        Enter to confirm · Esc to cancel
+//      This dialog does NOT show the reset time. Pressing Escape ONCE dismisses
+//      it and reveals form (B). We detect it by its two durable option lines (see
+//      LIMIT_DIALOG_RE) — passive detection that works WITHOUT a timestamp.
+//
+//  (B) The TEXT NOTICE — the reset-time-bearing form. On a REAL limited session it
+//      renders inside a tool result block (a leading ⎿ glyph, NBSP padding, a `·`
+//      separator), sometimes with a "/usage-credits" continuation line, sometimes
+//      without (both observed live):
+//        ⎿  You've hit your session limit · resets 2:10pm (Atlantic/Reykjavik)
+//        ⎿  You've hit your session limit · resets 7:20pm (Atlantic/Reykjavik)
+//           /usage-credits to finish what you're working on.
+//      Plus the historically-worded caps:
+//        • 5-hour:  "Claude usage limit reached. Your limit will reset at 3pm (America/Santiago)."
+//        • weekly:  "You've reached your weekly limit" / "Resets by 4:00 AM Friday Apr 24"
+//
 // We anchor on the DURABLE tokens ("hit/reached your … limit", "usage limit
-// reached", the "/usage-credits" hint) plus a separately-parsed reset time —
-// never a brittle full-string match — so copy tweaks, the ⎿ prefix, NBSP padding
-// and line-wrapping don't break detection.
+// reached", the "/usage-credits" hint, the dialog's option wording) plus a
+// separately-parsed reset time — never a brittle full-string match — so copy
+// tweaks, the ⎿ prefix, NBSP padding and line-wrapping don't break detection.
 import type { Readiness } from "./tmux.ts";
 
 /**
@@ -44,6 +59,30 @@ export const USAGE_LIMIT_RE =
  */
 export function isUsageLimited(plain: string): boolean {
   return USAGE_LIMIT_RE.test(plain) || USAGE_LIMIT_RE.test(plain.replace(/\s+/g, " "));
+}
+
+/**
+ * The numbered limit dialog (form A above), matched on its two durable option
+ * lines. Either alone suffices — both are specific enough to the limit menu that
+ * they never appear as ordinary prose, and matching either survives line-wrapping
+ * or one option being clipped:
+ *   - "Stop and wait for limit to reset"
+ *   - "Add funds to continue with usage credits"
+ * The dialog carries NO reset time; it's what a limited session shows by default,
+ * so this is the load-bearing PASSIVE signal. Whether it's the *active* dialog
+ * (vs. the same text left in scrollback after dismissal) is decided structurally
+ * in tmux.ts, which anchors on the absence of an input box below it.
+ */
+export const LIMIT_DIALOG_RE =
+  /\bstop and wait for (?:the |your )?limit to reset\b|\badd funds to continue with usage credits\b/i;
+
+/**
+ * Whether ANSI-stripped text shows the numbered limit dialog. Like isUsageLimited,
+ * tested against a whitespace-normalized copy too so NBSP padding / wrapping can't
+ * split a matched phrase.
+ */
+export function isLimitDialog(plain: string): boolean {
+  return LIMIT_DIALOG_RE.test(plain) || LIMIT_DIALOG_RE.test(plain.replace(/\s+/g, " "));
 }
 
 // ── reset-time parsing ─────────────────────────────────────────────────────────
