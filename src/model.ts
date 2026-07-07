@@ -190,7 +190,13 @@ export function reconcileLive(
 
 /** Dedup/identity key for a PR. PR ids are only unique within a repo (GitHub
  *  numbers collide across repos), so scope every key by the repository. */
-const prKey = (pr: PullRequest): string => `${pr.repositoryId}:${pr.id}`;
+export const prKey = (pr: Pick<PullRequest, "repositoryId" | "id">): string =>
+  `${pr.repositoryId}:${pr.id}`;
+
+/** Dedup/identity key for a work item. Same caveat as prKey: GitHub issue
+ *  numbers are per-repo, so scope by the project (the repo slug on GitHub). */
+export const itemKey = (it: Pick<WorkItem, "project" | "id">): string =>
+  `${it.project}:${it.id}`;
 
 export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   const provider = getProvider(opts.provider);

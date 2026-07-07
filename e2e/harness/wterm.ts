@@ -241,6 +241,16 @@ export class WebTerminal {
     return this.chain;
   }
 
+  /**
+   * Everything the process has written to the PTY so far (stdout+stderr,
+   * escape codes included). Unlike screen(), nothing ever scrolls out of or is
+   * overwritten in this stream — the place to assert on one-shot diagnostics
+   * like React key warnings that a redraw would hide from the visible grid.
+   */
+  output(): string {
+    return this.raw;
+  }
+
   /** Flush pending output, then read the terminal's visible grid as text. */
   async screen(): Promise<string> {
     await this.flush();

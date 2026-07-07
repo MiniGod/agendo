@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
-import { loadModel, isRunning, refreshLiveTmux, type LoadedModel } from "../model.ts";
+import { loadModel, isRunning, refreshLiveTmux, itemKey, prKey, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, sendResume, paneReadiness, paneResumeSafe, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
@@ -464,14 +464,14 @@ function pushItem(
   activity: Map<string, Activity>,
   inScope: (cwd: string) => boolean,
 ) {
-  const isOpen = expanded.has(`wi:${item.id}`);
+  const isOpen = expanded.has(`wi:${itemKey(item)}`);
   // Path scoping filters the session LIST (and its running count), but keeps the
   // work-item row — items are backend-scoped and may have no in-scope sessions.
   const sessions = item.sessions.filter((s) => inScope(s.cwd));
   const running = sessions.filter((s) => isRunning(s, live)).length;
   const open = wiOpen(item);
   rows.push({ kind: "item", item, expanded: isOpen, running, open });
-  if (isOpen) pushSessions(rows, sessions, live, wiTarget(item), `wi${item.id}`, expanded, activity, open);
+  if (isOpen) pushSessions(rows, sessions, live, wiTarget(item), `wi${itemKey(item)}`, expanded, activity, open);
 }
 
 function pushPr(
@@ -483,12 +483,12 @@ function pushPr(
   inScope: (cwd: string) => boolean,
   contextCell?: Cell,
 ) {
-  const isOpen = expanded.has(`pr:${pr.id}`);
+  const isOpen = expanded.has(`pr:${prKey(pr)}`);
   const sessions = pr.sessions.filter((s) => inScope(s.cwd));
   const running = sessions.filter((s) => isRunning(s, live)).length;
   const open = prOpen(pr);
   rows.push({ kind: "pr", pr, expanded: isOpen, running, contextCell, open });
-  if (isOpen) pushSessions(rows, sessions, live, prTarget(pr), `pr${pr.id}`, expanded, activity, open);
+  if (isOpen) pushSessions(rows, sessions, live, prTarget(pr), `pr${prKey(pr)}`, expanded, activity, open);
 }
 
 // ── per-view row models ─────────────────────────────────────────────────────
@@ -509,10 +509,10 @@ function buildItemsRows(
   // / secondary / linked via PRs), de-duped by work item id.
   const q = query.trim();
   if (q) {
-    const seen = new Set<number>();
+    const seen = new Set<string>();
     const matches = [...model.current, ...model.other, ...model.prLinked].filter((it) => {
-      if (seen.has(it.id) || !itemMatches(it, q)) return false;
-      seen.add(it.id);
+      if (seen.has(itemKey(it)) || !itemMatches(it, q)) return false;
+      seen.add(itemKey(it));
       return true;
     });
     rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
@@ -622,7 +622,7 @@ function buildPrsRows(
   // of the first section it appears in (linked → work item, review → reason).
   const q = query.trim();
   if (q) {
-    const seen = new Set<number>();
+    const seen = new Set<string>();
     const ctxFor = (pr: PullRequest): Cell | undefined =>
       "workItemId" in pr
         ? linkedCtx(pr as LinkedPR)
@@ -631,8 +631,8 @@ function buildPrsRows(
           : undefined;
     const matches = sortPrs(
       [...model.linkedPrs, ...model.reviewPrs, ...model.orphanPrs].filter((pr) => {
-        if (seen.has(pr.id) || !prMatches(pr, q)) return false;
-        seen.add(pr.id);
+        if (seen.has(prKey(pr)) || !prMatches(pr, q)) return false;
+        seen.add(prKey(pr));
         return true;
       }),
       sort,
@@ -1964,8 +1964,8 @@ export default function App({
           ? row.open
           : false;
     const flipOpen = (row: Row) => {
-      if (row.kind === "item") toggleExpand(`wi:${row.item.id}`);
-      else if (row.kind === "pr") toggleExpand(`pr:${row.pr.id}`);
+      if (row.kind === "item") toggleExpand(`wi:${itemKey(row.item)}`);
+      else if (row.kind === "pr") toggleExpand(`pr:${prKey(row.pr)}`);
       else if (row.kind === "toggle") toggleSection(row.id);
       else if (row.kind === "session") {
         ensureActivity(row.session); // kick off the lazy parse on first expand
@@ -2003,8 +2003,8 @@ export default function App({
     if (key.return) {
       const row = rows[cursor];
       if (!row) return;
-      if (row.kind === "item") toggleExpand(`wi:${row.item.id}`);
-      else if (row.kind === "pr") toggleExpand(`pr:${row.pr.id}`);
+      if (row.kind === "item") toggleExpand(`wi:${itemKey(row.item)}`);
+      else if (row.kind === "pr") toggleExpand(`pr:${prKey(row.pr)}`);
       else if (row.kind === "toggle") toggleSection(row.id);
       else if (row.kind === "session") {
         open(openSession(row.session, model?.liveWindows.get(sessionName(row.session))));
@@ -2354,13 +2354,13 @@ export default function App({
         }
         if (row.kind === "item") {
           return (
-            <ItemRow key={`i${row.item.id}`} item={row.item} expanded={row.expanded} running={row.running} selected={selected} />
+            <ItemRow key={`i${itemKey(row.item)}`} item={row.item} expanded={row.expanded} running={row.running} selected={selected} />
           );
         }
         if (row.kind === "pr") {
           return (
             <PrRow
-              key={`p${row.pr.id}`}
+              key={`p${prKey(row.pr)}`}
               pr={row.pr}
               expanded={row.expanded}
               running={row.running}
