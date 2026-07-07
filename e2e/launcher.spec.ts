@@ -127,6 +127,96 @@ test("path scope: a github.com remote forces the GitHub backend over the ADO def
   expect(screen).toContain("Header overlaps on mobile"); // data pulled via the gh code path
 });
 
+// Drive the new-session picker from the sessions view to the repo step:
+// `3` → sessions, `n` → agent picker, enter (Claude) → repo picker. Returns the
+// repo-picker screen text. Fails (via waitForText) if `n` bailed to a notice
+// instead of opening the picker — exactly the scoped-empty dead-end we fix.
+async function openRepoPicker(wt: import("./harness/wterm.ts").WebTerminal): Promise<string> {
+  await wt.press("3");
+  await wt.waitForStable();
+  await wt.press("n");
+  await wt.waitForText("New session — pick an agent");
+  await wt.press(KEY.enter); // Claude is the first/default agent
+  return wt.waitForText("New session — pick a repo");
+}
+
+// The scoped folder itself must always be an offerable new-session repo, even
+// when it has zero sessions — otherwise `agendo <fresh-dir>` → "＋ new session"
+// dead-ends on an empty picker. These four cases pin the ensureRepoAtTop wiring.
+test("new-session picker: scoped to a dir with NO sessions offers that dir as the top choice", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado"; // stay on the ADO backend (no github remote)
+  // A real, session-less folder under the fake home — nothing in the fixtures
+  // has ever run here, so it never appears in the session-derived repo list.
+  const fresh = join(mock.home, "repos", "greenfield");
+  await mkdir(fresh, { recursive: true });
+
+  const wt = await launch({ args: [fresh], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // The scoped folder is present as a zero-count entry — the empty-state that
+  // used to dead-end the flow ("No repos under this path") is gone.
+  expect(picker).toContain("greenfield");
+  expect(picker).toContain("(no sessions yet)");
+  expect(picker).not.toContain("No repos under this path");
+  // It's the only entry, so it's the top (highlighted ❯) choice.
+  expect(picker).toMatch(/❯[^\n]*greenfield/);
+});
+
+test("new-session picker: scoped to an existing repo with sessions lists it once, ranked first", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // appweb has two sessions in the fixtures, so it's a real session-derived repo.
+  const appweb = join(mock.home, "repos", "appweb");
+  const wt = await launch({ args: [appweb], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // Present exactly once (no synthesized duplicate), keeping its real count, and
+  // ranked first as the scoped folder.
+  expect(picker).toMatch(/❯[^\n]*appweb[^\n]*2 sessions/);
+  // Exactly one repo row (no synthesized duplicate) — one "N sessions" cell.
+  expect(picker.match(/\d+ sessions/g)?.length).toBe(1);
+  expect(picker).not.toContain("(no sessions yet)"); // it has sessions
+  // Scoped: the other repos are filtered out entirely.
+  expect(picker).not.toContain("applib");
+  expect(picker).not.toContain("standalone");
+});
+
+test("new-session picker: scoped to a SUBDIR of a repo offers the repo root (resolved up)", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // A fresh git checkout (…/labs with a .git marker) and a nested subdir. No
+  // sessions here, so repoRootForCwd must walk UP from the subdir to the root.
+  const repoRoot = join(mock.home, "repos", "labs");
+  const subdir = join(repoRoot, "packages", "core");
+  await mkdir(join(repoRoot, ".git"), { recursive: true });
+  await mkdir(subdir, { recursive: true });
+
+  const wt = await launch({ args: [subdir], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // The repo ROOT is offered (basename "labs"), not the scoped subdir "core",
+  // so a worktree lands at the git root.
+  expect(picker).toMatch(/❯[^\n]*\blabs\b/);
+  expect(picker).toContain("(no sessions yet)");
+  expect(picker).not.toMatch(/❯[^\n]*\bcore\b/);
+});
+
+test("new-session picker: UNSCOPED lists all session-derived repos, unchanged ranking", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch(); // bare `agendo` → global launcher, no filterRoot
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // All three session-derived repos show, ranked by session count: appweb (2)
+  // first, then applib / standalone. No synthesized zero-count entry appears.
+  expect(picker).toContain("appweb");
+  expect(picker).toContain("applib");
+  expect(picker).toContain("standalone");
+  expect(picker).toMatch(/❯[^\n]*appweb[^\n]*2 sessions/);
+  expect(picker).not.toContain("(no sessions yet)");
+});
+
 // Poll an async predicate until it's true, or fail. Used for side effects that
 // land in the fake-bin logs slightly after a keystroke.
 async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
