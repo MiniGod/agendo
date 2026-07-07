@@ -25,12 +25,22 @@ export interface AdoServer {
   requests: string[]; // "METHOD pathname" for each handled request
   /** Bodies of every POST, keyed by path suffix match — for WIQL assertions. */
   wiqlQueries: string[];
+  /** Patch a PR's fields at runtime (merged over the fixture on every response),
+   *  so a test can flip status/isDraft/title between reloads to prove the app
+   *  re-reads mutable PR state rather than serving a frozen cache. */
+  setPr(id: number, patch: Record<string, unknown>): void;
   close(): Promise<void>;
 }
 
 export async function startAdoServer(): Promise<AdoServer> {
   const requests: string[] = [];
   const wiqlQueries: string[] = [];
+  // Runtime PR overrides, merged over the fixture PR on every single-PR / list
+  // response. In-memory (same process as the test), so a mutation is visible to
+  // the child launcher's very next request.
+  const prOverrides = new Map<number, Record<string, unknown>>();
+  const withOverride = (pr: any): any =>
+    pr && prOverrides.has(pr.pullRequestId) ? { ...pr, ...prOverrides.get(pr.pullRequestId) } : pr;
 
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -82,13 +92,16 @@ export async function startAdoServer(): Promise<AdoServer> {
     if (itersOfPr) return json(resolvePrIterations(Number(itersOfPr[1])));
     const prMatch = path.match(/_apis\/git\/repositories\/([^/]+)\/pullRequests\/(\d+)$/i);
     if (prMatch) {
-      const pr = resolveSinglePr(prMatch[1], Number(prMatch[2]));
+      const pr = withOverride(resolveSinglePr(prMatch[1], Number(prMatch[2])));
       if (pr) return json(pr);
       res.writeHead(404).end("no such PR");
       return;
     }
     // Active PRs by creator or reviewer (same path; distinguished by query).
-    if (/_apis\/git\/pullrequests$/i.test(path)) return json(resolvePullRequests(q));
+    if (/_apis\/git\/pullrequests$/i.test(path)) {
+      const { value } = resolvePullRequests(q);
+      return json({ value: value.map(withOverride) });
+    }
 
     // ── CI / merge-gate policy + build results ──
     if (/_apis\/policy\/evaluations$/i.test(path)) {
@@ -114,6 +127,7 @@ export async function startAdoServer(): Promise<AdoServer> {
     graphUrl: `${origin}/acme`,
     requests,
     wiqlQueries,
+    setPr: (id, patch) => prOverrides.set(id, { ...prOverrides.get(id), ...patch }),
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

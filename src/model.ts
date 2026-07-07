@@ -200,6 +200,9 @@ export const itemKey = (it: Pick<WorkItem, "project" | "id">): string =>
 
 export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   const provider = getProvider(opts.provider);
+  // Invalidate any per-load backend caches so a refresh re-reads mutable state
+  // (ADO's PR cache in particular — see Provider.beginLoad / ado.clearPrCache).
+  provider.beginLoad?.();
   // The session index drives both the local views and (for backends that scope
   // to where you work, like GitHub) the fetch set, so build it up front.
   const [me, index] = await Promise.all([provider.getMe(), SessionIndex.build()]);
@@ -235,7 +238,11 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     for (const pr of it.prs) {
       for (const s of index.forBranch(pr.branch)) add(s);
     }
-    for (const s of index.forWorkItem(it.id)) add(s);
+    // Repo-scope the id-in-branch/cwd match for backends whose item ids collide
+    // across repos (GitHub: it.project is the `owner/repo` slug, and issue
+    // numbers are tiny). ADO ids are globally unique → unscoped (null).
+    const itemRepo = opts.provider === "github" ? it.project : null;
+    for (const s of index.forWorkItem(it.id, itemRepo)) add(s);
     sessions.sort((a, b) => b.lastUsed.getTime() - a.lastUsed.getTime());
     return { ...it, sessions };
   };

@@ -64,15 +64,32 @@ export interface RepoRef {
 
 const refCache = new Map<string, RepoRef | null>();
 
+/**
+ * Parse a git `origin` URL into a github.com `owner/repo`, or null when it isn't
+ * a GitHub remote. The github.com host (or GitHub's `ssh.github.com` SSH-over-
+ * HTTPS host) must sit right after the scheme `//`, an SSH `user@`, or the string
+ * start, so a look-alike host is rejected: `mygithub.com` (no anchor before
+ * `github.com`) and `github.com.evil.org` (github.com not delimited by a port,
+ * `:`, or `/`) both yield null. Port-aware, so `ssh://git@ssh.github.com:443/
+ * owner/repo` yields owner=`owner` (not `443`), and case-insensitive so
+ * `GitHub.com` parses. Handles the SSH (`git@github.com:owner/repo(.git)`),
+ * HTTPS (`https://github.com/owner/repo(.git)`), and `ssh://` forms.
+ */
+export function parseGithubRemote(url: string): { owner: string; repo: string } | null {
+  const m = url
+    .trim()
+    .match(/(?:^|@|\/\/)(?:ssh\.)?github\.com(?::\d+)?[:/]([^/]+)\/(.+?)(?:\.git)?\/?$/i);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
 /** Resolve a checkout's `origin` remote to a github.com owner/repo, or null. */
 function repoRef(root: string): RepoRef | null {
   if (refCache.has(root)) return refCache.get(root)!;
   let ref: RepoRef | null = null;
   const r = spawnSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf-8" });
   if (r.status === 0) {
-    // Matches both git@github.com:owner/repo.git and https://github.com/owner/repo(.git)
-    const m = r.stdout.trim().match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?\/?$/);
-    if (m) ref = { owner: m[1], repo: m[2], root };
+    const parsed = parseGithubRemote(r.stdout);
+    if (parsed) ref = { ...parsed, root };
   }
   refCache.set(root, ref);
   return ref;

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vocab } from "../src/vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, PROVIDER_INFO } from "../src/provider.ts";
+import { parseGithubRemote } from "../src/github.ts";
 
 test.describe("vocab: per-backend UI terminology", () => {
   test("ADO speaks work-items / sprint / '!' PRs", () => {
@@ -148,6 +149,13 @@ test.describe("detectRepoProvider: force GitHub from a path context's git remote
     withGitOrigin("ssh://git@github.com/ada/appweb.git", () =>
       expect(detectRepoProvider("/repo")).toBe("github"),
     );
+    // GitHub's SSH-over-HTTPS host with an explicit port, and a capitalized host.
+    withGitOrigin("ssh://git@ssh.github.com:443/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
+    withGitOrigin("https://GitHub.com/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
   });
 
   test("an Azure DevOps origin → null (leave the configured default untouched)", () => {
@@ -174,6 +182,32 @@ test.describe("detectRepoProvider: force GitHub from a path context's git remote
 
   test("no origin remote / not a git repo → null", () => {
     withGitOrigin(null, () => expect(detectRepoProvider("/repo")).toBeNull());
+  });
+});
+
+test.describe("parseGithubRemote: origin URL → owner/repo (host-anchored, port-aware)", () => {
+  test("SSH and HTTPS forms, with and without .git / trailing slash", () => {
+    expect(parseGithubRemote("git@github.com:ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com/ada/appweb")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("ssh://git@github.com/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com/ada/appweb/")).toEqual({ owner: "ada", repo: "appweb" });
+  });
+
+  test("REGRESSION: SSH-over-HTTPS with a port → owner is the org, not the port", () => {
+    // `ssh://git@ssh.github.com:443/owner/repo` used to parse owner="443".
+    expect(parseGithubRemote("ssh://git@ssh.github.com:443/ada/appweb")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com:443/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+  });
+
+  test("case-insensitive host", () => {
+    expect(parseGithubRemote("https://GitHub.com/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+  });
+
+  test("look-alike hosts are rejected (null), not silently mis-parsed", () => {
+    expect(parseGithubRemote("https://mygithub.com/ada/appweb.git")).toBeNull();
+    expect(parseGithubRemote("https://github.com.evil.org/ada/appweb.git")).toBeNull();
+    expect(parseGithubRemote("git@gitlab.com:ada/appweb.git")).toBeNull();
   });
 });
 
