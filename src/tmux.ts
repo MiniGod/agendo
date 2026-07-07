@@ -396,8 +396,21 @@ export function liveManagedPaths(): { name: string; cwd: string; placeholder: bo
   return out;
 }
 
+/**
+ * Force tmux to resolve `-t <name>` by EXACT match only. Without the leading `=`,
+ * tmux resolves a target by exact → unique-prefix → fnmatch, so a bare name that
+ * is a *prefix* of a longer live name silently binds to the wrong target — our
+ * managed names are prefixes of each other (`agendo`⊂`agendo-work`, `cl-pr-5`⊂
+ * `cl-pr-50`, `cl-wi-512`⊂`cl-wi-5120`). The `=` prefix (documented tmux target
+ * syntax) pins resolution to the literal name, and for a compound `session:window`
+ * target it applies to the session portion (the only ambiguous part here).
+ */
+export function exactTarget(name: string): string {
+  return `=${name}`;
+}
+
 export function hasSession(name: string): boolean {
-  return spawnSync("tmux", ["has-session", "-t", name]).status === 0;
+  return spawnSync("tmux", ["has-session", "-t", exactTarget(name)]).status === 0;
 }
 
 /** The tmux session the caller is currently inside, or null (outside tmux). */
@@ -410,14 +423,14 @@ export function currentSessionName(): string | null {
 
 /** The absolute root a launcher host session is scoped to (`@cl_root`), or null. */
 export function sessionRoot(session: string): string | null {
-  const r = spawnSync("tmux", ["show-options", "-t", session, "-v", ROOT_OPTION], { encoding: "utf-8" });
+  const r = spawnSync("tmux", ["show-options", "-t", exactTarget(session), "-v", ROOT_OPTION], { encoding: "utf-8" });
   const v = r.status === 0 ? (r.stdout ?? "").trim() : "";
   return v || null;
 }
 
 /** Record the absolute root a launcher host session is scoped to (`@cl_root`). */
 export function setSessionRoot(session: string, root: string): void {
-  tmuxQuiet(["set-option", "-t", session, ROOT_OPTION, root]);
+  tmuxQuiet(["set-option", "-t", exactTarget(session), ROOT_OPTION, root]);
 }
 
 /** Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
@@ -437,7 +450,7 @@ export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name:
   for (const line of tmuxLines([
     "list-windows",
     "-t",
-    session,
+    exactTarget(session),
     "-F",
     "#{window_name}\t#{pane_current_path}\t#{pane_dead}",
   ])) {
@@ -504,8 +517,8 @@ export function newWindow(name: string, cwd: string, argv: string[]): void {
  * `--tmux` bootstrap process, which isn't itself inside that session.
  */
 export function newWindowIn(session: string, name: string, cwd: string, argv: string[]): void {
-  tmuxQuiet(["new-window", "-d", "-t", session, "-n", name, "-c", cwd, "--", ...argv]);
-  pinName(`${session}:${name}`);
+  tmuxQuiet(["new-window", "-d", "-t", exactTarget(session), "-n", name, "-c", cwd, "--", ...argv]);
+  pinName(`${exactTarget(session)}:${name}`);
 }
 
 /**
@@ -515,7 +528,7 @@ export function newWindowIn(session: string, name: string, cwd: string, argv: st
  * config kept it around — "launcher" window means the menu isn't running.
  */
 export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean {
-  for (const line of tmuxLines(["list-windows", "-t", session, "-F", "#{window_name}\t#{pane_dead}"])) {
+  for (const line of tmuxLines(["list-windows", "-t", exactTarget(session), "-F", "#{window_name}\t#{pane_dead}"])) {
     const [name, dead] = line.split("\t");
     if (name === "launcher" && dead !== "1") return true;
   }
@@ -530,20 +543,20 @@ export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean 
  * attaches after.
  */
 function spawnLauncherWindow(session: string, cwd: string, launcherArgv: string[]): void {
-  tmuxQuiet(["kill-window", "-t", `${session}:launcher`]); // no-op if none exists
+  tmuxQuiet(["kill-window", "-t", `${exactTarget(session)}:launcher`]); // no-op if none exists
   const at0 = spawnSync(
     "tmux",
-    ["new-window", "-d", "-t", `${session}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+    ["new-window", "-d", "-t", `${exactTarget(session)}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
     { stdio: "ignore" },
   );
   if (at0.status !== 0) {
     spawnSync(
       "tmux",
-      ["new-window", "-d", "-t", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+      ["new-window", "-d", "-t", exactTarget(session), "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "ignore" },
     );
   }
-  pinName(`${session}:launcher`);
+  pinName(`${exactTarget(session)}:launcher`);
 }
 
 /**
@@ -581,14 +594,14 @@ export function enterLauncherSession(
       ["new-session", "-d", "-s", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "inherit" },
     );
-    pinName(`${session}:launcher`);
+    pinName(`${exactTarget(session)}:launcher`);
     if (root) setSessionRoot(session, root);
     onFreshCreate?.();
   } else if (!launcherWindowLive(session)) {
     spawnLauncherWindow(session, cwd, launcherArgv);
   }
   // Land on the menu window specifically, not whatever window was last active.
-  tmuxQuiet(["select-window", "-t", `${session}:launcher`]);
+  tmuxQuiet(["select-window", "-t", `${exactTarget(session)}:launcher`]);
   const verb = insideTmux() ? ["switch-client"] : ["attach-session"];
-  spawnSync("tmux", [...verb, "-t", session], { stdio: "inherit" });
+  spawnSync("tmux", [...verb, "-t", exactTarget(session)], { stdio: "inherit" });
 }
