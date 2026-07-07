@@ -88,9 +88,18 @@ switch (cmd) {
     process.exit(0);
   }
   case "has-session": {
-    const name = flag("-t");
-    const live = state.sessions.includes(name) || state.windows.some((w) => w.name === name || w.window === name);
-    process.exit(live ? 0 : 1);
+    // Mirror real tmux target resolution so the `=`-exact fix is actually
+    // exercised: a bare `-t <name>` resolves by exact, then unique prefix, then
+    // fnmatch; a leading `=` pins it to an exact match only. Managed names are
+    // prefixes of each other (`cl-pr-5`⊂`cl-pr-50`), so bare resolution would
+    // bind the shorter name to the longer live target — the T1 bug.
+    let target = flag("-t") ?? "";
+    const exactOnly = target.startsWith("=");
+    if (exactOnly) target = target.slice(1);
+    const names = [...state.sessions, ...state.windows.flatMap((w) => [w.name, w.window].filter(Boolean))];
+    const exact = names.includes(target);
+    const prefix = !exactOnly && names.some((n) => n.startsWith(target));
+    process.exit(exact || prefix ? 0 : 1);
   }
   case "new-session": {
     // ...-s <name> -n <window> -c <cwd> -- <argv...>
