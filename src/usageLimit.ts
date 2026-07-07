@@ -118,6 +118,20 @@ function instantFor(tz: string | null, y: number, mo: number, d: number, h: numb
 export const RESET_LOOKBACK_MS = 8 * 24 * 3600_000;
 
 /**
+ * The lookback ceiling for a BARE time-of-day (no weekday/date) reset. The full
+ * 8-day `RESET_LOOKBACK_MS` is sized for the weekly cap, but applying it to a
+ * bare clock time is wrong: a same-day instant many hours before `now` (e.g.
+ * "resets 1am" seen at 23:00 — 22h in the past) would be returned as "already
+ * past → act now", firing auto-resume into a session that is still limited and
+ * burning its single shot. A bare time only ever names the 5-hour cap's next
+ * reopen, so the just-reopened window is at most a few hours wide; cap the
+ * lookback at 6h so a genuinely just-passed reset still resumes now, while a time
+ * further back correctly rolls to tomorrow. Weekly/weekday/month forms keep the
+ * full lookback.
+ */
+export const BARE_TIME_LOOKBACK_MS = 6 * 3600_000;
+
+/**
  * Parse the reset time out of a usage-limit notice into an absolute epoch-ms
  * instant, relative to `now`, or null if no time is present.
  *
@@ -210,8 +224,13 @@ export function parseResetTime(plain: string, now: Date, lookbackMs = 0): number
     return inst;
   }
 
-  // Bare time-of-day: today unless it's further past than the lookback, then tomorrow.
-  if (inst < floor) {
+  // Bare time-of-day: today unless it's further past than the lookback, then
+  // tomorrow. The lookback is capped at BARE_TIME_LOOKBACK_MS here — the 8-day
+  // weekly lookback must NOT apply to a bare clock time (see the constant), or a
+  // reset many hours ago (e.g. "1am" at 23:00) reads as "act now" and burns the
+  // one auto-resume shot into a still-limited session.
+  const bareFloor = nowMs - Math.min(lookbackMs, BARE_TIME_LOOKBACK_MS);
+  if (inst < bareFloor) {
     const base = new Date(instantFor(null, y, mo, d, 12, 0));
     base.setDate(base.getDate() + 1);
     inst = instantFor(tz, base.getFullYear(), base.getMonth() + 1, base.getDate(), h, mi);

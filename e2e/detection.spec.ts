@@ -549,6 +549,33 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(new Date(current!).getDate()).toBe(15); // today (already reopened → act now)
     expect(current!).toBeLessThan(now.getTime());
   });
+
+  test("REGRESSION (L1): a bare time hours before now rolls to TOMORROW, not 'act now'", () => {
+    // 23:00 + "resets 1am": today's 1am is 22h in the past. The 8-day weekly
+    // lookback must NOT treat it as just-reopened (which fired auto-resume into a
+    // still-limited session, burning the one shot) — it names tomorrow's 1am.
+    const now = new Date(2026, 5, 15, 23, 0); // 11pm local
+    const at = parseResetTime("Your limit will reset at 1am.", now, RESET_LOOKBACK_MS);
+    const d = new Date(at!);
+    expect(d.getDate()).toBe(16); // tomorrow
+    expect(d.getHours()).toBe(1);
+    expect(at!).toBeGreaterThan(now.getTime());
+    // …so an auto-resume gated on this reset does NOT fire now (would burn the shot).
+    expect(
+      shouldAutoResume({ enabled: true, readiness: "limited", resetAt: at, now: now.getTime(), firedFor: null }),
+    ).toBe(false);
+  });
+
+  test("a bare time only a couple hours past (5-hour cap just reopened) still acts now", () => {
+    // 2am + "resets 1am": 1h ago, within the 6h bare-time lookback → the lingering
+    // notice of a just-reopened 5-hour window resolves to the past instant.
+    const now = new Date(2026, 5, 15, 2, 0); // 2am local
+    const at = parseResetTime("Your limit will reset at 1am.", now, RESET_LOOKBACK_MS);
+    const d = new Date(at!);
+    expect(d.getDate()).toBe(15); // today (already reopened)
+    expect(d.getHours()).toBe(1);
+    expect(at!).toBeLessThan(now.getTime());
+  });
 });
 
 // The auto-resume send must not clobber a session that has queued a draft or has
