@@ -201,7 +201,19 @@ function mapPr(pr: any): PullRequest {
   };
 }
 
+// Dedups repeated getPullRequest calls *within one model load* (a PR linked to
+// several work items is fetched once). It must NOT survive across loads: a PR's
+// status/approvals/isDraft/title are mutable, and only ci/updatedDate get
+// refreshed by enrichPrCI — so a completed PR would stay frozen "active" in the
+// linked view while vanishing from the orphan view. loadModel calls clearPrCache
+// (via Provider.beginLoad) at the start of every reload to keep it a per-load cache.
 const prCache = new Map<string, PullRequest>();
+
+/** Drop the per-load PR cache so the next fetch re-reads mutable PR fields.
+ *  Called at the start of each model reload (see Provider.beginLoad). */
+export function clearPrCache(): void {
+  prCache.clear();
+}
 
 async function getPullRequest(repoId: string, prId: number): Promise<PullRequest | null> {
   const key = `${repoId}:${prId}`;

@@ -26,6 +26,11 @@ export interface FetchContext {
 }
 
 export interface Provider {
+  /** Optional per-reload hook: invalidate any per-load caches so a refresh
+   *  re-reads mutable state. ADO clears its PR cache here (mutable PR fields
+   *  would otherwise stay frozen across reloads); GitHub fetches fresh every
+   *  time, so it has none. Called at the start of every loadModel. */
+  beginLoad?(): void;
   /** Whether the backend can authenticate right now (CLI installed + logged in).
    *  Cheap, never-throwing probe for the Settings page's auth-status line. */
   checkAuth(): Promise<boolean>;
@@ -60,6 +65,7 @@ export interface Provider {
 // ADO's functions predate the FetchContext shape, so adapt them here rather than
 // churn ado.ts: pull the field each one actually needs out of the context.
 const adoProvider: Provider = {
+  beginLoad: ado.clearPrCache,
   checkAuth: ado.checkAuth,
   getMe: ado.getMe,
   getTeamMembers: ado.getTeamMembers,

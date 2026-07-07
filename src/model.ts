@@ -246,6 +246,9 @@ export async function loadLocalSessions(): Promise<LocalSessions> {
 
 export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   const provider = getProvider(opts.provider);
+  // Invalidate any per-load backend caches so a refresh re-reads mutable state
+  // (ADO's PR cache in particular — see Provider.beginLoad / ado.clearPrCache).
+  provider.beginLoad?.();
   // The session index drives both the local views and (for backends that scope
   // to where you work, like GitHub) the fetch set, so build it up front. This is
   // the cheap, network-free local scan the App also polls on its own (see
