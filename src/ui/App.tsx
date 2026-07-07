@@ -9,7 +9,7 @@ import { parseResetTime, shouldAutoResume, RESET_LOOKBACK_MS } from "../usageLim
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, type RepoInfo } from "../repos.ts";
+import { repoRootForCwd, ensureRepoAtTop, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
@@ -1186,7 +1186,12 @@ export default function App({
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
     if (!scoped) return model.repos;
-    return model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root));
+    const inScopeRepos = model.repos.filter(
+      (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
+    );
+    // Always offer the scoped folder itself as the top choice, even with zero
+    // sessions — resolve it to its git root so worktrees land correctly.
+    return ensureRepoAtTop(inScopeRepos, repoRootForCwd(filterRoot!));
   }, [model, scoped, filterRoot]);
 
   const rows = useMemo(() => {
@@ -2063,8 +2068,14 @@ export default function App({
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
                 {sel ? "❯ " : "  "}
                 <Text bold>{r.name.padEnd(22).slice(0, 22)}</Text>
-                <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
-                <Text color={sel ? "black" : "gray"}>{` (${r.claude} claude, ${r.copilot} copilot)`}</Text>
+                {r.total === 0 ? (
+                  <Text color={sel ? "black" : "gray"}>{`  (no sessions yet)         `}</Text>
+                ) : (
+                  <>
+                    <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
+                    <Text color={sel ? "black" : "gray"}>{` (${r.claude} claude, ${r.copilot} copilot)`}</Text>
+                  </>
+                )}
                 <Text dimColor={!sel}>{`  ${r.root}`}</Text>
               </Text>
             );

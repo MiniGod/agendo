@@ -63,3 +63,20 @@ export function discoverRepos(sessions: AgentSession[]): RepoInfo[] {
   }
   return [...byRoot.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
 }
+
+/** A zero-count repo entry for a folder that has no sessions yet. */
+export function synthRepo(root: string): RepoInfo {
+  return { root, name: basename(root), total: 0, claude: 0, copilot: 0 };
+}
+
+/**
+ * Return `repos` with the repo rooted at `root` guaranteed present and ranked
+ * FIRST. If it already exists (has sessions elsewhere), it's moved to the top
+ * without duplicating; otherwise a synthesized zero-count entry is prepended.
+ * Used by the path-scoped picker so the scoped folder is always offerable.
+ */
+export function ensureRepoAtTop(repos: RepoInfo[], root: string): RepoInfo[] {
+  const existing = repos.find((r) => r.root === root);
+  const rest = repos.filter((r) => r.root !== root);
+  return [existing ?? synthRepo(root), ...rest];
+}
