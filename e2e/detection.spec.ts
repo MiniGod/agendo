@@ -307,16 +307,33 @@ test.describe("paneReadiness: finished-turn summary is idle, not a live counter"
   });
 
   test("an open dialog still reads 'dialog' even next to a done summary", () => {
+    // A REAL active dialog REPLACES the input box: the numbered options + footer
+    // are the bottom-most content, with no input-box rule below them.
     const dialog = [
       "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
       "  Do you want to proceed?",
       "  ❯ 1. Yes",
       "    2. No",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(paneReadiness(dialog)).toBe("dialog");
+  });
+
+  test("T8: numbered options left in SCROLLBACK above an idle box read 'ready', not 'dialog'", () => {
+    // Regression: isDialog matched a `❯ 1.` line ANYWHERE, so a finished dialog's
+    // options lingering in history misclassified an idle pane as 'dialog' and
+    // blocked `agendo send`. The input-box rule BELOW the options now demotes them.
+    const idlePastDialog = [
+      "  Do you want to proceed?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      "  ● Proceeding — done.",
       rule,
       "  ❯ ",
       rule,
+      "  ? for shortcuts",
     ].join("\n");
-    expect(paneReadiness(dialog)).toBe("dialog");
+    expect(paneReadiness(idlePastDialog)).toBe("ready");
   });
 });
 
@@ -482,13 +499,12 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     expect(paneResumeSafe(LIMIT_DIALOG_PANE)).toBe(true);
   });
 
-  test("REGRESSION (negative): the dialog wording left in scrollback (box below) is NOT limited", () => {
+  test("REGRESSION (negative): the dialog wording left in scrollback (box below) reads 'ready'", () => {
     // Once dismissed and worked past, the dialog text lingers in history with an
-    // input box beneath it. The `─` rule below the dialog demotes it from active,
-    // so it must NOT read as limited and must never be auto-resumed. (It classifies
-    // as "dialog" here only because a leftover numbered option sits in scrollback —
-    // a pre-existing whole-screen isDialog match, orthogonal to the limit fix.)
-    expect(paneReadiness(DISMISSED_DIALOG_PANE)).not.toBe("limited");
+    // input box beneath it. The `─` rule below the dialog demotes it from active
+    // for BOTH the limit check and the generic dialog check (T8), so an idle pane
+    // reads 'ready' — not limited, not dialog — and is never auto-resumed.
+    expect(paneReadiness(DISMISSED_DIALOG_PANE)).toBe("ready");
     expect(paneUsageLimited(DISMISSED_DIALOG_PANE)).toBe(false);
     expect(paneResumeSafe(DISMISSED_DIALOG_PANE)).toBe(false);
   });

@@ -265,21 +265,44 @@ export function paneReadiness(raw: string): Readiness {
   // notice sits just above the otherwise-idle box, so it would otherwise read
   // "ready" and invite a doomed send. See usageLimit.ts for the matched wording.
   if (paneUsageLimited(raw)) return "limited";
-  // An open interactive menu / confirmation (not mere prose — these footers and
-  // the numbered selection cursor only appear in real dialogs).
-  if (isDialog(plain)) return "dialog";
+  // An open interactive menu / confirmation (not mere prose, and not a numbered
+  // list left in scrollback — only the ACTIVE bottom-most dialog).
+  if (isDialog(raw)) return "dialog";
   // Read the input box: the lines between the last two horizontal rules.
   const input = inputBox(raw);
   if (input === null) return "unknown";
   return inputRealText(input) === "" ? "ready" : "queued";
 }
 
-/** Footers / a numbered selection cursor that only appear in a real dialog. */
-function isDialog(plain: string): boolean {
-  return (
-    /Enter to confirm|Esc to (reject|cancel|go back)|Press Enter to continue/i.test(plain) ||
-    /^\s*❯\s*\d+\.\s/m.test(plain)
-  );
+/**
+ * Whether the pane shows an ACTIVE interactive dialog — an open menu/confirmation
+ * awaiting a keypress — rather than a dialog footer or numbered list left in
+ * scrollback above a now-idle input box. A real dialog REPLACES the input box, so
+ * (mirroring isActiveLimitDialog) its signature must be the bottom-most content
+ * with NO input-box rule (`─{20,}`) below it. Signatures: a confirmation footer
+ * (`Enter to confirm`, `Esc to cancel/reject/go back`, `Press Enter to continue`)
+ * or a numbered selection cursor (`❯ 1.`). Without the "nothing below it" guard,
+ * an idle pane whose scrollback merely contained `❯ 1.`/`2.` lines read as
+ * `dialog` and wrongly blocked `agendo send`. `raw` may include SGR escapes.
+ */
+function isDialog(raw: string): boolean {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = stripAnsi(lines[i]);
+    if (
+      /Enter to confirm|Esc to (reject|cancel|go back)|Press Enter to continue/i.test(l) ||
+      /^\s*❯\s*\d+\.\s/.test(l)
+    ) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return false;
+  for (let i = idx + 1; i < lines.length; i++) {
+    if (/─{20,}/.test(lines[i])) return false;
+  }
+  return true;
 }
 
 /**
@@ -394,8 +417,7 @@ export function paneResumeSafe(raw: string): boolean {
   if (!paneUsageLimited(raw)) return false;
   const lines = raw.replace(/\r/g, "").split("\n");
   if (isActiveLimitDialog(lines)) return true;
-  const plain = stripAnsi(raw);
-  if (isDialog(plain)) return false;
+  if (isDialog(raw)) return false;
   const input = inputBox(raw);
   return input !== null && inputRealText(input) === "";
 }
