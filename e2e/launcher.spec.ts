@@ -378,3 +378,129 @@ test("auto-resume OFF: the limit dialog is left untouched (no Escape, no keystro
   const keys = await keysTo(mock, RUNNING_TARGET);
   expect(keys).toHaveLength(0);
 });
+
+// ── session-discovery staleness: the fast timer must RE-SCAN, not just reconcile ──
+// The liveness poll used to reconcile fresh tmux windows against the STALE session
+// index from the last full loadModel, so a session started afterwards was dropped
+// (never entered liveWindows, never readiness-polled, never auto-resumed). The
+// timer now re-runs the cheap local scan (loadLocalSessions). These drive the real
+// app + fake tmux and assert on the recorded tmux/ADO calls.
+
+// Write an on-disk claude session so SessionIndex.build() discovers it on rescan.
+async function writeSession(home: string, id: string, cwd: string, title: string, branch = "feature/late") {
+  const logDir = join(home, ".claude", "projects", `late-${id.slice(0, 8)}`);
+  await mkdir(logDir, { recursive: true });
+  await writeFile(
+    join(logDir, `${id}.jsonl`),
+    JSON.stringify({ type: "summary", cwd, gitBranch: branch, timestamp: "2026-07-08T09:00:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "ai-title", aiTitle: title, timestamp: "2026-07-08T09:00:01.000Z" }) + "\n",
+  );
+}
+const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+const IDLE_READY = ["  ● idle", "  ────────────────────────────", "  ❯ ", "  ────────────────────────────", "  ? for shortcuts"].join("\n");
+
+test("(a) a session started AFTER the initial load appears + is live-polled within one rescan (no `r`)", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  wt.write("3"); // Sessions view
+  await wt.waitForText("Running now");
+
+  // A brand-new claude session appears on disk AND as a live id-bearing window,
+  // both AFTER the initial full load — exactly the window the stale index dropped.
+  const SID = "99998888-7777-6666-5555-444433332222";
+  const win = `cl-claude-${shortIdOf(SID)}`;
+  const cwd = join(mock.home, "repos", "appweb");
+  await writeSession(mock.home, SID, cwd, "Late arriving session");
+  await mock.setTmuxState({
+    ...tmuxState,
+    windows: [{ session: RUNNING_TARGET, index: 1, name: win }],
+    panes: [...tmuxState.panes, { session: RUNNING_TARGET, window: win, cwd, placeholder: false }],
+    captures: { ...tmuxState.captures, [win]: IDLE_READY },
+  });
+
+  // Without pressing `r`: the rescan discovers it, so it shows up in the list...
+  await wt.waitForText("Late arriving session", 12000);
+  // ...and its window entered liveWindows — proven by the readiness poll capturing
+  // its pane (the poll only reads windows in model.liveWindows).
+  await waitUntil(async () => (await mock.tmuxLog()).some((a) => a[0] === "capture-pane" && a.includes(win)));
+});
+
+test("(b) the fast rescan does NO backend fetch; work items stay put across several rescans", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Add login screen", 20000); // full load done (items rendered)
+
+  await sleep(1000); // let any tail of the initial load's ADO calls settle
+  const before = mock.ado.requests.length;
+
+  // Add a new live session mid-run so rescans have real work + a model change.
+  const SID = "12341234-5678-5678-9012-901290129012";
+  const win = `cl-claude-${shortIdOf(SID)}`;
+  const cwd = join(mock.home, "repos", "appweb");
+  await writeSession(mock.home, SID, cwd, "Another late session");
+  await mock.setTmuxState({
+    ...tmuxState,
+    windows: [{ session: RUNNING_TARGET, index: 1, name: win }],
+    panes: [...tmuxState.panes, { session: RUNNING_TARGET, window: win, cwd, placeholder: false }],
+    captures: { ...tmuxState.captures, [win]: IDLE_READY },
+  });
+
+  await sleep(6000); // several LIVE_POLL_MS rescans go by
+  // Not one extra backend request — the slow fetch stays on the `r` cadence.
+  expect(mock.ado.requests.length).toBe(before);
+  // The network-derived work items are preserved from the last full load...
+  const screen = await wt.waitForText("Add login screen");
+  expect(screen).toContain("Add login screen");
+  // ...and the rescan still surfaced the new session (proving it DID run).
+  wt.write("3");
+  await wt.waitForText("Another late session", 12000);
+});
+
+test("(d) a rescan must not re-fire `continue` for an already-resumed limited window", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await writeFile(join(mock.home, ".agendo", "state.json"), JSON.stringify({ provider: "ado", autoResumeOnUsageLimit: true }));
+  // A limited pane whose reset time is an EXPLICIT past date (yesterday 3pm) — an
+  // explicit month+day parses to that concrete instant (unlike a bare time, which
+  // rolls forward and could land in the future near midnight), so it's reliably
+  // in the past and within RESET_LOOKBACK → auto-resume fires on the first sample.
+  const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const yst = new Date(Date.now() - 24 * 3600_000);
+  const label = `3:00pm ${MON[yst.getMonth()]} ${yst.getDate()}`;
+  const rule = "  ─────────────────────────────────────────────";
+  const LIMITED_PAST = [
+    `  Claude usage limit reached. Your limit will reset at ${label}.`,
+    rule,
+    "  ❯ ",
+    rule,
+    "  ? for shortcuts",
+  ].join("\n");
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMITED_PAST } });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+
+  // It fires the resume exactly once.
+  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).some((a) => a.includes("continue")));
+  const continues = async () => (await keysTo(mock, RUNNING_TARGET)).filter((a) => a.includes("continue")).length;
+  expect(await continues()).toBe(1);
+
+  // Now force a rescan MODEL CHANGE (a new session appears) → the readiness effect
+  // re-arms and re-samples. The frozen resetAt + fire-once guard must survive the
+  // rescan, so `continue` is NOT sent again.
+  const SID = "aaaabbbb-cccc-dddd-eeee-ffff00001111";
+  const win = `cl-claude-${shortIdOf(SID)}`;
+  const cwd = join(mock.home, "repos", "appweb");
+  await writeSession(mock.home, SID, cwd, "Bystander session");
+  await mock.setTmuxState({
+    ...tmuxState,
+    windows: [{ session: RUNNING_TARGET, index: 1, name: win }],
+    panes: [...tmuxState.panes, { session: RUNNING_TARGET, window: win, cwd, placeholder: false }],
+    captures: { [RUNNING_TARGET]: LIMITED_PAST, [win]: IDLE_READY },
+  });
+  // Wait for the rescan to pick up the bystander (proves the re-arm happened)…
+  wt.write("3");
+  await wt.waitForText("Bystander session", 12000);
+  await sleep(3000); // …and several more samples of the still-limited login pane.
+  expect(await continues()).toBe(1); // still exactly one — never re-fired
+});

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
-import { loadModel, isRunning, refreshLiveTmux, itemKey, prKey, type LoadedModel } from "../model.ts";
+import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
@@ -23,6 +23,7 @@ import type {
   PRWithSessions,
   ProviderName,
   PullRequest,
+  RepoSessions,
   ReviewPRWithSessions,
   SessionActivity,
   TaskItem,
@@ -170,6 +171,31 @@ function sameActivity(a: Activity | undefined, b: Activity | undefined): boolean
 function sameLiveTmux(a: Set<string>, b: Set<string>): boolean {
   if (a.size !== b.size) return false;
   for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+// Map equality (same keys → same values). Gates the rescan's setModel on the
+// live-window map, whose changes drive the readiness/auto-resume effect.
+function sameLiveWindows(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  return true;
+}
+
+// The set of session identities (source:id) present across all repo groups, as a
+// stable signature. Used to detect that a session appeared/vanished between
+// rescans — the trigger for refreshing the (network-free) local half of the model.
+function sessionGroupsSig(groups: RepoSessions[]): string {
+  const ids: string[] = [];
+  for (const g of groups) for (const s of g.sessions) ids.push(`${s.source}:${s.id}`);
+  return ids.sort().join(",");
+}
+
+// Repo-list equality by root (order-sensitive; discoverRepos is deterministically
+// ordered), so a changed repo set for the fresh-session picker triggers a refresh.
+function sameRepos(a: RepoInfo[], b: RepoInfo[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i].root !== b[i].root) return false;
   return true;
 }
 
@@ -1282,30 +1308,58 @@ export default function App({
     };
   }, []);
 
-  // Background tmux-liveness poll: recompute running/live state every
-  // LIVE_POLL_MS so badges update without a manual `r` (which makes slow ADO
-  // calls). LIVENESS ONLY — no network, no session re-scan; updates liveTmux/
-  // liveKinds/liveWindows on the model the app already has so the readiness poll
-  // sees sessions started since the last full reload. Mount-only: reads `model`
-  // via modelRef.
+  // Background LOCAL rescan every LIVE_POLL_MS: re-run the cheap, network-free
+  // session scan (loadLocalSessions → SessionIndex.build + discoverRepos +
+  // refreshLiveTmux) and merge its fresh session groups / repos / live-tmux state
+  // into the model the app already has. This is what makes a session started
+  // AFTER the last full `loadModel` appear in the list — and, critically, puts its
+  // window into `liveWindows` — without a manual `r`, so the readiness poll and
+  // #8 auto-resume can act on it. The SLOW backend fetch (work items / PRs / team)
+  // stays on the `r` / provider-change cadence; nothing here touches the network.
+  // Mount-only: reads `model` via modelRef; merges via setModel so the
+  // network-derived fields (items, PRs, teamMembers, sessionLinks) are preserved.
   useEffect(() => {
-    const handle = setInterval(() => {
-      const m = modelRef.current;
-      if (!m || m.sessionGroups.length === 0) return; // no model yet (full reload), or nothing to attribute
-      const fresh = refreshLiveTmux(m.sessionGroups.flatMap((g) => g.sessions));
-      setModel((prev) =>
-        prev &&
-        (!sameLiveTmux(prev.liveTmux, fresh.live) ||
-          !sameLiveTmux(prev.livePlaceholders, fresh.livePlaceholders))
-          ? {
-              ...prev,
-              liveTmux: fresh.live,
-              liveKinds: fresh.liveKinds,
-              liveWindows: fresh.liveWindows,
-              livePlaceholders: fresh.livePlaceholders,
-            }
-          : prev,
-      );
+    let inFlight = false; // a slow disk scan must not overlap the next tick
+    const handle = setInterval(async () => {
+      if (inFlight || !modelRef.current) return; // no full model yet, or busy
+      inFlight = true;
+      try {
+        const local = await loadLocalSessions();
+        setModel((prev) => {
+          if (!prev) return prev;
+          // Only re-render when something the list / readiness effect cares about
+          // actually changed — an unchanged local scan is a no-op, so a stable
+          // limited session doesn't thrash the readiness effect (which re-arms on
+          // every `model` change and would otherwise re-sample constantly).
+          const unchanged =
+            sessionGroupsSig(prev.sessionGroups) === sessionGroupsSig(local.sessionGroups) &&
+            sameLiveTmux(prev.liveTmux, local.live) &&
+            sameLiveTmux(prev.livePlaceholders, local.livePlaceholders) &&
+            sameLiveWindows(prev.liveWindows, local.liveWindows) &&
+            sameRepos(prev.repos, local.repos);
+          if (unchanged) return prev;
+          // Merge the fresh LOCAL half; keep the NETWORK half from the last full
+          // load. NB: item.sessions / pr.sessions were associated against the OLD
+          // index, so a brand-new session's backlink to an item/PR lags until the
+          // next full `r` — acceptable for v1 (the session itself still appears and
+          // is live-polled). We deliberately DON'T touch limitWindows/resumeFired/
+          // dialogRevealed here: a rescan must never reset a frozen reset instant
+          // or the fire-once guard, or auto-resume could re-fire `continue`.
+          return {
+            ...prev,
+            sessionGroups: local.sessionGroups,
+            repos: local.repos,
+            liveTmux: local.live,
+            liveKinds: local.liveKinds,
+            liveWindows: local.liveWindows,
+            livePlaceholders: local.livePlaceholders,
+          };
+        });
+      } catch {
+        // Leave the last good model in place on a transient scan error.
+      } finally {
+        inFlight = false;
+      }
     }, LIVE_POLL_MS);
     return () => clearInterval(handle);
   }, []);
