@@ -13,8 +13,8 @@
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, resumeKeystrokes } from "../src/tmux.ts";
-import { parseResetTime, shouldAutoResume, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes } from "../src/tmux.ts";
+import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import type { AgentSession } from "../src/types.ts";
@@ -307,16 +307,33 @@ test.describe("paneReadiness: finished-turn summary is idle, not a live counter"
   });
 
   test("an open dialog still reads 'dialog' even next to a done summary", () => {
+    // A REAL active dialog REPLACES the input box: the numbered options + footer
+    // are the bottom-most content, with no input-box rule below them.
     const dialog = [
       "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
       "  Do you want to proceed?",
       "  ❯ 1. Yes",
       "    2. No",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(paneReadiness(dialog)).toBe("dialog");
+  });
+
+  test("T8: numbered options left in SCROLLBACK above an idle box read 'ready', not 'dialog'", () => {
+    // Regression: isDialog matched a `❯ 1.` line ANYWHERE, so a finished dialog's
+    // options lingering in history misclassified an idle pane as 'dialog' and
+    // blocked `agendo send`. The input-box rule BELOW the options now demotes them.
+    const idlePastDialog = [
+      "  Do you want to proceed?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      "  ● Proceeding — done.",
       rule,
       "  ❯ ",
       rule,
+      "  ? for shortcuts",
     ].join("\n");
-    expect(paneReadiness(dialog)).toBe("dialog");
+    expect(paneReadiness(idlePastDialog)).toBe("ready");
   });
 });
 
@@ -381,6 +398,67 @@ const BLOCKED_PANE = [
   "  20:15:02 | 30% ctx | Opus 4.8 | fix/236653 [$] | ~/repos/mc-applications",
 ].join("\n");
 
+// PRIMARY POSITIVE fixture: the NUMBERED CHOICE DIALOG — the interactive state a
+// limited session actually sits in, captured VERBATIM (read-only) from the live
+// limited pane agendo:cl-bg-69a05a1d3a23. The two option lines are the durable
+// anchors (LIMIT_DIALOG_RE). Note: this dialog shows NO reset time, and it
+// renders `─` table rules ABOVE it (elided-but-representative here) yet has NO
+// input box below it — that structural fact (no `─{20,}` rule beneath the dialog)
+// is how we know it's the ACTIVE dialog, not stale scrollback. agendo previously
+// read this exact screen as non-"limited"; this is the false negative being fixed.
+const LIMIT_DIALOG_PANE = [
+  "● Done. The bug is created, fully configured, and linked.",
+  "",
+  "  ┌───────────┬───────────────────────────────────────────────────────┐",
+  "  │   Field   │                          Value                          │",
+  "  ├───────────┼───────────────────────────────────────────────────────┤",
+  "  │ State     │ In Review                                               │",
+  "  └───────────┴───────────────────────────────────────────────────────┘",
+  "",
+  "  Your uncommitted nx-migrate pipeline work remains untouched.",
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+  "   What do you want to do?",
+  "",
+  "   ❯ 1. Stop and wait for limit to reset",
+  "     2. Add funds to continue with usage credits",
+  "",
+  "   Enter to confirm · Esc to cancel",
+].join("\n");
+
+// NEGATIVE fixture: the SAME dialog wording, but DISMISSED and left in scrollback —
+// the user pressed Escape/continued, a real turn ran, and the pane now rests at an
+// empty input box (a `─{20,}` rule sits BELOW the old dialog text). Must NOT read
+// as limited: the dialog is history, not the active state.
+const DISMISSED_DIALOG_PANE = [
+  "   What do you want to do?",
+  "   ❯ 1. Stop and wait for limit to reset",
+  "     2. Add funds to continue with usage credits",
+  "   Enter to confirm · Esc to cancel",
+  "",
+  "❯ continue",
+  "● Picked the work back up and finished the migration.",
+  "✻ Worked for 25s",
+  "─────────────────────────────────────────────",
+  "❯ ",
+  "─────────────────────────────────────────────",
+  "  14:31:02 | 30% ctx | Opus 4.8 | worktree-x [$] | ~/repos/mc-applications",
+].join("\n");
+
+// ESC-REVEALED text form, captured VERBATIM (read-only) from the same live pane
+// after ONE Escape dismissed the dialog: the reset time now shows, WITHOUT a
+// "/usage-credits" continuation line (that line appears only in some cases — cf.
+// REAL_LIMIT_PANE, which has it). Here the notice is the active block right above
+// the input box. Detection must fire, and parseResetTime must read "2:10pm
+// (Atlantic/Reykjavik)".
+const ESC_REVEALED_PANE = [
+  "❯ pr status?",
+  "  ⎿  You've hit your session limit · resets 2:10pm (Atlantic/Reykjavik)",
+  "─────────────────────────────────────────────",
+  "❯ ",
+  "─────────────────────────────────────────────",
+  "  14:20:47 | 23% ctx | 5h: 101% (now) | Opus 4.8 | worktree-fix-npm11-lockfile [!?$] | /home/kristjan/re…",
+].join("\n");
+
 test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
   const idleBox = ["  ─────────────────────────────────────────", "  ❯ ", "  ─────────────────────────────────────────"].join("\n");
 
@@ -406,6 +484,45 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     expect(paneReadiness(BLOCKED_PANE)).toBe("limited");
     expect(paneUsageLimited(BLOCKED_PANE)).toBe(true);
     expect(paneResumeSafe(BLOCKED_PANE)).toBe(true); // safe to auto-resume once reset passes
+  });
+
+  test("REGRESSION (the real false negative): the numbered limit DIALOG reads 'limited'", () => {
+    // The primary interactive state — a limited session sits in this menu. It has
+    // NO reset time and no input box, so it can't be caught by the text-block
+    // heuristic; the option wording ("Stop and wait for limit to reset" / "Add
+    // funds to continue with usage credits") is the anchor. This is the exact
+    // screen agendo missed (classified non-"limited").
+    expect(paneReadiness(LIMIT_DIALOG_PANE)).toBe("limited");
+    expect(paneUsageLimited(LIMIT_DIALOG_PANE)).toBe(true);
+    // Resume-safe: the resume keystrokes lead with Escape, which dismisses the
+    // dialog (verified live), then type + send `continue`.
+    expect(paneResumeSafe(LIMIT_DIALOG_PANE)).toBe(true);
+  });
+
+  test("REGRESSION (negative): the dialog wording left in scrollback (box below) reads 'ready'", () => {
+    // Once dismissed and worked past, the dialog text lingers in history with an
+    // input box beneath it. The `─` rule below the dialog demotes it from active
+    // for BOTH the limit check and the generic dialog check (T8), so an idle pane
+    // reads 'ready' — not limited, not dialog — and is never auto-resumed.
+    expect(paneReadiness(DISMISSED_DIALOG_PANE)).toBe("ready");
+    expect(paneUsageLimited(DISMISSED_DIALOG_PANE)).toBe(false);
+    expect(paneResumeSafe(DISMISSED_DIALOG_PANE)).toBe(false);
+  });
+
+  test("REGRESSION: the esc-revealed text form (no /usage-credits line) reads 'limited'", () => {
+    // After one Escape the reset time shows; this variant has no "/usage-credits"
+    // continuation. The notice is the active block above the box, so it fires.
+    expect(paneReadiness(ESC_REVEALED_PANE)).toBe("limited");
+    expect(paneUsageLimited(ESC_REVEALED_PANE)).toBe(true);
+    expect(paneResumeSafe(ESC_REVEALED_PANE)).toBe(true);
+  });
+
+  test("isLimitDialog matches the option wording, not ordinary prose", () => {
+    expect(isLimitDialog("❯ 1. Stop and wait for limit to reset")).toBe(true);
+    expect(isLimitDialog("  2. Add funds to continue with usage credits")).toBe(true);
+    // Not tripped by unrelated prose that merely mentions limits or funds.
+    expect(isLimitDialog("I hit a limit in the loop and had to reset the counter")).toBe(false);
+    expect(isLimitDialog("add the funds to the budget spreadsheet")).toBe(false);
   });
 
   test("the canonical 5-hour notice reads 'limited', not 'ready'", () => {
@@ -500,6 +617,19 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     }).formatToParts(new Date(at!));
     const hm = `${parts.find((p) => p.type === "hour")!.value}:${parts.find((p) => p.type === "minute")!.value}`;
     expect(hm).toBe("19:20"); // 7:20pm in Reykjavik (UTC+0 year-round)
+  });
+
+  test("REGRESSION: the esc-revealed 'resets 2:10pm (Atlantic/Reykjavik)' (no /usage-credits) parses", () => {
+    // Verbatim from the live pane after one Escape. The notice ends at the reset
+    // time with no continuation line — parsing must still extract the instant.
+    const now = new Date("2026-07-07T09:00:00Z");
+    const at = parseResetTime(ESC_REVEALED_PANE, now, RESET_LOOKBACK_MS);
+    expect(at).not.toBeNull();
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Atlantic/Reykjavik", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(new Date(at!));
+    const hm = `${parts.find((p) => p.type === "hour")!.value}:${parts.find((p) => p.type === "minute")!.value}`;
+    expect(hm).toBe("14:10"); // 2:10pm in Reykjavik (UTC+0 year-round)
   });
 
   test("no parseable reset time → null (still limited, just not auto-resumable)", () => {
@@ -622,6 +752,90 @@ test.describe("resumeKeystrokes: the continue sequence", () => {
       ["send-keys", "-t", "cl-claude-abc", "-l", "continue"],
       ["send-keys", "-t", "cl-claude-abc", "Enter"],
     ]);
+  });
+});
+
+test.describe("dialogRevealKeystrokes: the one-Escape reveal nudge", () => {
+  test("is exactly a single Escape to the target — no 'continue'", () => {
+    expect(dialogRevealKeystrokes("cl-claude-abc")).toEqual([
+      ["send-keys", "-t", "cl-claude-abc", "Escape"],
+    ]);
+  });
+});
+
+test.describe("paneLimitDialogActive: raw-string wrapper of the structural check", () => {
+  test("true only for the active numbered dialog, not text/dismissed forms", () => {
+    expect(paneLimitDialogActive(LIMIT_DIALOG_PANE)).toBe(true);
+    expect(paneLimitDialogActive(DISMISSED_DIALOG_PANE)).toBe(false); // box below ⇒ scrollback
+    expect(paneLimitDialogActive(ESC_REVEALED_PANE)).toBe(false); // text form, no dialog options
+    expect(paneLimitDialogActive(BLOCKED_PANE)).toBe(false);
+  });
+});
+
+// The dialog carries NO reset time, so shouldAutoResume can never fire on it. The
+// reveal nudge (one Escape) exists to surface the timestamp; once it lands, this
+// gate steps aside and shouldAutoResume takes over. These pin the whole gate.
+test.describe("shouldRevealDialog: one-shot reveal of the dialog's hidden reset time", () => {
+  const base = {
+    enabled: true,
+    readiness: "limited" as const,
+    dialogActive: true,
+    resetAt: null as number | null,
+    revealed: false,
+  };
+
+  test("fires when ON, limited, active dialog, no reset time, not yet revealed", () => {
+    expect(shouldRevealDialog(base)).toBe(true);
+  });
+
+  test("off by default: disabled never reveals", () => {
+    expect(shouldRevealDialog({ ...base, enabled: false })).toBe(false);
+  });
+
+  test("only for the active dialog — never a text-form or non-dialog limited pane", () => {
+    expect(shouldRevealDialog({ ...base, dialogActive: false })).toBe(false);
+  });
+
+  test("never when the pane isn't limited", () => {
+    for (const r of ["ready", "busy", "queued", "dialog", "compacting", "unknown"] as const)
+      expect(shouldRevealDialog({ ...base, readiness: r })).toBe(false);
+  });
+
+  test("once a reset time is known, it steps aside (shouldAutoResume's job now)", () => {
+    expect(shouldRevealDialog({ ...base, resetAt: Date.now() + 3600_000 })).toBe(false);
+  });
+
+  test("once-only: already revealed → never re-Escape (parks if the time never shows)", () => {
+    expect(shouldRevealDialog({ ...base, revealed: true })).toBe(false);
+  });
+});
+
+// The reveal→resume handoff end to end (pure): after the Escape reveals the text
+// form, parseResetTime freezes an instant, shouldRevealDialog stops, and once the
+// reset (plus grace) has passed shouldAutoResume fires into a resume-safe pane.
+test.describe("reveal → resume handoff on the esc-revealed text form", () => {
+  test("esc-revealed 'resets 2:10pm' → resetAt parses, reveal stops, resume fires", () => {
+    const now = new Date("2026-07-07T15:00:00Z"); // past 2:10pm (14:10) in Reykjavik (UTC+0)
+    const resetAt = parseResetTime(ESC_REVEALED_PANE, now, RESET_LOOKBACK_MS);
+    expect(resetAt).not.toBeNull();
+    expect(resetAt!).toBeLessThan(now.getTime()); // already reopened
+
+    // Reveal no longer applies — a reset time is known.
+    expect(
+      shouldRevealDialog({
+        enabled: true,
+        readiness: "limited",
+        dialogActive: paneLimitDialogActive(ESC_REVEALED_PANE), // false anyway
+        resetAt,
+        revealed: true,
+      }),
+    ).toBe(false);
+
+    // The normal fire path takes over: reset passed + grace, pane is resume-safe.
+    expect(paneResumeSafe(ESC_REVEALED_PANE)).toBe(true);
+    expect(
+      shouldAutoResume({ enabled: true, readiness: "limited", resetAt, now: now.getTime(), firedFor: null }),
+    ).toBe(true);
   });
 });
 

@@ -8,7 +8,7 @@
 // whose first window runs the menu, so every agent ends up as a tab next to it.
 import { spawnSync } from "child_process";
 import type { AgentSession } from "./types.ts";
-import { isUsageLimited } from "./usageLimit.ts";
+import { isUsageLimited, isLimitDialog } from "./usageLimit.ts";
 
 /**
  * The default host session the `--tmux` flag creates/attaches when the launcher
@@ -118,10 +118,17 @@ export function sendToPane(target: string, text: string): void {
 
 /**
  * The tmux `send-keys` argv sequence that nudges a usage-limited session to
- * resume: press Escape (drop any partial input / dismiss the notice), type
- * `continue`, then Enter. Split from the runner (`sendResume`) so it can be
- * asserted directly in tests without touching a real tmux server. `-l` forces
- * "continue" to be sent as literal characters, not looked up as a key name.
+ * resume: press Escape, type `continue`, then Enter. `-l` forces "continue" to be
+ * sent as literal characters, not looked up as a key name. Split from the runner
+ * (`sendResume`) so it can be asserted directly in tests without touching a real
+ * tmux server.
+ *
+ * VERIFIED against the live limited pane, one keystroke at a time: on the numbered
+ * limit DIALOG a single Escape dismisses the menu and drops back to an empty input
+ * box (revealing the "resets <time>" text as a ⎿ result above it); the literal
+ * `continue` then lands in that box; Enter sends it. The leading Escape is thus
+ * load-bearing for the dialog form (dismiss the modal before typing) and harmless
+ * for the plain text form (clears any stray partial input).
  */
 export function resumeKeystrokes(target: string): string[][] {
   return [
@@ -134,6 +141,23 @@ export function resumeKeystrokes(target: string): string[][] {
 /** Send the resume keystrokes (`<esc>continue<enter>`) to a target pane. */
 export function sendResume(target: string): void {
   for (const argv of resumeKeystrokes(target)) tmuxQuiet(argv);
+}
+
+/**
+ * The `send-keys` argv for the dialog-reveal nudge: a SINGLE Escape. On the
+ * numbered limit dialog this dismisses the menu and reveals the "resets <time>"
+ * notice (verified live) — the timestamp the dialog itself hides — so the next
+ * poll can parse and freeze a reset instant and the normal auto-resume machinery
+ * can fire. Deliberately just Escape: no `continue` is sent on the reveal tick.
+ * Split from the runner so it can be asserted directly in tests.
+ */
+export function dialogRevealKeystrokes(target: string): string[][] {
+  return [["send-keys", "-t", target, "Escape"]];
+}
+
+/** Send the dialog-reveal nudge (a single `<esc>`) to a target pane. */
+export function sendDialogReveal(target: string): void {
+  for (const argv of dialogRevealKeystrokes(target)) tmuxQuiet(argv);
 }
 
 /** Whether a captured claude TUI pane can accept a freshly-sent prompt. */
@@ -241,21 +265,44 @@ export function paneReadiness(raw: string): Readiness {
   // notice sits just above the otherwise-idle box, so it would otherwise read
   // "ready" and invite a doomed send. See usageLimit.ts for the matched wording.
   if (paneUsageLimited(raw)) return "limited";
-  // An open interactive menu / confirmation (not mere prose — these footers and
-  // the numbered selection cursor only appear in real dialogs).
-  if (isDialog(plain)) return "dialog";
+  // An open interactive menu / confirmation (not mere prose, and not a numbered
+  // list left in scrollback — only the ACTIVE bottom-most dialog).
+  if (isDialog(raw)) return "dialog";
   // Read the input box: the lines between the last two horizontal rules.
   const input = inputBox(raw);
   if (input === null) return "unknown";
   return inputRealText(input) === "" ? "ready" : "queued";
 }
 
-/** Footers / a numbered selection cursor that only appear in a real dialog. */
-function isDialog(plain: string): boolean {
-  return (
-    /Enter to confirm|Esc to (reject|cancel|go back)|Press Enter to continue/i.test(plain) ||
-    /^\s*❯\s*\d+\.\s/m.test(plain)
-  );
+/**
+ * Whether the pane shows an ACTIVE interactive dialog — an open menu/confirmation
+ * awaiting a keypress — rather than a dialog footer or numbered list left in
+ * scrollback above a now-idle input box. A real dialog REPLACES the input box, so
+ * (mirroring isActiveLimitDialog) its signature must be the bottom-most content
+ * with NO input-box rule (`─{20,}`) below it. Signatures: a confirmation footer
+ * (`Enter to confirm`, `Esc to cancel/reject/go back`, `Press Enter to continue`)
+ * or a numbered selection cursor (`❯ 1.`). Without the "nothing below it" guard,
+ * an idle pane whose scrollback merely contained `❯ 1.`/`2.` lines read as
+ * `dialog` and wrongly blocked `agendo send`. `raw` may include SGR escapes.
+ */
+function isDialog(raw: string): boolean {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = stripAnsi(lines[i]);
+    if (
+      /Enter to confirm|Esc to (reject|cancel|go back)|Press Enter to continue/i.test(l) ||
+      /^\s*❯\s*\d+\.\s/.test(l)
+    ) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return false;
+  for (let i = idx + 1; i < lines.length; i++) {
+    if (/─{20,}/.test(lines[i])) return false;
+  }
+  return true;
 }
 
 /**
@@ -280,6 +327,43 @@ function inputBox(raw: string): string | null {
 const LIMIT_ACTIVE_MAX_LINES = 12;
 
 /**
+ * Whether the numbered limit dialog is the *active* bottom-most content — not the
+ * same text lingering in scrollback after it was dismissed. The dialog replaces
+ * the input box while it's up (there's no `❯ ` prompt line, hence no `─` rule,
+ * below it); once dismissed the session drops back to an input box, so a `─{20,}`
+ * rule appears beneath the (now historical) dialog text. So: find the last line
+ * carrying the dialog's option wording and treat it as active only when no input-
+ * box rule sits below it. `lines` are raw (SGR escapes intact) — we strip per
+ * line before matching. Note the dialog can render `─` rules *above* it (e.g. a
+ * table in scrollback); only rules *below* the dialog demote it.
+ */
+function isActiveLimitDialog(lines: string[]): boolean {
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (isLimitDialog(stripAnsi(lines[i]))) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return false;
+  for (let i = idx + 1; i < lines.length; i++) {
+    if (/─{20,}/.test(lines[i])) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether a captured pane is showing the ACTIVE numbered limit dialog (the
+ * public, raw-string form of isActiveLimitDialog). Exposed so callers — the
+ * auto-resume poll in particular — can key the dialog-reveal nudge off the same
+ * structural check the readiness classifier uses, rather than re-deriving it.
+ * `raw` may include SGR escapes (see capturePane).
+ */
+export function paneLimitDialogActive(raw: string): boolean {
+  return isActiveLimitDialog(raw.replace(/\r/g, "").split("\n"));
+}
+
+/**
  * Whether the pane is CURRENTLY at a usage limit — the notice is the active,
  * bottom-most content, not a stale line left in scrollback after the session
  * resumed. The message persists in history once the user continues, so a plain
@@ -296,6 +380,10 @@ const LIMIT_ACTIVE_MAX_LINES = 12;
  */
 export function paneUsageLimited(raw: string): boolean {
   const lines = raw.replace(/\r/g, "").split("\n");
+  // The numbered limit dialog — the primary interactive limit state (form A in
+  // usageLimit.ts). It has no reset time and no input box of its own, so the
+  // text-block heuristic below can't see it; detect it structurally instead.
+  if (isActiveLimitDialog(lines)) return true;
   const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
   if (rules.length === 0) return isUsageLimited(stripAnsi(raw));
   const top = rules.length >= 2 ? rules[rules.length - 2] : rules[rules.length - 1] - 2;
@@ -319,11 +407,17 @@ export function paneUsageLimited(raw: string): boolean {
  * wiped). Stricter than `paneReadiness` alone, which reports "limited" even over
  * a lingering dialog / queued text because the limit check outranks both. `raw`
  * must include SGR escapes (see capturePane).
+ *
+ * The numbered limit dialog is the one dialog we DO fire into: the resume
+ * keystrokes lead with Escape, which dismisses it (verified live), and the dialog
+ * has no input box holding a user draft. Every *other* open dialog still blocks —
+ * Escape would dismiss it too, but that's not what the user wants.
  */
 export function paneResumeSafe(raw: string): boolean {
   if (!paneUsageLimited(raw)) return false;
-  const plain = stripAnsi(raw);
-  if (isDialog(plain)) return false;
+  const lines = raw.replace(/\r/g, "").split("\n");
+  if (isActiveLimitDialog(lines)) return true;
+  if (isDialog(raw)) return false;
   const input = inputBox(raw);
   return input !== null && inputRealText(input) === "";
 }
