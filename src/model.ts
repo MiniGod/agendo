@@ -198,13 +198,61 @@ export const prKey = (pr: Pick<PullRequest, "repositoryId" | "id">): string =>
 export const itemKey = (it: Pick<WorkItem, "project" | "id">): string =>
   `${it.project}:${it.id}`;
 
+/** Sort helper shared by the session groupings: most-recently-used first. */
+const byLastUsedDesc = (a: AgentSession, b: AgentSession) =>
+  b.lastUsed.getTime() - a.lastUsed.getTime();
+
+/** Group every local session by the main repo of its worktree (Sessions view),
+ *  most-recently-active repo (and session within a repo) first. */
+export function groupSessionsByRepo(sessions: AgentSession[]): RepoSessions[] {
+  const groupMap = new Map<string, AgentSession[]>();
+  for (const s of sessions) {
+    const root = repoRootForCwd(s.cwd);
+    const arr = groupMap.get(root) ?? [];
+    arr.push(s);
+    groupMap.set(root, arr);
+  }
+  return [...groupMap.entries()]
+    .map(([root, ss]) => ({ root, name: basename(root), sessions: ss.sort(byLastUsedDesc) }))
+    .sort((a, b) => b.sessions[0].lastUsed.getTime() - a.sessions[0].lastUsed.getTime());
+}
+
+/**
+ * The CHEAP, network-free half of a model load: scan on-disk sessions, discover
+ * their repos, reconcile live tmux, and group sessions by repo. Deliberately does
+ * NO provider.* calls, so it's light enough to poll on a short timer — the App
+ * runs it every couple seconds to discover sessions started since the last full
+ * `loadModel` (so their windows enter `liveWindows` and the readiness/auto-resume
+ * poll can act on them) without paying for the slow backend fetches. `loadModel`
+ * reuses it so the local half has a single source of truth.
+ */
+export interface LocalSessions {
+  index: SessionIndex;
+  repos: RepoInfo[];
+  sessionGroups: RepoSessions[];
+  live: Set<string>;
+  liveKinds: Map<string, SessionKind>;
+  liveWindows: Map<string, string>;
+  livePlaceholders: Set<string>;
+}
+
+export async function loadLocalSessions(): Promise<LocalSessions> {
+  const index = await SessionIndex.build();
+  const repos = discoverRepos(index.all);
+  const { live, liveKinds, liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  const sessionGroups = groupSessionsByRepo(index.all);
+  return { index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders };
+}
+
 export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   const provider = getProvider(opts.provider);
   // The session index drives both the local views and (for backends that scope
-  // to where you work, like GitHub) the fetch set, so build it up front.
-  const [me, index] = await Promise.all([provider.getMe(), SessionIndex.build()]);
+  // to where you work, like GitHub) the fetch set, so build it up front. This is
+  // the cheap, network-free local scan the App also polls on its own (see
+  // loadLocalSessions) — reused here so the local half is computed one way.
+  const [me, local] = await Promise.all([provider.getMe(), loadLocalSessions()]);
+  const { index, repos } = local;
   const identity = opts.identity ?? me;
-  const repos = discoverRepos(index.all);
   const ctx = { identity, repos };
   const [{ items, currentIterationPath }, activePRs, reviewPRs, teamMembers] =
     await Promise.all([
@@ -213,7 +261,7 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
       provider.fetchReviewPRs(ctx),
       provider.getTeamMembers(),
     ]);
-  const { live, liveKinds, liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  const { live, liveKinds, liveWindows, livePlaceholders } = local;
 
   // Snapshot the host session's open agent tabs so a future startup can lazily
   // restore them (browser-style). Cheap, idempotent, and no-op when that host
@@ -322,22 +370,9 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     ? currentIterationPath.split("\\").pop() ?? currentIterationPath
     : null;
 
-  // Group every local session by the main repo of its worktree (Sessions view).
-  const groupMap = new Map<string, AgentSession[]>();
-  for (const s of index.all) {
-    const root = repoRootForCwd(s.cwd);
-    const arr = groupMap.get(root) ?? [];
-    arr.push(s);
-    groupMap.set(root, arr);
-  }
-  const sessionGroups: RepoSessions[] = [...groupMap.entries()]
-    .map(([root, sessions]) => ({
-      root,
-      name: basename(root),
-      sessions: sessions.sort(byLastUsed),
-    }))
-    // Most recently active repo first.
-    .sort((a, b) => b.sessions[0].lastUsed.getTime() - a.sessions[0].lastUsed.getTime());
+  // Group every local session by the main repo of its worktree (Sessions view) —
+  // reused from the local scan above so grouping is defined once.
+  const sessionGroups: RepoSessions[] = local.sessionGroups;
 
   // Reverse index for the Sessions view: which PR / work item each session
   // links to. Built from the already-resolved lists, richest source first, so a

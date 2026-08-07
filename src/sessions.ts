@@ -117,11 +117,42 @@ async function parseClaudeMeta(
   return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt };
 }
 
+// Per-transcript parse cache, keyed by absolute .jsonl path. Parsing a Claude
+// transcript means reading + JSON-parsing every line of a possibly huge file;
+// with the index rebuilt on a short timer that dominated a CPU core across
+// hundreds of MB of transcripts. Since a transcript only gains records by being
+// appended to (mtime AND size move together on any change), reusing the built
+// AgentSession while both match is pure memoization — build() output stays
+// byte-for-byte identical for a given on-disk state. The one actively-appending
+// transcript (the foreground session's own log) still re-parses every build
+// because its mtime/size change each tick; that's one file, not the whole
+// corpus. Incremental tail-by-offset reading of that growing file is a possible
+// future follow-up, not done here.
+const claudeParseCache = new Map<string, { mtimeMs: number; size: number; session: AgentSession }>();
+
+// Test-only instrumentation: counts how many transcripts were actually read +
+// parsed (cache MISSES) during index builds, so tests can prove the mtime/size
+// cache serves unchanged files without re-reading. Never read in production code.
+let claudeParseCount = 0;
+export function __claudeParseCount(): number {
+  return claudeParseCount;
+}
+export function __resetClaudeParseCount(): void {
+  claudeParseCount = 0;
+}
+/** Test-only: current number of cached transcript entries (to prove pruning). */
+export function __claudeCacheSize(): number {
+  return claudeParseCache.size;
+}
+
 const claudeProvider: SessionProvider = {
   source: "claude",
   async index() {
     const bases = await claudeBaseDirs();
     const sessions: AgentSession[] = [];
+    // Absolute paths of transcripts that still exist this scan; cache entries
+    // for anything else (deleted or vanished mid-scan) are pruned afterwards.
+    const seen = new Set<string>();
     await Promise.all(
       bases.map(async ({ projects, configDir }) => {
         let dirs: string[];
@@ -147,35 +178,55 @@ const claudeProvider: SessionProvider = {
             await Promise.all(
               files.map(async (file) => {
                 const filePath = join(dirPath, file);
-                const [meta, st] = await Promise.all([
-                  parseClaudeMeta(filePath),
-                  stat(filePath).catch(() => null),
-                ]);
+                // stat first (cheap): the cache hit path must not touch file
+                // contents. A file that vanished mid-scan is skipped (and, by
+                // not being marked seen, pruned from the cache below).
+                const st = await stat(filePath).catch(() => null);
+                if (!st) return;
+                seen.add(filePath);
+                const cached = claudeParseCache.get(filePath);
+                if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+                  sessions.push(cached.session);
+                  return;
+                }
+                claudeParseCount++; // cache miss: this file is actually read+parsed
+                const meta = await parseClaudeMeta(filePath);
                 if (!meta?.cwd) return;
                 const id = file.replace(/\.jsonl$/, "");
-                sessions.push({
+                const session: AgentSession = {
                   id,
                   source: "claude",
                   cwd: meta.cwd,
                   branch: meta.branch,
                   title: meta.title || id.slice(0, 8),
-                  lastUsed: st?.mtime ?? new Date(0),
+                  lastUsed: st.mtime,
                   createdAt: meta.createdAt,
                   configDir,
                   logPath: filePath,
-                });
+                };
+                claudeParseCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, session });
+                sessions.push(session);
               }),
             );
           }),
         );
       }),
     );
+    // Prune cache entries for transcripts that no longer exist. The seen-set is
+    // exactly the Claude files enumerated this scan, so this only ever touches
+    // Claude transcript keys, and it runs after every per-file task above has
+    // finished recording its path.
+    for (const path of claudeParseCache.keys()) {
+      if (!seen.has(path)) claudeParseCache.delete(path);
+    }
     return sessions;
   },
 };
 
 // ── Copilot CLI ───────────────────────────────────────────────────────────────
 // Sessions live under session-state/<id>/workspace.yaml (flat key: value).
+// Deliberately NOT cached like the Claude scan: workspace.yaml is tiny and
+// lastUsed derives from a directory stat, so caching would cost more than it saves.
 function parseFlatYaml(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
