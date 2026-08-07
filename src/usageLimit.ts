@@ -14,17 +14,22 @@
 //        ❯ 1. Stop and wait for limit to reset
 //          2. Add funds to continue with usage credits
 //        Enter to confirm · Esc to cancel
+//      The trailing options vary by plan — a Max-plan session shows "2. Upgrade
+//      your plan / 3. Upgrade to Team plan" (captured live) — so option 1 is the
+//      only cross-plan anchor.
 //      This dialog does NOT show the reset time. Pressing Escape ONCE dismisses
 //      it and reveals form (B). We detect it by its two durable option lines (see
 //      LIMIT_DIALOG_RE) — passive detection that works WITHOUT a timestamp.
 //
 //  (B) The TEXT NOTICE — the reset-time-bearing form. On a REAL limited session it
 //      renders inside a tool result block (a leading ⎿ glyph, NBSP padding, a `·`
-//      separator), sometimes with a "/usage-credits" continuation line, sometimes
-//      without (both observed live):
+//      separator), sometimes with a "/usage-credits" or "/upgrade" continuation
+//      line, sometimes without (all observed live):
 //        ⎿  You've hit your session limit · resets 2:10pm (Atlantic/Reykjavik)
 //        ⎿  You've hit your session limit · resets 7:20pm (Atlantic/Reykjavik)
 //           /usage-credits to finish what you're working on.
+//        ⎿  You've hit your session limit · resets 5pm (Atlantic/Reykjavik)
+//           /upgrade to increase your usage limit.
 //      Plus the historically-worded caps:
 //        • 5-hour:  "Claude usage limit reached. Your limit will reset at 3pm (America/Santiago)."
 //        • weekly:  "You've reached your weekly limit" / "Resets by 4:00 AM Friday Apr 24"
@@ -44,12 +49,14 @@ import type { Readiness } from "./tmux.ts";
  *   - "usage limit reached"                      (the canonical 5-hour line)
  *   - "weekly/5-hour/… limit reached"
  *   - "/usage-credits"                           (the credit-cap continuation hint)
+ *   - "/upgrade to increase your usage limit"    (the Max-plan continuation hint;
+ *     full phrase, so ordinary prose mentioning /upgrade alone can't trip it)
  * The "hit/reached your … limit" arm keeps the qualifier constrained to Claude's
  * own cap names so unrelated prose ("reached your rate limit for the OpenAI API",
  * "up to its length limit") doesn't trip it.
  */
 export const USAGE_LIMIT_RE =
-  /\busage limit reached\b|\b(?:hit|reached) your (?:(?:5-hour|weekly|hourly|daily|usage|session|monthly)\s+)?limit\b|\b(?:5-hour|weekly|hourly|daily|session|usage)\s+limit\s+reached\b|\/usage-credits\b/i;
+  /\busage limit reached\b|\b(?:hit|reached) your (?:(?:5-hour|weekly|hourly|daily|usage|session|monthly)\s+)?limit\b|\b(?:5-hour|weekly|hourly|daily|session|usage)\s+limit\s+reached\b|\/usage-credits\b|\/upgrade to increase your usage limit\b/i;
 
 /**
  * Whether ANSI-stripped pane text shows a usage-limit notice. Tested against a

@@ -138,9 +138,31 @@ export function resumeKeystrokes(target: string): string[][] {
   ];
 }
 
-/** Send the resume keystrokes (`<esc>continue<enter>`) to a target pane. */
+/**
+ * Gap between the resume keystrokes. Sent back-to-back, the three `send-keys`
+ * writes coalesce in the pane's pty and the TUI reads `ESC` + `c` in ONE chunk —
+ * which every terminal input parser means Alt+c — so the `c` was eaten and the
+ * pane received "ontinue" (observed live on the first real auto-resume fire).
+ * Any real gap makes the reads distinct; 150ms is imperceptible next to the
+ * seconds-scale poll cadence.
+ */
+export const RESUME_KEY_DELAY_MS = 150;
+
+/** Synchronous sleep that works under both bun and node (the sender is sync). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Send the resume keystrokes (`<esc>continue<enter>`) to a target pane, with a
+ * RESUME_KEY_DELAY_MS pause between them (see above — Escape must arrive in its
+ * own read or it turns the following `c` into Alt+c).
+ */
 export function sendResume(target: string): void {
-  for (const argv of resumeKeystrokes(target)) tmuxQuiet(argv);
+  resumeKeystrokes(target).forEach((argv, i) => {
+    if (i > 0) sleepSync(RESUME_KEY_DELAY_MS);
+    tmuxQuiet(argv);
+  });
 }
 
 /**
@@ -327,6 +349,27 @@ function inputBox(raw: string): string | null {
 const LIMIT_ACTIVE_MAX_LINES = 12;
 
 /**
+ * UI chrome the TUI renders between the last content block and the input box —
+ * lines that carry no conversation content and so must NOT count as "the session
+ * moved on" when locating the active block (all captured live on v2.1.224):
+ *   - the spinner's turn summary: `✻ Crunched for 0s`, `✻ Worked for 4m 54s`
+ *     (the glyph and verb vary per frame/turn);
+ *   - the right-aligned effort/mode hint above the box's top rule: `● high · /effort`;
+ *   - the right-aligned context-pressure hint: `new task? /clear to save 293k tokens`
+ *     (captured on a live limited pane, where it hid the notice from detection).
+ * Expects an ANSI-stripped, trimmed line. Deliberately narrow: a turn-output
+ * bullet (`● Build 123456 now: SUCCEEDED`) or a typed `❯ continue` is content,
+ * and correctly demotes any notice above it to history.
+ */
+function isPaneChrome(line: string): boolean {
+  return (
+    /^[✻✢✳✶✽·∗+*]\s+\S+\s+for\s+\d+[smhd]/.test(line) ||
+    /^●\s+\S+\s+·\s+\/[\w-]+$/.test(line) ||
+    /^new task\?\s+\/clear to save\b/i.test(line)
+  );
+}
+
+/**
  * Whether the numbered limit dialog is the *active* bottom-most content — not the
  * same text lingering in scrollback after it was dismissed. The dialog replaces
  * the input box while it's up (there's no `❯ ` prompt line, hence no `─` rule,
@@ -369,14 +412,17 @@ export function paneLimitDialogActive(raw: string): boolean {
  * resumed. The message persists in history once the user continues, so a plain
  * whole-screen match would keep flagging a recovered, idle session as limited.
  *
- * When an input box is present we look only at the block of content immediately
- * above it — the contiguous run of non-blank lines just before the box's top
- * rule (bounded by LIMIT_ACTIVE_MAX_LINES). An active limit renders its notice
- * right there; a recovered session has a later completed turn (and its typed
- * `❯ continue`) between the old notice and the box, so the block above the box
- * is that turn's tail, not the notice. With no input box to anchor on, fall back
- * to scanning the whole capture (permissive — better to flag than to miss).
- * `raw` must include SGR escapes (see capturePane).
+ * When an input box is present we look only at the LAST CONTENT BLOCK above it —
+ * the contiguous run of non-blank lines nearest the box's top rule (bounded by
+ * LIMIT_ACTIVE_MAX_LINES), skipping past blank lines AND pane chrome (the
+ * spinner's `✻ Crunched for 0s` summary, the `● high · /effort` mode hint — see
+ * isPaneChrome) that the TUI draws between that block and the box. An active
+ * limit renders its notice as that block; a recovered session has a later
+ * completed turn (and its typed `❯ continue`) between the old notice and the
+ * box, so the nearest content block is that turn's tail, not the notice. With
+ * no input box to anchor on, fall back to scanning the whole capture
+ * (permissive — better to flag than to miss). `raw` must include SGR escapes
+ * (see capturePane).
  */
 export function paneUsageLimited(raw: string): boolean {
   const lines = raw.replace(/\r/g, "").split("\n");
@@ -390,9 +436,9 @@ export function paneUsageLimited(raw: string): boolean {
   const block: string[] = [];
   for (let i = top - 1; i >= 0 && block.length < LIMIT_ACTIVE_MAX_LINES; i--) {
     const line = stripAnsi(lines[i]).trim();
-    if (line === "") {
-      if (block.length) break; // reached the blank gap above the last block
-      continue; // skip trailing blanks between the last block and the box
+    if (line === "" || isPaneChrome(line)) {
+      if (block.length) break; // reached the gap above the collected block
+      continue; // still below the block: skip blanks and box-side chrome
     }
     block.unshift(line);
   }

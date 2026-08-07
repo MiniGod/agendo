@@ -10,11 +10,13 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes } from "../src/tmux.ts";
-import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi } from "../src/tmux.ts";
+import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import type { AgentSession } from "../src/types.ts";
@@ -371,16 +373,16 @@ const RECOVERED_PANE = [
   "",
   "❯ continue",
   "",
-  "● Checking the e2e retry result on build 546343.",
+  "● Checking the e2e retry result on build 123456.",
   "",
-  "● Build 546343 (iteration 6) now: SUCCEEDED ✅ — CI fully green.",
+  "● Build 123456 (iteration 6) now: SUCCEEDED ✅ — CI fully green.",
   "",
   "✻ Worked for 25s",
   "",
   "─────────────────────────────────────────────",
   "❯ ",
   "─────────────────────────────────────────────",
-  "  20:11:25 | 30% ctx | Opus 4.8 | fix/236653-smart-button-emulated-click [$] | ~/repos/mc-applications",
+  "  20:11:25 | 30% ctx | Opus 4.8 | fix/1234-example-button-fix [$] | ~/repos/example-app",
   "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
 ].join("\n");
 
@@ -395,7 +397,7 @@ const BLOCKED_PANE = [
   "─────────────────────────────────────────────",
   "❯ ",
   "─────────────────────────────────────────────",
-  "  20:15:02 | 30% ctx | Opus 4.8 | fix/236653 [$] | ~/repos/mc-applications",
+  "  20:15:02 | 30% ctx | Opus 4.8 | fix/1234 [$] | ~/repos/example-app",
 ].join("\n");
 
 // PRIMARY POSITIVE fixture: the NUMBERED CHOICE DIALOG — the interactive state a
@@ -441,7 +443,7 @@ const DISMISSED_DIALOG_PANE = [
   "─────────────────────────────────────────────",
   "❯ ",
   "─────────────────────────────────────────────",
-  "  14:31:02 | 30% ctx | Opus 4.8 | worktree-x [$] | ~/repos/mc-applications",
+  "  14:31:02 | 30% ctx | Opus 4.8 | worktree-x [$] | ~/repos/example-app",
 ].join("\n");
 
 // ESC-REVEALED text form, captured VERBATIM (read-only) from the same live pane
@@ -456,8 +458,45 @@ const ESC_REVEALED_PANE = [
   "─────────────────────────────────────────────",
   "❯ ",
   "─────────────────────────────────────────────",
-  "  14:20:47 | 23% ctx | 5h: 101% (now) | Opus 4.8 | worktree-fix-npm11-lockfile [!?$] | /home/kristjan/re…",
+  "  14:20:47 | 23% ctx | 5h: 101% (now) | Opus 4.8 | worktree-fix-lockfile [!?$] | /home/user/re…",
 ].join("\n");
+
+// FULL-PANE fixtures: raw `tmux capture-pane -p -e` output (SGR escapes intact —
+// exactly what capturePane feeds the classifiers) from a REAL limited Claude Code
+// v2.1.224 session (Max plan, session cap), stored under e2e/fixtures/. Repo
+// paths, branch names, and work identifiers in the captures were anonymized;
+// everything detection reads (notice wording, dialog, chrome lines, rules, SGR
+// attributes) is byte-for-byte as captured:
+//   - limit-dialog-menu.ansi    the numbered dialog OPEN (Max wording: "2. Upgrade
+//                               your plan / 3. Upgrade to Team plan"); the notice
+//                               happened to be visible above it in this shallow
+//                               session, but with a full scrollback the menu hides it.
+//   - limit-esc-revealed.ansi   the SAME pane after ONE Escape: notice + empty box,
+//                               with a `✻ Crunched for 0s` spinner summary and a
+//                               right-aligned `● high · /effort` mode line between
+//                               the notice and the box — the chrome that previously
+//                               made this state read "ready".
+//   - limit-notice-resent.ansi  a prompt re-sent while limited: the notice re-prints
+//                               inline with the "/upgrade to increase your usage
+//                               limit." continuation, `✻ Baked for 1s` above the box.
+//   - limit-notice-clear-hint.ansi  a long-running session (the real "master-orch"
+//                               agendo missed in the field): limit hit mid /loop
+//                               wakeup, inline notice, and TWO chrome lines between
+//                               it and the box — `✻ Cogitated for 0s` plus the
+//                               right-aligned `new task? /clear to save 293k tokens`
+//                               hint — with a FAINT history suggestion ("stop
+//                               monitoring") sitting in the otherwise-empty box.
+const fullPane = (name: string) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf-8");
+const REAL_MENU_PANE = fullPane("limit-dialog-menu.ansi");
+const REAL_ESC_REVEALED_PANE = fullPane("limit-esc-revealed.ansi");
+const REAL_RESENT_NOTICE_PANE = fullPane("limit-notice-resent.ansi");
+const REAL_CLEAR_HINT_PANE = fullPane("limit-notice-clear-hint.ansi");
+// The deep-scrollback menu state: the SAME dialog but with the reset-time notice
+// NOT on screen (it scrolled behind the menu) — the case the reveal Escape exists
+// for. Synthesized from the verbatim capture by dropping the notice line.
+const REAL_MENU_PANE_NOTICE_HIDDEN = REAL_MENU_PANE.split("\n")
+  .filter((l) => !/hit your session limit/i.test(stripAnsi(l)))
+  .join("\n");
 
 test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
   const idleBox = ["  ─────────────────────────────────────────", "  ❯ ", "  ─────────────────────────────────────────"].join("\n");
@@ -515,6 +554,77 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     expect(paneReadiness(ESC_REVEALED_PANE)).toBe("limited");
     expect(paneUsageLimited(ESC_REVEALED_PANE)).toBe(true);
     expect(paneResumeSafe(ESC_REVEALED_PANE)).toBe(true);
+  });
+
+  test("REAL CAPTURE: the Max-plan numbered dialog reads 'limited', dialog-active, resume-safe", () => {
+    // Verbatim full-pane capture, SGR escapes intact. Only option 1 ("Stop and
+    // wait for limit to reset") matches LIMIT_DIALOG_RE — the Max plan replaces
+    // the "Add funds" option with upgrade offers — so this pins the single-anchor
+    // detection on a real screen.
+    expect(paneReadiness(REAL_MENU_PANE)).toBe("limited");
+    expect(paneLimitDialogActive(REAL_MENU_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_MENU_PANE)).toBe(true);
+  });
+
+  test("REAL CAPTURE (the reveal case): menu open with the notice off-screen → limited, no reset time, reveal fires", () => {
+    // With a deep scrollback the menu hides the "resets <time>" line, so the pane
+    // is limited but yields no resetAt — exactly the state shouldRevealDialog's
+    // one Escape exists to break out of.
+    const pane = REAL_MENU_PANE_NOTICE_HIDDEN;
+    expect(paneReadiness(pane)).toBe("limited");
+    expect(paneLimitDialogActive(pane)).toBe(true);
+    expect(parseResetTime(stripAnsi(pane), new Date("2026-08-07T12:00:00Z"))).toBeNull();
+    expect(
+      shouldRevealDialog({
+        enabled: true,
+        readiness: "limited",
+        dialogActive: true,
+        resetAt: null,
+        revealed: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("REGRESSION, REAL CAPTURE: the esc-revealed pane with spinner + mode-line chrome reads 'limited'", () => {
+    // The v2.1.224 TUI draws a `✻ Crunched for 0s` turn summary and a right-aligned
+    // `● high · /effort` mode line between the notice and the input box. The
+    // block-above-the-box heuristic used to stop at that chrome and read this pane
+    // as 'ready' — wiping the limit bookkeeping right after the reveal Escape and
+    // breaking hands-off auto-resume. It must read 'limited' and parse the time.
+    expect(paneReadiness(REAL_ESC_REVEALED_PANE)).toBe("limited");
+    expect(paneUsageLimited(REAL_ESC_REVEALED_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_ESC_REVEALED_PANE)).toBe(true);
+    const at = parseResetTime(stripAnsi(REAL_ESC_REVEALED_PANE), new Date("2026-08-07T12:00:00Z"));
+    expect(at).not.toBeNull();
+    // "resets 5pm (Atlantic/Reykjavik)" — Reykjavik is UTC+0 year-round.
+    expect(new Date(at!).toISOString()).toBe("2026-08-07T17:00:00.000Z");
+  });
+
+  test("REGRESSION, REAL CAPTURE (master-orch): notice behind the '/clear to save' hint reads 'limited'", () => {
+    // The field failure: a /loop session hit its limit mid-wakeup and printed the
+    // inline notice, but the TUI drew `✻ Cogitated for 0s` AND the right-aligned
+    // `new task? /clear to save 293k tokens` hint between the notice and the box.
+    // Both are chrome; agendo read the pane as 'ready', wiped its limit
+    // bookkeeping, and never auto-resumed at reset. The faint "stop monitoring"
+    // in the box is a history SUGGESTION, not a draft — resume must stay safe.
+    expect(paneReadiness(REAL_CLEAR_HINT_PANE)).toBe("limited");
+    expect(paneUsageLimited(REAL_CLEAR_HINT_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_CLEAR_HINT_PANE)).toBe(true);
+    const at = parseResetTime(stripAnsi(REAL_CLEAR_HINT_PANE), new Date("2026-08-07T14:00:00Z"));
+    expect(at).not.toBeNull();
+    expect(new Date(at!).toISOString()).toBe("2026-08-07T17:00:00.000Z");
+  });
+
+  test("REAL CAPTURE: a prompt re-sent while limited re-prints the notice ('/upgrade' variant) → 'limited'", () => {
+    // Sending into an already-limited pane doesn't reopen the menu; the notice
+    // re-prints inline with the Max-plan "/upgrade to increase your usage limit."
+    // continuation (a third observed continuation wording, now in USAGE_LIMIT_RE)
+    // and a `✻ Baked for 1s` summary above the box.
+    expect(paneReadiness(REAL_RESENT_NOTICE_PANE)).toBe("limited");
+    expect(paneUsageLimited(REAL_RESENT_NOTICE_PANE)).toBe(true);
+    expect(isUsageLimited("     /upgrade to increase your usage limit.")).toBe(true);
+    // The bare command name in prose must NOT trip it.
+    expect(isUsageLimited("run /upgrade to switch plans")).toBe(false);
   });
 
   test("isLimitDialog matches the option wording, not ordinary prose", () => {
