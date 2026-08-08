@@ -20,8 +20,9 @@ import * as github from "./github.ts";
 export interface FetchContext {
   /** The identity whose work items / PRs to fetch. */
   identity: Identity;
-  /** Repos discovered from local sessions — the scope for backends (GitHub) that
-   *  derive their query set from where you actually work. */
+  /** Repos discovered from local sessions, plus any found under the launcher's
+   *  path context — the scope for backends (GitHub) that derive their query set
+   *  from where you actually work. */
   repos: RepoInfo[];
 }
 
@@ -115,22 +116,54 @@ export function detectProviders(): Set<ProviderName> {
   return avail;
 }
 
+// The host must sit immediately after the scheme (`//`), an SSH user (`@`), or
+// the string start, and be delimited by `:`/`/` — so `evilgithub.com` and
+// `github.com.example.org` don't false-positive.
+const GITHUB_REMOTE_RE = /(^|@|\/\/)github\.com[:/]/i;
+// Azure DevOps: `dev.azure.com` (HTTPS), `ssh.dev.azure.com` (SSH), and the
+// legacy `<org>.visualstudio.com` / `vs-ssh.visualstudio.com` forms.
+const ADO_REMOTE_RE = /(^|@|\/\/)((ssh\.)?dev\.azure\.com|([^/@:]+\.)?visualstudio\.com)[:/]/i;
+
 /**
  * Detect the provider implied by a path's git `origin` remote, or `null` when
- * there is nothing to force. Returns `"github"` only when the origin host is
- * github.com — handling both SSH (`git@github.com:owner/repo(.git)`) and HTTPS
- * (`https://github.com/owner/repo(.git)`) forms. An Azure DevOps remote
- * (`dev.azure.com` / `*.visualstudio.com`), any other host, a repo with no
- * `origin`, or a non-repo path all yield `null` so the configured default
- * stands. One-directional by design: we only ever *force* GitHub, never ADO.
+ * there is nothing to force — any other host, a repo with no `origin`, or a
+ * non-repo path all keep the configured default. Both backends are detected
+ * (and both SSH and HTTPS forms of each): a one-directional "force GitHub only"
+ * rule would leave a persisted GitHub default pointed at an ADO target, whose
+ * repo-scope keys are bare ADO repo names that no GitHub `owner/repo` slug can
+ * match — filtering everything away silently.
  */
 export function detectRepoProvider(path: string): ProviderName | null {
   const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf-8" });
   if (r.status !== 0) return null; // no origin remote, or not a git repo at all
-  // github.com must sit immediately after the scheme (`//`), an SSH user (`@`),
-  // or the string start, and be delimited by `:`/`/` — so `evilgithub.com` and
-  // `github.com.example.org` don't false-positive.
-  return /(^|@|\/\/)github\.com[:/]/i.test(r.stdout.trim()) ? "github" : null;
+  const url = r.stdout.trim();
+  if (GITHUB_REMOTE_RE.test(url)) return "github";
+  if (ADO_REMOTE_RE.test(url)) return "ado";
+  return null;
+}
+
+/**
+ * The provider a whole path context implies: the first repo inside the target
+ * whose `origin` names a known backend, else the target's own `origin`. A target
+ * folder never mixes trackers, so any one of its repos speaks for all — but not
+ * every one of them can answer (a bare `git init` scratch dir, or a clone from
+ * some other host, resolves to null), so we ask each in turn rather than let a
+ * silent first repo veto the set. Without this a parent folder of repos would
+ * keep a persisted default from the other backend and then be filtered against
+ * repo keys it can never match (an empty view). The discovered repos win over
+ * the path itself for the same reason discoverGitReposUnder prefers what's
+ * below: `git -C <parent>` happily reports an *enclosing* checkout's origin (a
+ * `$HOME` tracked as dotfiles, say), which would otherwise outvote the repos
+ * actually in scope — so once any repo is in scope the path never gets a vote.
+ * `null` means "nothing to infer from, leave the configured default alone".
+ */
+export function detectScopeProvider(path: string, repos: RepoInfo[]): ProviderName | null {
+  if (repos.length === 0) return detectRepoProvider(path);
+  for (const r of repos) {
+    const p = detectRepoProvider(r.root);
+    if (p) return p;
+  }
+  return null;
 }
 
 /** Pick the backend to start on. A `forced` provider (e.g. GitHub detected from

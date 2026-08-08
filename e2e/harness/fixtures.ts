@@ -80,8 +80,12 @@ export async function materializeHome(home: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   await writeFile(join(stateDir, "state.json"), JSON.stringify({ provider: "ado" }, null, 2));
 
-  // A `.git` marker so repoRootForCwd resolves the standalone session's repo.
-  await mkdir(join(p.standalone, ".git"), { recursive: true });
+  // `.git` markers so repoRootForCwd resolves the standalone session's repo, and
+  // so the three repos under ~/repos are found by the downward scan a path
+  // context runs (discoverGitReposUnder) — the repo filter's input.
+  for (const root of [p.appweb, p.applib, p.standalone]) {
+    await mkdir(join(root, ".git"), { recursive: true });
+  }
 
   const projects = join(home, ".claude", "projects");
 

@@ -475,14 +475,76 @@ test("agendo list issues --json carries item id + associated sessions (ADO)", as
   expect(byId.get(103).sessions).toEqual([]); // no session on the docs task
 });
 
+// ── repo-scoped `list pr` / `list issues` ────────────────────────────────────
+// The `[dir]` positional is the CLI mirror of the TUI's path context: the git
+// repos found inside it (the fixture home has three under ~/repos, each with a
+// `.git` marker) narrow the listing, and --no-repo-filter opts back out. Like
+// the TUI's path-scope tests, these pin the shim's origin to ADO so the dir
+// doesn't force the GitHub backend away from the ADO fixture data.
+
+test("agendo list pr [dir] narrows to the PRs of the repos inside the dir", async ({ mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const appweb = join(mock.home, "repos", "appweb");
+  const repos = join(mock.home, "repos");
+
+  // Scoped to one repo: PR 5001 (appweb) stays, the applib orphan 6001 is gone.
+  const scoped = await agendoAsync(mock.env, "list", "pr", appweb).done;
+  expect(scoped.code).toBe(0);
+  expect(scoped.stdout).toContain("!5001");
+  expect(scoped.stdout).not.toContain("!6001");
+
+  // --no-repo-filter keeps the dir's fetch scope but shows everything again.
+  const off = await agendoAsync(mock.env, "list", "pr", appweb, "--no-repo-filter").done;
+  expect(off.code).toBe(0);
+  expect(off.stdout).toContain("!5001");
+  expect(off.stdout).toContain("!6001");
+
+  // A PARENT folder holding several repos scopes to all of them (the deep scan).
+  const parent = await agendoAsync(mock.env, "list", "pr", repos).done;
+  expect(parent.code).toBe(0);
+  expect(parent.stdout).toContain("!5001"); // appweb
+  expect(parent.stdout).toContain("!6001"); // applib
+});
+
+test("agendo list issues [dir] narrows ADO work items through their linked PRs", async ({ mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // ADO work items carry no repo, so scoping to applib drops WI 101 (its only PR
+  // is in appweb) while the PR-less items 102/103 — no repo signal at all — stay.
+  const applib = join(mock.home, "repos", "applib");
+  const r = await agendoAsync(mock.env, "list", "issues", applib, "--json").done;
+  expect(r.code).toBe(0);
+  const ids = (JSON.parse(r.stdout) as any[]).map((i) => i.id).sort((a, b) => a - b);
+  expect(ids).toEqual([102, 103]);
+
+  // Unscoped (no dir) the full assigned set is listed, as before.
+  const all = await agendoAsync(mock.env, "list", "issues", "--json").done;
+  expect((JSON.parse(all.stdout) as any[]).map((i) => i.id).sort((a, b) => a - b)).toEqual([101, 102, 103]);
+});
+
+test("agendo list pr [dir] with no repo inside it says so and lists everything", async ({ mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const empty = join(mock.home, "no-repos-here");
+  const r = await agendoAsync(mock.env, "list", "pr", empty).done;
+  expect(r.code).toBe(0);
+  expect(r.stderr).toContain("no git repos found under");
+  // An empty scope is likelier a wrong path than "show nothing", so nothing is hidden.
+  expect(r.stdout).toContain("!5001");
+  expect(r.stdout).toContain("!6001");
+});
+
 // GitHub vocab: flip the backend, wire the fake gh with an issue and a PR that
 // closes it on the login session's branch, so the association resolves the same
 // way it does in the TUI. Repo scope comes from the local sessions' origin slug
 // (ada/appweb), matching the login session's repo.
-async function seedGitHubList(mock: {
-  setProvider: (n: "github") => Promise<void>;
-  setGhState: (s: unknown) => Promise<void>;
-}) {
+async function seedGitHubList(
+  mock: {
+    setProvider: (n: "github") => Promise<void>;
+    setGhState: (s: unknown) => Promise<void>;
+  },
+  // `false` leaves the persisted backend on ADO — for the test that proves a
+  // path context's git origin forces GitHub without any persisted choice.
+  opts: { persistProvider?: boolean } = {},
+) {
   const PR = {
     number: 401,
     title: "Wire up the login screen",
@@ -499,7 +561,7 @@ async function seedGitHubList(mock: {
     closingIssuesReferences: [{ number: 301 }], // links the PR to issue 301
     body: "",
   };
-  await mock.setProvider("github");
+  if (opts.persistProvider !== false) await mock.setProvider("github");
   await mock.setGhState({
     authed: true,
     user: { login: "ada", name: "Ada Lovelace" },
@@ -553,6 +615,22 @@ test("agendo list issues (GitHub) uses 'issue' vocab and associates the session"
   expect(iss).toBeTruthy();
   expect(iss.sessions[0].shortId).toBe(SHORT_ID);
   expect(iss.sessions[0].running).toBe(true);
+});
+
+// The `[dir]` resolves the BACKEND too, exactly as the TUI does (App.tsx forces
+// the provider from the path's git remote): a github.com origin under it wins
+// over the persisted ADO default. Without this the CLI would query ADO and then
+// filter those PRs against repo keys derived from a GitHub checkout — an empty
+// listing, and a different answer than the menu gives for the same path.
+test("agendo list pr [dir] forces the GitHub backend from the dir's git origin", async ({ mock }) => {
+  await seedGitHubList(mock, { persistProvider: false }); // state.json still says "ado"
+  mock.env.FAKE_GIT_ORIGIN_HOST = "github";
+  const appweb = join(mock.home, "repos", "appweb");
+
+  const r = await agendoAsync(mock.env, "list", "pr", appweb).done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("#401"); // GitHub PR 401 via gh…
+  expect(r.stdout).not.toContain("!5001"); // …not the ADO fixture's PRs
 });
 
 test("agendo list rejects unknown sub-flags; a non-keyword positional is a dir filter", async ({ mock }) => {
