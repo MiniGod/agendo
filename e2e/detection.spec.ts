@@ -22,6 +22,7 @@ import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, is
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
+import { ensureRepoAtTop, type RepoInfo } from "../src/repos.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -1184,5 +1185,50 @@ test.describe("isUnderRoot: segment-aware prefix match", () => {
     expect(isUnderRoot("/anything/here", "/")).toBe(true);
     expect(isUnderRoot("/home/me/work/", "/home/me/work")).toBe(true);
     expect(isUnderRoot("/home/me/work", "/home/me/work/")).toBe(true);
+  });
+});
+
+// The path-scoped repo picker's "always offer the scoped folder, ranked first"
+// rule. Lives next to isUnderRoot because it leans on the same normalizeCwd
+// convention: the two sides being compared come from different sources — the
+// scoped root is `path.resolve`d from a CLI arg, the repo roots are derived from
+// recorded session cwds — so equal directories must compare equal despite
+// spelling differences. The browser-driven picker tests can't reach this: every
+// path they feed in is already clean, so only a direct test pins the dedupe.
+test.describe("ensureRepoAtTop: the scoped folder is offered exactly once, first", () => {
+  const repo = (root: string, total = 1): RepoInfo => ({ root, name: root.split("/").pop() || root, total, claude: total, copilot: 0 });
+
+  test("an existing repo is promoted, not duplicated", () => {
+    const out = ensureRepoAtTop([repo("/h/appweb", 2), repo("/h/applib", 1)], "/h/applib");
+    expect(out.map((r) => r.root)).toEqual(["/h/applib", "/h/appweb"]);
+    expect(out[0].total).toBe(1); // kept its real count — not replaced by a synth
+  });
+
+  test("an absent repo is synthesized as a zero-count entry on top", () => {
+    const out = ensureRepoAtTop([repo("/h/appweb", 2)], "/h/greenfield");
+    expect(out.map((r) => r.root)).toEqual(["/h/greenfield", "/h/appweb"]);
+    expect(out[0]).toMatchObject({ name: "greenfield", total: 0, claude: 0, copilot: 0 });
+  });
+
+  test("representation drift still dedupes — the same repo never appears twice", () => {
+    // A trailing slash on the recorded session cwd, a clean scoped root…
+    const trailing = ensureRepoAtTop([repo("/h/appweb/", 2)], "/h/appweb");
+    expect(trailing).toHaveLength(1); // a raw `===` would prepend a synth duplicate
+    expect(trailing[0].total).toBe(2);
+    // …and the reverse: clean repo root, drifty scoped root (`..` + doubled slash).
+    const drifty = ensureRepoAtTop([repo("/h/appweb", 2)], "/h/nope/..//appweb/");
+    expect(drifty).toHaveLength(1);
+    expect(drifty[0].total).toBe(2);
+  });
+
+  test("a synthesized entry is normalized, so its name and root are clean", () => {
+    const out = ensureRepoAtTop([], "/h/labs/packages/../");
+    expect(out[0].root).toBe("/h/labs");
+    expect(out[0].name).toBe("labs");
+  });
+
+  test("the filesystem root gets a non-empty name (basename('/') is '')", () => {
+    // `agendo /` is legal; a blank name cell in the picker is not.
+    expect(ensureRepoAtTop([], "/")[0].name).toBe("/");
   });
 });
