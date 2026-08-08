@@ -85,7 +85,10 @@ export function llmGuide(): string {
     "  window, runs unattended (auto/autopilot mode), and prints its session id.",
     "  Flags: --name <slug> (name the worktree/branch) · --no-worktree (use the current",
     "         checkout) · --attach (switch to it now instead of leaving it detached) ·",
-    "         --agent <claude|copilot> / --copilot (which agent to run; default claude).",
+    "         --agent <claude|copilot> / --copilot (which agent to run; default claude) ·",
+    "         --model <name> (model for the new session; both agents) · --fallback-model",
+    "         <name> (claude only). Only these agent flags are forwarded — anything else",
+    "         dashed is an error, so put prompt text that starts with -- after a bare --.",
     "",
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
@@ -139,6 +142,26 @@ const AUTONOMY_ARGV = [
  */
 const COPILOT_AUTONOMY_ARGV = ["--autopilot", "--allow-all-tools"];
 
+/**
+ * Agent CLI flags `agendo launch` may forward verbatim into a BRAND-NEW
+ * session's argv. Deliberately a small allowlist rather than a `--` catch-all:
+ * every forwarded token is one we know the target agent accepts, so a typo fails
+ * loudly instead of silently becoming prompt text (see the launch parser).
+ *
+ * Each entry lists the agents that take the flag with this exact
+ * `<flag> <value>` syntax — the flags are NOT symmetric across agents:
+ *  - `--model <name>`: both Claude and Copilot, same syntax and meaning, so it
+ *    forwards straight through with no per-agent translation.
+ *  - `--fallback-model <name>`: Claude only; Copilot has no equivalent, so
+ *    `agendo launch --copilot --fallback-model …` is rejected rather than
+ *    passed to a binary that would choke on it.
+ * Forwarding applies to new sessions only — `resumeArgv` never sees these.
+ */
+export const FORWARDABLE_LAUNCH_FLAGS: Record<string, { agents: readonly AgentSource[] }> = {
+  "--model": { agents: ["claude", "copilot"] },
+  "--fallback-model": { agents: ["claude"] },
+};
+
 /** argv that resumes a given session in its working directory. */
 export function resumeArgv(s: AgentSession): string[] {
   switch (s.source) {
@@ -169,6 +192,13 @@ interface FreshArgvOptions {
   prompt?: string;
   /** Apply the agent's unattended-autonomy flags (background sessions only). */
   autonomy?: boolean;
+  /**
+   * Allowlisted agent flags to forward verbatim, already validated against the
+   * agent as flat `[flag, value, …]` tokens (see `FORWARDABLE_LAUNCH_FLAGS`).
+   * Each element becomes one argv token — tmux execs the argv directly, with no
+   * shell in between, so values with spaces need no quoting or escaping.
+   */
+  forwardArgv?: string[];
 }
 
 /**
@@ -180,18 +210,22 @@ interface FreshArgvOptions {
  *  - Copilot: `--session-id <id>`, `--interactive <prompt>`,
  *    `COPILOT_AUTONOMY_ARGV`. Copilot has no `--append-system-prompt`, so the
  *    launcher prompt is omitted (background coordination is Claude-only today).
+ * Any `forwardArgv` (allowlisted flags from `agendo launch`) goes last among the
+ * flags, so an explicit `--model` wins over anything the defaults might set.
  */
 function freshArgv(agent: AgentSource, opts: FreshArgvOptions = {}): string[] {
   if (agent === "copilot") {
     const argv = ["copilot"];
     if (opts.sessionId) argv.push("--session-id", opts.sessionId);
     if (opts.autonomy) argv.push(...COPILOT_AUTONOMY_ARGV);
+    if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
     if (opts.prompt) argv.push("--interactive", opts.prompt);
     return argv;
   }
   const argv = ["claude"];
   if (opts.sessionId) argv.push("--session-id", opts.sessionId);
   if (opts.autonomy) argv.push(...AUTONOMY_ARGV);
+  if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
   if (opts.prompt) argv.push(opts.prompt);
   return withLauncherPrompt(argv);
 }
@@ -299,16 +333,19 @@ export function launchFresh(cwd: string, name: string, agent: AgentSource = "cla
  * lets `openSession` find this exact window on a later attach (no duplicate),
  * and the `cl-bg-`/`cl-new-` prefix tells the human (and the UI badge) how it
  * started. Background sessions also get the autonomy flags so they run unattended.
+ * `forwardArgv` carries the allowlisted agent flags `agendo launch` accepted; the
+ * TUI's own launch paths pass none.
  */
 function launchManaged(
   cwd: string,
   kind: "background" | "new",
   agent: AgentSource,
   prompt?: string,
+  forwardArgv?: string[],
 ): { plan: OpenPlan; id: string } {
   const id = randomUUID();
   const tmuxName = kindName(kind, id);
-  const argv = freshArgv(agent, { sessionId: id, prompt, autonomy: kind === "background" });
+  const argv = freshArgv(agent, { sessionId: id, prompt, autonomy: kind === "background", forwardArgv });
   return { plan: openTarget(tmuxName, cwd, argv), id };
 }
 
@@ -326,6 +363,12 @@ export interface LaunchOptions {
   worktree?: boolean;
   /** Which agent to launch. Defaults to Claude for back-compat. */
   agent?: AgentSource;
+  /**
+   * Allowlisted agent flags to forward to the new session, as flat
+   * `[flag, value, …]` tokens (see `FORWARDABLE_LAUNCH_FLAGS`). The caller is
+   * responsible for validating them against `agent` — `agendo launch` does.
+   */
+  forwardArgv?: string[];
 }
 
 export interface LaunchResult {
@@ -358,6 +401,12 @@ export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
     if (res.error) return { cwd, error: res.error };
     runCwd = res.path;
   }
-  const { plan, id } = launchManaged(runCwd, "background", opts.agent ?? "claude", opts.prompt);
+  const { plan, id } = launchManaged(
+    runCwd,
+    "background",
+    opts.agent ?? "claude",
+    opts.prompt,
+    opts.forwardArgv,
+  );
   return { plan, id, cwd: runCwd };
 }
