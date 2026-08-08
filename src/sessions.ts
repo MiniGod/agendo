@@ -5,10 +5,13 @@
 // more agent types can be added later. Both index their on-disk sessions and
 // both resume natively (Claude via `claude --resume`, Copilot via
 // `copilot --resume=<id>`); see launch.ts:resumeArgv.
+import { existsSync } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
+import { spawnSync } from "child_process";
 import { basename, join } from "path";
 import { homedir } from "os";
 import { repoRootForCwd } from "./repos.ts";
+import { parseGithubRemote } from "./github.ts";
 import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus } from "./types.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");
@@ -330,15 +333,46 @@ export class SessionIndex {
    * repoA #7 would match an unrelated repoB #7. Pass the item's `owner/repo` slug
    * (or bare repo name) to require the session to live in that repo. ADO ids are
    * globally unique, so it passes null and the match stays unscoped (unchanged).
+   *
+   * Passing a slug makes this resolve each candidate session's checkout to its
+   * own `owner/repo` via `git remote get-url origin` (see sessionInScope) —
+   * memoized per repo root, but still a process spawn on the first sighting of
+   * a root. Keep it off hot polling paths; the unscoped call never shells out.
    */
   forWorkItem(id: number, repo?: string | null): AgentSession[] {
     const re = new RegExp(`(^|[^0-9])${id}([^0-9]|$)`);
-    const wanted = repo ? bareRepoName(repo) : null;
+    const scope = repo ? repoScope(repo) : null;
     return this.all.filter((s) => {
-      if (wanted && !sessionRepoNames(s).includes(wanted)) return false;
+      if (scope && !sessionInScope(s, scope)) return false;
       return (s.branch && re.test(s.branch)) || re.test(s.cwd);
     });
   }
+}
+
+// ── Repo scoping for forWorkItem ─────────────────────────────────────────────
+// The scope comparison must happen in ONE identity domain. The obvious-looking
+// shortcut — compare the wanted repo's bare name against the basename of the
+// session's checkout directory — silently mixes two domains: a REMOTE repo name
+// and a LOCAL directory name. Those agree only when the clone happens to be
+// named after the remote (`owner/web-app` cloned into `~/projects/frontend`, a
+// second checkout `~/git/agendo-copy`, or a worktree outside
+// `<root>/.claude/worktrees/` that repos.ts resolves to its own dir all break
+// it), and even when they do agree the owner is thrown away, so a fork
+// (`alice/tool` vs `bob/tool`) still cross-matches. So we resolve BOTH sides to
+// `owner/repo` slugs via the `origin` remote whenever we can, and only fall back
+// to bare-name comparison when a side has no resolvable GitHub slug.
+
+/** A repo identifier reduced to both comparison forms: the full lowercased
+ *  `owner/repo` slug (null when the caller passed a bare name) and the bare
+ *  lowercased repo name (always present, used as the fallback domain). */
+interface RepoScope {
+  slug: string | null;
+  bare: string;
+}
+
+function repoScope(repo: string): RepoScope {
+  const r = repo.trim().toLowerCase();
+  return { slug: r.includes("/") ? r : null, bare: bareRepoName(r) };
 }
 
 /** Reduce a repo identifier (an `owner/repo` slug or a bare name) to its bare,
@@ -347,13 +381,62 @@ function bareRepoName(repo: string): string {
   return (repo.includes("/") ? repo.split("/").pop()! : repo).toLowerCase();
 }
 
-/** The repo name(s) a session belongs to: the basename of its worktree's main
- *  repo root, plus (Copilot) its recorded `repository`, all as bare lowercased
- *  names. Used to repo-scope the work-item↔session join. */
-function sessionRepoNames(s: AgentSession): string[] {
-  const names = [basename(repoRootForCwd(s.cwd)).toLowerCase()];
-  if (s.repository) names.push(bareRepoName(s.repository));
-  return names;
+// Repo root → lowercased `owner/repo` slug (or null when the root has no
+// resolvable github.com origin). Mirrors repoRef()'s cache in github.ts and
+// exists for the same reason, only more acutely: forWorkItem runs once per work
+// item inside loadModel and walks EVERY indexed session, so without memoization
+// a single refresh would re-spawn `git` hundreds of times. A repo root's origin
+// doesn't move under us during a process lifetime, so a plain unbounded Map
+// keyed by root (not by cwd — worktrees of one repo share a root) is enough.
+// NOTE: nothing on the fast paths (SessionIndex.build, loadLocalSessions) may
+// reach this; it is deliberately confined to the repo-scoped forWorkItem call.
+const rootSlugCache = new Map<string, string | null>();
+
+function repoSlugForRoot(root: string): string | null {
+  const cached = rootSlugCache.get(root);
+  if (cached !== undefined) return cached;
+  let slug: string | null = null;
+  // existsSync first: we routinely index sessions whose cwd is long gone
+  // (deleted worktrees, moved checkouts), and `git -C <missing>` would cost a
+  // doomed process spawn each. A missing root simply has no slug → fallback.
+  if (existsSync(root)) {
+    const r = spawnSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf-8" });
+    if (r.status === 0) {
+      const parsed = parseGithubRemote(r.stdout);
+      if (parsed) slug = `${parsed.owner}/${parsed.repo}`.toLowerCase();
+    }
+  }
+  rootSlugCache.set(root, slug);
+  return slug;
+}
+
+// One candidate identity (the session's checkout, or Copilot's recorded
+// `repository`) against the wanted scope: full slugs when BOTH sides have one,
+// bare names otherwise. Comparing slugs is what rejects same-named forks;
+// falling back to bare names is what keeps non-GitHub, remote-less, and
+// no-longer-on-disk checkouts matching at all.
+function identityMatches(scope: RepoScope, slug: string | null, bare: string): boolean {
+  return scope.slug && slug ? slug === scope.slug : bare === scope.bare;
+}
+
+/** Whether a session belongs to the wanted repo, for the repo-scoped
+ *  work-item↔session join. */
+function sessionInScope(s: AgentSession, scope: RepoScope): boolean {
+  const root = repoRootForCwd(s.cwd);
+  // Only shell out when the wanted repo is a full slug: against a bare wanted
+  // name there is no owner to compare, so the resolution could not change the
+  // answer and the git call would be pure waste.
+  const rootSlug = scope.slug ? repoSlugForRoot(root) : null;
+  if (identityMatches(scope, rootSlug, basename(root).toLowerCase())) return true;
+  // Copilot records the remote repo it was launched against, which is already in
+  // the remote domain — no git call needed, and it's the only signal for a
+  // Copilot session whose cwd no longer exists.
+  if (s.repository) {
+    const recorded = s.repository.trim().toLowerCase();
+    const slug = recorded.includes("/") ? recorded : null;
+    if (identityMatches(scope, slug, bareRepoName(recorded))) return true;
+  }
+  return false;
 }
 
 // ── On-demand activity (recent action lines) ────────────────────────────────

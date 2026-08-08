@@ -10,7 +10,9 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
@@ -110,6 +112,58 @@ test.describe("SessionIndex.forWorkItem: repo-scoped id-in-branch/cwd match (M1)
     const hit = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-231938", "worktree-231938");
     const near = mk("s2", "/home/me/git/appweb/.claude/worktrees/x", "b-1231938"); // 231938 inside 1231938
     expect(indexOf(hit, near).forWorkItem(231938).map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  // ── real checkouts on disk: scope by owner/repo, not by directory name ──────
+  // The tests above use synthetic cwds that don't exist, which exercises the
+  // basename FALLBACK. These create actual git repos so the `origin` remote
+  // resolves, pinning the two things a directory-name comparison gets wrong: a
+  // clone whose directory isn't named after the remote (false negative — the
+  // item↔session link silently dies for that repo), and two forks of the same
+  // repo name under different owners (false positive — they cross-match).
+  //
+  // Real repos rather than a stub `git` on PATH (as provider.spec.ts uses): a
+  // stub reports ONE origin for every root, so it could not distinguish
+  // alice/tool from bob/tool, which is the whole point of the fork case.
+  function gitRepo(dirName: string, origin: string | null): string {
+    const root = join(mkdtempSync(join(tmpdir(), "agendo-scope-")), dirName);
+    mkdirSync(root, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    if (origin) execFileSync("git", ["remote", "add", "origin", origin], { cwd: root });
+    return root;
+  }
+  // A worktree-shaped cwd under a real checkout: repos.ts strips the
+  // `.claude/worktrees/<name>` suffix by string, so the dir needn't exist.
+  const worktreeIn = (root: string, name: string) => join(root, ".claude", "worktrees", name);
+
+  test("a checkout whose DIRECTORY name differs from the remote repo still matches", () => {
+    // `ada/web-app` cloned into a directory called `frontend`: the bare-basename
+    // comparison sees "frontend" vs "web-app" and drops the session entirely.
+    const root = gitRepo("frontend", "https://github.com/ada/web-app.git");
+    const s = mk("s1", worktreeIn(root, "fix-2"), "worktree-fix-2");
+    expect(indexOf(s).forWorkItem(2, "ada/web-app").map((x) => x.id)).toEqual(["s1"]);
+    // …and it is still correctly excluded from a different repo's issue #2.
+    expect(indexOf(s).forWorkItem(2, "ada/appweb")).toEqual([]);
+  });
+
+  test("same-named repos under different owners (forks) do NOT cross-match", () => {
+    const alice = mk("s1", worktreeIn(gitRepo("tool", "git@github.com:alice/tool.git"), "fix-2"), "fix-2");
+    const bob = mk("s2", worktreeIn(gitRepo("tool", "git@github.com:bob/tool.git"), "fix-2"), "fix-2");
+    const idx = indexOf(alice, bob);
+    expect(idx.forWorkItem(2, "alice/tool").map((s) => s.id)).toEqual(["s1"]);
+    expect(idx.forWorkItem(2, "bob/tool").map((s) => s.id)).toEqual(["s2"]);
+    // Unscoped (the ADO path) still sees both — scoping is opt-in.
+    expect(idx.forWorkItem(2).map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+  });
+
+  test("a checkout with no GitHub origin falls back to comparing bare names", () => {
+    // A real repo with no remote at all, plus one on a non-GitHub host: neither
+    // resolves to a slug, so both are matched by directory basename as before.
+    const noRemote = mk("s1", worktreeIn(gitRepo("appweb", null), "fix-2"), "worktree-fix-2");
+    const ado = mk("s2", worktreeIn(gitRepo("appweb", "https://dev.azure.com/org/proj/_git/appweb"), "fix-2"), "fix-2");
+    expect(indexOf(noRemote).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s1"]);
+    expect(indexOf(ado).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s2"]);
+    expect(indexOf(noRemote, ado).forWorkItem(2, "ada/other")).toEqual([]);
   });
 });
 
