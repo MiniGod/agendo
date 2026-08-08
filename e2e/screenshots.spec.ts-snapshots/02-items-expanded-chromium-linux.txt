@@ -19,6 +19,7 @@ as ⟨magenta⟩Ada Lovelace (you)⟨bold⟩
        <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Read      ⟨gray⟩…/src/login.tsx⟨dim⟩
        <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Edit      ⟨yellow⟩…/src/login.tsx⟨dim⟩
        <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Bash      ⟨cyan⟩bun test login⟨dim⟩
+       <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Workflow  ⟨gray⟩(inline script)⟨dim⟩
        <ago>⟨gray⟩  <+d>   ⟨gray,dim⟩Claude    ⟨white⟩Done — login form added with validation. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx⟨dim⟩…
     + start a fresh session…⟨gray⟩
 ▸ #102     Bug        ⟨gray⟩Active       ⟨white⟩Fix crash on startup                          —                     1 sess     ⟨gray⟩

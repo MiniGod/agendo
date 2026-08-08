@@ -19,7 +19,8 @@ import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState } from "./config.ts";
 import { repoRootForCwd } from "./repos.ts";
-import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem } from "./types.ts";
+import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
+import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
 
@@ -70,7 +71,8 @@ Usage:
       --all                     All running sessions
       --prefix <p>              Sessions whose dir basename starts with p
       --repo <name>             Sessions whose repo root basename is name
-  agendo status <id>           Show a session's state, task checklist, recent
+  agendo status <id>           Show a session's state, task checklist, workflows
+                                (Workflow-tool runs with agent progress), recent
                                 activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
@@ -97,6 +99,15 @@ const STATUS_GLYPH: Record<string, string> = {
   pending: "[ ]",
 };
 
+/** CLI glyphs for workflow run states, matching the task-glyph style. */
+const WF_GLYPH: Record<WorkflowStatus, string> = {
+  running: "[~]",
+  completed: "[x]",
+  failed: "[!]",
+  stopped: "[-]",
+  interrupted: "[?]",
+};
+
 /** Short kind labels for the `list` columns, matching the menu's {bg}/{new} badges. */
 const KIND_LABEL: Record<SessionKind, string> = {
   background: "bg",
@@ -113,6 +124,20 @@ const KIND_LABEL: Record<SessionKind, string> = {
  * temporal dead zone during an early `wait` invocation.
  */
 const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
+
+/**
+ * Print a JSON payload and await the write. The subcommand dispatch calls
+ * `process.exit(0)` right after its runner returns, and Bun drops stdout still
+ * buffered at exit — a `console.log` of a large payload into a pipe truncates
+ * at ~64KB (the pipe buffer), silently corrupting `--json` output for the
+ * scripts consuming it. Awaiting the write callback guarantees the payload is
+ * flushed before the dispatch can exit.
+ */
+function printJson(value: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(JSON.stringify(value, null, 2) + "\n", (err) => (err ? reject(err) : resolve()));
+  });
+}
 
 /** Compact "last used" age for the list columns (matches the menu's timeAgo). */
 function timeAgo(d: Date): string {
@@ -485,6 +510,34 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
     console.log(`\n  tasks:`);
     for (const t of act.tasks) console.log(`    ${STATUS_GLYPH[t.status]} ${t.label}`);
   }
+  // Workflow-tool runs this session launched (refs come from the cached
+  // transcript parse; per-run detail is read here, on demand).
+  if (s.workflows?.length) {
+    console.log(`\n  workflows:`);
+    for (const w of s.workflows) {
+      const wst = workflowStatus(w, running);
+      const d = await loadWorkflowDetails(w);
+      const bits = [`${d.agentsDone}/${d.agentsStarted} agents done`];
+      if (w.launchedAt) bits.push(`started ${timeAgo(w.launchedAt)}`);
+      if (wst === "running" && d.lastActivity) bits.push(`active ${timeAgo(d.lastActivity)}`);
+      console.log(`    ${WF_GLYPH[wst]} ${w.name} — ${wst} · ${bits.join(" · ")}`);
+      const desc = w.summary ?? d.description;
+      if (desc) console.log(`        ${full ? desc : desc.slice(0, 120)}`);
+      if (d.phases?.length) {
+        console.log(`        phases: ${d.phases.map((p) => (p.model ? `${p.title} (${p.model})` : p.title)).join(" → ")}`);
+      }
+      if (d.modelCounts) {
+        // Alphabetical: the tally is built concurrently, so insertion order is
+        // nondeterministic — sort for stable output.
+        const models = Object.entries(d.modelCounts)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([m, n]) => (n > 1 ? `${m} ×${n}` : m))
+          .join(", ");
+        console.log(`        agents: ${models}`);
+      }
+      console.log(`        run: ${w.runId}${full && w.transcriptDir ? `\n        transcripts: ${w.transcriptDir}` : ""}`);
+    }
+  }
   if (act.actions.length) {
     console.log(`\n  recent activity:`);
     for (const a of act.actions) console.log(`    ${a.verb}${a.detail ? `  ${a.detail}` : ""}`);
@@ -596,6 +649,8 @@ interface ListRow {
   pr: { id: number; url: string } | null;
   /** Linked work item / issue, resolved through the model's reverse index. */
   workItem: { id: number; url: string } | null;
+  /** Workflow-tool runs the session launched, with their effective status. */
+  workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
 }
 
 /**
@@ -700,11 +755,17 @@ async function runList(opts: ListOptions): Promise<void> {
       lastUsed: s.lastUsed.toISOString(),
       pr: l?.pr ?? null,
       workItem: l?.workItem ?? null,
+      workflows: (s.workflows ?? []).map((w) => ({
+        runId: w.runId,
+        name: w.name,
+        status: workflowStatus(w, running),
+        summary: w.summary ?? null,
+      })),
     };
   });
 
   if (opts.json) {
-    console.log(JSON.stringify(rows, null, 2));
+    await printJson(rows);
     return;
   }
   if (rows.length === 0) {
@@ -720,6 +781,7 @@ async function runList(opts: ListOptions): Promise<void> {
     ["", "ready".padEnd(10), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
   for (const r of rows) {
+    const wfRunning = r.workflows.filter((w) => w.status === "running").length;
     console.log(
       [
         r.running ? "●" : "○",
@@ -730,7 +792,7 @@ async function runList(opts: ListOptions): Promise<void> {
         r.dir.slice(0, 20).padEnd(20),
         (r.pr ? `!${r.pr.id}` : "-").padEnd(6),
         (r.workItem ? `#${r.workItem.id}` : "-").padEnd(6),
-        r.title.slice(0, 44) + (r.shells > 0 ? `  ⛁${r.shells}` : ""),
+        r.title.slice(0, 44) + (r.shells > 0 ? `  ⛁${r.shells}` : "") + (wfRunning > 0 ? `  ◆${wfRunning}` : ""),
       ].join("  ").trimEnd(),
     );
   }
@@ -765,6 +827,8 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     seen.add(key);
     const raw = capturePane(name);
     const shells = paneShells(raw);
+    // Running-workflow marker (◆N): the session is live here by construction.
+    const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
     rows.push(
       [
         "●",
@@ -774,7 +838,7 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
         timeAgo(s.lastUsed).padEnd(8),
         (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
         s.title.replace(/\s+/g, " ").slice(0, 44),
-        shells > 0 ? `⛁${shells}` : "",
+        [shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""].filter(Boolean).join(" "),
       ].join("  ").trimEnd(),
     );
   }
@@ -853,7 +917,7 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
   }));
 
   if (opts.json) {
-    console.log(JSON.stringify(rows, null, 2));
+    await printJson(rows);
     return;
   }
   if (rows.length === 0) {
@@ -915,7 +979,7 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
   }));
 
   if (opts.json) {
-    console.log(JSON.stringify(rows, null, 2));
+    await printJson(rows);
     return;
   }
   if (rows.length === 0) {

@@ -8,7 +8,8 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus } from "./types.ts";
+import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus, WorkflowRef } from "./types.ts";
+import { WorkflowScan } from "./workflows.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");
 
@@ -67,7 +68,7 @@ const BASE_BRANCHES = new Set(["master", "main"]);
 
 async function parseClaudeMeta(
   filePath: string,
-): Promise<{ cwd?: string; branch?: string; title?: string; createdAt?: Date } | null> {
+): Promise<{ cwd?: string; branch?: string; title?: string; createdAt?: Date; workflows?: WorkflowRef[] } | null> {
   let raw: string;
   try {
     raw = await readFile(filePath, "utf-8");
@@ -90,6 +91,9 @@ async function parseClaudeMeta(
   // worktree branch), or a brief mid-session switch back to master, from winning.
   let lastNonBase: string | undefined;
   let lastAnyBranch: string | undefined;
+  // Workflow runs ride the same line walk (and thus the same parse cache) —
+  // launches and completion notifications are both transcript records.
+  const workflows = new WorkflowScan();
   for (const line of raw.split("\n")) {
     const t = line.trim();
     if (!t) continue;
@@ -112,9 +116,10 @@ async function parseClaudeMeta(
     if (e.type === "custom-title" && e.customTitle) customTitle = e.customTitle;
     else if (e.type === "ai-title" && e.aiTitle) aiTitle = e.aiTitle;
     else if (e.type === "agent-name" && e.agentName) agentName = e.agentName;
+    workflows.record(e);
   }
   const branch = lastNonBase ?? lastAnyBranch;
-  return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt };
+  return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt, workflows: workflows.finish() };
 }
 
 // Per-transcript parse cache, keyed by absolute .jsonl path. Parsing a Claude
@@ -203,6 +208,7 @@ const claudeProvider: SessionProvider = {
                   createdAt: meta.createdAt,
                   configDir,
                   logPath: filePath,
+                  workflows: meta.workflows,
                 };
                 claudeParseCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, session });
                 sessions.push(session);
@@ -475,6 +481,13 @@ function claudeAction(b: any, ts: Date, full = false): ActionLine | null {
       detail = at + (inp.description ?? "");
       break;
     }
+    // A Workflow launch's input is a whole orchestration script — dumping its
+    // first value would spray code into the one-liner. Prefer the workflow's
+    // name / script path; run identity + progress live in the workflows
+    // section (see workflows.ts), not the action log.
+    case "Workflow":
+      detail = inp.name ?? (typeof inp.scriptPath === "string" ? shortPath(inp.scriptPath) : "(inline script)");
+      break;
     case "TaskCreate":
       detail = inp.subject ?? inp.title ?? "";
       break;
@@ -521,8 +534,10 @@ async function loadClaudeActivity(path?: string, full = false): Promise<SessionA
     if (e.type === "user") {
       const txt = userText(e.message?.content);
       // A genuine new human prompt (not a tool_result) starts a fresh turn, so
-      // the previous turn's answer is no longer "the final response".
-      if (txt) {
+      // the previous turn's answer is no longer "the final response". Injected
+      // task-notifications (background agent/workflow completions) are user-typed
+      // records but not human prompts — they must not clobber either field.
+      if (txt && !txt.startsWith("<task-notification>")) {
         lastPrompt = full ? txt : txt.slice(0, 200);
         finalResponse = undefined;
       }
