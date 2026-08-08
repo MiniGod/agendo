@@ -10,7 +10,9 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
@@ -19,6 +21,7 @@ import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneU
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
+import { SessionIndex } from "../src/sessions.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -65,6 +68,116 @@ test.describe("resolveWindowSession: window name → session", () => {
 
   test("legacy name in a cwd with no session resolves to nothing", () => {
     expect(resolveWindowSession(all, "cl-wi-101", "/nowhere")).toBeUndefined();
+  });
+});
+
+test.describe("SessionIndex.forWorkItem: repo-scoped id-in-branch/cwd match (M1)", () => {
+  // Build an index directly from in-memory sessions (bypassing the disk scan).
+  // Worktree-shaped cwds resolve to a repo root purely by string, so no fs.
+  function indexOf(...sessions: AgentSession[]): SessionIndex {
+    const idx = new SessionIndex();
+    idx.all.push(...sessions);
+    return idx;
+  }
+  const mk = (id: string, cwd: string, branch: string): AgentSession =>
+    ({ id, source: "claude", cwd, branch, title: id, lastUsed: new Date(0) });
+
+  test("a repo scope keeps GitHub issue #2 off same-numbered branches in OTHER repos", () => {
+    const inRepo = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-2", "worktree-fix-2");
+    // A different repo whose name AND branch merely contain "2" — the false match.
+    const otherRepo = mk("s2", "/home/me/git/app2/.claude/worktrees/rework", "v2-fixes");
+    const idx = indexOf(inRepo, otherRepo);
+    // Unscoped, BOTH match on the bare "2" (the pre-fix behaviour, still the ADO path).
+    expect(idx.forWorkItem(2).map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+    // Scoped to the issue's repo slug → only the session actually in appweb.
+    expect(idx.forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  test("a bare repo name scopes just as well as a slug", () => {
+    const inRepo = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-2", "worktree-fix-2");
+    const otherRepo = mk("s2", "/home/me/git/app2/.claude/worktrees/rework", "v2-fixes");
+    expect(indexOf(inRepo, otherRepo).forWorkItem(2, "appweb").map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  test("Copilot's recorded repository field also satisfies the scope", () => {
+    const cop: AgentSession = {
+      id: "c1", source: "copilot", cwd: "/tmp/checkout", branch: "fix-2",
+      repository: "ada/appweb", title: "c1", lastUsed: new Date(0),
+    };
+    expect(indexOf(cop).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["c1"]);
+    expect(indexOf(cop).forWorkItem(2, "ada/other")).toEqual([]);
+  });
+
+  test("unscoped (ADO) match is unchanged, digit boundaries still hold", () => {
+    const hit = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-231938", "worktree-231938");
+    const near = mk("s2", "/home/me/git/appweb/.claude/worktrees/x", "b-1231938"); // 231938 inside 1231938
+    expect(indexOf(hit, near).forWorkItem(231938).map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  // ── real checkouts on disk: scope by owner/repo, not by directory name ──────
+  // The tests above use synthetic cwds that don't exist, which exercises the
+  // basename FALLBACK. These create actual git repos so the `origin` remote
+  // resolves, pinning the two things a directory-name comparison gets wrong: a
+  // clone whose directory isn't named after the remote (false negative — the
+  // item↔session link silently dies for that repo), and two forks of the same
+  // repo name under different owners (false positive — they cross-match).
+  //
+  // Real repos rather than a stub `git` on PATH (as provider.spec.ts uses): a
+  // stub reports ONE origin for every root, so it could not distinguish
+  // alice/tool from bob/tool, which is the whole point of the fork case.
+  // Each gitRepo() call mints its own mkdtemp parent (so two repos can share a
+  // basename, as the fork case needs); remember the parents so afterAll can
+  // reclaim them — a `git init` leaves ~100KB of template files behind, and
+  // without this every local run permanently litters the temp dir.
+  const tempRoots: string[] = [];
+  test.afterAll(() => {
+    for (const dir of tempRoots) {
+      // Cleanup must never be the reason a green suite reports red.
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  function gitRepo(dirName: string, origin: string | null): string {
+    const parent = mkdtempSync(join(tmpdir(), "agendo-scope-"));
+    tempRoots.push(parent);
+    const root = join(parent, dirName);
+    mkdirSync(root, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    if (origin) execFileSync("git", ["remote", "add", "origin", origin], { cwd: root });
+    return root;
+  }
+  // A worktree-shaped cwd under a real checkout: repos.ts strips the
+  // `.claude/worktrees/<name>` suffix by string, so the dir needn't exist.
+  const worktreeIn = (root: string, name: string) => join(root, ".claude", "worktrees", name);
+
+  test("a checkout whose DIRECTORY name differs from the remote repo still matches", () => {
+    // `ada/web-app` cloned into a directory called `frontend`: the bare-basename
+    // comparison sees "frontend" vs "web-app" and drops the session entirely.
+    const root = gitRepo("frontend", "https://github.com/ada/web-app.git");
+    const s = mk("s1", worktreeIn(root, "fix-2"), "worktree-fix-2");
+    expect(indexOf(s).forWorkItem(2, "ada/web-app").map((x) => x.id)).toEqual(["s1"]);
+    // …and it is still correctly excluded from a different repo's issue #2.
+    expect(indexOf(s).forWorkItem(2, "ada/appweb")).toEqual([]);
+  });
+
+  test("same-named repos under different owners (forks) do NOT cross-match", () => {
+    const alice = mk("s1", worktreeIn(gitRepo("tool", "git@github.com:alice/tool.git"), "fix-2"), "fix-2");
+    const bob = mk("s2", worktreeIn(gitRepo("tool", "git@github.com:bob/tool.git"), "fix-2"), "fix-2");
+    const idx = indexOf(alice, bob);
+    expect(idx.forWorkItem(2, "alice/tool").map((s) => s.id)).toEqual(["s1"]);
+    expect(idx.forWorkItem(2, "bob/tool").map((s) => s.id)).toEqual(["s2"]);
+    // Unscoped (the ADO path) still sees both — scoping is opt-in.
+    expect(idx.forWorkItem(2).map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+  });
+
+  test("a checkout with no GitHub origin falls back to comparing bare names", () => {
+    // A real repo with no remote at all, plus one on a non-GitHub host: neither
+    // resolves to a slug, so both are matched by directory basename as before.
+    const noRemote = mk("s1", worktreeIn(gitRepo("appweb", null), "fix-2"), "worktree-fix-2");
+    const ado = mk("s2", worktreeIn(gitRepo("appweb", "https://dev.azure.com/org/proj/_git/appweb"), "fix-2"), "fix-2");
+    expect(indexOf(noRemote).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s1"]);
+    expect(indexOf(ado).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s2"]);
+    expect(indexOf(noRemote, ado).forWorkItem(2, "ada/other")).toEqual([]);
   });
 });
 
@@ -788,6 +901,33 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     const current = parseResetTime("Your limit will reset at 3pm.", now, RESET_LOOKBACK_MS);
     expect(new Date(current!).getDate()).toBe(15); // today (already reopened → act now)
     expect(current!).toBeLessThan(now.getTime());
+  });
+
+  test("REGRESSION (L1): a bare time hours before now rolls to TOMORROW, not 'act now'", () => {
+    // 23:00 + "resets 1am": today's 1am is 22h in the past. The 8-day weekly
+    // lookback must NOT treat it as just-reopened (which fired auto-resume into a
+    // still-limited session, burning the one shot) — it names tomorrow's 1am.
+    const now = new Date(2026, 5, 15, 23, 0); // 11pm local
+    const at = parseResetTime("Your limit will reset at 1am.", now, RESET_LOOKBACK_MS);
+    const d = new Date(at!);
+    expect(d.getDate()).toBe(16); // tomorrow
+    expect(d.getHours()).toBe(1);
+    expect(at!).toBeGreaterThan(now.getTime());
+    // …so an auto-resume gated on this reset does NOT fire now (would burn the shot).
+    expect(
+      shouldAutoResume({ enabled: true, readiness: "limited", resetAt: at, now: now.getTime(), firedFor: null }),
+    ).toBe(false);
+  });
+
+  test("a bare time only a couple hours past (5-hour cap just reopened) still acts now", () => {
+    // 2am + "resets 1am": 1h ago, within the 6h bare-time lookback → the lingering
+    // notice of a just-reopened 5-hour window resolves to the past instant.
+    const now = new Date(2026, 5, 15, 2, 0); // 2am local
+    const at = parseResetTime("Your limit will reset at 1am.", now, RESET_LOOKBACK_MS);
+    const d = new Date(at!);
+    expect(d.getDate()).toBe(15); // today (already reopened)
+    expect(d.getHours()).toBe(1);
+    expect(at!).toBeLessThan(now.getTime());
   });
 });
 
