@@ -10,7 +10,7 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync, mkdirSync, mkdtempSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,8 +125,22 @@ test.describe("SessionIndex.forWorkItem: repo-scoped id-in-branch/cwd match (M1)
   // Real repos rather than a stub `git` on PATH (as provider.spec.ts uses): a
   // stub reports ONE origin for every root, so it could not distinguish
   // alice/tool from bob/tool, which is the whole point of the fork case.
+  // Each gitRepo() call mints its own mkdtemp parent (so two repos can share a
+  // basename, as the fork case needs); remember the parents so afterAll can
+  // reclaim them — a `git init` leaves ~100KB of template files behind, and
+  // without this every local run permanently litters the temp dir.
+  const tempRoots: string[] = [];
+  test.afterAll(() => {
+    for (const dir of tempRoots) {
+      // Cleanup must never be the reason a green suite reports red.
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   function gitRepo(dirName: string, origin: string | null): string {
-    const root = join(mkdtempSync(join(tmpdir(), "agendo-scope-")), dirName);
+    const parent = mkdtempSync(join(tmpdir(), "agendo-scope-"));
+    tempRoots.push(parent);
+    const root = join(parent, dirName);
     mkdirSync(root, { recursive: true });
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
     if (origin) execFileSync("git", ["remote", "add", "origin", origin], { cwd: root });
