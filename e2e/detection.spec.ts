@@ -599,11 +599,18 @@ const ESC_REVEALED_PANE = [
 //                               right-aligned `new task? /clear to save 293k tokens`
 //                               hint — with a FAINT history suggestion ("stop
 //                               monitoring") sitting in the otherwise-empty box.
+//   - limit-notice-task-panel.ansi  an orchestrator session with a TASK LIST: its
+//                               background agents died on the limit, and the TUI's
+//                               standing `7 tasks (3 done, 1 in progress, 3 open)`
+//                               panel renders between the notice and the box —
+//                               seven lines of persistent UI that read as the
+//                               "latest content block" and hid the notice.
 const fullPane = (name: string) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf-8");
 const REAL_MENU_PANE = fullPane("limit-dialog-menu.ansi");
 const REAL_ESC_REVEALED_PANE = fullPane("limit-esc-revealed.ansi");
 const REAL_RESENT_NOTICE_PANE = fullPane("limit-notice-resent.ansi");
 const REAL_CLEAR_HINT_PANE = fullPane("limit-notice-clear-hint.ansi");
+const REAL_TASK_PANEL_PANE = fullPane("limit-notice-task-panel.ansi");
 // The deep-scrollback menu state: the SAME dialog but with the reset-time notice
 // NOT on screen (it scrolled behind the menu) — the case the reveal Escape exists
 // for. Synthesized from the verbatim capture by dropping the notice line.
@@ -726,6 +733,61 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     const at = parseResetTime(stripAnsi(REAL_CLEAR_HINT_PANE), new Date("2026-08-07T14:00:00Z"));
     expect(at).not.toBeNull();
     expect(new Date(at!).toISOString()).toBe("2026-08-07T17:00:00.000Z");
+  });
+
+  test("REGRESSION, REAL CAPTURE: notice behind the TASK PANEL reads 'limited' and yields the reset time", () => {
+    // The field failure this fixture was captured for: an orchestrator session
+    // whose background agents all died on the session cap ("Agent … failed: …
+    // You've hit your session limit · resets 1:30pm"), sitting behind the TUI's
+    // standing task list:
+    //     ✻ Cogitated for 52m 16s
+    //     7 tasks (3 done, 1 in progress, 3 open)
+    //     ◼ … / ◻ … / ✔ …
+    //      … +2 completed
+    // That panel is persistent UI, not conversation output, but the
+    // block-above-the-box heuristic counted it as the latest content and demoted
+    // the notice to history — so the pane read 'ready' and never auto-resumed.
+    expect(paneReadiness(REAL_TASK_PANEL_PANE)).toBe("limited");
+    expect(paneUsageLimited(REAL_TASK_PANEL_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_TASK_PANEL_PANE)).toBe(true);
+    const at = parseResetTime(stripAnsi(REAL_TASK_PANEL_PANE), new Date("2026-08-10T12:40:00Z"));
+    expect(at).not.toBeNull();
+    // "resets 1:30pm (Atlantic/Reykjavik)" — Reykjavik is UTC+0 year-round.
+    expect(new Date(at!).toISOString()).toBe("2026-08-10T13:30:00.000Z");
+  });
+
+  test("REGRESSION (negative): a task panel above a RECOVERED session still reads 'ready'", () => {
+    // Skipping the panel must not skip past real turn output behind it. Same
+    // capture, but with a completed turn between the notice and the panel — the
+    // session moved on, so the notice is history and the pane is sendable.
+    const lines = REAL_TASK_PANEL_PANE.split("\n");
+    const panelAt = lines.findIndex((l) => /^\s*\d+ tasks? \(/.test(stripAnsi(l)));
+    const recovered = [
+      ...lines.slice(0, panelAt),
+      "[38;5;231m●[39m Picked the work back up: rebuilt the index and re-ran the suite, all green.",
+      "",
+      ...lines.slice(panelAt),
+    ].join("\n");
+    expect(paneUsageLimited(recovered)).toBe(false);
+    expect(paneReadiness(recovered)).toBe("ready");
+    expect(paneResumeSafe(recovered)).toBe(false);
+  });
+
+  test("a task-panel-shaped line outside a panel is still content, not chrome", () => {
+    // The panel is matched structurally (header + the contiguous rows beneath it),
+    // so a lone glyph line of turn output between the notice and the box demotes
+    // the notice exactly as before — only a real `N tasks (…)` header opens a panel.
+    const notice = "  ⎿  You've hit your session limit · resets 2:10pm (Atlantic/Reykjavik)";
+    const glyphOutput = "  ✔ Rebuilt the index and re-ran the suite";
+    expect(paneUsageLimited([notice, "", glyphOutput, idleBox].join("\n"))).toBe(false);
+    // …but the same line *under* a panel header is part of the panel, and skipped.
+    expect(
+      paneUsageLimited([notice, "", "  1 task (0 done, 1 open)", glyphOutput, idleBox].join("\n")),
+    ).toBe(true);
+    // Prose that merely counts tasks doesn't open a panel.
+    expect(
+      paneUsageLimited([notice, "", "  3 tasks (see the plan above)", glyphOutput, idleBox].join("\n")),
+    ).toBe(false);
   });
 
   test("REAL CAPTURE: a prompt re-sent while limited re-prints the notice ('/upgrade' variant) → 'limited'", () => {
