@@ -6,7 +6,7 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePane, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
+  liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
   sessionRoot, currentSessionName, killWindow,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
@@ -466,8 +466,8 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   if (s.branch) console.log(`  branch: ${s.branch}`);
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
   if (target) {
-    const raw = capturePane(target);
-    const readiness = paneReadiness(raw);
+    const { raw, cursor } = capturePaneState(target);
+    const readiness = paneReadiness(raw, cursor);
     console.log(`  ready:  ${readiness}`);
     if (readiness === "limited") {
       const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
@@ -520,8 +520,8 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     console.error(`Session ${token} is not running (no live tmux window to send to).`);
     process.exit(1);
   }
-  const raw = capturePane(target);
-  const readiness = paneReadiness(raw);
+  const { raw, cursor } = capturePaneState(target);
+  const readiness = paneReadiness(raw, cursor);
   if (readiness !== "ready" && !force) {
     console.error(`Not sending: session looks "${readiness}", not ready. Re-check with \`${SELF_CMD} status ${token}\`, or pass --force.`);
     console.error(`\n  current screen (tail):`);
@@ -548,8 +548,8 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
     console.error(`Session ${token} is not running (no live tmux window to unblock).`);
     process.exit(1);
   }
-  const raw = capturePane(target);
-  const readiness = paneReadiness(raw);
+  const { raw, cursor } = capturePaneState(target);
+  const readiness = paneReadiness(raw, cursor);
   if (readiness !== "limited" && !force) {
     console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
     process.exit(2);
@@ -680,8 +680,8 @@ async function runList(opts: ListOptions): Promise<void> {
     let readiness: Readiness | null = null;
     let shells = 0;
     if (running && window) {
-      const raw = capturePane(window);
-      readiness = paneReadiness(raw);
+      const { raw, cursor } = capturePaneState(window);
+      readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
     }
     const l = linkOf(s);
@@ -763,12 +763,12 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const raw = capturePane(name);
+    const { raw, cursor } = capturePaneState(name);
     const shells = paneShells(raw);
     rows.push(
       [
         "●",
-        paneReadiness(raw).padEnd(10),
+        paneReadiness(raw, cursor).padEnd(10),
         KIND_LABEL[kind].padEnd(3),
         shortId(s.id),
         timeAgo(s.lastUsed).padEnd(8),
@@ -1110,7 +1110,10 @@ async function runWait(o: WaitOptions): Promise<void> {
   const interval = Math.max(100, o.intervalMs);
   const deadline = Date.now() + o.timeoutMs;
   while (true) {
-    const states = targets.map((t) => ({ ...t, r: paneReadiness(capturePane(t.target)) }));
+    const states = targets.map((t) => {
+      const { raw, cursor } = capturePaneState(t.target);
+      return { ...t, r: paneReadiness(raw, cursor) };
+    });
     const pending = states.filter((x) => !waitSatisfied(x.r, o));
     if (pending.length === 0) {
       for (const x of states) console.log(`${shortId(x.s.id)}\t${x.r}`);

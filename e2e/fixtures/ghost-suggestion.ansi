@@ -1,0 +1,47 @@
+     [38;5;77m[48;5;22m 169 +[38;5;231m * loses its framing on a *cold* [38;5;148mresume[38;5;231m (a live session keeps the prompt it                                                                                                  [39m[49m
+     [38;5;77m[48;5;22m 170 +[38;5;231m * started [38;5;197mwith[38;5;231m), and orchestrators are launched one at a time by a human or by                                                                                              [39m[49m
+     [38;5;77m[48;5;22m 171 +[38;5;231m * another agent, [38;5;148mnever[38;5;231m fanned out [38;5;197min[38;5;231m a batch.                                                                                                                               [39m[49m
+     [2m[38;5;231m 172 [0m[38;5;231m  */[39m
+     [2m[38;5;231m 173 [0m[38;5;231m [38;5;197mexport[38;5;231m [38;5;81mfunction[38;5;231m [38;5;148mmarkOrchestratorSession[38;5;231m([38;5;148mid[38;5;208m: [38;5;148mstring[38;5;231m): [38;5;148mvoid[38;5;231m {[39m
+     [2m[38;5;231m 174 [0m[38;5;231m   [38;5;197mtry[38;5;231m {[39m
+
+  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m●[39m Implementation is complete and green. Summary of what's in place while the review agent finishes:
+
+  [1m[38;5;153msrc/orchestrator.ts[0m (new) — the prompt text plus the resume marker.
+  - [38;5;153morchestratorSystemPrompt(selfCmd)[39m takes the launcher's [38;5;153mSELF_CMD[39m as a parameter (keeps the module free of spawn-time env sniffing, and directly unit-testable).
+  - I chose [38;5;153m--append-system-prompt[39m over [38;5;153m--agent[39m: [38;5;153mclaude --agent <name>[39m needs a definition on disk in the target repo, and orchestrators get launched into arbitrary repos, so the instructions
+  would silently vanish where no [38;5;153m.claude/agents/orchestrator.md[39m exists. (This repo's [38;5;153m.claude/agents/[39m is in fact empty — the [38;5;153morchestrator[39m definition lives at user level in
+  [38;5;153m~/.claude/agents/orchestrator.md[39m, so I reused its content rather than depending on the file.) Neither flag is recorded in claude's session state, and re-appending a system prompt on resume
+  is already the codebase's proven path ([38;5;153mresumeArgv[39m).
+  - Resume survival: launched ids are recorded in [38;5;153m~/.agendo/orchestrators.json[39m, and [38;5;153mresumeArgv[39m consults it — so cold resume and restore-tab replay both re-inject.
+
+  [1mWiring[0m — [38;5;153mlaunch.ts[39m combines the launcher prompt and the orchestrator prompt into [1mone[0m [38;5;153m--append-system-prompt[39m value (claude's flag takes a single value; passing it twice would silently
+  discard one). [38;5;153mLaunchOptions.orchestrator[39m threads through [38;5;153mlaunchTask[39m/[38;5;153mlaunchNewSession[39m. The worktree slug defaults to [38;5;153morchestrator[39m rather than a slug of the goal.
+
+  [1mCLI[0m — [38;5;153magendo launch --orchestrator|-O "<goal>"[39m, documented in [38;5;153m--help[39m and [38;5;153m--llm[39m. [38;5;153m--orchestrator[39m with an explicit [38;5;153m--copilot[39m/[38;5;153m--agent copilot[39m exits non-zero rather than downgrading (Copilot has
+  no [38;5;153m--append-system-prompt[39m equivalent, so the instructions would be dropped).
+
+  [1mTUI[0m — [38;5;153mO[39m in the Sessions view, advertised in the hint bar next to [38;5;153mn new[39m. It reuses the existing repo → worktree-choice → name flow (including scoped repos), skipping only the agent picker
+  since the mode is Claude-only, with the branch prompt prefilled [38;5;153morchestrator[39m.
+
+  [1mTests[0m — [38;5;153me2e/orchestrator.spec.ts[39m asserts each required directive is in the prompt; [38;5;153me2e/cli.spec.ts[39m covers the flag, the slug default and [38;5;153m--name[39m override, the Copilot refusal, resume
+  re-injection, and the inverse (a plain [38;5;153mlaunch[39m gets no orchestrator text); [38;5;153me2e/launcher.spec.ts[39m drives [38;5;153mO[39m through to the spawned argv, plus the inverse for [38;5;153mn[39m. The CLI launch tests run from a
+  repo in the mock home — from [38;5;153mREPO_ROOT[39m the fake git would have [38;5;153mmkdir[39m'd a worktree inside your real repo.
+
+  Both typechecks pass and the full suite is green (209 passed; the one snapshot diff was the sessions-view hint line, regenerated).
+
+  Two things I have [1mnot[0m done yet, pending the review findings: committing to the branch and opening the PR. I'll fold in any real findings, re-run the suite, then commit and open the PR
+  against [38;5;153mmaster[39m and report the number.
+
+[38;5;246m✻[39m [38;5;246mWaiting for [1m1[0m[38;5;246m background agent to finish[39m
+
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2mwait for the review, then commit and open the PR[0m
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [34m12:19:31[38;5;246m | [33m20%[38;5;246m ctx | [33m5h: 56%[2m[38;5;246m (1h 30m)[0m[38;5;246m | [33m7d: 8%[2m[38;5;246m (133h 40m)[0m[38;5;246m | [36mOpus 5[38;5;246m | [35mworktree-orchestrator-mode [!?][38;5;246m | [32m/home/user/repo/.claude/worktrees/orchestrator-mode[39m
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · ← for agents[39m
+
+[1m  ● main[0m
+❯ ◯ general-purpose  Review orchestrator mode change                                                                                                                    5m 39s · ↓ 99.9k tokens

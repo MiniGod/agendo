@@ -100,6 +100,57 @@ export function capturePane(target: string): string {
   return r.status === 0 ? (r.stdout ?? "") : "";
 }
 
+/**
+ * Where a pane's caret sits, in pane-relative cells: row 0 is the top visible
+ * row — the same origin `capture-pane` uses for its first output line — so `y`
+ * indexes straight into a capture's lines.
+ */
+export interface PaneCursor {
+  x: number;
+  y: number;
+}
+
+/**
+ * Cursor position of a target's active pane, or null when tmux can't report it
+ * (no such target, or a stub/older tmux that doesn't answer the format). Callers
+ * treat null as "no cursor evidence" and fall back to the color-based read — see
+ * `inputEmpty`.
+ */
+function paneCursor(target: string): PaneCursor | null {
+  const r = spawnSync("tmux", ["display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y}"], { encoding: "utf-8" });
+  if (r.status !== 0) return null;
+  const m = (r.stdout ?? "").trim().match(/^(\d+)\s+(\d+)$/);
+  return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+}
+
+/** A pane's visible text paired with the caret position captured alongside it. */
+export interface PaneSnapshot {
+  /** `capture-pane -p -e` output — SGR escapes intact. */
+  raw: string;
+  /** Caret position, or null when tmux couldn't report one. */
+  cursor: PaneCursor | null;
+}
+
+/**
+ * Snapshot a pane: its visible text plus its caret. Every call site that judges
+ * readiness should use this rather than a bare `capturePane`, since the caret is
+ * half the evidence (see `inputEmpty`).
+ *
+ * Two separate tmux reads, so the halves can be skewed by whatever the pane did
+ * in between — including a paint in progress, which parks the grid cursor
+ * wherever the TUI's output stream has reached rather than where it will rest.
+ * That makes the caret a BEST-EFFORT signal, not a proof: `inputEmpty` accepts it
+ * only at the exact resting column of an untouched prompt, which is the narrowest
+ * test that still recognizes a suggestion, not an airtight one. tmux can serve
+ * both reads in one invocation (`display-message … \; capture-pane …`); kept as
+ * two calls because `display-message` is a cheap one-line read next to dumping
+ * the whole screen, and the combined form's output shape is one more thing to get
+ * wrong.
+ */
+export function capturePaneState(target: string): PaneSnapshot {
+  return { raw: capturePane(target), cursor: paneCursor(target) };
+}
+
 /** Strip ANSI SGR escape sequences, for plain-text display / matching. */
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -249,14 +300,17 @@ function inputRealText(line: string): string {
  *    than a fixed offset, because sub-agent status lines (`● main`, `◯ …`) can
  *    render below the mode bar. The box can be empty even while busy, so busy is
  *    checked first and independently.
- * `raw` must include SGR escapes (see `capturePane`). Busy/dialog use specific,
- * transient markers so scanning the whole visible screen is safe: claude's prose
- * questions don't match them, and while a *finished* turn keeps a token count in
+ * `raw` must include SGR escapes (see `capturePane`), and `cursor` — the caret
+ * captured alongside it (see `capturePaneState`) — is the second, color-blind
+ * signal for "is anything typed?"; omitting it falls back to the color read alone
+ * (see `inputEmpty`). Busy/dialog use specific, transient markers so scanning the
+ * whole visible screen is safe: claude's prose questions don't match them, and
+ * while a *finished* turn keeps a token count in
  * its result summary (`✔ Goal achieved (1m · 1 turn · 4.6k tokens)`), that
  * summary never carries the live counter's directional ↑/↓ arrow — which the
  * busy check requires — so an idle post-turn pane isn't mistaken for a live one.
  */
-export function paneReadiness(raw: string): Readiness {
+export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readiness {
   const plain = stripAnsi(raw);
   // Compacting the conversation — a distinct, blocking state. Must be checked
   // *before* the input-box read below: compaction shows no token counter and no
@@ -293,7 +347,7 @@ export function paneReadiness(raw: string): Readiness {
   // Read the input box: the lines between the last two horizontal rules.
   const input = inputBox(raw);
   if (input === null) return "unknown";
-  return inputRealText(input) === "" ? "ready" : "queued";
+  return inputEmpty(input, cursor) ? "ready" : "queued";
 }
 
 /**
@@ -327,19 +381,103 @@ function isDialog(raw: string): boolean {
   return true;
 }
 
+/** The claude input box, located inside a capture. */
+interface InputBox {
+  /** The box's lines (SGR escapes intact), joined — what `inputRealText` reads. */
+  text: string;
+  /** Index of the `❯` prompt line *in the full capture* = its pane row. */
+  promptRow: number;
+  /** Index of the same line within `text` (the box's own rows). */
+  promptOffset: number;
+  /** Column of the first input cell, one past the `❯ ` marker. */
+  inputCol: number;
+}
+
 /**
  * The input-box region — the lines between the last two horizontal rules, which
  * bound the `❯` prompt — or null if there's no recognizable box. `raw` must keep
  * its SGR escapes (inputRealText reads them to tell real text from a suggestion).
+ *
+ * The prompt's row/column are reported alongside the text so `inputEmpty` can
+ * line the pane's caret up against them. The row is a capture line index, which
+ * IS the pane row (`capture-pane`'s first line is row 0, the origin `#{cursor_y}`
+ * uses); the column is counted on the ANSI-stripped line, so it's a cell offset
+ * (the prompt line carries only spaces before the `❯`, one cell each).
  */
-function inputBox(raw: string): string | null {
+function inputBox(raw: string): InputBox | null {
   const lines = raw.replace(/\r/g, "").split("\n");
   const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
   if (rules.length === 0) return null;
   const bottom = rules[rules.length - 1];
   const top = rules.length >= 2 ? rules[rules.length - 2] : bottom - 2;
-  const input = lines.slice(top + 1, bottom).join("\n");
-  return input.includes("❯") ? input : null;
+  const body = lines.slice(Math.max(top + 1, 0), bottom);
+  const promptOffset = body.findIndex((l) => l.includes("❯"));
+  if (promptOffset === -1) return null;
+  const promptRow = Math.max(top + 1, 0) + promptOffset;
+  return {
+    text: body.join("\n"),
+    promptRow,
+    promptOffset,
+    // `❯ ` — the marker plus the single space separating it from the input.
+    inputCol: stripAnsi(lines[promptRow]).indexOf("❯") + 2,
+  };
+}
+
+/**
+ * Whether the input box holds nothing the user typed — the check that gates both
+ * `agendo send` and auto-resume. Two independent discriminators, either of which
+ * is enough to call the box empty:
+ *
+ *  1. COLOR (`inputRealText`): the TUI draws an autocomplete *suggestion* faint
+ *     (`\e[2m`) or gray and real text in the default color, so a box whose only
+ *     glyphs are faint/gray holds no typed text. Precise when it applies, but
+ *     it's a palette heuristic — it can only recognize the grays it enumerates,
+ *     and it needs a capture that kept its escapes.
+ *  2. CARET (`cursor`): a suggestion is rendered *at* the caret, waiting for Tab;
+ *     typed text pushes the caret to its end. So a caret still resting at the
+ *     prompt column means nothing was typed, whatever color the box is drawn in —
+ *     no palette knowledge, no escapes needed. Accepted only at EXACTLY the
+ *     prompt's row and column: the caret is sampled by a second tmux read (see
+ *     capturePaneState), and a pane caught mid-paint parks its cursor wherever the
+ *     output stream reached — column 0 of a row it is only passing through, say —
+ *     so anything short of the resting position is treated as no evidence.
+ *
+ * They're OR'd because the bug being fixed is a FALSE dirty read: a ghost
+ * suggestion that (1) can't recognize — an unenumerated gray, a theme that draws
+ * suggestions without dim, a capture stripped of escapes — makes `agendo send`
+ * refuse and, worse, makes `paneResumeSafe` refuse, so a usage-limited session
+ * never resumes hands-off however long it waits.
+ *
+ * The OR is not free, and signal 1 does NOT backstop signal 2 — the moment the
+ * caret says empty, the color read is discarded. The way that clobbers a real
+ * draft: the user types something, then moves the caret back to the prompt column
+ * (Home / Ctrl-A, or `0`/`^` under vim bindings) and leaves it there across a
+ * poll, at which point a `send`/auto-resume can overwrite the draft. We take that
+ * trade knowingly: it needs a caret deliberately moved off the text and left
+ * there in an unattended session, versus a suggestion — which the TUI offers
+ * constantly, unprompted — silently disabling hands-off resume. `onlyPromptRow`
+ * below keeps the trade as narrow as it can be made: the caret may only speak for
+ * a box whose other rows are blank, so a multi-row draft (whose caret was moved
+ * back up to the prompt row) is never overruled.
+ */
+function inputEmpty(box: InputBox, cursor?: PaneCursor | null): boolean {
+  if (inputRealText(box.text) === "") return true;
+  return (
+    !!cursor && cursor.y === box.promptRow && cursor.x === box.inputCol && onlyPromptRow(box)
+  );
+}
+
+/**
+ * Whether the input box's content is confined to the prompt row — every other row
+ * blank. Bounds what the caret is allowed to vouch for (see `inputEmpty`): the
+ * caret proves nothing about rows it isn't on, so a box with content elsewhere
+ * keeps the (conservative) color verdict. Costs the caret signal on a suggestion
+ * long enough to WRAP onto a second row, which is the safe direction to fail.
+ */
+function onlyPromptRow(box: InputBox): boolean {
+  return box.text
+    .split("\n")
+    .every((l, i) => i === box.promptOffset || stripAnsi(l).trim() === "");
 }
 
 /**
@@ -452,20 +590,23 @@ export function paneUsageLimited(raw: string): boolean {
  * it) and an *empty* input box (so a draft the user queued for after reset isn't
  * wiped). Stricter than `paneReadiness` alone, which reports "limited" even over
  * a lingering dialog / queued text because the limit check outranks both. `raw`
- * must include SGR escapes (see capturePane).
+ * must include SGR escapes (see capturePane); pass the caret captured with it
+ * (see capturePaneState) so a greyed-out autocomplete *suggestion* sitting in the
+ * box doesn't read as a draft and veto the resume — a false-dirty read here is
+ * silent and permanent: auto-resume simply never fires for that limit window.
  *
  * The numbered limit dialog is the one dialog we DO fire into: the resume
  * keystrokes lead with Escape, which dismisses it (verified live), and the dialog
  * has no input box holding a user draft. Every *other* open dialog still blocks —
  * Escape would dismiss it too, but that's not what the user wants.
  */
-export function paneResumeSafe(raw: string): boolean {
+export function paneResumeSafe(raw: string, cursor?: PaneCursor | null): boolean {
   if (!paneUsageLimited(raw)) return false;
   const lines = raw.replace(/\r/g, "").split("\n");
   if (isActiveLimitDialog(lines)) return true;
   if (isDialog(raw)) return false;
   const input = inputBox(raw);
-  return input !== null && inputRealText(input) === "";
+  return input !== null && inputEmpty(input, cursor);
 }
 
 /**
