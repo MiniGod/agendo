@@ -7,7 +7,8 @@ import { openSession, launchFresh, launchNewSession, freshName, prFreshName, run
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
 import { openUrl } from "../browser.ts";
-import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
+import { createWorktree, checkoutWorktree, defaultBranch, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
+import { ORCHESTRATOR_SLUG, isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
 import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
@@ -357,6 +358,13 @@ interface FreshTarget {
   defaultBranch: string;
   /** The PR's source branch to check out (kind "pr"). */
   prBranch?: string;
+  /**
+   * Launch this session in orchestrator mode — it coordinates and delegates
+   * instead of implementing (see src/orchestrator.ts). Only set on "free"
+   * targets, and it forces Claude (Copilot can't carry the instructions), so the
+   * flow skips the agent picker.
+   */
+  orchestrator?: boolean;
 }
 function wiTarget(item: WorkItem): FreshTarget {
   return {
@@ -379,6 +387,20 @@ function prTarget(pr: PRWithSessions): FreshTarget {
 }
 function freeTarget(): FreshTarget {
   return { kind: "free", tmuxName: "", defaultBranch: "", title: "New session" };
+}
+/**
+ * A free target that runs in orchestrator mode. `defaultBranch` prefills the
+ * worktree/branch prompt with the launcher's own orchestrator slug — the
+ * worktree is a coordination desk, so it's named after the role, not the work.
+ */
+function orchestratorTarget(): FreshTarget {
+  return {
+    kind: "free",
+    orchestrator: true,
+    tmuxName: "",
+    defaultBranch: ORCHESTRATOR_SLUG,
+    title: "Orchestrator session",
+  };
 }
 
 // What the "open in browser" (o) dialog can open for a given row. A row may
@@ -1016,7 +1038,11 @@ type Mode =
   | { kind: "agent"; target: FreshTarget; cursor: number }
   | { kind: "repo"; target: FreshTarget; agent: AgentSource; cursor: number }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
-  | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
+  // `seed` is the value the field was PREFILLED with (orchestrator flow only).
+  // Kept so submit can tell an untouched default from a name the user chose, and
+  // re-derive a free one — the prefill was computed when the screen opened, which
+  // may be minutes before enter is pressed.
+  | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean; seed?: string }
   | { kind: "open"; targets: OpenTargets; title: string };
 
 /** Agents offered by the fresh-session picker, in display order. */
@@ -1267,9 +1293,15 @@ export default function App({
     // Nothing to demote (or nowhere to demote it to) — keep the array identity.
     return rest.length === 0 || hostable.length === 0 ? scopedRepos : [...hostable, ...rest];
   }, [scoped, scopedRepos]);
-  /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
-  const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
-    kind === "free" ? scopedRepos : worktreeRepos;
+  /**
+   * Repo choices for a fresh-session target — see `worktreeRepos` for why they
+   * differ by kind. An orchestrator is a `free` target but needs the worktree
+   * ranking anyway: `scopedRepos` deliberately puts a NON-git scoped folder
+   * first, and an orchestrator must land in a real checkout — that's where it
+   * does its integration merges, and where a worktree could be cut for it.
+   */
+  const reposForTarget = (target: FreshTarget): RepoInfo[] =>
+    target.kind === "free" && !target.orchestrator ? scopedRepos : worktreeRepos;
 
   const rows = useMemo(() => {
     if (!model) return [];
@@ -1632,23 +1664,44 @@ export default function App({
     setMode({ kind: "agent", target, cursor: 0 });
   };
 
-  const enterNewSession = () => {
-    setNotice(null);
-    // A scoped picker is never empty — `scopedRepos` always keeps at least the
-    // scoped folder itself when nothing else is in scope — so the only ways to
-    // land here are the model not being loaded yet, or an unscoped launcher on a
-    // machine where no session has ever run in any repo. Those need different
-    // advice: one is "wait", the other is "go start a session somewhere". No
-    // "press a to widen" hint in either case — widening isn't what's missing.
+  // Both free-session entry points (new session, orchestrator) need repos to pick
+  // from; without any, the flow has nowhere to run, so say why instead of opening
+  // an empty picker.
+  //
+  // A scoped picker is never empty — `scopedRepos` always keeps at least the
+  // scoped folder itself when nothing else is in scope — so the only ways to
+  // land here are the model not being loaded yet, or an unscoped launcher on a
+  // machine where no session has ever run in any repo. Those need different
+  // advice: one is "wait", the other is "go start a session somewhere". No
+  // "press a to widen" hint in either case — widening isn't what's missing.
+  const haveRepos = () => {
     if (!model) {
       setNotice("Still loading — try again in a moment.");
-      return;
+      return false;
     }
     if (scopedRepos.length === 0) {
       setNotice("No known repos yet — open or resume a session in a repo first.");
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const enterNewSession = () => {
+    setNotice(null);
+    if (!haveRepos()) return;
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
+  };
+
+  /**
+   * Open the orchestrator flow: the same repo → worktree → name steps as a plain
+   * new session, but the agent picker is skipped (orchestrator mode is Claude-only,
+   * so there's nothing to choose) and the session launches with the orchestrator
+   * instructions injected.
+   */
+  const enterOrchestrator = () => {
+    setNotice(null);
+    if (!haveRepos()) return;
+    setMode({ kind: "repo", target: orchestratorTarget(), agent: "claude", cursor: 0 });
   };
 
   // After the agent is chosen, resolve where to run: PRs check out their branch
@@ -1678,15 +1731,39 @@ export default function App({
   };
 
   // Work item / free session: create a branch+worktree or launch in main repo directly.
-  const startFresh = (target: FreshTarget, repo: RepoInfo, name: string, worktree: boolean, agent: AgentSource) => {
+  //
+  // `seed` (orchestrator flow only) is what the name field was prefilled with. If
+  // the user never edited it, we re-derive a free name HERE rather than trusting
+  // the one computed when the screen opened — another orchestrator (a CLI launch,
+  // or a second launcher) may have taken it in the meantime, and `createWorktree`
+  // treats an existing path as success, so the stale name would silently drop this
+  // session into that one's checkout. A name the user typed is left alone.
+  const startFresh = (
+    target: FreshTarget,
+    repo: RepoInfo,
+    name: string,
+    worktree: boolean,
+    agent: AgentSource,
+    seed?: string,
+  ) => {
     // A manual "new session" assigns its own session id (so it gets a canonical,
     // attachable `cl-new-<id>` window); work-item / PR launches keep their
     // item-named target. Both run the chosen agent in the resolved directory.
     const launch = (cwd: string) =>
-      open(target.kind === "free" ? launchNewSession(cwd, agent) : launchFresh(cwd, target.tmuxName, agent));
+      open(
+        target.kind === "free"
+          ? launchNewSession(cwd, agent, target.orchestrator)
+          : launchFresh(cwd, target.tmuxName, agent),
+      );
     if (worktree) {
-      setBusy(`Creating worktree ${name.trim()} in ${repo.name}…`);
-      const res = createWorktree(repo.root, name.trim());
+      // Untouched orchestrator default → re-derive from the base slug at the last
+      // possible moment (see the note above). Anything the user typed is used verbatim.
+      const branch =
+        seed && name.trim() === seed
+          ? freeWorktreeBranch(repo.root, target.defaultBranch)
+          : name.trim();
+      setBusy(`Creating worktree ${branch} in ${repo.name}…`);
+      const res = createWorktree(repo.root, branch);
       if (res.error) {
         setBusy(null);
         setMode({ kind: "list" });
@@ -1732,6 +1809,14 @@ export default function App({
   // configDir override is needed for resume.
   const continueInOtherAgent = async (s: AgentSession) => {
     const dest = otherAgent(s.source);
+    // Copilot has no `--append-system-prompt` equivalent, so converting an
+    // orchestrator to it would produce a session with none of the coordinate-
+    // don't-implement instructions — an "orchestrator" that just starts editing.
+    // Refuse, the way `launch --orchestrator --copilot` does on the CLI.
+    if (dest === "copilot" && isOrchestratorSession(s.id)) {
+      setNotice("That's an orchestrator session — Copilot can't carry the orchestrator instructions, so it won't convert.");
+      return;
+    }
     const direction = s.source === "claude" ? "claude-to-copilot" : "copilot-to-claude";
     setNotice(null);
     setBusy(`Converting session to ${dest} (npx converter)…`);
@@ -1855,9 +1940,13 @@ export default function App({
 
     // ── repo picker ──
     if (mode.kind === "repo") {
-      const repos = reposForTarget(mode.target.kind);
+      const repos = reposForTarget(mode.target);
       const len = repos.length || 1;
-      if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
+      // The orchestrator flow entered here directly (no agent step to go back to).
+      if (key.escape)
+        return mode.target.orchestrator
+          ? setMode({ kind: "list" })
+          : setMode({ kind: "agent", target: mode.target, cursor: 0 });
       if (key.upArrow || input === "k")
         return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
       if (key.downArrow || input === "j")
@@ -1896,14 +1985,26 @@ export default function App({
       if (key.downArrow || input === "j")
         return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor + 1) % 2 } : p));
       if (key.return) {
+        const worktree = mode.cursor === 0;
+        // A plain free session has no default name (defaultBranch is ""), so this
+        // still opens an empty prompt; an orchestrator prefills its own role slug,
+        // stepped past any orchestrator worktree already in this repo. Only a
+        // preview — `startFresh` re-derives it at create time, since the user may
+        // sit on this screen for a while. (Moot for the main-repo option, which
+        // ignores the name entirely.)
+        const seed =
+          worktree && mode.target.defaultBranch
+            ? freeWorktreeBranch(mode.repo.root, mode.target.defaultBranch)
+            : mode.target.defaultBranch;
         return setMode({
           kind: "branch",
           target: mode.target,
           agent: mode.agent,
           repo: mode.repo,
-          value: "",
-          cursor: 0,
-          worktree: mode.cursor === 0,
+          value: seed,
+          cursor: seed.length,
+          worktree,
+          seed: seed || undefined,
         });
       }
       return;
@@ -1916,7 +2017,7 @@ export default function App({
         return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
       }
       if (key.return) {
-        if (mode.value.trim()) startFresh(mode.target, mode.repo, mode.value, mode.worktree, mode.agent);
+        if (mode.value.trim()) startFresh(mode.target, mode.repo, mode.value, mode.worktree, mode.agent, mode.seed);
         return;
       }
       // Functional updates so batched keystrokes (e.g. two Lefts in one chunk)
@@ -2034,6 +2135,11 @@ export default function App({
 
     // new arbitrary session (sessions view only)
     if (input === "n" && view === "sessions") { enterNewSession(); return; }
+
+    // new ORCHESTRATOR session (sessions view only) — a session that delegates
+    // every unit of work to further background sessions instead of implementing.
+    // Capital O, so the lowercase `o` open-in-browser binding is untouched.
+    if (input === "O" && view === "sessions") { enterOrchestrator(); return; }
 
     // focus the fuzzy-search input (all list views)
     if (input === "/") { setSearchFocus("input"); return; }
@@ -2201,12 +2307,18 @@ export default function App({
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
+    const orch = !!mode.target.orchestrator;
     return (
       <Box flexDirection="column">
-        <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
+        <Text bold>
+          {orch ? `Orchestrator session — pick a repo` : isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}
+        </Text>
         <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
+        {orch ? (
+          <Text color="magenta">{"It will delegate every unit of work to background sessions — it writes no code itself."}</Text>
+        ) : null}
         <Box marginTop={1} flexDirection="column">
-          {reposForTarget(mode.target.kind).map((r, i) => {
+          {reposForTarget(mode.target).map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
@@ -2347,7 +2459,7 @@ export default function App({
     ];
     return (
       <Box flexDirection="column">
-        <Text bold>{`New session in ${mode.repo.name} — choose where to run`}</Text>
+        <Text bold>{`${mode.target.orchestrator ? "Orchestrator" : "New"} session in ${mode.repo.name} — choose where to run`}</Text>
         <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
         <Box marginTop={1} flexDirection="column">
           {opts.map((label, i) => {
@@ -2371,9 +2483,12 @@ export default function App({
     // Free sessions get a `cl-new-<id>` name assigned at launch, so we can only
     // preview the prefix; item/PR launches already know their target name.
     const tmuxPreview = isFree ? "cl-new-…" : mode.target.tmuxName;
+    const orch = !!mode.target.orchestrator;
     return (
       <Box flexDirection="column">
-        <Text bold>{isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}</Text>
+        <Text bold>
+          {orch ? `Orchestrator session in ${mode.repo.name}` : isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}
+        </Text>
         <Text dimColor>{mode.worktree ? "New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back" : "Session name · ←/→ move · ⌃a/⌃e start/end · enter launch · esc back"}</Text>
         <Box marginTop={1}>
           <Text>{mode.worktree ? "branch: " : "name:   "}</Text>
@@ -2383,8 +2498,8 @@ export default function App({
         </Box>
         <Box marginTop={1}>
           {mode.worktree
-            ? <Text dimColor>{`→ ${mode.agent} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
-            : <Text dimColor>{`→ ${mode.agent} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
+            ? <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
+            : <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
           }
         </Box>
       </Box>
@@ -2454,7 +2569,10 @@ export default function App({
             : searchFocus === "list"
               ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
               : view === "sessions"
-                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
+                // `⇥ view` (not "switch view") matches the PRs hint and buys back
+                // 7 columns for the new `O orchestrator` entry — this line already
+                // truncated at ~120 cols before it, so tail hints are at a premium.
+                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orchestrator · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}

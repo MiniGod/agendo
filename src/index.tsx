@@ -41,6 +41,14 @@ Usage:
       --no-worktree             Run in the current checkout instead of a new worktree
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
+      --orchestrator, -O        Run the session in ORCHESTRATOR MODE: it writes no
+                                project code itself — it splits the goal into units,
+                                launches one background session per unit (each with a
+                                sub-agent dev→review loop), monitors them via
+                                list/status/send, and squash-merges each finished
+                                branch into the main branch. Claude only. Names the
+                                worktree/branch "orchestrator" (then -2, -3, … if one
+                                is already there), unless --name says otherwise.
       --model <name>            Model for the new session, passed to the agent
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
@@ -192,6 +200,7 @@ if (process.argv[2] === "launch") {
   let name: string | undefined;
   let worktree = true;
   let attach = false;
+  let orchestrator = false;
   let agent: AgentSource = "claude";
   // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
   const forwardArgv: string[] = [];
@@ -208,6 +217,18 @@ if (process.argv[2] === "launch") {
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
     else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
+    // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
+    // would be rejected outright and `-O` would fall through into the prompt —
+    // launching an ordinary session that looks like it was asked to orchestrate.
+    else if (flag === "--orchestrator" || a === "-O") {
+      // A boolean flag: `--orchestrator=false` reads as "off" to a human but
+      // would enable it here, so an inline value is refused, never guessed.
+      if (inline) {
+        console.error(`launch failed: --orchestrator takes no value (got "${a}")`);
+        process.exit(1);
+      }
+      orchestrator = true;
+    }
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
     else if (flag === "--agent") {
@@ -247,8 +268,24 @@ if (process.argv[2] === "launch") {
       process.exit(1);
     }
   }
+  // Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
+  // equivalent for, so a Copilot orchestrator would run with none of the
+  // coordinate-don't-implement instructions. Refuse loudly rather than degrade.
+  // `agent` defaults to claude, so "copilot" here can only mean a flag asked for
+  // it — no need to track explicitness separately.
+  if (orchestrator && agent === "copilot") {
+    console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
+    process.exit(1);
+  }
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent, forwardArgv });
+  const { plan, id, cwd, error } = launchTask(process.cwd(), {
+    prompt,
+    name,
+    worktree,
+    agent,
+    orchestrator,
+    forwardArgv,
+  });
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -264,7 +301,7 @@ if (process.argv[2] === "launch") {
       {
         id,
         cwd,
-        title: prompt || "background session",
+        title: prompt || (orchestrator ? "orchestrator session" : "background session"),
         source: agent,
         // Claude is profile-scoped via CLAUDE_CONFIG_DIR; Copilot keeps all state
         // under ~/.copilot, so it carries no config dir.
@@ -281,7 +318,7 @@ if (process.argv[2] === "launch") {
     spawnSync(cmd, args, { stdio: "inherit" });
   } else {
     // Print machine-readable next steps for the agent/human that launched it.
-    console.log(`▸ launched background session ${id}`);
+    console.log(`▸ launched ${orchestrator ? "orchestrator" : "background"} session ${id}`);
     console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
     console.log(`  status:  ${SELF_CMD} status ${id}`);
     console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);

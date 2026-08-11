@@ -4,6 +4,7 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
@@ -26,8 +27,18 @@ const BUSY_PANE = [
 ].join("\n");
 
 function agendo(env: Record<string, string>, ...args: string[]) {
+  return agendoIn(REPO_ROOT, env, ...args);
+}
+
+/**
+ * Like `agendo`, but from an explicit working directory. Needed by the `launch`
+ * tests: `launchTask` creates its worktree relative to `process.cwd()`, so
+ * running them from REPO_ROOT would have the fake git mkdir a directory inside
+ * the developer's REAL repo. Point them at a repo in the mock home instead.
+ */
+function agendoIn(cwd: string, env: Record<string, string>, ...args: string[]) {
   return spawnSync("bun", ["run", join(REPO_ROOT, "src", "index.tsx"), ...args], {
-    cwd: REPO_ROOT,
+    cwd,
     env,
     encoding: "utf-8",
     timeout: 30_000,
@@ -812,4 +823,181 @@ test("agendo list rejects unknown sub-flags; a non-keyword positional is a dir f
   const badFlag = agendo(mock.env, "list", "pr", "--nope");
   expect(badFlag.status).not.toBe(0);
   expect(badFlag.stderr).toContain('unknown argument "--nope"');
+});
+
+// ── orchestrator mode (`launch --orchestrator`) ────────────────────────────────
+// Orchestrator mode is delivered as text appended to the session's system prompt,
+// so "is it wired up?" is answerable only by reading the argv the launcher spawned.
+// These drive the real CLI against the fake tmux/git and assert on that argv.
+
+/** The single `--append-system-prompt` value from a spawned claude argv. */
+function appendedPrompt(argv: string[]): string {
+  const flags = argv.filter((a) => a === "--append-system-prompt");
+  // Exactly one occurrence matters: claude's flag takes ONE value, so a second
+  // one would silently discard the first — the launcher prompt or the orchestrator
+  // instructions would vanish with no error anywhere.
+  expect(flags).toHaveLength(1);
+  return argv[argv.indexOf("--append-system-prompt") + 1] ?? "";
+}
+
+/**
+ * The `git` invocations from the shared call log, as parsed argv arrays. The fake
+ * git logs each call as `git <JSON argv>` (e2e/fakebin/git), so this decodes back
+ * to exact arguments — letting a test distinguish `worktree-orchestrator` from
+ * `worktree-orchestrator-2`, which a substring check cannot.
+ */
+function gitArgv(callLog: string[]): string[][] {
+  return callLog
+    .filter((l) => l.startsWith("git "))
+    .map((l) => {
+      try {
+        return JSON.parse(l.slice("git ".length)) as string[];
+      } catch {
+        return [];
+      }
+    });
+}
+
+/**
+ * A repo inside the mock home — safe for the fake git to mkdir a worktree in.
+ * `standalone` is the fixture repo that actually exists on disk (with a `.git`),
+ * so `repoRootForCwd` resolves it to itself and the worktree lands under the
+ * throwaway home rather than anywhere real.
+ */
+const mockRepo = (home: string) => join(home, "repos", "standalone");
+
+test("agendo --help and --llm document orchestrator mode", async ({ mock }) => {
+  const help = agendo(mock.env, "--help");
+  expect(help.status).toBe(0);
+  expect(help.stdout).toContain("--orchestrator, -O");
+  expect(help.stdout).toContain("ORCHESTRATOR MODE");
+
+  // The on-demand agent-facing guide advertises it too, so an agent asked to
+  // "orchestrate this" finds the flag without the human naming it.
+  const llm = agendo(mock.env, "--llm");
+  expect(llm.status).toBe(0);
+  expect(llm.stdout).toContain("launch --orchestrator");
+});
+
+test("agendo launch --orchestrator injects the orchestrator instructions into the spawned claude", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "Build the reporting module");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched orchestrator session");
+  const id = r.stdout.match(/launched orchestrator session (\S+)/)?.[1];
+  expect(id).toBeTruthy();
+
+  // It went out as a detached tmux session running claude in the new worktree.
+  const tmux = await mock.tmuxLog();
+  const spawned = tmux.find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(spawned).toBeTruthy();
+
+  const appended = appendedPrompt(spawned!);
+  // Both prompts share the one value: the launcher's background-session pointer…
+  expect(appended).toContain("You are running inside agendo");
+  // …and the orchestrator instructions, with the directives that define the mode.
+  expect(appended).toContain("ORCHESTRATOR MODE");
+  expect(appended).toContain("Never write project code yourself");
+  expect(appended).toContain("launch --name <slug>");
+  expect(appended).toContain("have a SUB-AGENT review your change");
+  expect(appended).toContain("do not open a pull request");
+  // The goal is still the session's opening prompt.
+  expect(spawned!).toContain("Build the reporting module");
+  // Autonomy flags still apply — an orchestrator must not stall on approvals.
+  expect(spawned!.join(" ")).toContain("--permission-mode");
+
+  // Its worktree/branch is named after the ROLE, not the goal it was handed.
+  const args = gitArgv(await mock.callLog()).flat();
+  expect(args).toContain("worktree-orchestrator");
+  expect(args.some((a) => a.includes("build-the-reporting-module"))).toBe(false);
+
+  // The launch is remembered, so a later cold resume can re-inject (see below).
+  const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
+  expect(marker.ids).toContain(id);
+});
+
+test("a second orchestrator in the same repo gets its OWN worktree, not the first one's", async ({ mock }) => {
+  // The orchestrator slug names the role, so it's the same for every unnamed
+  // orchestrator. `createWorktree` treats an existing path as success, so without
+  // stepping past it the second orchestrator would run in the first one's checkout
+  // on its branch — two autonomous coordinators sharing one working tree.
+  const repo = mockRepo(mock.home);
+  const first = agendoIn(repo, mock.env, "launch", "--orchestrator", "Goal A");
+  expect(first.status).toBe(0);
+  const second = agendoIn(repo, mock.env, "launch", "--orchestrator", "Goal B");
+  expect(second.status).toBe(0);
+
+  // Distinct worktree directories…
+  const dirs = [first, second].map((r) => r.stdout.match(/\(in (.+?)\)/)?.[1]);
+  expect(dirs[0]).toBeTruthy();
+  expect(dirs[1]).toBeTruthy();
+  expect(dirs[0]).not.toBe(dirs[1]);
+  // …from distinct branches: the base slug, then the -2 suffix. Compared as parsed
+  // argv entries rather than substrings, since "worktree-orchestrator" is itself a
+  // prefix of "worktree-orchestrator-2".
+  const branches = new Set(gitArgv(await mock.callLog()).flat());
+  expect(branches.has("worktree-orchestrator")).toBe(true);
+  expect(branches.has("worktree-orchestrator-2")).toBe(true);
+});
+
+test("agendo launch --name overrides the orchestrator's default slug", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--name", "rollout", "Ship it");
+  expect(r.status).toBe(0);
+  const args = gitArgv(await mock.callLog()).flat();
+  expect(args).toContain("worktree-rollout");
+  expect(args).not.toContain("worktree-orchestrator");
+});
+
+test("a plain agendo launch carries NO orchestrator instructions", async ({ mock }) => {
+  // Guards the inverse: orchestrator mode must be opt-in, never leaking into the
+  // ordinary background-session launch every agent already uses.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "Fix the header");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched background session");
+  expect(r.stdout).not.toContain("orchestrator");
+
+  const tmux = await mock.tmuxLog();
+  const spawned = tmux.find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  const appended = appendedPrompt(spawned!);
+  expect(appended).toContain("You are running inside agendo"); // launcher prompt still there
+  expect(appended).not.toContain("ORCHESTRATOR MODE");
+});
+
+test("agendo launch --orchestrator --copilot is refused, not silently downgraded", async ({ mock }) => {
+  // Copilot has no --append-system-prompt equivalent, so a Copilot "orchestrator"
+  // would run with none of the instructions. Fail loudly instead.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--copilot", "Coordinate this");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("--orchestrator is Claude-only");
+  // Nothing was spawned.
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session" && argv.includes("copilot"))).toBe(false);
+});
+
+test("orchestrator mode survives a cold resume; an ordinary session isn't given it", async ({ mock }) => {
+  // claude records neither --append-system-prompt nor --agent in its session state,
+  // so resume must re-inject from the launcher's own marker file. Mark the (idle)
+  // crash session as an orchestrator, then resume it and read the spawned argv.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: [CRASH_SESSION_ID] }),
+  );
+
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  const resumed = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  expect(resumed).toBeTruthy();
+  expect(appendedPrompt(resumed!)).toContain("ORCHESTRATOR MODE");
+
+  // The login session is NOT in the marker file, so its resume stays a plain one.
+  // (It's live under RUNNING_TARGET, so kill that first or resume just navigates.)
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+  const plain = agendo(mock.env, "resume", SHORT_ID);
+  expect(plain.status).toBe(0);
+  const other = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${SHORT_ID}`),
+  );
+  expect(other).toBeTruthy();
+  expect(appendedPrompt(other!)).not.toContain("ORCHESTRATOR MODE");
 });
