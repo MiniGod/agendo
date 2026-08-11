@@ -40,7 +40,7 @@ bunx github:MiniGod/agendo#pull/8/head   # run agendo from PR #8
 ```
 
 Handy for trying a change against your own real sessions before merging it. Swap
-`8` for the PR number; `#master` gets you the tip of the default branch.
+`8` for the PR number; `#HEAD` gets you the tip of the default branch.
 
 ## Features
 
