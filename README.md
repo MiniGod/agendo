@@ -62,6 +62,17 @@ monitor and steer them through the same commands. One orchestrator session can f
 large task out across many worktrees and coordinate them, instead of hand-rolling
 tmux and `git worktree`. The sessions it starts inherit the same ability.
 
+### Orchestrator mode, one keypress away
+
+Press `O` in the Sessions view — or run `agendo launch --orchestrator "<goal>"` — to
+start a session that is _only_ a coordinator. It gets the orchestrator instructions
+injected into its system prompt: write no project code, split the goal into units,
+launch one background session per unit (each running an implement → sub-agent review →
+fix loop until a review pass comes back clean), keep a live task list, parallelize
+independent units, monitor via `list`/`status` and steer via `send`, then squash-merge
+each finished branch into the main branch — no PRs. The framing is re-injected on
+resume, so a restored orchestrator doesn't quietly turn back into an implementer.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
