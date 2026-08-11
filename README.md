@@ -31,6 +31,17 @@ bunx agendo --no-tmux  # run the menu inline, without a tmux session
 For Azure DevOps, set your `org` / `project` / `team` / `tenant` in
 `~/.agendo/config.json` first (see [Config](#config)). GitHub needs no config.
 
+### Running a pull request
+
+To review or test a PR, run it straight from its branch — no clone, no checkout:
+
+```bash
+bunx github:MiniGod/agendo#pull/8/head   # run agendo from PR #8
+```
+
+Handy for trying a change against your own real sessions before merging it. Swap
+`8` for the PR number; `#master` gets you the tip of the default branch.
+
 ## Features
 
 ### Azure DevOps & GitHub backends
