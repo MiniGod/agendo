@@ -9,7 +9,7 @@ import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, type RepoInfo } from "../repos.ts";
+import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
@@ -1218,8 +1218,58 @@ export default function App({
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
     if (!scoped) return model.repos;
-    return model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root));
+    const inScopeRepos = model.repos.filter(
+      (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
+    );
+    // Always offer the scoped folder itself, ranked FIRST — above child repos
+    // that already have sessions. Scoping to a folder is a statement that the
+    // folder is what you're working on, so a new session there is the "supervise
+    // this whole scope" entry point: `agendo ~/git` → new session in ~/git is an
+    // orchestrator watching the agendo sessions running in ~/git/*. That intent
+    // outranks any individual child repo, so it takes cursor 0.
+    // The folder needn't be a git checkout — a bare parent like ~/git is a
+    // legitimate place to run a session via the run-in-place path (see the
+    // wtchoice default, which steers non-repos there).
+    // Resolved through repoRootForCwd so scoping INSIDE a checkout still offers
+    // the repo root, and worktrees land at the root rather than a subdir.
+    return ensureRepoAtTop(inScopeRepos, repoRootForCwd(filterRoot!));
   }, [model, scoped, filterRoot]);
+
+  // The same list, reordered for targets that MUST create a worktree. Work-item
+  // ("new") and PR flows structurally cannot run in place — `pr` goes straight
+  // to startCheckout, `new` launches with `worktree: true` — so a scoped folder
+  // that isn't a git checkout can only ever produce "fatal: not a git
+  // repository" for them. The free flow has no such constraint (running in place
+  // IS the orchestrator entry point), which is why it keeps the scoped folder
+  // first unconditionally and only these two demote it.
+  // Demoted below every hostable repo, not dropped: still selectable for someone
+  // who knows they're about to `git init`, just never the enter-key default.
+  const worktreeRepos = useMemo<RepoInfo[]>(() => {
+    // Scoped only. The unscoped ranking is pre-existing behavior this PR leaves
+    // alone: bare `agendo` can still default to a folder that can't host a
+    // worktree (a plain folder accumulates sessions and out-counts every real
+    // repo), but that predates the scoped picker and fixing it is a separate
+    // change. Confining the reorder here keeps this PR to the scope it claims.
+    if (!scoped) return scopedRepos;
+    // The ONLY question is whether a root can host a worktree, so ask exactly
+    // that — of EVERY entry, not just the head. Session count says nothing about
+    // repo-ness in either direction: repoRootForCwd falls back to the raw cwd
+    // when its walk-up finds no `.git`, so a session run in a plain folder yields
+    // a discovered entry with a real count — precisely what the orchestrator
+    // session in ~/git creates. A plain folder can therefore outrank a real
+    // checkout mid-list, so checking only index 0 would just hand cursor 0 to the
+    // next unhostable entry.
+    // Stable partition, so hostable repos keep their session-count ranking among
+    // themselves and the rest keep theirs.
+    const hostable: RepoInfo[] = [];
+    const rest: RepoInfo[] = [];
+    for (const r of scopedRepos) (isGitCheckout(r.root) ? hostable : rest).push(r);
+    // Nothing to demote (or nowhere to demote it to) — keep the array identity.
+    return rest.length === 0 || hostable.length === 0 ? scopedRepos : [...hostable, ...rest];
+  }, [scoped, scopedRepos]);
+  /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
+  const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
+    kind === "free" ? scopedRepos : worktreeRepos;
 
   const rows = useMemo(() => {
     if (!model) return [];
@@ -1584,12 +1634,18 @@ export default function App({
 
   const enterNewSession = () => {
     setNotice(null);
-    if (!model || scopedRepos.length === 0) {
-      setNotice(
-        scoped
-          ? "No repos under this path — press a to widen to all repos, or open a session here first."
-          : "No known repos yet — open or resume a session in a repo first.",
-      );
+    // A scoped picker is never empty — `scopedRepos` always keeps at least the
+    // scoped folder itself when nothing else is in scope — so the only ways to
+    // land here are the model not being loaded yet, or an unscoped launcher on a
+    // machine where no session has ever run in any repo. Those need different
+    // advice: one is "wait", the other is "go start a session somewhere". No
+    // "press a to widen" hint in either case — widening isn't what's missing.
+    if (!model) {
+      setNotice("Still loading — try again in a moment.");
+      return;
+    }
+    if (scopedRepos.length === 0) {
+      setNotice("No known repos yet — open or resume a session in a repo first.");
       return;
     }
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
@@ -1799,7 +1855,7 @@ export default function App({
 
     // ── repo picker ──
     if (mode.kind === "repo") {
-      const repos = scopedRepos;
+      const repos = reposForTarget(mode.target.kind);
       const len = repos.length || 1;
       if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
       if (key.upArrow || input === "k")
@@ -1809,7 +1865,16 @@ export default function App({
       if (key.return && repos[mode.cursor]) {
         const repo = repos[mode.cursor];
         if (mode.target.kind === "pr") return startCheckout(mode.target, repo, mode.agent);
-        if (mode.target.kind === "free") return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo, cursor: 0 });
+        // Default to "New git worktree" (cursor 0) only where one can exist: in a
+        // non-repo folder (`agendo ~/git` → the scoped parent itself) `git worktree
+        // add` can only ever print "fatal: not a git repository", so defaulting to
+        // it makes the enter-enter-enter happy path dead-end. Point those at "Main
+        // repo checkout" (cursor 1) instead; both options stay on screen.
+        // INTERIM: the non-repo case really wants its own pair of options (run
+        // here / clone-or-init something), not a worktree-vs-checkout question —
+        // this just stops the default from being the one that cannot work.
+        if (mode.target.kind === "free")
+          return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo, cursor: isGitCheckout(repo.root) ? 0 : 1 });
         return setMode({
           kind: "branch",
           target: mode.target,
@@ -2141,14 +2206,20 @@ export default function App({
         <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
         <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
         <Box marginTop={1} flexDirection="column">
-          {scopedRepos.map((r, i) => {
+          {reposForTarget(mode.target.kind).map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
                 {sel ? "❯ " : "  "}
                 <Text bold>{r.name.padEnd(22).slice(0, 22)}</Text>
-                <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
-                <Text color={sel ? "black" : "gray"}>{` (${r.claude} claude, ${r.copilot} copilot)`}</Text>
+                {r.total === 0 ? (
+                  <Text color={sel ? "black" : "gray"}>{`  (no sessions yet)         `}</Text>
+                ) : (
+                  <>
+                    <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
+                    <Text color={sel ? "black" : "gray"}>{` (${r.claude} claude, ${r.copilot} copilot)`}</Text>
+                  </>
+                )}
                 <Text dimColor={!sel}>{`  ${r.root}`}</Text>
               </Text>
             );
