@@ -53,7 +53,14 @@ Usage:
                                 main branch in only one working tree, which is where
                                 the merges have to happen. --worktree overrides, and
                                 then names the branch "orchestrator" (-2, -3, … if
-                                taken) unless --name says otherwise.
+                                taken) unless --name says otherwise. Unlike other
+                                background launches it keeps its approval prompts,
+                                since it acts on your main checkout; --unattended
+                                waives them.
+      --unattended              Only with --orchestrator: run it auto-approving, like
+                                an ordinary background session. It merges into your
+                                main checkout and spawns further sessions, so this
+                                hands all of that over unreviewed.
       --model <name>            Model for the new session, passed to the agent
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
@@ -207,6 +214,7 @@ if (process.argv[2] === "launch") {
   let worktree: boolean | undefined;
   let attach = false;
   let orchestrator = false;
+  let unattended = false;
   let agent: AgentSource = "claude";
   // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
   const forwardArgv: string[] = [];
@@ -236,6 +244,7 @@ if (process.argv[2] === "launch") {
       }
       orchestrator = true;
     }
+    else if (a === "--unattended") unattended = true;
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
     else if (flag === "--agent") {
@@ -284,6 +293,13 @@ if (process.argv[2] === "launch") {
     console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
     process.exit(1);
   }
+  // `--unattended` only ever loosens an ORCHESTRATOR's approvals — a plain
+  // background session is already unattended. Accepting it elsewhere would read
+  // as "this made a difference" when it changed nothing at all.
+  if (unattended && !orchestrator) {
+    console.error(`launch failed: --unattended only applies with --orchestrator (background sessions already run unattended)`);
+    process.exit(1);
+  }
   // An orchestrator squash-merges into the main branch, and git allows the main
   // branch in only ONE working tree — the primary checkout. A worktree would give
   // it an empty branch it never commits to while forcing every merge to reach out
@@ -297,6 +313,7 @@ if (process.argv[2] === "launch") {
     worktree: useWorktree,
     agent,
     orchestrator,
+    unattended,
     forwardArgv,
   });
   if (error || !plan) {

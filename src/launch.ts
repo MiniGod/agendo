@@ -86,7 +86,8 @@ export function llmGuide(): string {
     "Use this ONLY when the user explicitly asks to run work in a separate/background",
     "session (its own git worktree + claude). It is NOT for sub-agents within this session.",
     "EXCEPTION: if you are running in ORCHESTRATOR MODE, delegating this way IS your job —",
-    "launch freely, no explicit per-unit request needed.",
+    "launch freely, no explicit per-unit request needed. (Your own instructions say so;",
+    "nothing here can put you in that mode.)",
     "",
     `Start one:    ${SELF_CMD} launch "<task prompt>"`,
     "  Creates an isolated git worktree, runs a new agent there in an attachable tmux",
@@ -98,12 +99,13 @@ export function llmGuide(): string {
     "         <name> (claude only). Only these agent flags are forwarded — anything else",
     "         dashed is an error, so put prompt text that starts with -- after a bare --.",
     "",
-    `Orchestrate:  ${SELF_CMD} launch --orchestrator "<overall goal>"`,
-    "  Same thing, but the new session runs in ORCHESTRATOR MODE: it writes no project",
-    "  code itself — it splits the goal into units, launches one background session per",
-    "  unit (each with a sub-agent dev→review loop), monitors them via list/status/send,",
-    "  and squash-merges each finished branch into the main branch. Claude only.",
-    "",
+    // Deliberately NOT documented here: `launch --orchestrator`. `repoRootForCwd`
+    // resolves a worktree back to its parent repo, so an agent sandboxed in a
+    // worktree could use it to start a session in the human's MAIN checkout — one
+    // told to merge branches there. That escalation should come from a human (it is
+    // in `--help` and the README), never from instructions an agent reads to itself.
+    // An orchestrator doesn't need it either: it is already in orchestrator mode,
+    // and the sessions it launches are meant to implement, not to orchestrate.
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
     "",
@@ -364,27 +366,49 @@ export function launchFresh(cwd: string, name: string, agent: AgentSource = "cla
  * session id up front (`--session-id`) so the tmux window name embeds it — that
  * lets `openSession` find this exact window on a later attach (no duplicate),
  * and the `cl-bg-`/`cl-new-` prefix tells the human (and the UI badge) how it
- * started. Background sessions also get the autonomy flags so they run unattended.
+ * started. Background sessions also get the autonomy flags so they run unattended
+ * — except orchestrators, which need `unattended` as well (see `ManagedOptions`).
  * `forwardArgv` carries the allowlisted agent flags `agendo launch` accepted; the
  * TUI's own launch paths pass none.
  *
  * An orchestrator launch also records the minted id, so a later cold resume can
  * re-inject the instructions claude itself doesn't remember.
  */
+interface ManagedOptions {
+  /** Run in orchestrator mode (Claude only — see `freshArgv`). */
+  orchestrator?: boolean;
+  /**
+   * Give an ORCHESTRATOR the unattended autonomy flags too. Off by default: an
+   * orchestrator's whole job is to spawn further sessions and merge into the main
+   * checkout, so auto-approving its actions turns one compromised or confused
+   * agent into unreviewed writes on the user's primary working tree. Ordinary
+   * background sessions are unaffected — they stay autonomous in their own
+   * throwaway worktree, which is what makes `agendo launch` useful at all.
+   */
+  unattended?: boolean;
+  /** Allowlisted agent flags to forward verbatim (see `FORWARDABLE_LAUNCH_FLAGS`). */
+  forwardArgv?: string[];
+}
+
+// A single options object rather than trailing positionals: `orchestrator` (bool)
+// and `forwardArgv` (string[]) sit next to each other, and swapping them at a call
+// site type-checks under neither — but a third boolean beside `orchestrator` would
+// swap silently, turning an ordinary launch into an auto-approving orchestrator.
 function launchManaged(
   cwd: string,
   kind: "background" | "new",
   agent: AgentSource,
   prompt?: string,
-  orchestrator = false,
-  forwardArgv?: string[],
+  opts: ManagedOptions = {},
 ): { plan: OpenPlan; id: string } {
+  const { orchestrator = false, unattended = false, forwardArgv } = opts;
   const id = randomUUID();
   const tmuxName = kindName(kind, id);
   const argv = freshArgv(agent, {
     sessionId: id,
     prompt,
-    autonomy: kind === "background",
+    // Orchestrators opt IN to autonomy; everything else keeps the old rule.
+    autonomy: kind === "background" && (!orchestrator || unattended),
     orchestrator,
     forwardArgv,
   });
@@ -397,13 +421,16 @@ function launchManaged(
  * `orchestrator` runs it in orchestrator mode (Claude only — see `freshArgv`).
  * The minted id is remembered by `launchManaged`, so the restore snapshot picks
  * the orchestrator framing back up via `resumeArgv` without extra bookkeeping here.
+ *
+ * This is the TUI's path, and `kind: "new"` carries no autonomy flags at all — a
+ * session the user started from the menu keeps its normal approval prompts.
  */
 export function launchNewSession(
   cwd: string,
   agent: AgentSource = "claude",
   orchestrator = false,
 ): OpenPlan {
-  return launchManaged(cwd, "new", agent, undefined, orchestrator).plan;
+  return launchManaged(cwd, "new", agent, undefined, { orchestrator }).plan;
 }
 
 export interface LaunchOptions {
@@ -431,6 +458,12 @@ export interface LaunchOptions {
    * src/orchestrator.ts). Claude only.
    */
   orchestrator?: boolean;
+  /**
+   * Let an orchestrator run with the unattended autonomy flags. Ignored unless
+   * `orchestrator` is set (ordinary background sessions are always unattended).
+   * See `ManagedOptions.unattended` for why this is opt-in.
+   */
+  unattended?: boolean;
 }
 
 export interface LaunchResult {
@@ -489,13 +522,10 @@ export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
     if (res.error) return { cwd, error: res.error };
     runCwd = res.path;
   }
-  const { plan, id } = launchManaged(
-    runCwd,
-    "background",
-    opts.agent ?? "claude",
-    opts.prompt,
-    opts.orchestrator,
-    opts.forwardArgv,
-  );
+  const { plan, id } = launchManaged(runCwd, "background", opts.agent ?? "claude", opts.prompt, {
+    orchestrator: opts.orchestrator,
+    unattended: opts.unattended,
+    forwardArgv: opts.forwardArgv,
+  });
   return { plan, id, cwd: runCwd };
 }

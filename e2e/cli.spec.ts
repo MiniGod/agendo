@@ -866,17 +866,25 @@ function gitArgv(callLog: string[]): string[][] {
  */
 const mockRepo = (home: string) => join(home, "repos", "standalone");
 
-test("agendo --help and --llm document orchestrator mode", async ({ mock }) => {
+test("--help documents orchestrator mode but --llm does NOT hand it to agents", async ({ mock }) => {
+  // Humans get the full documentation.
   const help = agendo(mock.env, "--help");
   expect(help.status).toBe(0);
   expect(help.stdout).toContain("--orchestrator, -O");
   expect(help.stdout).toContain("ORCHESTRATOR MODE");
+  expect(help.stdout).toContain("--unattended");
 
-  // The on-demand agent-facing guide advertises it too, so an agent asked to
-  // "orchestrate this" finds the flag without the human naming it.
+  // Agents do not. `repoRootForCwd` walks a worktree back up to its parent repo,
+  // so an agent sandboxed in a worktree that learned this flag from the guide
+  // could start a session in the human's MAIN checkout — one instructed to merge
+  // branches there. The guide is read by every launched session, so advertising
+  // the flag there is a self-service escalation path; keep it human-initiated.
   const llm = agendo(mock.env, "--llm");
   expect(llm.status).toBe(0);
-  expect(llm.stdout).toContain("launch --orchestrator");
+  expect(llm.stdout).not.toContain("--orchestrator");
+  expect(llm.stdout).not.toContain("--unattended");
+  // The guide still works for its actual purpose.
+  expect(llm.stdout).toContain("launch");
 });
 
 test("agendo launch --orchestrator injects the orchestrator instructions into the spawned claude", async ({ mock }) => {
@@ -902,8 +910,11 @@ test("agendo launch --orchestrator injects the orchestrator instructions into th
   expect(appended).toContain("do not open a pull request");
   // The goal is still the session's opening prompt.
   expect(spawned!).toContain("Build the reporting module");
-  // Autonomy flags still apply — an orchestrator must not stall on approvals.
-  expect(spawned!.join(" ")).toContain("--permission-mode");
+  // Autonomy flags are NOT applied by default. An orchestrator acts on the user's
+  // main checkout (merging branches into it) and spawns further sessions, so
+  // auto-approving it hands all of that over unreviewed. Ordinary background
+  // sessions keep their autonomy — they're sandboxed in a throwaway worktree.
+  expect(spawned!).not.toContain("--permission-mode");
 
   // It runs in the repo's MAIN checkout, NOT a worktree: it squash-merges into the
   // main branch, and git allows that branch in one working tree only. A worktree
@@ -976,6 +987,50 @@ test("a plain agendo launch carries NO orchestrator instructions", async ({ mock
   const appended = appendedPrompt(spawned!);
   expect(appended).toContain("You are running inside agendo"); // launcher prompt still there
   expect(appended).not.toContain("ORCHESTRATOR MODE");
+});
+
+test("--unattended is the explicit opt-in that restores an orchestrator's autonomy", async ({ mock }) => {
+  // The safe default must stay reachable-past: unattended orchestration is a real
+  // use (leave it running overnight), it just has to be asked for by name.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--unattended", "Run it overnight");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  const spawned = tmux.find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(spawned).toBeTruthy();
+  expect(spawned!).toContain("--permission-mode");
+  // Still an orchestrator, not a plain autonomous session.
+  expect(appendedPrompt(spawned!)).toContain("ORCHESTRATOR MODE");
+});
+
+test("--unattended without --orchestrator is refused rather than silently ignored", async ({ mock }) => {
+  // A plain background session is already unattended, so accepting the flag here
+  // would read as "that changed something" when it changed nothing.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--unattended", "Do a thing");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("--unattended only applies with --orchestrator");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
+});
+
+test("--orchestrator rejects an inline value instead of guessing at it", async ({ mock }) => {
+  // It's a boolean flag: `--orchestrator=false` reads as "off" to a human, but a
+  // bare presence check would turn orchestrator mode ON. Refuse, never guess.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator=false", "Do a thing");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("--orchestrator takes no value");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
+});
+
+test("-O survives the unknown-flag guard and really launches an orchestrator", async ({ mock }) => {
+  // Single-dash args fall through to positionals, so a dropped `-O` branch would
+  // silently fold the flag into the prompt and launch an ordinary session.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "-O", "Coordinate the rewrite");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  const spawned = tmux.find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(appendedPrompt(spawned!)).toContain("ORCHESTRATOR MODE");
+  // And it didn't end up as prompt text.
+  expect(spawned!).toContain("Coordinate the rewrite");
+  expect(spawned!).not.toContain("-O Coordinate the rewrite");
 });
 
 test("agendo launch --orchestrator --copilot is refused, not silently downgraded", async ({ mock }) => {

@@ -89,6 +89,13 @@ than a worktree: git allows the main branch in only one working tree, and that's
 its merges have to land. It writes no project code, so it needs no isolation of its own
 — pass `--worktree` (or pick "New git worktree") if you want it anyway.
 
+Because it acts on your main checkout and spawns further sessions, an orchestrator also
+**keeps its approval prompts** — it's the one background launch that isn't auto-approved.
+Add `--unattended` to waive them once you're happy to let it run on its own. For the same
+reason `--orchestrator` is documented here and in `--help`, but deliberately left out of
+`agendo --llm`: that guide is injected into every launched session, and a worktree-sandboxed
+agent shouldn't be able to read its way into starting an orchestrator in your main checkout.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
