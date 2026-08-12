@@ -1887,7 +1887,10 @@ export default function App({
       if (key.return && repos[mode.cursor]) {
         const repo = repos[mode.cursor];
         if (mode.target.kind === "pr") return startCheckout(mode.target, repo, mode.agent);
-        if (mode.target.kind === "free") return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo, cursor: 0 });
+        // Orchestrators land on "Main repo checkout": that's where the main branch
+        // lives, and merging is their whole job (see the wtchoice hint).
+        if (mode.target.kind === "free")
+          return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo, cursor: mode.target.orchestrator ? 1 : 0 });
         return setMode({
           kind: "branch",
           target: mode.target,
@@ -1910,6 +1913,12 @@ export default function App({
         return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor + 1) % 2 } : p));
       if (key.return) {
         const worktree = mode.cursor === 0;
+        // Orchestrator in the main checkout: nothing to name (the main-repo path
+        // discards the name anyway, and it has no branch of its own), so launch
+        // straight away instead of showing a prompt whose value is thrown out.
+        if (!worktree && mode.target.orchestrator) {
+          return startFresh(mode.target, mode.repo, ORCHESTRATOR_SLUG, false, mode.agent);
+        }
         // A plain free session has no default name (defaultBranch is ""), so this
         // still opens an empty prompt; an orchestrator prefills its own role slug,
         // stepped past any orchestrator worktree already in this repo. Only a
@@ -2379,6 +2388,14 @@ export default function App({
       <Box flexDirection="column">
         <Text bold>{`${mode.target.orchestrator ? "Orchestrator" : "New"} session in ${mode.repo.name} — choose where to run`}</Text>
         <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
+        {mode.target.orchestrator ? (
+          <Text color="magenta">
+            {"An orchestrator squash-merges finished branches into the main branch, and git keeps that"}
+          </Text>
+        ) : null}
+        {mode.target.orchestrator ? (
+          <Text color="magenta">{"branch in one working tree only — so the main checkout is the right home for it."}</Text>
+        ) : null}
         <Box marginTop={1} flexDirection="column">
           {opts.map((label, i) => {
             const sel = i === mode.cursor;

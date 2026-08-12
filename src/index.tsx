@@ -38,6 +38,8 @@ Usage:
       --attach, -a              Switch/attach to it immediately (default: detached)
       --name, -n <slug>         Name the worktree/branch (else derived from prompt)
       --no-worktree             Run in the current checkout instead of a new worktree
+      --worktree                Force a new worktree (only useful with --orchestrator,
+                                which otherwise runs in the main checkout)
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
       --orchestrator, -O        Run the session in ORCHESTRATOR MODE: it writes no
@@ -45,9 +47,12 @@ Usage:
                                 launches one background session per unit (each with a
                                 sub-agent dev→review loop), monitors them via
                                 list/status/send, and squash-merges each finished
-                                branch into the main branch. Claude only. Names the
-                                worktree/branch "orchestrator" (then -2, -3, … if one
-                                is already there), unless --name says otherwise.
+                                branch into the main branch. Claude only. Runs in the
+                                repo's MAIN checkout (not a worktree) — git allows the
+                                main branch in only one working tree, which is where
+                                the merges have to happen. --worktree overrides, and
+                                then names the branch "orchestrator" (-2, -3, … if
+                                taken) unless --name says otherwise.
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
@@ -166,7 +171,8 @@ if (process.argv[2] === "status") {
 // switches/attaches to it immediately.
 if (process.argv[2] === "launch") {
   let name: string | undefined;
-  let worktree = true;
+  // undefined = "not specified", so the default can depend on --orchestrator below.
+  let worktree: boolean | undefined;
   let attach = false;
   let orchestrator = false;
   let agent: AgentSource = "claude";
@@ -176,6 +182,7 @@ if (process.argv[2] === "launch") {
     const a = rest[i];
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
+    else if (a === "--worktree") worktree = true;
     else if (a === "--name" || a === "-n") name = rest[++i];
     else if (a === "--orchestrator" || a === "-O") orchestrator = true;
     else if (a === "--copilot") agent = "copilot";
@@ -199,8 +206,20 @@ if (process.argv[2] === "launch") {
     console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
     process.exit(1);
   }
+  // An orchestrator squash-merges into the main branch, and git allows the main
+  // branch in only ONE working tree — the primary checkout. A worktree would give
+  // it an empty branch it never commits to while forcing every merge to reach out
+  // to the repo root, so orchestrators run in the main checkout unless asked
+  // otherwise. Ordinary background sessions keep their isolation.
+  const useWorktree = worktree ?? !orchestrator;
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent, orchestrator });
+  const { plan, id, cwd, error } = launchTask(process.cwd(), {
+    prompt,
+    name,
+    worktree: useWorktree,
+    agent,
+    orchestrator,
+  });
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
