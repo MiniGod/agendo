@@ -1,6 +1,6 @@
 {
   "name": "agendo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Terminal UI to launch/resume Claude and Copilot agent sessions for Azure DevOps work items",
   "repository": {
     "type": "git",
@@ -15,8 +15,18 @@
     "agendo": "./src/index.tsx"
   },
   "license": "MIT",
-  "keywords": ["claude", "copilot", "azure-devops", "tmux", "agent", "cli", "ink"],
-  "files": ["src"],
+  "keywords": [
+    "claude",
+    "copilot",
+    "azure-devops",
+    "tmux",
+    "agent",
+    "cli",
+    "ink"
+  ],
+  "files": [
+    "src"
+  ],
   "scripts": {
     "start": "bun run src/index.tsx",
     "dev": "bun run src/index.tsx",

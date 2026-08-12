@@ -1,0 +1,47 @@
+      169 + * loses its framing on a *cold* resume (a live session keeps the prompt it
+      170 + * started with), and orchestrators are launched one at a time by a human or by
+      171 + * another agent, never fanned out in a batch.
+      172   */
+      173  export function markOrchestratorSession(id: string): void {
+      174    try {
+
+  Ran 1 shell command
+
+● Implementation is complete and green. Summary of what's in place while the review agent finishes:
+
+  src/orchestrator.ts (new) — the prompt text plus the resume marker.
+  - orchestratorSystemPrompt(selfCmd) takes the launcher's SELF_CMD as a parameter (keeps the module free of spawn-time env sniffing, and directly unit-testable).
+  - I chose --append-system-prompt over --agent: claude --agent <name> needs a definition on disk in the target repo, and orchestrators get launched into arbitrary repos, so the instructions
+  would silently vanish where no .claude/agents/orchestrator.md exists. (This repo's .claude/agents/ is in fact empty — the orchestrator definition lives at user level in
+  ~/.claude/agents/orchestrator.md, so I reused its content rather than depending on the file.) Neither flag is recorded in claude's session state, and re-appending a system prompt on resume
+  is already the codebase's proven path (resumeArgv).
+  - Resume survival: launched ids are recorded in ~/.agendo/orchestrators.json, and resumeArgv consults it — so cold resume and restore-tab replay both re-inject.
+
+  Wiring — launch.ts combines the launcher prompt and the orchestrator prompt into one --append-system-prompt value (claude's flag takes a single value; passing it twice would silently
+  discard one). LaunchOptions.orchestrator threads through launchTask/launchNewSession. The worktree slug defaults to orchestrator rather than a slug of the goal.
+
+  CLI — agendo launch --orchestrator|-O "<goal>", documented in --help and --llm. --orchestrator with an explicit --copilot/--agent copilot exits non-zero rather than downgrading (Copilot has
+  no --append-system-prompt equivalent, so the instructions would be dropped).
+
+  TUI — O in the Sessions view, advertised in the hint bar next to n new. It reuses the existing repo → worktree-choice → name flow (including scoped repos), skipping only the agent picker
+  since the mode is Claude-only, with the branch prompt prefilled orchestrator.
+
+  Tests — e2e/orchestrator.spec.ts asserts each required directive is in the prompt; e2e/cli.spec.ts covers the flag, the slug default and --name override, the Copilot refusal, resume
+  re-injection, and the inverse (a plain launch gets no orchestrator text); e2e/launcher.spec.ts drives O through to the spawned argv, plus the inverse for n. The CLI launch tests run from a
+  repo in the mock home — from REPO_ROOT the fake git would have mkdir'd a worktree inside your real repo.
+
+  Both typechecks pass and the full suite is green (209 passed; the one snapshot diff was the sessions-view hint line, regenerated).
+
+  Two things I have not done yet, pending the review findings: committing to the branch and opening the PR. I'll fold in any real findings, re-run the suite, then commit and open the PR
+  against master and report the number.
+
+✻ Waiting for 1 background agent to finish
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ wait for the review, then commit and open the PR
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  12:19:31 | 20% ctx | 5h: 56% (1h 30m) | 7d: 8% (133h 40m) | Opus 5 | worktree-orchestrator-mode [!?] | /home/user/repo/.claude/worktrees/orchestrator-mode
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+
+  ● main
+❯ ◯ general-purpose  Review orchestrator mode change                                                                                                                    5m 39s · ↓ 99.9k tokens

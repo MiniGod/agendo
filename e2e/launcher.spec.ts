@@ -801,3 +801,63 @@ test("(d) a rescan must not re-fire `continue` for an already-resumed limited wi
   await sleep(3000); // …and several more samples of the still-limited login pane.
   expect(await continues()).toBe(1); // still exactly one — never re-fired
 });
+
+// ── a greyed-out suggestion must not veto hands-off auto-resume ────────────────
+// claude offers an autocomplete SUGGESTION in the input box unprompted; nothing
+// was typed until Tab accepts it. Read as a draft, it makes paneResumeSafe refuse
+// forever, so a limited session never resumes on its own. The caret settles it —
+// still parked at the prompt ⇒ nothing typed — and these drive the real Ink poll
+// to prove the caret actually reaches the auto-resume gate (the pane text below
+// carries no SGR escapes, so colour alone cannot tell the two cases apart).
+
+/** A limited pane whose reset time is an explicit PAST date, with `boxText` in
+ *  the input box. Same shape as (d): explicit month+day can't roll forward. */
+function limitedPaneWithInput(boxText: string): string {
+  const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const yst = new Date(Date.now() - 24 * 3600_000);
+  const rule = "  ─────────────────────────────────────────────";
+  return [
+    `  Claude usage limit reached. Your limit will reset at 3:00pm ${MON[yst.getMonth()]} ${yst.getDate()}.`,
+    rule,
+    `  ❯ ${boxText}`,
+    rule,
+    "  ? for shortcuts",
+  ].join("\n");
+}
+const SUGGESTION = "wait for the review, then commit and open the PR";
+// `❯` sits at column 2 of capture row 2, so the first input cell is column 4.
+const PROMPT_CARET = { x: 4, y: 2 };
+
+test("(e) a ghost suggestion in the box does NOT block auto-resume (caret at the prompt)", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await writeFile(join(mock.home, ".agendo", "state.json"), JSON.stringify({ provider: "ado", autoResumeOnUsageLimit: true }));
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: limitedPaneWithInput(SUGGESTION) },
+    cursors: { [RUNNING_TARGET]: PROMPT_CARET },
+  });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+
+  // Resume fires despite the text on screen: the caret proves it isn't typed.
+  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).some((a) => a.includes("continue")));
+});
+
+test("(f) a REAL draft in a limited box still blocks auto-resume (caret at the end)", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await writeFile(join(mock.home, ".agendo", "state.json"), JSON.stringify({ provider: "ado", autoResumeOnUsageLimit: true }));
+  // Identical screen; only the caret differs — it sits where typing leaves it.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: limitedPaneWithInput(SUGGESTION) },
+    cursors: { [RUNNING_TARGET]: { x: PROMPT_CARET.x + SUGGESTION.length, y: PROMPT_CARET.y } },
+  });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  // Several poll cycles (READINESS_MS = 1500ms): `<esc>continue<enter>` would wipe
+  // the user's queued prompt, so nothing may be sent to the pane at all.
+  await sleep(5000);
+  expect(await keysTo(mock, RUNNING_TARGET)).toHaveLength(0);
+});

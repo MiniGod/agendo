@@ -163,6 +163,54 @@ test("agendo send refuses a compacting session unless forced", async ({ mock }) 
   expect(forced.stdout).toContain(`sent to ${RUNNING_TARGET}`);
 });
 
+// A pane whose input box holds claude's greyed-out autocomplete SUGGESTION —
+// nothing typed, Tab would accept it. Written without SGR escapes, which is the
+// case colour alone cannot resolve (a suggestion in a grey `inputRealText`
+// doesn't enumerate looks exactly like this): only the caret settles it. The
+// `❯` sits at column 2, so the first input cell is column 4 and the box is
+// capture row 2.
+const GHOST_PANE = [
+  "  ● Implement login form",
+  "  ─────────────────────────────────────────────",
+  "  ❯ wait for the review, then commit and open the PR",
+  "  ─────────────────────────────────────────────",
+].join("\n");
+const GHOST_PROMPT_CURSOR = { x: 4, y: 2 };
+
+test("agendo send treats a ghost suggestion as an empty box (caret still at the prompt)", async ({ mock }) => {
+  // End-to-end proof that the caret reaches the classifier through the CLI: the
+  // same screen is sendable or not purely on where tmux reports the caret.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: GHOST_PANE },
+    cursors: { [RUNNING_TARGET]: GHOST_PROMPT_CURSOR },
+  });
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send still refuses when the caret sits at the END of the same text (a real draft)", async ({ mock }) => {
+  // The guard against over-correcting: identical pane, caret where typing leaves
+  // it, so the box holds a draft and `send` must not clobber it.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: GHOST_PANE },
+    cursors: {
+      [RUNNING_TARGET]: { x: GHOST_PROMPT_CURSOR.x + "wait for the review, then commit and open the PR".length, y: 2 },
+    },
+  });
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("queued");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+});
+
 test("agendo list [dir] scopes the listing to sessions under the dir", async ({ mock }) => {
   // Two running managed windows under two different repo roots: the login claude
   // session (appweb) and the experiment copilot session (applib). `agendo list`
@@ -588,6 +636,118 @@ test("agendo list issues (GitHub) uses 'issue' vocab and associates the session"
   expect(iss).toBeTruthy();
   expect(iss.sessions[0].shortId).toBe(SHORT_ID);
   expect(iss.sessions[0].running).toBe(true);
+});
+
+// ── `launch` agent-flag forwarding ───────────────────────────────────────────
+// `agendo launch` forwards a small allowlist of agent flags (--model,
+// --fallback-model) into the NEW session's argv, and rejects anything else
+// dashed. Every case runs with --no-worktree so no git worktree is created (the
+// fake git would mkdir one inside the real checkout), and the fake tmux records
+// the full `new-session … -- <agent argv>` we'd have spawned.
+
+/** The agent argv of the last `new-session`/`new-window` (everything after `--`). */
+function spawnedAgentArgv(tmux: string[][]): string[] | undefined {
+  const call = [...tmux].reverse().find((argv) => argv[0] === "new-session" || argv[0] === "new-window");
+  if (!call) return undefined;
+  const sep = call.indexOf("--", 1);
+  return sep >= 0 ? call.slice(sep + 1) : undefined;
+}
+
+test("agendo launch forwards --model into the new claude's argv", async ({ mock }) => {
+  const r = agendo(mock.env, "launch", "--no-worktree", "--model", "opus", "do the thing");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched background session");
+
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(argv[0]).toBe("claude");
+  // The flag pair is forwarded verbatim, adjacent, alongside the usual autonomy
+  // flags and the prompt.
+  expect(argv.join(" ")).toContain("--model opus");
+  expect(argv).toContain("--permission-mode"); // background autonomy still applied
+  expect(argv).toContain("do the thing");
+});
+
+test("agendo launch forwards --model to copilot too, and keeps multi-word values intact", async ({ mock }) => {
+  // Both agents take `--model <name>` with identical syntax, so no translation.
+  // The value is one argv token — tmux execs the argv directly (no shell), so a
+  // value with spaces survives without quoting.
+  const r = agendo(mock.env, "launch", "--no-worktree", "--copilot", "--model", "claude sonnet 4.5", "spike it");
+  expect(r.status).toBe(0);
+
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(argv[0]).toBe("copilot");
+  const at = argv.indexOf("--model");
+  expect(at).toBeGreaterThan(0);
+  expect(argv[at + 1]).toBe("claude sonnet 4.5"); // still a single, unsplit token
+  expect(argv).toContain("--autopilot");
+});
+
+test("agendo launch rejects a forwarded flag the chosen agent doesn't support", async ({ mock }) => {
+  // --fallback-model is Claude-only; copilot has no equivalent, so it must fail
+  // rather than hand the copilot binary a flag it doesn't know. The agent can be
+  // named after the flag, so the check runs on the fully parsed argv.
+  const r = agendo(mock.env, "launch", "--no-worktree", "--fallback-model", "sonnet", "--copilot", "spike it");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("--fallback-model isn't supported by --agent copilot");
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined(); // nothing spawned
+
+  // With claude (the default) the same flag is accepted and forwarded.
+  const ok = agendo(mock.env, "launch", "--no-worktree", "--fallback-model", "sonnet", "spike it");
+  expect(ok.status).toBe(0);
+  expect(spawnedAgentArgv(await mock.tmuxLog())!.join(" ")).toContain("--fallback-model sonnet");
+});
+
+test("agendo launch accepts the GNU --flag=value form for forwarded flags", async ({ mock }) => {
+  // Both agent CLIs take `--model=opus`, so the habit must not hit the
+  // unknown-flag error. It normalizes to the same two-token pair on the way out.
+  const r = agendo(mock.env, "launch", "--no-worktree", "--model=opus", "--agent=copilot", "do the thing");
+  expect(r.status).toBe(0);
+
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(argv[0]).toBe("copilot"); // `--agent=copilot` parsed too
+  expect(argv.join(" ")).toContain("--model opus");
+  expect(argv).not.toContain("--model=opus");
+
+  // An inline value may itself start with dashes — unlike the two-token form,
+  // there's nothing ambiguous about it.
+  const dashed = agendo(mock.env, "launch", "--no-worktree", "--model=--weird", "do it");
+  expect(dashed.status).toBe(0);
+  expect(spawnedAgentArgv(await mock.tmuxLog())!.join(" ")).toContain("--model --weird");
+});
+
+test("agendo launch fails when a forwarded flag has no value", async ({ mock }) => {
+  const missing = agendo(mock.env, "launch", "--no-worktree", "--model");
+  expect(missing.status).toBe(1);
+  expect(missing.stderr).toContain("--model needs a value");
+
+  // The inline form with an empty value is just as wrong.
+  const empty = agendo(mock.env, "launch", "--no-worktree", "--model=", "do it");
+  expect(empty.status).toBe(1);
+  expect(empty.stderr).toContain("--model needs a value");
+
+  // Another flag in the value slot is a mistake too, not a model named "--attach".
+  const swallowed = agendo(mock.env, "launch", "--no-worktree", "--model", "--attach", "do it");
+  expect(swallowed.status).toBe(1);
+  expect(swallowed.stderr).toContain("--model needs a value");
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+});
+
+test("agendo launch rejects unknown dashed flags instead of folding them into the prompt", async ({ mock }) => {
+  // A typo'd flag used to become prompt text ("--modle opus do the thing"); now
+  // it's a clean error naming what may be forwarded.
+  const r = agendo(mock.env, "launch", "--no-worktree", "--modle", "opus", "do the thing");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain('unknown flag "--modle"');
+  expect(r.stderr).toContain("--model"); // lists the forwardable flags
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+
+  // `--` remains the escape hatch for prompt text that legitimately starts with
+  // dashes: everything after it is prompt, never parsed as flags.
+  const escaped = agendo(mock.env, "launch", "--no-worktree", "--", "--modle", "is", "a", "typo");
+  expect(escaped.status).toBe(0);
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(argv).toContain("--modle is a typo");
+  expect(argv).not.toContain("--model");
 });
 
 test("agendo list rejects unknown sub-flags; a non-keyword positional is a dir filter", async ({ mock }) => {

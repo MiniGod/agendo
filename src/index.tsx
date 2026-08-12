@@ -6,12 +6,12 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePane, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
+  liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
   sessionRoot, currentSessionName, killWindow,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
-import { launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
+import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
@@ -40,6 +40,10 @@ Usage:
       --no-worktree             Run in the current checkout instead of a new worktree
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
+      --model <name>            Model for the new session, passed to the agent
+      --fallback-model <name>   Claude only: model to fall back to when overloaded
+                                Any other dashed argument is an error; put prompt
+                                text that starts with -- after a bare --.
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
@@ -155,33 +159,71 @@ if (process.argv[2] === "status") {
 // `cl-bg-…` agent window it can attach to later (Claude by default, or Copilot
 // via `--agent copilot`/`--copilot`). Used both by humans and by a running agent
 // the user asked to start a background session. Detached by default; `--attach`
-// switches/attaches to it immediately.
+// switches/attaches to it immediately. A small allowlist of agent flags
+// (`FORWARDABLE_LAUNCH_FLAGS`, e.g. `--model`) is passed through to the new
+// agent's argv; any other dashed argument is rejected rather than silently
+// swallowed into the prompt, so a typo'd flag can't quietly change the task.
 if (process.argv[2] === "launch") {
   let name: string | undefined;
   let worktree = true;
   let attach = false;
   let agent: AgentSource = "claude";
+  // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
+  const forwardArgv: string[] = [];
   const positionals: string[] = [];
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
+    // Both agent CLIs accept the GNU `--model=opus` form as well as the two-token
+    // one, so split an inline value off here and normalize to `[flag, value]`.
+    // (`eq > 2` keeps the bare `--` separator and a leading `--=` out of this.)
+    const eq = a.indexOf("=");
+    const inline = a.startsWith("--") && eq > 2;
+    const flag = inline ? a.slice(0, eq) : a;
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
-    else if (a === "--name" || a === "-n") name = rest[++i];
+    else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
-    else if (a === "--agent") {
-      const v = rest[++i];
+    else if (flag === "--agent") {
+      const v = inline ? a.slice(eq + 1) : rest[++i];
       if (v !== "claude" && v !== "copilot") {
         console.error(`launch failed: --agent must be "claude" or "copilot", got "${v ?? ""}"`);
         process.exit(1);
       }
       agent = v;
+    } else if (Object.hasOwn(FORWARDABLE_LAUNCH_FLAGS, flag)) {
+      // Value flags: take the inline `=value`, else the next token verbatim. A
+      // missing value (empty, or end of argv) or — in the two-token form, where
+      // it's ambiguous — another flag in its place is a mistake, not a model
+      // named "--attach".
+      const v = inline ? a.slice(eq + 1) : rest[++i];
+      if (v === undefined || v === "" || (!inline && v.startsWith("--"))) {
+        console.error(`launch failed: ${flag} needs a value`);
+        process.exit(1);
+      }
+      forwardArgv.push(flag, v);
     } else if (a === "--") { positionals.push(...rest.slice(i + 1)); break; }
-    else positionals.push(a);
+    else if (a.startsWith("--")) {
+      const known = Object.keys(FORWARDABLE_LAUNCH_FLAGS).join(", ");
+      console.error(
+        `launch failed: unknown flag "${a}" (forwardable agent flags: ${known}; ` +
+        `use -- before prompt text that starts with --)`,
+      );
+      process.exit(1);
+    } else positionals.push(a);
+  }
+  // The agent can be named after a forwarded flag (`--model x --copilot`), so the
+  // per-agent support check only makes sense once the whole argv is parsed.
+  for (let i = 0; i < forwardArgv.length; i += 2) {
+    const flag = forwardArgv[i];
+    if (!FORWARDABLE_LAUNCH_FLAGS[flag]?.agents.includes(agent)) {
+      console.error(`launch failed: ${flag} isn't supported by --agent ${agent}`);
+      process.exit(1);
+    }
   }
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent });
+  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent, forwardArgv });
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -466,8 +508,8 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   if (s.branch) console.log(`  branch: ${s.branch}`);
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
   if (target) {
-    const raw = capturePane(target);
-    const readiness = paneReadiness(raw);
+    const { raw, cursor } = capturePaneState(target);
+    const readiness = paneReadiness(raw, cursor);
     console.log(`  ready:  ${readiness}`);
     if (readiness === "limited") {
       const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
@@ -520,8 +562,8 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     console.error(`Session ${token} is not running (no live tmux window to send to).`);
     process.exit(1);
   }
-  const raw = capturePane(target);
-  const readiness = paneReadiness(raw);
+  const { raw, cursor } = capturePaneState(target);
+  const readiness = paneReadiness(raw, cursor);
   if (readiness !== "ready" && !force) {
     console.error(`Not sending: session looks "${readiness}", not ready. Re-check with \`${SELF_CMD} status ${token}\`, or pass --force.`);
     console.error(`\n  current screen (tail):`);
@@ -548,8 +590,8 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
     console.error(`Session ${token} is not running (no live tmux window to unblock).`);
     process.exit(1);
   }
-  const raw = capturePane(target);
-  const readiness = paneReadiness(raw);
+  const { raw, cursor } = capturePaneState(target);
+  const readiness = paneReadiness(raw, cursor);
   if (readiness !== "limited" && !force) {
     console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
     process.exit(2);
@@ -680,8 +722,8 @@ async function runList(opts: ListOptions): Promise<void> {
     let readiness: Readiness | null = null;
     let shells = 0;
     if (running && window) {
-      const raw = capturePane(window);
-      readiness = paneReadiness(raw);
+      const { raw, cursor } = capturePaneState(window);
+      readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
     }
     const l = linkOf(s);
@@ -763,12 +805,12 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const raw = capturePane(name);
+    const { raw, cursor } = capturePaneState(name);
     const shells = paneShells(raw);
     rows.push(
       [
         "●",
-        paneReadiness(raw).padEnd(10),
+        paneReadiness(raw, cursor).padEnd(10),
         KIND_LABEL[kind].padEnd(3),
         shortId(s.id),
         timeAgo(s.lastUsed).padEnd(8),
@@ -1110,7 +1152,10 @@ async function runWait(o: WaitOptions): Promise<void> {
   const interval = Math.max(100, o.intervalMs);
   const deadline = Date.now() + o.timeoutMs;
   while (true) {
-    const states = targets.map((t) => ({ ...t, r: paneReadiness(capturePane(t.target)) }));
+    const states = targets.map((t) => {
+      const { raw, cursor } = capturePaneState(t.target);
+      return { ...t, r: paneReadiness(raw, cursor) };
+    });
     const pending = states.filter((x) => !waitSatisfied(x.r, o));
     if (pending.length === 0) {
       for (const x of states) console.log(`${shortId(x.s.id)}\t${x.r}`);
