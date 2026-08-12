@@ -80,8 +80,16 @@ export async function materializeHome(home: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   await writeFile(join(stateDir, "state.json"), JSON.stringify({ provider: "ado" }, null, 2));
 
-  // A `.git` marker so repoRootForCwd resolves the standalone session's repo.
-  await mkdir(join(p.standalone, ".git"), { recursive: true });
+  // `.git` markers. standalone's is what makes repoRootForCwd's walk-up resolve
+  // its session at all; appweb's and applib's are not needed for that (their
+  // sessions live in `<root>/.claude/worktrees/…`, which resolves by pattern),
+  // but they are needed for the fixtures to be HONEST: these are checkouts with
+  // worktrees under them, and code that asks "can this host a worktree" — the
+  // repo picker's demotion rule, the worktree-vs-checkout default — would
+  // otherwise be told they're plain folders and behave accordingly.
+  for (const root of [p.standalone, p.appweb, p.applib]) {
+    await mkdir(join(root, ".git"), { recursive: true });
+  }
 
   const projects = join(home, ".claude", "projects");
 

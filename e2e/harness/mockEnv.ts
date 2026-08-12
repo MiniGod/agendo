@@ -30,6 +30,9 @@ export interface MockEnv {
   setGhState(state: unknown): Promise<void>;
   /** Switch the persisted backend (writes ~/.agendo/state.json). */
   setProvider(name: "ado" | "github"): Promise<void>;
+  /** Patch an ADO PR's mutable fields at runtime (status/isDraft/title/…), so a
+   *  test can change them between reloads to prove the app re-fetches PR state. */
+  setAdoPr(id: number, patch: Record<string, unknown>): void;
   /** Argv arrays of every fake-tmux invocation, in order. */
   tmuxLog(): Promise<string[][]>;
   /** Raw lines of the shared call log (az/gh/git/claude/xdg-open invocations). */
@@ -89,6 +92,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     setTmuxState: (state) => writeFile(tmuxStatePath, JSON.stringify(state, null, 2)),
     setGhState: (state) => writeFile(ghStatePath, JSON.stringify(state, null, 2)),
     setProvider: (name) => writeFile(join(home, ".agendo", "state.json"), JSON.stringify({ provider: name }, null, 2)),
+    setAdoPr: (id, patch) => ado.setPr(id, patch),
     tmuxLog: async () => (await parseLog(tmuxLogPath)).map((l) => JSON.parse(l) as string[]),
     callLog: () => parseLog(callLogPath),
     async cleanup() {

@@ -100,6 +100,57 @@ export function capturePane(target: string): string {
   return r.status === 0 ? (r.stdout ?? "") : "";
 }
 
+/**
+ * Where a pane's caret sits, in pane-relative cells: row 0 is the top visible
+ * row — the same origin `capture-pane` uses for its first output line — so `y`
+ * indexes straight into a capture's lines.
+ */
+export interface PaneCursor {
+  x: number;
+  y: number;
+}
+
+/**
+ * Cursor position of a target's active pane, or null when tmux can't report it
+ * (no such target, or a stub/older tmux that doesn't answer the format). Callers
+ * treat null as "no cursor evidence" and fall back to the color-based read — see
+ * `inputEmpty`.
+ */
+function paneCursor(target: string): PaneCursor | null {
+  const r = spawnSync("tmux", ["display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y}"], { encoding: "utf-8" });
+  if (r.status !== 0) return null;
+  const m = (r.stdout ?? "").trim().match(/^(\d+)\s+(\d+)$/);
+  return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+}
+
+/** A pane's visible text paired with the caret position captured alongside it. */
+export interface PaneSnapshot {
+  /** `capture-pane -p -e` output — SGR escapes intact. */
+  raw: string;
+  /** Caret position, or null when tmux couldn't report one. */
+  cursor: PaneCursor | null;
+}
+
+/**
+ * Snapshot a pane: its visible text plus its caret. Every call site that judges
+ * readiness should use this rather than a bare `capturePane`, since the caret is
+ * half the evidence (see `inputEmpty`).
+ *
+ * Two separate tmux reads, so the halves can be skewed by whatever the pane did
+ * in between — including a paint in progress, which parks the grid cursor
+ * wherever the TUI's output stream has reached rather than where it will rest.
+ * That makes the caret a BEST-EFFORT signal, not a proof: `inputEmpty` accepts it
+ * only at the exact resting column of an untouched prompt, which is the narrowest
+ * test that still recognizes a suggestion, not an airtight one. tmux can serve
+ * both reads in one invocation (`display-message … \; capture-pane …`); kept as
+ * two calls because `display-message` is a cheap one-line read next to dumping
+ * the whole screen, and the combined form's output shape is one more thing to get
+ * wrong.
+ */
+export function capturePaneState(target: string): PaneSnapshot {
+  return { raw: capturePane(target), cursor: paneCursor(target) };
+}
+
 /** Strip ANSI SGR escape sequences, for plain-text display / matching. */
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -249,14 +300,17 @@ function inputRealText(line: string): string {
  *    than a fixed offset, because sub-agent status lines (`● main`, `◯ …`) can
  *    render below the mode bar. The box can be empty even while busy, so busy is
  *    checked first and independently.
- * `raw` must include SGR escapes (see `capturePane`). Busy/dialog use specific,
- * transient markers so scanning the whole visible screen is safe: claude's prose
- * questions don't match them, and while a *finished* turn keeps a token count in
+ * `raw` must include SGR escapes (see `capturePane`), and `cursor` — the caret
+ * captured alongside it (see `capturePaneState`) — is the second, color-blind
+ * signal for "is anything typed?"; omitting it falls back to the color read alone
+ * (see `inputEmpty`). Busy/dialog use specific, transient markers so scanning the
+ * whole visible screen is safe: claude's prose questions don't match them, and
+ * while a *finished* turn keeps a token count in
  * its result summary (`✔ Goal achieved (1m · 1 turn · 4.6k tokens)`), that
  * summary never carries the live counter's directional ↑/↓ arrow — which the
  * busy check requires — so an idle post-turn pane isn't mistaken for a live one.
  */
-export function paneReadiness(raw: string): Readiness {
+export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readiness {
   const plain = stripAnsi(raw);
   // Compacting the conversation — a distinct, blocking state. Must be checked
   // *before* the input-box read below: compaction shows no token counter and no
@@ -293,7 +347,7 @@ export function paneReadiness(raw: string): Readiness {
   // Read the input box: the lines between the last two horizontal rules.
   const input = inputBox(raw);
   if (input === null) return "unknown";
-  return inputRealText(input) === "" ? "ready" : "queued";
+  return inputEmpty(input, cursor) ? "ready" : "queued";
 }
 
 /**
@@ -327,19 +381,103 @@ function isDialog(raw: string): boolean {
   return true;
 }
 
+/** The claude input box, located inside a capture. */
+interface InputBox {
+  /** The box's lines (SGR escapes intact), joined — what `inputRealText` reads. */
+  text: string;
+  /** Index of the `❯` prompt line *in the full capture* = its pane row. */
+  promptRow: number;
+  /** Index of the same line within `text` (the box's own rows). */
+  promptOffset: number;
+  /** Column of the first input cell, one past the `❯ ` marker. */
+  inputCol: number;
+}
+
 /**
  * The input-box region — the lines between the last two horizontal rules, which
  * bound the `❯` prompt — or null if there's no recognizable box. `raw` must keep
  * its SGR escapes (inputRealText reads them to tell real text from a suggestion).
+ *
+ * The prompt's row/column are reported alongside the text so `inputEmpty` can
+ * line the pane's caret up against them. The row is a capture line index, which
+ * IS the pane row (`capture-pane`'s first line is row 0, the origin `#{cursor_y}`
+ * uses); the column is counted on the ANSI-stripped line, so it's a cell offset
+ * (the prompt line carries only spaces before the `❯`, one cell each).
  */
-function inputBox(raw: string): string | null {
+function inputBox(raw: string): InputBox | null {
   const lines = raw.replace(/\r/g, "").split("\n");
   const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
   if (rules.length === 0) return null;
   const bottom = rules[rules.length - 1];
   const top = rules.length >= 2 ? rules[rules.length - 2] : bottom - 2;
-  const input = lines.slice(top + 1, bottom).join("\n");
-  return input.includes("❯") ? input : null;
+  const body = lines.slice(Math.max(top + 1, 0), bottom);
+  const promptOffset = body.findIndex((l) => l.includes("❯"));
+  if (promptOffset === -1) return null;
+  const promptRow = Math.max(top + 1, 0) + promptOffset;
+  return {
+    text: body.join("\n"),
+    promptRow,
+    promptOffset,
+    // `❯ ` — the marker plus the single space separating it from the input.
+    inputCol: stripAnsi(lines[promptRow]).indexOf("❯") + 2,
+  };
+}
+
+/**
+ * Whether the input box holds nothing the user typed — the check that gates both
+ * `agendo send` and auto-resume. Two independent discriminators, either of which
+ * is enough to call the box empty:
+ *
+ *  1. COLOR (`inputRealText`): the TUI draws an autocomplete *suggestion* faint
+ *     (`\e[2m`) or gray and real text in the default color, so a box whose only
+ *     glyphs are faint/gray holds no typed text. Precise when it applies, but
+ *     it's a palette heuristic — it can only recognize the grays it enumerates,
+ *     and it needs a capture that kept its escapes.
+ *  2. CARET (`cursor`): a suggestion is rendered *at* the caret, waiting for Tab;
+ *     typed text pushes the caret to its end. So a caret still resting at the
+ *     prompt column means nothing was typed, whatever color the box is drawn in —
+ *     no palette knowledge, no escapes needed. Accepted only at EXACTLY the
+ *     prompt's row and column: the caret is sampled by a second tmux read (see
+ *     capturePaneState), and a pane caught mid-paint parks its cursor wherever the
+ *     output stream reached — column 0 of a row it is only passing through, say —
+ *     so anything short of the resting position is treated as no evidence.
+ *
+ * They're OR'd because the bug being fixed is a FALSE dirty read: a ghost
+ * suggestion that (1) can't recognize — an unenumerated gray, a theme that draws
+ * suggestions without dim, a capture stripped of escapes — makes `agendo send`
+ * refuse and, worse, makes `paneResumeSafe` refuse, so a usage-limited session
+ * never resumes hands-off however long it waits.
+ *
+ * The OR is not free, and signal 1 does NOT backstop signal 2 — the moment the
+ * caret says empty, the color read is discarded. The way that clobbers a real
+ * draft: the user types something, then moves the caret back to the prompt column
+ * (Home / Ctrl-A, or `0`/`^` under vim bindings) and leaves it there across a
+ * poll, at which point a `send`/auto-resume can overwrite the draft. We take that
+ * trade knowingly: it needs a caret deliberately moved off the text and left
+ * there in an unattended session, versus a suggestion — which the TUI offers
+ * constantly, unprompted — silently disabling hands-off resume. `onlyPromptRow`
+ * below keeps the trade as narrow as it can be made: the caret may only speak for
+ * a box whose other rows are blank, so a multi-row draft (whose caret was moved
+ * back up to the prompt row) is never overruled.
+ */
+function inputEmpty(box: InputBox, cursor?: PaneCursor | null): boolean {
+  if (inputRealText(box.text) === "") return true;
+  return (
+    !!cursor && cursor.y === box.promptRow && cursor.x === box.inputCol && onlyPromptRow(box)
+  );
+}
+
+/**
+ * Whether the input box's content is confined to the prompt row — every other row
+ * blank. Bounds what the caret is allowed to vouch for (see `inputEmpty`): the
+ * caret proves nothing about rows it isn't on, so a box with content elsewhere
+ * keeps the (conservative) color verdict. Costs the caret signal on a suggestion
+ * long enough to WRAP onto a second row, which is the safe direction to fail.
+ */
+function onlyPromptRow(box: InputBox): boolean {
+  return box.text
+    .split("\n")
+    .every((l, i) => i === box.promptOffset || stripAnsi(l).trim() === "");
 }
 
 /**
@@ -367,6 +505,46 @@ function isPaneChrome(line: string): boolean {
     /^●\s+\S+\s+·\s+\/[\w-]+$/.test(line) ||
     /^new task\?\s+\/clear to save\b/i.test(line)
   );
+}
+
+/**
+ * The task panel's header line, e.g. `7 tasks (3 done, 1 in progress, 3 open)`
+ * (also `1 task (…)`). Requires at least one of the TUI's own status words inside
+ * the parens so ordinary prose ("3 tasks (see below)") can't open a panel.
+ */
+const TASK_PANEL_HEADER_RE = /^\d+\s+tasks?\s+\([^)]*\b(?:done|in progress|open|pending)\b[^)]*\)$/i;
+
+/**
+ * A row *inside* an already-opened task panel: a status-glyph item line
+ * (`◼ WebRTC session…` in progress, `◻ UI: pair code…` open, `✔ Gradle skeleton…`
+ * done) or the elision footer (`… +2 completed`). Only ever applied to the
+ * contiguous run directly beneath a matched header (see taskPanelLines), so the
+ * glyph set can stay permissive without swallowing turn output that happens to
+ * start with `✔`.
+ */
+const TASK_PANEL_ROW_RE = /^(?:[◼◻◐◌●○☐☑✔✓✗]\s+\S|…\s*\+\d+\b)/;
+
+/**
+ * Indices of the lines belonging to the TUI's TASK PANEL — the persistent
+ * `N tasks (…)` summary plus its item rows, which Claude Code renders directly
+ * above the input box while a task list exists. It is standing UI, not
+ * conversation content: it stays on screen unchanged across turns, so counting it
+ * as "the last content block" hid an active usage-limit notice sitting just above
+ * it and made a blocked session read `ready` (the field miss this exists for).
+ *
+ * Found structurally — a header line, then the contiguous run of rows beneath it —
+ * rather than by matching item glyphs anywhere on screen, so a turn-output line
+ * that merely starts with one of those glyphs is still content. `lines` are
+ * ANSI-stripped and trimmed.
+ */
+function taskPanelLines(lines: string[]): Set<number> {
+  const marked = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    if (!TASK_PANEL_HEADER_RE.test(lines[i])) continue;
+    marked.add(i);
+    for (let j = i + 1; j < lines.length && TASK_PANEL_ROW_RE.test(lines[j]); j++) marked.add(j);
+  }
+  return marked;
 }
 
 /**
@@ -416,7 +594,7 @@ export function paneLimitDialogActive(raw: string): boolean {
  * the contiguous run of non-blank lines nearest the box's top rule (bounded by
  * LIMIT_ACTIVE_MAX_LINES), skipping past blank lines AND pane chrome (the
  * spinner's `✻ Crunched for 0s` summary, the `● high · /effort` mode hint — see
- * isPaneChrome) that the TUI draws between that block and the box. An active
+ * isPaneChrome — plus the standing `N tasks (…)` panel, see taskPanelLines). An active
  * limit renders its notice as that block; a recovered session has a later
  * completed turn (and its typed `❯ continue`) between the old notice and the
  * box, so the nearest content block is that turn's tail, not the notice. With
@@ -433,10 +611,12 @@ export function paneUsageLimited(raw: string): boolean {
   const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
   if (rules.length === 0) return isUsageLimited(stripAnsi(raw));
   const top = rules.length >= 2 ? rules[rules.length - 2] : rules[rules.length - 1] - 2;
+  const plainLines = lines.map((l) => stripAnsi(l).trim());
+  const taskPanel = taskPanelLines(plainLines);
   const block: string[] = [];
   for (let i = top - 1; i >= 0 && block.length < LIMIT_ACTIVE_MAX_LINES; i--) {
-    const line = stripAnsi(lines[i]).trim();
-    if (line === "" || isPaneChrome(line)) {
+    const line = plainLines[i];
+    if (line === "" || isPaneChrome(line) || taskPanel.has(i)) {
       if (block.length) break; // reached the gap above the collected block
       continue; // still below the block: skip blanks and box-side chrome
     }
@@ -452,20 +632,23 @@ export function paneUsageLimited(raw: string): boolean {
  * it) and an *empty* input box (so a draft the user queued for after reset isn't
  * wiped). Stricter than `paneReadiness` alone, which reports "limited" even over
  * a lingering dialog / queued text because the limit check outranks both. `raw`
- * must include SGR escapes (see capturePane).
+ * must include SGR escapes (see capturePane); pass the caret captured with it
+ * (see capturePaneState) so a greyed-out autocomplete *suggestion* sitting in the
+ * box doesn't read as a draft and veto the resume — a false-dirty read here is
+ * silent and permanent: auto-resume simply never fires for that limit window.
  *
  * The numbered limit dialog is the one dialog we DO fire into: the resume
  * keystrokes lead with Escape, which dismisses it (verified live), and the dialog
  * has no input box holding a user draft. Every *other* open dialog still blocks —
  * Escape would dismiss it too, but that's not what the user wants.
  */
-export function paneResumeSafe(raw: string): boolean {
+export function paneResumeSafe(raw: string, cursor?: PaneCursor | null): boolean {
   if (!paneUsageLimited(raw)) return false;
   const lines = raw.replace(/\r/g, "").split("\n");
   if (isActiveLimitDialog(lines)) return true;
   if (isDialog(raw)) return false;
   const input = inputBox(raw);
-  return input !== null && inputRealText(input) === "";
+  return input !== null && inputEmpty(input, cursor);
 }
 
 /**
@@ -536,8 +719,21 @@ export function liveManagedPaths(): { name: string; cwd: string; placeholder: bo
   return out;
 }
 
+/**
+ * Force tmux to resolve `-t <name>` by EXACT match only. Without the leading `=`,
+ * tmux resolves a target by exact → unique-prefix → fnmatch, so a bare name that
+ * is a *prefix* of a longer live name silently binds to the wrong target — our
+ * managed names are prefixes of each other (`agendo`⊂`agendo-work`, `cl-pr-5`⊂
+ * `cl-pr-50`, `cl-wi-512`⊂`cl-wi-5120`). The `=` prefix (documented tmux target
+ * syntax) pins resolution to the literal name, and for a compound `session:window`
+ * target it applies to the session portion (the only ambiguous part here).
+ */
+export function exactTarget(name: string): string {
+  return `=${name}`;
+}
+
 export function hasSession(name: string): boolean {
-  return spawnSync("tmux", ["has-session", "-t", name]).status === 0;
+  return spawnSync("tmux", ["has-session", "-t", exactTarget(name)]).status === 0;
 }
 
 /** The tmux session the caller is currently inside, or null (outside tmux). */
@@ -550,14 +746,14 @@ export function currentSessionName(): string | null {
 
 /** The absolute root a launcher host session is scoped to (`@cl_root`), or null. */
 export function sessionRoot(session: string): string | null {
-  const r = spawnSync("tmux", ["show-options", "-t", session, "-v", ROOT_OPTION], { encoding: "utf-8" });
+  const r = spawnSync("tmux", ["show-options", "-t", exactTarget(session), "-v", ROOT_OPTION], { encoding: "utf-8" });
   const v = r.status === 0 ? (r.stdout ?? "").trim() : "";
   return v || null;
 }
 
 /** Record the absolute root a launcher host session is scoped to (`@cl_root`). */
 export function setSessionRoot(session: string, root: string): void {
-  tmuxQuiet(["set-option", "-t", session, ROOT_OPTION, root]);
+  tmuxQuiet(["set-option", "-t", exactTarget(session), ROOT_OPTION, root]);
 }
 
 /** Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
@@ -577,7 +773,7 @@ export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name:
   for (const line of tmuxLines([
     "list-windows",
     "-t",
-    session,
+    exactTarget(session),
     "-F",
     "#{window_name}\t#{pane_current_path}\t#{pane_dead}",
   ])) {
@@ -644,8 +840,8 @@ export function newWindow(name: string, cwd: string, argv: string[]): void {
  * `--tmux` bootstrap process, which isn't itself inside that session.
  */
 export function newWindowIn(session: string, name: string, cwd: string, argv: string[]): void {
-  tmuxQuiet(["new-window", "-d", "-t", session, "-n", name, "-c", cwd, "--", ...argv]);
-  pinName(`${session}:${name}`);
+  tmuxQuiet(["new-window", "-d", "-t", exactTarget(session), "-n", name, "-c", cwd, "--", ...argv]);
+  pinName(`${exactTarget(session)}:${name}`);
 }
 
 /**
@@ -655,7 +851,7 @@ export function newWindowIn(session: string, name: string, cwd: string, argv: st
  * config kept it around — "launcher" window means the menu isn't running.
  */
 export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean {
-  for (const line of tmuxLines(["list-windows", "-t", session, "-F", "#{window_name}\t#{pane_dead}"])) {
+  for (const line of tmuxLines(["list-windows", "-t", exactTarget(session), "-F", "#{window_name}\t#{pane_dead}"])) {
     const [name, dead] = line.split("\t");
     if (name === "launcher" && dead !== "1") return true;
   }
@@ -670,20 +866,20 @@ export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean 
  * attaches after.
  */
 function spawnLauncherWindow(session: string, cwd: string, launcherArgv: string[]): void {
-  tmuxQuiet(["kill-window", "-t", `${session}:launcher`]); // no-op if none exists
+  tmuxQuiet(["kill-window", "-t", `${exactTarget(session)}:launcher`]); // no-op if none exists
   const at0 = spawnSync(
     "tmux",
-    ["new-window", "-d", "-t", `${session}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+    ["new-window", "-d", "-t", `${exactTarget(session)}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
     { stdio: "ignore" },
   );
   if (at0.status !== 0) {
     spawnSync(
       "tmux",
-      ["new-window", "-d", "-t", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+      ["new-window", "-d", "-t", exactTarget(session), "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "ignore" },
     );
   }
-  pinName(`${session}:launcher`);
+  pinName(`${exactTarget(session)}:launcher`);
 }
 
 /**
@@ -721,14 +917,14 @@ export function enterLauncherSession(
       ["new-session", "-d", "-s", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "inherit" },
     );
-    pinName(`${session}:launcher`);
+    pinName(`${exactTarget(session)}:launcher`);
     if (root) setSessionRoot(session, root);
     onFreshCreate?.();
   } else if (!launcherWindowLive(session)) {
     spawnLauncherWindow(session, cwd, launcherArgv);
   }
   // Land on the menu window specifically, not whatever window was last active.
-  tmuxQuiet(["select-window", "-t", `${session}:launcher`]);
+  tmuxQuiet(["select-window", "-t", `${exactTarget(session)}:launcher`]);
   const verb = insideTmux() ? ["switch-client"] : ["attach-session"];
-  spawnSync("tmux", [...verb, "-t", session], { stdio: "inherit" });
+  spawnSync("tmux", [...verb, "-t", exactTarget(session)], { stdio: "inherit" });
 }
