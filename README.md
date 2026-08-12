@@ -84,6 +84,11 @@ independent units, monitor via `list`/`status` and steer via `send`, then squash
 each finished branch into the main branch — no PRs. The framing is re-injected on
 resume, so a restored orchestrator doesn't quietly turn back into an implementer.
 
+Unlike every other launch, an orchestrator runs in the repo's **main checkout** rather
+than a worktree: git allows the main branch in only one working tree, and that's where
+its merges have to land. It writes no project code, so it needs no isolation of its own
+— pass `--worktree` (or pick "New git worktree") if you want it anyway.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git

@@ -103,11 +103,14 @@ test("the prompt says WHERE to merge — the main checkout, not its own worktree
   // its own worktree lands the work on the wrong branch, and it must not reach
   // into a background session's worktree either.
   expect(prompt).toContain("Merge in the repo's MAIN checkout");
+  // The main checkout is the DEFAULT home, so "merge where you sit" is the primary
+  // instruction; reaching out with `git -C <repo-root>` is the worktree fallback.
+  expect(flat).toContain("git allows the main branch in only ONE working tree");
+  expect(flat).toContain("you can merge right where you sit");
   expect(prompt).toContain("git -C <repo-root>");
-  expect(prompt).toContain("Not in your own worktree");
-  expect(flat).toContain("never in a background session's worktree");
-  // And the --no-worktree case, where its cwd already IS the main checkout.
-  expect(flat).toContain("your cwd already IS the main checkout");
+  expect(flat).toContain("Never merge inside a background session's worktree");
+  // And the opt-in-worktree case, now the exception rather than the norm.
+  expect(flat).toContain("If you were deliberately given a worktree of your own");
   // And it must not stomp a checkout the human might be sitting in — on EVERY
   // merge, not only the first (the hazard persists across a multi-wave run).
   expect(flat).toContain("Before EACH merge — not just the first — check the main checkout is clean");

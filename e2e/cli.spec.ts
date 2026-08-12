@@ -886,7 +886,7 @@ test("agendo launch --orchestrator injects the orchestrator instructions into th
   const id = r.stdout.match(/launched orchestrator session (\S+)/)?.[1];
   expect(id).toBeTruthy();
 
-  // It went out as a detached tmux session running claude in the new worktree.
+  // It went out as a detached tmux session running claude.
   const tmux = await mock.tmuxLog();
   const spawned = tmux.find((argv) => argv[0] === "new-session" && argv.includes("claude"));
   expect(spawned).toBeTruthy();
@@ -905,25 +905,41 @@ test("agendo launch --orchestrator injects the orchestrator instructions into th
   // Autonomy flags still apply — an orchestrator must not stall on approvals.
   expect(spawned!.join(" ")).toContain("--permission-mode");
 
-  // Its worktree/branch is named after the ROLE, not the goal it was handed.
-  const args = gitArgv(await mock.callLog()).flat();
-  expect(args).toContain("worktree-orchestrator");
-  expect(args.some((a) => a.includes("build-the-reporting-module"))).toBe(false);
+  // It runs in the repo's MAIN checkout, NOT a worktree: it squash-merges into the
+  // main branch, and git allows that branch in one working tree only. A worktree
+  // would hand it an empty branch it never commits to and force every merge to
+  // reach out to the repo root.
+  expect(r.stdout).toContain(`(in ${mockRepo(mock.home)})`);
+  const gitCalls = gitArgv(await mock.callLog());
+  expect(gitCalls.some((a) => a.includes("worktree"))).toBe(false);
 
   // The launch is remembered, so a later cold resume can re-inject (see below).
   const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
   expect(marker.ids).toContain(id);
 });
 
-test("a second orchestrator in the same repo gets its OWN worktree, not the first one's", async ({ mock }) => {
-  // The orchestrator slug names the role, so it's the same for every unnamed
-  // orchestrator. `createWorktree` treats an existing path as success, so without
-  // stepping past it the second orchestrator would run in the first one's checkout
-  // on its branch — two autonomous coordinators sharing one working tree.
+test("an orchestrator launched from a subdirectory still runs at the repo root", async ({ mock }) => {
+  // "Merge right where you are" is only true if it starts in the primary checkout,
+  // so a launch from a subdirectory (or from inside another worktree) must still
+  // land at the root rather than wherever the human happened to be standing.
   const repo = mockRepo(mock.home);
-  const first = agendoIn(repo, mock.env, "launch", "--orchestrator", "Goal A");
+  const sub = join(repo, "packages", "api");
+  await mkdir(sub, { recursive: true });
+  const r = agendoIn(sub, mock.env, "launch", "--orchestrator", "Coordinate the rewrite");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`(in ${repo})`);
+  expect(r.stdout).not.toContain(`(in ${sub})`);
+});
+
+test("--orchestrator --worktree opts into isolation, and a second one gets its OWN worktree", async ({ mock }) => {
+  // Worktree isolation is now opt-in for orchestrators. When taken, the role-named
+  // slug is identical for every unnamed one, and `createWorktree` treats an
+  // existing path as success — so without stepping past it the second would run in
+  // the first one's checkout on its branch.
+  const repo = mockRepo(mock.home);
+  const first = agendoIn(repo, mock.env, "launch", "--orchestrator", "--worktree", "Goal A");
   expect(first.status).toBe(0);
-  const second = agendoIn(repo, mock.env, "launch", "--orchestrator", "Goal B");
+  const second = agendoIn(repo, mock.env, "launch", "--orchestrator", "--worktree", "Goal B");
   expect(second.status).toBe(0);
 
   // Distinct worktree directories…
@@ -940,7 +956,7 @@ test("a second orchestrator in the same repo gets its OWN worktree, not the firs
 });
 
 test("agendo launch --name overrides the orchestrator's default slug", async ({ mock }) => {
-  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--name", "rollout", "Ship it");
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--worktree", "--name", "rollout", "Ship it");
   expect(r.status).toBe(0);
   const args = gitArgv(await mock.callLog()).flat();
   expect(args).toContain("worktree-rollout");

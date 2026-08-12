@@ -411,7 +411,11 @@ export interface LaunchOptions {
   prompt?: string;
   /** Slug for the worktree/branch; derived from the prompt if omitted. */
   name?: string;
-  /** Create an isolated git worktree to run in. Defaults to true. */
+  /**
+   * Create an isolated git worktree to run in. Defaults to true — but callers
+   * launching an orchestrator should pass `false` (the CLI does): it merges into
+   * the main branch, which git only permits in the primary checkout.
+   */
   worktree?: boolean;
   /** Which agent to launch. Defaults to Claude for back-compat. */
   agent?: AgentSource;
@@ -452,17 +456,25 @@ export interface LaunchResult {
  * autonomously spawn its own nested background sessions.
  */
 export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
-  // An orchestrator's slug should say what the session IS, not repeat the goal
-  // it was handed — its worktree is a coordination desk, not the work.
+  // An orchestrator's slug should say what the session IS, not repeat the goal it
+  // was handed. Only used on the opt-in `worktree: true` path — an orchestrator
+  // normally runs in the main checkout and has no branch of its own.
   const fallbackSlug = opts.orchestrator ? ORCHESTRATOR_SLUG : slugify(opts.prompt || "") || "session";
   // Whether `--name` actually produced a usable slug — `--name "  "` / `"!!!"` are
   // truthy but slugify to nothing, so testing `opts.name` alone would treat them
   // as user-chosen and skip the collision stepping below.
   const named = slugify(opts.name || "");
   const slug = named || fallbackSlug;
+  const root = repoRootForCwd(cwd);
   let runCwd = cwd;
-  if (opts.worktree !== false) {
-    const root = repoRootForCwd(cwd);
+  if (opts.worktree === false) {
+    // An orchestrator integrates by squash-merging into the main branch, and git
+    // allows the main branch in exactly ONE working tree — the primary checkout.
+    // So run it AT the repo root, even when invoked from a subdirectory or from
+    // inside another worktree: then "merge where you are" is literally true, and
+    // it never has to reach outside its own cwd to do its one git job.
+    if (opts.orchestrator) runCwd = root;
+  } else {
     // The orchestrator slug names the ROLE, so it's identical for every unnamed
     // orchestrator in a repo. `createWorktree` treats an existing path as
     // success, so without stepping past it a second orchestrator would run in

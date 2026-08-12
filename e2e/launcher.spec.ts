@@ -621,27 +621,18 @@ test("O in the Sessions view launches an orchestrator through the normal worktre
   await wt.press(KEY.enter); // top repo (appweb) → worktree-vs-main choice
   screen = await wt.waitForText("choose where to run");
   expect(screen).toContain("Orchestrator session in appweb");
+  // The choice explains itself, and the cursor already sits on the main checkout —
+  // git keeps the main branch in one working tree, and merging is the whole job.
+  expect(screen).toContain("git keeps that");
+  expect(screen).toMatch(/❯\s+Main repo checkout/);
 
-  await wt.press(KEY.enter); // "New git worktree"
-  // Wait on a needle unique to the BRANCH screen — "Orchestrator session in appweb"
-  // is also a prefix of the wtchoice title, so waiting on that could match the
-  // previous screen and assert against stale text.
-  screen = await wt.waitForText("New branch off origin/HEAD");
-  expect(screen).toContain("Orchestrator session in appweb");
-  // The branch field itself is prefilled with the ROLE slug. Assert on the
-  // labelled field, not a bare "orchestrator" substring — the same screen renders
-  // "→ claude (orchestrator mode)", which would satisfy that even if empty.
-  expect(screen).toMatch(/branch:\s*orchestrator/);
-  expect(screen).toContain("(orchestrator mode)");
+  // Accepting that default launches immediately: there's no branch to name, so no
+  // prompt whose value would just be discarded.
+  await wt.press(KEY.enter);
 
-  await wt.press(KEY.enter); // create the worktree & launch
-  const expectedCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "orchestrator");
-  await waitUntil(async () =>
-    (await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree") && l.includes(expectedCwd)),
-  );
-
-  // The spawned claude carries the orchestrator instructions, in the worktree,
-  // under a `cl-new-…` target (the manual-flow prefix).
+  // It runs in the repo ROOT, not a worktree, under a `cl-new-…` target, carrying
+  // the orchestrator instructions.
+  const expectedCwd = join(mock.home, "repos", "appweb");
   await waitUntil(async () => {
     const spawned = (await mock.tmuxLog()).find(
       (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude"),
@@ -657,6 +648,38 @@ test("O in the Sessions view launches an orchestrator through the normal worktre
       appended.includes("You are running inside agendo")
     );
   });
+  // No worktree was created for it.
+  expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
+});
+
+// The isolation escape hatch is still reachable in the TUI: pick "New git worktree"
+// and the role-slug branch prompt appears as before.
+test("the orchestrator flow can still opt into its own worktree", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  await wt.waitForText("Running now");
+  wt.write("O");
+  await wt.waitForText("Orchestrator session — pick a repo");
+  await wt.press(KEY.enter); // appweb → wtchoice (cursor on "Main repo checkout")
+  await wt.waitForText("choose where to run");
+  await wt.press(KEY.up); // move up to "New git worktree"
+  await wt.press(KEY.enter);
+
+  // Now the branch prompt appears, prefilled with the ROLE slug. Assert on the
+  // labelled field, not a bare "orchestrator" substring — the same screen renders
+  // "→ claude (orchestrator mode)", which would satisfy that even if empty.
+  const screen = await wt.waitForText("New branch off origin/HEAD");
+  expect(screen).toMatch(/branch:\s*orchestrator/);
+  expect(screen).toContain("(orchestrator mode)");
+
+  await wt.press(KEY.enter);
+  const expectedCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "orchestrator");
+  await waitUntil(async () =>
+    (await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree") && l.includes(expectedCwd)),
+  );
 });
 
 test("n in the Sessions view still launches a plain session (no orchestrator prompt)", async ({ launch, mock }) => {
