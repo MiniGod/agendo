@@ -126,8 +126,48 @@ export async function materializeHome(home: string): Promise<void> {
         { content: "Add validation", activeForm: "Adding validation", status: "in_progress" },
         { content: "Wire up the submit handler", activeForm: "Wiring up the submit handler", status: "pending" },
       ] } }] }, timestamp: "2026-06-20T10:00:27.000Z" },
+      // A Workflow-tool launch with NO completion notification: on the RUNNING
+      // session this must surface as a running workflow (status/list ◆ marker).
+      // The structured toolUseResult mirrors a real launch record verbatim.
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_wf_login", name: "Workflow", input: {} }] }, timestamp: "2026-06-20T10:00:28.000Z" },
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_wf_login", content: "Workflow launched in background. Task ID: wtask-login" }] }, toolUseResult: { status: "async_launched", taskId: "wtask-login", taskType: "local_workflow", workflowName: "login-hardening", runId: "wf_login01", summary: "Harden the login flow end-to-end", transcriptDir: join(loginDir, LOGIN_SESSION_ID, "subagents", "workflows", "wf_login01"), scriptPath: join(loginDir, LOGIN_SESSION_ID, "workflows", "scripts", "login-hardening-wf_login01.js") }, timestamp: "2026-06-20T10:00:29.000Z" },
       { type: "assistant", message: { content: [{ type: "text", text: "Done — login form added with validation. " + "x".repeat(400) }] }, cwd: p.loginCwd, gitBranch: "feature/login", timestamp: "2026-06-20T10:00:30.000Z" },
     ]),
+  );
+
+  // The login workflow's run files: a journal with 2 agents spawned / 1 done
+  // (drives "1/2 agents done"), per-agent meta (drives the model tally), and
+  // the persisted script whose meta literal drives the phases line.
+  const loginWfDir = join(loginDir, LOGIN_SESSION_ID, "subagents", "workflows", "wf_login01");
+  await mkdir(loginWfDir, { recursive: true });
+  await writeFile(
+    join(loginWfDir, "journal.jsonl"),
+    jsonl([
+      { type: "started", key: "v2:aaa", agentId: "agent-one" },
+      { type: "result", key: "v2:aaa", agentId: "agent-one", result: "research done" },
+      { type: "started", key: "v2:bbb", agentId: "agent-two" },
+    ]),
+  );
+  await writeFile(join(loginWfDir, "agent-one.meta.json"), JSON.stringify({ agentType: "workflow-subagent", spawnDepth: 1, model: "sonnet" }));
+  await writeFile(join(loginWfDir, "agent-two.meta.json"), JSON.stringify({ agentType: "workflow-subagent", spawnDepth: 1, model: "opus" }));
+  const loginScriptsDir = join(loginDir, LOGIN_SESSION_ID, "workflows", "scripts");
+  await mkdir(loginScriptsDir, { recursive: true });
+  await writeFile(
+    join(loginScriptsDir, "login-hardening-wf_login01.js"),
+    [
+      "export const meta = {",
+      "  name: 'login-hardening',",
+      "  description: 'Harden the login flow end-to-end',",
+      "  phases: [",
+      "    { title: 'Research', detail: 'map the login flow', model: 'sonnet' },",
+      "    { title: 'Develop', model: 'opus' },",
+      "  ],",
+      "}",
+      "phase('Research')",
+      "const r = await agent('map the login flow')",
+      "return r",
+      "",
+    ].join("\n"),
   );
 
   // 2) crash session — branch embeds work-item id 102 (no PR on that item).
@@ -152,6 +192,23 @@ export async function materializeHome(home: string): Promise<void> {
       { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "1", status: "completed" } }] }, timestamp: "2026-06-19T09:00:11.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "2", status: "active" } }] }, timestamp: "2026-06-19T09:00:12.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "3", status: "deleted" } }] }, timestamp: "2026-06-19T09:00:13.000Z" },
+      // A workflow that RAN TO COMPLETION: launch + the `<task-notification>`
+      // user message naming its taskId. Must surface as completed even though
+      // this session is idle (a notification beats the liveness fallback).
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_wf_crash", name: "Workflow", input: {} }] }, timestamp: "2026-06-19T09:00:14.000Z" },
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_wf_crash", content: "Workflow launched in background. Task ID: wtask-crash" }] }, toolUseResult: { status: "async_launched", taskId: "wtask-crash", taskType: "local_workflow", workflowName: "crash-triage", runId: "wf_crash01", summary: "Triage the startup crash across subsystems", transcriptDir: join(crashDir, CRASH_SESSION_ID, "subagents", "workflows", "wf_crash01"), scriptPath: join(crashDir, CRASH_SESSION_ID, "workflows", "scripts", "crash-triage-wf_crash01.js") }, timestamp: "2026-06-19T09:00:15.000Z" },
+      { type: "user", message: { role: "user", content: "<task-notification>\n<task-id>wtask-crash</task-id>\n<status>completed</status>\n<summary>Workflow \"crash-triage\" finished</summary>\n</task-notification>" }, timestamp: "2026-06-19T09:20:00.000Z" },
+    ]),
+  );
+
+  // The crash workflow's journal: one agent spawned and finished (1/1 done).
+  const crashWfDir = join(crashDir, CRASH_SESSION_ID, "subagents", "workflows", "wf_crash01");
+  await mkdir(crashWfDir, { recursive: true });
+  await writeFile(
+    join(crashWfDir, "journal.jsonl"),
+    jsonl([
+      { type: "started", key: "v2:ccc", agentId: "agent-solo" },
+      { type: "result", key: "v2:ccc", agentId: "agent-solo", result: "triage done" },
     ]),
   );
 

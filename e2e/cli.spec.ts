@@ -128,6 +128,58 @@ test("agendo status reconstructs a checklist from Task events when no TodoWrite 
   expect(r.stdout).not.toMatch(/\[.\] Write a regression test/);
 });
 
+test("agendo status surfaces a running Workflow run with agent progress + phases", async ({ mock }) => {
+  // The login session launched workflow wf_login01 and never got a completion
+  // notification; the session is live, so the run reports as running. Progress
+  // comes from its journal (2 started / 1 result), phases + models from the
+  // persisted script meta and the per-agent meta files.
+  const r = agendo(mock.env, "status", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("workflows:");
+  expect(r.stdout).toContain("[~] login-hardening — running · 1/2 agents done");
+  expect(r.stdout).toContain("Harden the login flow end-to-end"); // launch summary
+  expect(r.stdout).toContain("phases: Research (sonnet) → Develop (opus)");
+  expect(r.stdout).toContain("agents: opus, sonnet"); // per-agent meta tally (alphabetical)
+  expect(r.stdout).toContain("run: wf_login01");
+});
+
+test("agendo status shows a notified workflow as completed on an idle session", async ({ mock }) => {
+  // The crash session's workflow got a <task-notification> with status
+  // completed — authoritative even though the session itself is idle (without
+  // it, an idle session would downgrade the run to "interrupted"). Its script
+  // file doesn't exist, so detail degrades gracefully (no phases line).
+  const r = agendo(mock.env, "status", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("[x] crash-triage — completed · 1/1 agents done");
+  expect(r.stdout).toContain("Triage the startup crash across subsystems");
+  expect(r.stdout).not.toContain("phases:");
+  // The injected notification is NOT a human prompt — the real last prompt wins.
+  expect(r.stdout).toContain("last prompt: App crashes on startup");
+  expect(r.stdout).not.toContain("last prompt: <task-notification>");
+});
+
+test("agendo list carries workflow state (◆ marker + --json rows)", async ({ mock }) => {
+  // Plain list: the running login session shows the running-workflow marker.
+  const plain = agendo(mock.env, "list");
+  expect(plain.status).toBe(0);
+  expect(plain.stdout).toContain("◆1");
+  // JSON (--all): both sessions expose their workflow refs with effective status.
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  expect(login.workflows).toEqual([
+    { runId: "wf_login01", name: "login-hardening", status: "running", summary: "Harden the login flow end-to-end" },
+  ]);
+  const crash = rows.find((x) => x.shortId === CRASH_SHORT_ID);
+  expect(crash.workflows).toEqual([
+    { runId: "wf_crash01", name: "crash-triage", status: "completed", summary: "Triage the startup crash across subsystems" },
+  ]);
+  // A session that launched nothing reports an empty array, not undefined.
+  const cop = rows.find((x) => x.shortId === COP_SHORT_ID);
+  expect(cop.workflows).toEqual([]);
+});
+
 test("agendo send delivers a prompt to a ready session", async ({ mock }) => {
   const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
   expect(r.status).toBe(0);
