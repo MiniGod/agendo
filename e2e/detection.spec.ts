@@ -10,7 +10,9 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
@@ -19,6 +21,7 @@ import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneU
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
+import { SessionIndex } from "../src/sessions.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -65,6 +68,116 @@ test.describe("resolveWindowSession: window name → session", () => {
 
   test("legacy name in a cwd with no session resolves to nothing", () => {
     expect(resolveWindowSession(all, "cl-wi-101", "/nowhere")).toBeUndefined();
+  });
+});
+
+test.describe("SessionIndex.forWorkItem: repo-scoped id-in-branch/cwd match (M1)", () => {
+  // Build an index directly from in-memory sessions (bypassing the disk scan).
+  // Worktree-shaped cwds resolve to a repo root purely by string, so no fs.
+  function indexOf(...sessions: AgentSession[]): SessionIndex {
+    const idx = new SessionIndex();
+    idx.all.push(...sessions);
+    return idx;
+  }
+  const mk = (id: string, cwd: string, branch: string): AgentSession =>
+    ({ id, source: "claude", cwd, branch, title: id, lastUsed: new Date(0) });
+
+  test("a repo scope keeps GitHub issue #2 off same-numbered branches in OTHER repos", () => {
+    const inRepo = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-2", "worktree-fix-2");
+    // A different repo whose name AND branch merely contain "2" — the false match.
+    const otherRepo = mk("s2", "/home/me/git/app2/.claude/worktrees/rework", "v2-fixes");
+    const idx = indexOf(inRepo, otherRepo);
+    // Unscoped, BOTH match on the bare "2" (the pre-fix behaviour, still the ADO path).
+    expect(idx.forWorkItem(2).map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+    // Scoped to the issue's repo slug → only the session actually in appweb.
+    expect(idx.forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  test("a bare repo name scopes just as well as a slug", () => {
+    const inRepo = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-2", "worktree-fix-2");
+    const otherRepo = mk("s2", "/home/me/git/app2/.claude/worktrees/rework", "v2-fixes");
+    expect(indexOf(inRepo, otherRepo).forWorkItem(2, "appweb").map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  test("Copilot's recorded repository field also satisfies the scope", () => {
+    const cop: AgentSession = {
+      id: "c1", source: "copilot", cwd: "/tmp/checkout", branch: "fix-2",
+      repository: "ada/appweb", title: "c1", lastUsed: new Date(0),
+    };
+    expect(indexOf(cop).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["c1"]);
+    expect(indexOf(cop).forWorkItem(2, "ada/other")).toEqual([]);
+  });
+
+  test("unscoped (ADO) match is unchanged, digit boundaries still hold", () => {
+    const hit = mk("s1", "/home/me/git/appweb/.claude/worktrees/fix-231938", "worktree-231938");
+    const near = mk("s2", "/home/me/git/appweb/.claude/worktrees/x", "b-1231938"); // 231938 inside 1231938
+    expect(indexOf(hit, near).forWorkItem(231938).map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  // ── real checkouts on disk: scope by owner/repo, not by directory name ──────
+  // The tests above use synthetic cwds that don't exist, which exercises the
+  // basename FALLBACK. These create actual git repos so the `origin` remote
+  // resolves, pinning the two things a directory-name comparison gets wrong: a
+  // clone whose directory isn't named after the remote (false negative — the
+  // item↔session link silently dies for that repo), and two forks of the same
+  // repo name under different owners (false positive — they cross-match).
+  //
+  // Real repos rather than a stub `git` on PATH (as provider.spec.ts uses): a
+  // stub reports ONE origin for every root, so it could not distinguish
+  // alice/tool from bob/tool, which is the whole point of the fork case.
+  // Each gitRepo() call mints its own mkdtemp parent (so two repos can share a
+  // basename, as the fork case needs); remember the parents so afterAll can
+  // reclaim them — a `git init` leaves ~100KB of template files behind, and
+  // without this every local run permanently litters the temp dir.
+  const tempRoots: string[] = [];
+  test.afterAll(() => {
+    for (const dir of tempRoots) {
+      // Cleanup must never be the reason a green suite reports red.
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  function gitRepo(dirName: string, origin: string | null): string {
+    const parent = mkdtempSync(join(tmpdir(), "agendo-scope-"));
+    tempRoots.push(parent);
+    const root = join(parent, dirName);
+    mkdirSync(root, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    if (origin) execFileSync("git", ["remote", "add", "origin", origin], { cwd: root });
+    return root;
+  }
+  // A worktree-shaped cwd under a real checkout: repos.ts strips the
+  // `.claude/worktrees/<name>` suffix by string, so the dir needn't exist.
+  const worktreeIn = (root: string, name: string) => join(root, ".claude", "worktrees", name);
+
+  test("a checkout whose DIRECTORY name differs from the remote repo still matches", () => {
+    // `ada/web-app` cloned into a directory called `frontend`: the bare-basename
+    // comparison sees "frontend" vs "web-app" and drops the session entirely.
+    const root = gitRepo("frontend", "https://github.com/ada/web-app.git");
+    const s = mk("s1", worktreeIn(root, "fix-2"), "worktree-fix-2");
+    expect(indexOf(s).forWorkItem(2, "ada/web-app").map((x) => x.id)).toEqual(["s1"]);
+    // …and it is still correctly excluded from a different repo's issue #2.
+    expect(indexOf(s).forWorkItem(2, "ada/appweb")).toEqual([]);
+  });
+
+  test("same-named repos under different owners (forks) do NOT cross-match", () => {
+    const alice = mk("s1", worktreeIn(gitRepo("tool", "git@github.com:alice/tool.git"), "fix-2"), "fix-2");
+    const bob = mk("s2", worktreeIn(gitRepo("tool", "git@github.com:bob/tool.git"), "fix-2"), "fix-2");
+    const idx = indexOf(alice, bob);
+    expect(idx.forWorkItem(2, "alice/tool").map((s) => s.id)).toEqual(["s1"]);
+    expect(idx.forWorkItem(2, "bob/tool").map((s) => s.id)).toEqual(["s2"]);
+    // Unscoped (the ADO path) still sees both — scoping is opt-in.
+    expect(idx.forWorkItem(2).map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+  });
+
+  test("a checkout with no GitHub origin falls back to comparing bare names", () => {
+    // A real repo with no remote at all, plus one on a non-GitHub host: neither
+    // resolves to a slug, so both are matched by directory basename as before.
+    const noRemote = mk("s1", worktreeIn(gitRepo("appweb", null), "fix-2"), "worktree-fix-2");
+    const ado = mk("s2", worktreeIn(gitRepo("appweb", "https://dev.azure.com/org/proj/_git/appweb"), "fix-2"), "fix-2");
+    expect(indexOf(noRemote).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s1"]);
+    expect(indexOf(ado).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["s2"]);
+    expect(indexOf(noRemote, ado).forWorkItem(2, "ada/other")).toEqual([]);
   });
 });
 
@@ -486,11 +599,18 @@ const ESC_REVEALED_PANE = [
 //                               right-aligned `new task? /clear to save 293k tokens`
 //                               hint — with a FAINT history suggestion ("stop
 //                               monitoring") sitting in the otherwise-empty box.
+//   - limit-notice-task-panel.ansi  an orchestrator session with a TASK LIST: its
+//                               background agents died on the limit, and the TUI's
+//                               standing `7 tasks (3 done, 1 in progress, 3 open)`
+//                               panel renders between the notice and the box —
+//                               seven lines of persistent UI that read as the
+//                               "latest content block" and hid the notice.
 const fullPane = (name: string) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf-8");
 const REAL_MENU_PANE = fullPane("limit-dialog-menu.ansi");
 const REAL_ESC_REVEALED_PANE = fullPane("limit-esc-revealed.ansi");
 const REAL_RESENT_NOTICE_PANE = fullPane("limit-notice-resent.ansi");
 const REAL_CLEAR_HINT_PANE = fullPane("limit-notice-clear-hint.ansi");
+const REAL_TASK_PANEL_PANE = fullPane("limit-notice-task-panel.ansi");
 // The deep-scrollback menu state: the SAME dialog but with the reset-time notice
 // NOT on screen (it scrolled behind the menu) — the case the reveal Escape exists
 // for. Synthesized from the verbatim capture by dropping the notice line.
@@ -615,6 +735,61 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     expect(new Date(at!).toISOString()).toBe("2026-08-07T17:00:00.000Z");
   });
 
+  test("REGRESSION, REAL CAPTURE: notice behind the TASK PANEL reads 'limited' and yields the reset time", () => {
+    // The field failure this fixture was captured for: an orchestrator session
+    // whose background agents all died on the session cap ("Agent … failed: …
+    // You've hit your session limit · resets 1:30pm"), sitting behind the TUI's
+    // standing task list:
+    //     ✻ Cogitated for 52m 16s
+    //     7 tasks (3 done, 1 in progress, 3 open)
+    //     ◼ … / ◻ … / ✔ …
+    //      … +2 completed
+    // That panel is persistent UI, not conversation output, but the
+    // block-above-the-box heuristic counted it as the latest content and demoted
+    // the notice to history — so the pane read 'ready' and never auto-resumed.
+    expect(paneReadiness(REAL_TASK_PANEL_PANE)).toBe("limited");
+    expect(paneUsageLimited(REAL_TASK_PANEL_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_TASK_PANEL_PANE)).toBe(true);
+    const at = parseResetTime(stripAnsi(REAL_TASK_PANEL_PANE), new Date("2026-08-10T12:40:00Z"));
+    expect(at).not.toBeNull();
+    // "resets 1:30pm (Atlantic/Reykjavik)" — Reykjavik is UTC+0 year-round.
+    expect(new Date(at!).toISOString()).toBe("2026-08-10T13:30:00.000Z");
+  });
+
+  test("REGRESSION (negative): a task panel above a RECOVERED session still reads 'ready'", () => {
+    // Skipping the panel must not skip past real turn output behind it. Same
+    // capture, but with a completed turn between the notice and the panel — the
+    // session moved on, so the notice is history and the pane is sendable.
+    const lines = REAL_TASK_PANEL_PANE.split("\n");
+    const panelAt = lines.findIndex((l) => /^\s*\d+ tasks? \(/.test(stripAnsi(l)));
+    const recovered = [
+      ...lines.slice(0, panelAt),
+      "[38;5;231m●[39m Picked the work back up: rebuilt the index and re-ran the suite, all green.",
+      "",
+      ...lines.slice(panelAt),
+    ].join("\n");
+    expect(paneUsageLimited(recovered)).toBe(false);
+    expect(paneReadiness(recovered)).toBe("ready");
+    expect(paneResumeSafe(recovered)).toBe(false);
+  });
+
+  test("a task-panel-shaped line outside a panel is still content, not chrome", () => {
+    // The panel is matched structurally (header + the contiguous rows beneath it),
+    // so a lone glyph line of turn output between the notice and the box demotes
+    // the notice exactly as before — only a real `N tasks (…)` header opens a panel.
+    const notice = "  ⎿  You've hit your session limit · resets 2:10pm (Atlantic/Reykjavik)";
+    const glyphOutput = "  ✔ Rebuilt the index and re-ran the suite";
+    expect(paneUsageLimited([notice, "", glyphOutput, idleBox].join("\n"))).toBe(false);
+    // …but the same line *under* a panel header is part of the panel, and skipped.
+    expect(
+      paneUsageLimited([notice, "", "  1 task (0 done, 1 open)", glyphOutput, idleBox].join("\n")),
+    ).toBe(true);
+    // Prose that merely counts tasks doesn't open a panel.
+    expect(
+      paneUsageLimited([notice, "", "  3 tasks (see the plan above)", glyphOutput, idleBox].join("\n")),
+    ).toBe(false);
+  });
+
   test("REAL CAPTURE: a prompt re-sent while limited re-prints the notice ('/upgrade' variant) → 'limited'", () => {
     // Sending into an already-limited pane doesn't reopen the menu; the notice
     // re-prints inline with the Max-plan "/upgrade to increase your usage limit."
@@ -666,6 +841,169 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     // so a session quoting an API error would misclassify as limited.
     const pane = ["  Note: you have reached your rate limit for the OpenAI API.", idleBox].join("\n");
     expect(paneReadiness(pane)).toBe("ready");
+  });
+});
+
+// GHOST-SUGGESTION fixtures: the same real pane captured three ways (window
+// cl-bg-3a8335a284b7, 2026-08-11), stored under e2e/fixtures/. The box rendered
+//   ❯ wait for the review, then commit and open the PR
+// but NOTHING was typed — that's claude's own greyed-out autocomplete
+// suggestion, waiting for Tab. Only the repo path was anonymized; every line the
+// classifiers read is byte-for-byte as captured:
+//   - ghost-suggestion.ansi        `capture-pane -p -e`: the suggestion wrapped in
+//                                  `\e[2m` … `\e[0m` (SGR 2 = faint).
+//   - ghost-suggestion-plain.txt   `capture-pane -p`: the SAME screen with the
+//                                  escapes discarded — the suggestion is now
+//                                  indistinguishable from typed text by color.
+//   - ghost-suggestion.cursor      `display-message` readout: cursor_x=2 on
+//                                  cursor_y=40 (the box's prompt row) — the caret
+//                                  never left the prompt, so nothing was typed.
+// A false "dirty" read here is not cosmetic: `agendo send` refuses, and
+// `paneResumeSafe` vetoes the auto-resume — silently and permanently, so a
+// usage-limited session never resumes hands-off however long it waits.
+// NB on what these fixtures do and don't prove: with the escapes intact (what
+// `capturePane` always produces today) the COLOR read already handles this exact
+// pane, and the tests below pin that. The colour-stripped fixture stands in for
+// the palette blind spot that has no verbatim capture: `inputRealText` recognizes
+// only the grays it enumerates (256-color 8 / 236-250, truecolor 90-200), so any
+// theme drawing suggestions outside them lands agendo in exactly the
+// escapes-discarded position this fixture reproduces.
+const GHOST_PANE = fullPane("ghost-suggestion.ansi");
+const GHOST_PANE_PLAIN = fullPane("ghost-suggestion-plain.txt");
+const GHOST_CURSOR_READOUT = fullPane("ghost-suggestion.cursor");
+// The caret, parsed from the verbatim readout rather than hard-coded.
+const GHOST_CURSOR = (() => {
+  const m = GHOST_CURSOR_READOUT.match(/cursor_x=(\d+)\s+cursor_y=(\d+)/)!;
+  return { x: Number(m[1]), y: Number(m[2]) };
+})();
+// The capture also has a sub-agent status row below the box carrying a live
+// `↓ 99.9k tokens` counter, so the WHOLE pane legitimately reads "busy" (it was
+// waiting on a background agent) and that verdict outranks the input-box read.
+// Dropping those trailing rows — and nothing above them, so every row index the
+// caret refers to is untouched — exposes the input read the fix is about.
+const idlePane = (pane: string) => pane.split("\n").slice(0, 45).join("\n");
+const GHOST_IDLE = idlePane(GHOST_PANE);
+const GHOST_IDLE_PLAIN = idlePane(GHOST_PANE_PLAIN);
+// The same screen with REAL typed text: the identical row minus its `\e[2m`
+// (default color = typed), and the caret pushed to the end of what was typed.
+const TYPED_TEXT = "wait for the review, then commit and open the PR";
+const TYPED_IDLE = GHOST_IDLE.split("\n")
+  .map((l, i) => (i === GHOST_CURSOR.y ? l.replace("\x1b[2m", "") : l))
+  .join("\n");
+const TYPED_CURSOR = { x: GHOST_CURSOR.x + TYPED_TEXT.length, y: GHOST_CURSOR.y };
+
+test.describe("paneReadiness: a greyed-out autocomplete suggestion is NOT typed input", () => {
+  test("the raw capture is 'busy' — the sub-agent counter below the box outranks the box", () => {
+    // Pinned so the trimming the rest of this block does is honest about what it
+    // removes: the busy verdict comes from below the input box, not from it.
+    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+  });
+
+  test("color signal: the faint suggestion reads 'ready' (no caret needed)", () => {
+    expect(paneReadiness(GHOST_IDLE)).toBe("ready");
+    expect(paneReadiness(GHOST_IDLE, GHOST_CURSOR)).toBe("ready");
+  });
+
+  test("REGRESSION: with the color stripped, only the caret can tell — and it does", () => {
+    // The blind spot the caret check exists for. `capture-pane` without `-e`
+    // discards the `\e[2m`, and so does any theme/gray the color heuristic
+    // doesn't enumerate: the suggestion then looks exactly like a draft.
+    expect(paneReadiness(GHOST_IDLE_PLAIN)).toBe("queued"); // color alone: wrong
+    // cursor_x=2 is the first cell after `❯ ` — nothing was typed.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, GHOST_CURSOR)).toBe("ready");
+  });
+
+  test("genuinely typed text still reads 'queued', with or without the caret", () => {
+    expect(paneReadiness(TYPED_IDLE)).toBe("queued");
+    expect(paneReadiness(TYPED_IDLE, TYPED_CURSOR)).toBe("queued");
+    // Same text in a color-blind capture: the caret at the END keeps it dirty.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, TYPED_CURSOR)).toBe("queued");
+  });
+
+  test("the caret only speaks for the prompt's OWN row", () => {
+    // A caret parked anywhere else (a stale/mismatched readout, a multi-line
+    // draft whose caret sits on a later row) proves nothing, so the color read
+    // stands and the box stays dirty.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: GHOST_CURSOR.x, y: GHOST_CURSOR.y - 1 })).toBe("queued");
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: GHOST_CURSOR.x + 1, y: GHOST_CURSOR.y })).toBe("queued");
+    expect(paneReadiness(GHOST_IDLE_PLAIN, null)).toBe("queued");
+  });
+
+  test("only the caret's RESTING column counts — column 0 (mid-paint) proves nothing", () => {
+    // The caret comes from a second tmux read, so it can be sampled while the TUI
+    // is painting, parked at column 0 of a row it's merely passing through. That
+    // position is not where an untouched prompt rests, so it must not vouch for
+    // the box — otherwise a repaint could hand a real draft a clean verdict.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: 0, y: GHOST_CURSOR.y })).toBe("queued");
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: GHOST_CURSOR.x - 1, y: GHOST_CURSOR.y })).toBe("queued");
+    // The resting column still reads clean.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, GHOST_CURSOR)).toBe("ready");
+  });
+
+  test("an empty box stays 'ready' however the caret is reported", () => {
+    const empty = ["  ─────────────────────────────────────────", "  ❯ ", "  ─────────────────────────────────────────"].join("\n");
+    expect(paneReadiness(empty)).toBe("ready");
+    expect(paneReadiness(empty, { x: 4, y: 1 })).toBe("ready");
+    expect(paneReadiness(empty, { x: 99, y: 9 })).toBe("ready");
+  });
+});
+
+// The path that actually costs something when a suggestion reads as a draft:
+// auto-resume refuses to fire — silently, and for good: nothing is sent to the
+// pane at all, so a usage-limited session never resumes hands-off.
+test.describe("paneResumeSafe: a suggestion in the box must not block auto-resume", () => {
+  // Caret coordinates are written out rather than recomputed from the pane, so
+  // these tests can't share (and cancel out) an off-by-one with the code under
+  // test. limit-notice-clear-hint.ansi: the `❯ stop monitoring` row is capture
+  // line 92 (0-indexed) and the `❯` starts the line, so the first input cell is
+  // column 2 — the same shape the verbatim ghost-suggestion.cursor readout shows.
+  const CLEAR_HINT_PROMPT = { x: 2, y: 92 };
+
+  test("REAL CAPTURE: the faint 'stop monitoring' history suggestion keeps resume safe", () => {
+    // Already true from color alone; pinned again with the caret to prove the
+    // second signal doesn't disturb it.
+    expect(paneResumeSafe(REAL_CLEAR_HINT_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_CLEAR_HINT_PANE, CLEAR_HINT_PROMPT)).toBe(true);
+  });
+
+  test("REGRESSION: with the color stripped, the caret is what keeps resume safe", () => {
+    // Same limited pane, no SGR to read: the suggestion looks like a draft, so
+    // resume refused to fire and the session sat at its limit forever.
+    const colorBlind = stripAnsi(REAL_CLEAR_HINT_PANE);
+    expect(paneUsageLimited(colorBlind)).toBe(true);
+    expect(paneResumeSafe(colorBlind)).toBe(false); // color alone: wrong
+    expect(paneResumeSafe(colorBlind, CLEAR_HINT_PROMPT)).toBe(true);
+  });
+
+  test("a real draft in a limited box still blocks resume", () => {
+    // The guarantee auto-resume must not lose: `<esc>continue<enter>` would wipe
+    // a prompt the user queued for after the reset.
+    const draft = [
+      "  Claude usage limit reached. Your limit will reset at 3pm (America/Santiago).",
+      "  ─────────────────────────────────────────",
+      "  ❯ run the migration once we are back",
+      "  ─────────────────────────────────────────",
+    ].join("\n");
+    // The `❯` sits at column 2 of capture line 2, so the first input cell is 4.
+    expect(paneResumeSafe(draft)).toBe(false);
+    // Caret at the end of the draft — where typing leaves it.
+    expect(paneResumeSafe(draft, { x: 4 + "run the migration once we are back".length, y: 2 })).toBe(false);
+  });
+
+  test("a MULTI-ROW draft is never overruled by the caret, wherever it was parked", () => {
+    // The caret can only vouch for a box whose other rows are blank (see
+    // onlyPromptRow): a draft continued onto a second row stays dirty even with
+    // the caret parked back at the prompt column — the Home/Ctrl-A (or vim `0`)
+    // case, which is the one way the caret signal could clobber a real draft.
+    const draft = [
+      "  Claude usage limit reached. Your limit will reset at 3pm (America/Santiago).",
+      "  ─────────────────────────────────────────",
+      "  ❯ run the migration once we are back",
+      "    and then re-run the smoke tests",
+      "  ─────────────────────────────────────────",
+    ].join("\n");
+    expect(paneResumeSafe(draft, { x: 4, y: 2 })).toBe(false);
+    expect(paneReadiness(draft.split("\n").slice(1).join("\n"), { x: 4, y: 1 })).toBe("queued");
   });
 });
 
@@ -788,6 +1126,33 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     const current = parseResetTime("Your limit will reset at 3pm.", now, RESET_LOOKBACK_MS);
     expect(new Date(current!).getDate()).toBe(15); // today (already reopened → act now)
     expect(current!).toBeLessThan(now.getTime());
+  });
+
+  test("REGRESSION (L1): a bare time hours before now rolls to TOMORROW, not 'act now'", () => {
+    // 23:00 + "resets 1am": today's 1am is 22h in the past. The 8-day weekly
+    // lookback must NOT treat it as just-reopened (which fired auto-resume into a
+    // still-limited session, burning the one shot) — it names tomorrow's 1am.
+    const now = new Date(2026, 5, 15, 23, 0); // 11pm local
+    const at = parseResetTime("Your limit will reset at 1am.", now, RESET_LOOKBACK_MS);
+    const d = new Date(at!);
+    expect(d.getDate()).toBe(16); // tomorrow
+    expect(d.getHours()).toBe(1);
+    expect(at!).toBeGreaterThan(now.getTime());
+    // …so an auto-resume gated on this reset does NOT fire now (would burn the shot).
+    expect(
+      shouldAutoResume({ enabled: true, readiness: "limited", resetAt: at, now: now.getTime(), firedFor: null }),
+    ).toBe(false);
+  });
+
+  test("a bare time only a couple hours past (5-hour cap just reopened) still acts now", () => {
+    // 2am + "resets 1am": 1h ago, within the 6h bare-time lookback → the lingering
+    // notice of a just-reopened 5-hour window resolves to the past instant.
+    const now = new Date(2026, 5, 15, 2, 0); // 2am local
+    const at = parseResetTime("Your limit will reset at 1am.", now, RESET_LOOKBACK_MS);
+    const d = new Date(at!);
+    expect(d.getDate()).toBe(15); // today (already reopened)
+    expect(d.getHours()).toBe(1);
+    expect(at!).toBeLessThan(now.getTime());
   });
 });
 

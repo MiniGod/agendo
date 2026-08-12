@@ -26,6 +26,11 @@ export interface FetchContext {
 }
 
 export interface Provider {
+  /** Optional per-reload hook: invalidate any per-load caches so a refresh
+   *  re-reads mutable state. ADO clears its PR cache here (mutable PR fields
+   *  would otherwise stay frozen across reloads); GitHub fetches fresh every
+   *  time, so it has none. Called at the start of every loadModel. */
+  beginLoad?(): void;
   /** Whether the backend can authenticate right now (CLI installed + logged in).
    *  Cheap, never-throwing probe for the Settings page's auth-status line. */
   checkAuth(): Promise<boolean>;
@@ -60,6 +65,7 @@ export interface Provider {
 // ADO's functions predate the FetchContext shape, so adapt them here rather than
 // churn ado.ts: pull the field each one actually needs out of the context.
 const adoProvider: Provider = {
+  beginLoad: ado.clearPrCache,
   checkAuth: ado.checkAuth,
   getMe: ado.getMe,
   getTeamMembers: ado.getTeamMembers,
@@ -127,10 +133,12 @@ export function detectProviders(): Set<ProviderName> {
 export function detectRepoProvider(path: string): ProviderName | null {
   const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf-8" });
   if (r.status !== 0) return null; // no origin remote, or not a git repo at all
-  // github.com must sit immediately after the scheme (`//`), an SSH user (`@`),
-  // or the string start, and be delimited by `:`/`/` — so `evilgithub.com` and
-  // `github.com.example.org` don't false-positive.
-  return /(^|@|\/\/)github\.com[:/]/i.test(r.stdout.trim()) ? "github" : null;
+  // github.com (or GitHub's ssh.github.com SSH-over-HTTPS host) must sit
+  // immediately after the scheme (`//`), an SSH user (`@`), or the string start,
+  // and be delimited by an optional port then `:`/`/` — so `evilgithub.com`,
+  // `github.com.example.org` don't false-positive, while
+  // `ssh://git@ssh.github.com:443/owner/repo` is recognized.
+  return /(?:^|@|\/\/)(?:ssh\.)?github\.com(?::\d+)?[:/]/i.test(r.stdout.trim()) ? "github" : null;
 }
 
 /** Pick the backend to start on. A `forced` provider (e.g. GitHub detected from

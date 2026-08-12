@@ -163,6 +163,54 @@ test("agendo send refuses a compacting session unless forced", async ({ mock }) 
   expect(forced.stdout).toContain(`sent to ${RUNNING_TARGET}`);
 });
 
+// A pane whose input box holds claude's greyed-out autocomplete SUGGESTION —
+// nothing typed, Tab would accept it. Written without SGR escapes, which is the
+// case colour alone cannot resolve (a suggestion in a grey `inputRealText`
+// doesn't enumerate looks exactly like this): only the caret settles it. The
+// `❯` sits at column 2, so the first input cell is column 4 and the box is
+// capture row 2.
+const GHOST_PANE = [
+  "  ● Implement login form",
+  "  ─────────────────────────────────────────────",
+  "  ❯ wait for the review, then commit and open the PR",
+  "  ─────────────────────────────────────────────",
+].join("\n");
+const GHOST_PROMPT_CURSOR = { x: 4, y: 2 };
+
+test("agendo send treats a ghost suggestion as an empty box (caret still at the prompt)", async ({ mock }) => {
+  // End-to-end proof that the caret reaches the classifier through the CLI: the
+  // same screen is sendable or not purely on where tmux reports the caret.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: GHOST_PANE },
+    cursors: { [RUNNING_TARGET]: GHOST_PROMPT_CURSOR },
+  });
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send still refuses when the caret sits at the END of the same text (a real draft)", async ({ mock }) => {
+  // The guard against over-correcting: identical pane, caret where typing leaves
+  // it, so the box holds a draft and `send` must not clobber it.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: GHOST_PANE },
+    cursors: {
+      [RUNNING_TARGET]: { x: GHOST_PROMPT_CURSOR.x + "wait for the review, then commit and open the PR".length, y: 2 },
+    },
+  });
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("queued");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+});
+
 test("agendo list [dir] scopes the listing to sessions under the dir", async ({ mock }) => {
   // Two running managed windows under two different repo roots: the login claude
   // session (appweb) and the experiment copilot session (applib). `agendo list`
@@ -330,6 +378,41 @@ test("agendo resume headlessly creates the session's resume window (detached)", 
   expect(joined).toContain(CRASH_SESSION_ID);
   // No handover: detached resume must not attach/switch the client.
   expect(tmux.some((argv) => argv[0] === "attach-session" || argv[0] === "switch-client")).toBe(false);
+});
+
+test("agendo resume targets tmux by EXACT name — a prefix-colliding neighbour isn't mistaken for it (T1)", async ({ mock }) => {
+  // A live session whose name is a SUPERSTRING of the crash session's canonical
+  // target (`cl-claude-<crash>` ⊂ `cl-claude-<crash>x`). Real tmux resolves a bare
+  // `-t cl-claude-<crash>` by exact→unique-prefix→fnmatch, so it would bind to this
+  // longer neighbour and report the crash session as already running (skipping the
+  // resume, attaching into the wrong pane). The fix pins resolution with a leading
+  // `=`, so the crash session is correctly seen as NOT running and resumed on its own.
+  const canonical = `cl-claude-${CRASH_SHORT_ID}`;
+  await mock.setTmuxState({
+    ...tmuxState,
+    sessions: [...tmuxState.sessions, `${canonical}x`],
+    panes: [
+      ...tmuxState.panes,
+      { session: `${canonical}x`, window: `${canonical}x`, cwd: "/somewhere/else", placeholder: false },
+    ],
+  });
+
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  // Not fooled into "already running" by the prefix-colliding neighbour.
+  expect(r.stdout).toContain(`resumed session ${CRASH_SHORT_ID}`);
+  expect(r.stdout).not.toContain("was already running");
+
+  const tmux = await mock.tmuxLog();
+  // It spun up its OWN detached session under the exact canonical name…
+  expect(tmux.some((argv) => argv[0] === "new-session" && argv.includes(canonical))).toBe(true);
+  // …and every has-session probe used the `=`-exact target form (the fix).
+  const probes = tmux.filter((argv) => argv[0] === "has-session");
+  expect(probes.length).toBeGreaterThan(0);
+  for (const argv of probes) {
+    const t = argv[argv.indexOf("-t") + 1];
+    expect(t.startsWith("=")).toBe(true);
+  }
 });
 
 test("agendo wait blocks until a busy session settles, then exits 0", async ({ mock }) => {
