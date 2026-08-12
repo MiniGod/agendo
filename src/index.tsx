@@ -11,7 +11,7 @@ import {
   type SessionKind, type Readiness,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
-import { launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
+import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
@@ -40,6 +40,10 @@ Usage:
       --no-worktree             Run in the current checkout instead of a new worktree
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
+      --model <name>            Model for the new session, passed to the agent
+      --fallback-model <name>   Claude only: model to fall back to when overloaded
+                                Any other dashed argument is an error; put prompt
+                                text that starts with -- after a bare --.
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
@@ -155,33 +159,71 @@ if (process.argv[2] === "status") {
 // `cl-bg-…` agent window it can attach to later (Claude by default, or Copilot
 // via `--agent copilot`/`--copilot`). Used both by humans and by a running agent
 // the user asked to start a background session. Detached by default; `--attach`
-// switches/attaches to it immediately.
+// switches/attaches to it immediately. A small allowlist of agent flags
+// (`FORWARDABLE_LAUNCH_FLAGS`, e.g. `--model`) is passed through to the new
+// agent's argv; any other dashed argument is rejected rather than silently
+// swallowed into the prompt, so a typo'd flag can't quietly change the task.
 if (process.argv[2] === "launch") {
   let name: string | undefined;
   let worktree = true;
   let attach = false;
   let agent: AgentSource = "claude";
+  // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
+  const forwardArgv: string[] = [];
   const positionals: string[] = [];
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
+    // Both agent CLIs accept the GNU `--model=opus` form as well as the two-token
+    // one, so split an inline value off here and normalize to `[flag, value]`.
+    // (`eq > 2` keeps the bare `--` separator and a leading `--=` out of this.)
+    const eq = a.indexOf("=");
+    const inline = a.startsWith("--") && eq > 2;
+    const flag = inline ? a.slice(0, eq) : a;
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
-    else if (a === "--name" || a === "-n") name = rest[++i];
+    else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
-    else if (a === "--agent") {
-      const v = rest[++i];
+    else if (flag === "--agent") {
+      const v = inline ? a.slice(eq + 1) : rest[++i];
       if (v !== "claude" && v !== "copilot") {
         console.error(`launch failed: --agent must be "claude" or "copilot", got "${v ?? ""}"`);
         process.exit(1);
       }
       agent = v;
+    } else if (Object.hasOwn(FORWARDABLE_LAUNCH_FLAGS, flag)) {
+      // Value flags: take the inline `=value`, else the next token verbatim. A
+      // missing value (empty, or end of argv) or — in the two-token form, where
+      // it's ambiguous — another flag in its place is a mistake, not a model
+      // named "--attach".
+      const v = inline ? a.slice(eq + 1) : rest[++i];
+      if (v === undefined || v === "" || (!inline && v.startsWith("--"))) {
+        console.error(`launch failed: ${flag} needs a value`);
+        process.exit(1);
+      }
+      forwardArgv.push(flag, v);
     } else if (a === "--") { positionals.push(...rest.slice(i + 1)); break; }
-    else positionals.push(a);
+    else if (a.startsWith("--")) {
+      const known = Object.keys(FORWARDABLE_LAUNCH_FLAGS).join(", ");
+      console.error(
+        `launch failed: unknown flag "${a}" (forwardable agent flags: ${known}; ` +
+        `use -- before prompt text that starts with --)`,
+      );
+      process.exit(1);
+    } else positionals.push(a);
+  }
+  // The agent can be named after a forwarded flag (`--model x --copilot`), so the
+  // per-agent support check only makes sense once the whole argv is parsed.
+  for (let i = 0; i < forwardArgv.length; i += 2) {
+    const flag = forwardArgv[i];
+    if (!FORWARDABLE_LAUNCH_FLAGS[flag]?.agents.includes(agent)) {
+      console.error(`launch failed: ${flag} isn't supported by --agent ${agent}`);
+      process.exit(1);
+    }
   }
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent });
+  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent, forwardArgv });
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
