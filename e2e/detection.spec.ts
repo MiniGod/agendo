@@ -844,6 +844,169 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
   });
 });
 
+// GHOST-SUGGESTION fixtures: the same real pane captured three ways (window
+// cl-bg-3a8335a284b7, 2026-08-11), stored under e2e/fixtures/. The box rendered
+//   ❯ wait for the review, then commit and open the PR
+// but NOTHING was typed — that's claude's own greyed-out autocomplete
+// suggestion, waiting for Tab. Only the repo path was anonymized; every line the
+// classifiers read is byte-for-byte as captured:
+//   - ghost-suggestion.ansi        `capture-pane -p -e`: the suggestion wrapped in
+//                                  `\e[2m` … `\e[0m` (SGR 2 = faint).
+//   - ghost-suggestion-plain.txt   `capture-pane -p`: the SAME screen with the
+//                                  escapes discarded — the suggestion is now
+//                                  indistinguishable from typed text by color.
+//   - ghost-suggestion.cursor      `display-message` readout: cursor_x=2 on
+//                                  cursor_y=40 (the box's prompt row) — the caret
+//                                  never left the prompt, so nothing was typed.
+// A false "dirty" read here is not cosmetic: `agendo send` refuses, and
+// `paneResumeSafe` vetoes the auto-resume — silently and permanently, so a
+// usage-limited session never resumes hands-off however long it waits.
+// NB on what these fixtures do and don't prove: with the escapes intact (what
+// `capturePane` always produces today) the COLOR read already handles this exact
+// pane, and the tests below pin that. The colour-stripped fixture stands in for
+// the palette blind spot that has no verbatim capture: `inputRealText` recognizes
+// only the grays it enumerates (256-color 8 / 236-250, truecolor 90-200), so any
+// theme drawing suggestions outside them lands agendo in exactly the
+// escapes-discarded position this fixture reproduces.
+const GHOST_PANE = fullPane("ghost-suggestion.ansi");
+const GHOST_PANE_PLAIN = fullPane("ghost-suggestion-plain.txt");
+const GHOST_CURSOR_READOUT = fullPane("ghost-suggestion.cursor");
+// The caret, parsed from the verbatim readout rather than hard-coded.
+const GHOST_CURSOR = (() => {
+  const m = GHOST_CURSOR_READOUT.match(/cursor_x=(\d+)\s+cursor_y=(\d+)/)!;
+  return { x: Number(m[1]), y: Number(m[2]) };
+})();
+// The capture also has a sub-agent status row below the box carrying a live
+// `↓ 99.9k tokens` counter, so the WHOLE pane legitimately reads "busy" (it was
+// waiting on a background agent) and that verdict outranks the input-box read.
+// Dropping those trailing rows — and nothing above them, so every row index the
+// caret refers to is untouched — exposes the input read the fix is about.
+const idlePane = (pane: string) => pane.split("\n").slice(0, 45).join("\n");
+const GHOST_IDLE = idlePane(GHOST_PANE);
+const GHOST_IDLE_PLAIN = idlePane(GHOST_PANE_PLAIN);
+// The same screen with REAL typed text: the identical row minus its `\e[2m`
+// (default color = typed), and the caret pushed to the end of what was typed.
+const TYPED_TEXT = "wait for the review, then commit and open the PR";
+const TYPED_IDLE = GHOST_IDLE.split("\n")
+  .map((l, i) => (i === GHOST_CURSOR.y ? l.replace("\x1b[2m", "") : l))
+  .join("\n");
+const TYPED_CURSOR = { x: GHOST_CURSOR.x + TYPED_TEXT.length, y: GHOST_CURSOR.y };
+
+test.describe("paneReadiness: a greyed-out autocomplete suggestion is NOT typed input", () => {
+  test("the raw capture is 'busy' — the sub-agent counter below the box outranks the box", () => {
+    // Pinned so the trimming the rest of this block does is honest about what it
+    // removes: the busy verdict comes from below the input box, not from it.
+    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+  });
+
+  test("color signal: the faint suggestion reads 'ready' (no caret needed)", () => {
+    expect(paneReadiness(GHOST_IDLE)).toBe("ready");
+    expect(paneReadiness(GHOST_IDLE, GHOST_CURSOR)).toBe("ready");
+  });
+
+  test("REGRESSION: with the color stripped, only the caret can tell — and it does", () => {
+    // The blind spot the caret check exists for. `capture-pane` without `-e`
+    // discards the `\e[2m`, and so does any theme/gray the color heuristic
+    // doesn't enumerate: the suggestion then looks exactly like a draft.
+    expect(paneReadiness(GHOST_IDLE_PLAIN)).toBe("queued"); // color alone: wrong
+    // cursor_x=2 is the first cell after `❯ ` — nothing was typed.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, GHOST_CURSOR)).toBe("ready");
+  });
+
+  test("genuinely typed text still reads 'queued', with or without the caret", () => {
+    expect(paneReadiness(TYPED_IDLE)).toBe("queued");
+    expect(paneReadiness(TYPED_IDLE, TYPED_CURSOR)).toBe("queued");
+    // Same text in a color-blind capture: the caret at the END keeps it dirty.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, TYPED_CURSOR)).toBe("queued");
+  });
+
+  test("the caret only speaks for the prompt's OWN row", () => {
+    // A caret parked anywhere else (a stale/mismatched readout, a multi-line
+    // draft whose caret sits on a later row) proves nothing, so the color read
+    // stands and the box stays dirty.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: GHOST_CURSOR.x, y: GHOST_CURSOR.y - 1 })).toBe("queued");
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: GHOST_CURSOR.x + 1, y: GHOST_CURSOR.y })).toBe("queued");
+    expect(paneReadiness(GHOST_IDLE_PLAIN, null)).toBe("queued");
+  });
+
+  test("only the caret's RESTING column counts — column 0 (mid-paint) proves nothing", () => {
+    // The caret comes from a second tmux read, so it can be sampled while the TUI
+    // is painting, parked at column 0 of a row it's merely passing through. That
+    // position is not where an untouched prompt rests, so it must not vouch for
+    // the box — otherwise a repaint could hand a real draft a clean verdict.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: 0, y: GHOST_CURSOR.y })).toBe("queued");
+    expect(paneReadiness(GHOST_IDLE_PLAIN, { x: GHOST_CURSOR.x - 1, y: GHOST_CURSOR.y })).toBe("queued");
+    // The resting column still reads clean.
+    expect(paneReadiness(GHOST_IDLE_PLAIN, GHOST_CURSOR)).toBe("ready");
+  });
+
+  test("an empty box stays 'ready' however the caret is reported", () => {
+    const empty = ["  ─────────────────────────────────────────", "  ❯ ", "  ─────────────────────────────────────────"].join("\n");
+    expect(paneReadiness(empty)).toBe("ready");
+    expect(paneReadiness(empty, { x: 4, y: 1 })).toBe("ready");
+    expect(paneReadiness(empty, { x: 99, y: 9 })).toBe("ready");
+  });
+});
+
+// The path that actually costs something when a suggestion reads as a draft:
+// auto-resume refuses to fire — silently, and for good: nothing is sent to the
+// pane at all, so a usage-limited session never resumes hands-off.
+test.describe("paneResumeSafe: a suggestion in the box must not block auto-resume", () => {
+  // Caret coordinates are written out rather than recomputed from the pane, so
+  // these tests can't share (and cancel out) an off-by-one with the code under
+  // test. limit-notice-clear-hint.ansi: the `❯ stop monitoring` row is capture
+  // line 92 (0-indexed) and the `❯` starts the line, so the first input cell is
+  // column 2 — the same shape the verbatim ghost-suggestion.cursor readout shows.
+  const CLEAR_HINT_PROMPT = { x: 2, y: 92 };
+
+  test("REAL CAPTURE: the faint 'stop monitoring' history suggestion keeps resume safe", () => {
+    // Already true from color alone; pinned again with the caret to prove the
+    // second signal doesn't disturb it.
+    expect(paneResumeSafe(REAL_CLEAR_HINT_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_CLEAR_HINT_PANE, CLEAR_HINT_PROMPT)).toBe(true);
+  });
+
+  test("REGRESSION: with the color stripped, the caret is what keeps resume safe", () => {
+    // Same limited pane, no SGR to read: the suggestion looks like a draft, so
+    // resume refused to fire and the session sat at its limit forever.
+    const colorBlind = stripAnsi(REAL_CLEAR_HINT_PANE);
+    expect(paneUsageLimited(colorBlind)).toBe(true);
+    expect(paneResumeSafe(colorBlind)).toBe(false); // color alone: wrong
+    expect(paneResumeSafe(colorBlind, CLEAR_HINT_PROMPT)).toBe(true);
+  });
+
+  test("a real draft in a limited box still blocks resume", () => {
+    // The guarantee auto-resume must not lose: `<esc>continue<enter>` would wipe
+    // a prompt the user queued for after the reset.
+    const draft = [
+      "  Claude usage limit reached. Your limit will reset at 3pm (America/Santiago).",
+      "  ─────────────────────────────────────────",
+      "  ❯ run the migration once we are back",
+      "  ─────────────────────────────────────────",
+    ].join("\n");
+    // The `❯` sits at column 2 of capture line 2, so the first input cell is 4.
+    expect(paneResumeSafe(draft)).toBe(false);
+    // Caret at the end of the draft — where typing leaves it.
+    expect(paneResumeSafe(draft, { x: 4 + "run the migration once we are back".length, y: 2 })).toBe(false);
+  });
+
+  test("a MULTI-ROW draft is never overruled by the caret, wherever it was parked", () => {
+    // The caret can only vouch for a box whose other rows are blank (see
+    // onlyPromptRow): a draft continued onto a second row stays dirty even with
+    // the caret parked back at the prompt column — the Home/Ctrl-A (or vim `0`)
+    // case, which is the one way the caret signal could clobber a real draft.
+    const draft = [
+      "  Claude usage limit reached. Your limit will reset at 3pm (America/Santiago).",
+      "  ─────────────────────────────────────────",
+      "  ❯ run the migration once we are back",
+      "    and then re-run the smoke tests",
+      "  ─────────────────────────────────────────",
+    ].join("\n");
+    expect(paneResumeSafe(draft, { x: 4, y: 2 })).toBe(false);
+    expect(paneReadiness(draft.split("\n").slice(1).join("\n"), { x: 4, y: 1 })).toBe("queued");
+  });
+});
+
 test.describe("parseResetTime: extract the reset instant from the notice", () => {
   test("time + IANA timezone → that wall-clock time in the named zone", () => {
     const now = new Date("2026-06-15T12:00:00Z");

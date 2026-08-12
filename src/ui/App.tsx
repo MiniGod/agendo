@@ -4,7 +4,7 @@ import { execFile } from "child_process";
 import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName, capturePane, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
+import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
@@ -1385,8 +1385,8 @@ export default function App({
       // same cadence and the same fresh capture.
       const next = new Map<string, PaneState>();
       for (const [canon, win] of windows) {
-        const raw = capturePane(win);
-        const readiness = paneReadiness(raw);
+        const { raw, cursor } = capturePaneState(win);
+        const readiness = paneReadiness(raw, cursor);
         let resetAt: number | null | undefined;
         if (readiness === "limited") {
           // Freeze the reset instant on first *successful* parse of this limit
@@ -1408,7 +1408,8 @@ export default function App({
           if (autoResumeRef.current) {
             const fired = resumeFired.current.get(canon) ?? null;
             if (shouldAutoResume({ enabled: true, readiness, resetAt: resetAt ?? null, now: Date.now(), firedFor: fired })) {
-              if (paneResumeSafe(capturePane(win))) {
+              const fresh = capturePaneState(win);
+              if (paneResumeSafe(fresh.raw, fresh.cursor)) {
                 sendResume(win);
                 resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
               }

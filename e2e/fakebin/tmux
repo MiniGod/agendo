@@ -18,9 +18,13 @@ function readState() {
       windows: s.windows ?? [],
       panes: s.panes ?? [],
       captures: s.captures ?? {},
+      // Per-target caret position ({x, y}), served to `display-message
+      // '#{cursor_x} #{cursor_y}'` — the second signal the input-box classifier
+      // reads (a greyed-out suggestion leaves the caret at the prompt).
+      cursors: s.cursors ?? {},
     };
   } catch {
-    return { sessions: [], windows: [], panes: [], captures: {} };
+    return { sessions: [], windows: [], panes: [], captures: {}, cursors: {} };
   }
 }
 function writeState(s) {
@@ -85,6 +89,15 @@ switch (cmd) {
     const target = flag("-t");
     const text = state.captures[target] ?? "";
     process.stdout.write(text);
+    process.exit(0);
+  }
+  case "display-message": {
+    // -p prints to stdout. Only the caret format is answered (from
+    // state.cursors[target]); every other format prints nothing, which is how
+    // this stub has always answered `#{session_name}` (⇒ currentSessionName null).
+    const fmt = argv[argv.length - 1] ?? "";
+    const cursor = state.cursors?.[flag("-t")];
+    if (fmt.includes("#{cursor_x}") && cursor) process.stdout.write(`${cursor.x} ${cursor.y}\n`);
     process.exit(0);
   }
   case "has-session": {
