@@ -508,6 +508,46 @@ function isPaneChrome(line: string): boolean {
 }
 
 /**
+ * The task panel's header line, e.g. `7 tasks (3 done, 1 in progress, 3 open)`
+ * (also `1 task (…)`). Requires at least one of the TUI's own status words inside
+ * the parens so ordinary prose ("3 tasks (see below)") can't open a panel.
+ */
+const TASK_PANEL_HEADER_RE = /^\d+\s+tasks?\s+\([^)]*\b(?:done|in progress|open|pending)\b[^)]*\)$/i;
+
+/**
+ * A row *inside* an already-opened task panel: a status-glyph item line
+ * (`◼ WebRTC session…` in progress, `◻ UI: pair code…` open, `✔ Gradle skeleton…`
+ * done) or the elision footer (`… +2 completed`). Only ever applied to the
+ * contiguous run directly beneath a matched header (see taskPanelLines), so the
+ * glyph set can stay permissive without swallowing turn output that happens to
+ * start with `✔`.
+ */
+const TASK_PANEL_ROW_RE = /^(?:[◼◻◐◌●○☐☑✔✓✗]\s+\S|…\s*\+\d+\b)/;
+
+/**
+ * Indices of the lines belonging to the TUI's TASK PANEL — the persistent
+ * `N tasks (…)` summary plus its item rows, which Claude Code renders directly
+ * above the input box while a task list exists. It is standing UI, not
+ * conversation content: it stays on screen unchanged across turns, so counting it
+ * as "the last content block" hid an active usage-limit notice sitting just above
+ * it and made a blocked session read `ready` (the field miss this exists for).
+ *
+ * Found structurally — a header line, then the contiguous run of rows beneath it —
+ * rather than by matching item glyphs anywhere on screen, so a turn-output line
+ * that merely starts with one of those glyphs is still content. `lines` are
+ * ANSI-stripped and trimmed.
+ */
+function taskPanelLines(lines: string[]): Set<number> {
+  const marked = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    if (!TASK_PANEL_HEADER_RE.test(lines[i])) continue;
+    marked.add(i);
+    for (let j = i + 1; j < lines.length && TASK_PANEL_ROW_RE.test(lines[j]); j++) marked.add(j);
+  }
+  return marked;
+}
+
+/**
  * Whether the numbered limit dialog is the *active* bottom-most content — not the
  * same text lingering in scrollback after it was dismissed. The dialog replaces
  * the input box while it's up (there's no `❯ ` prompt line, hence no `─` rule,
@@ -554,7 +594,7 @@ export function paneLimitDialogActive(raw: string): boolean {
  * the contiguous run of non-blank lines nearest the box's top rule (bounded by
  * LIMIT_ACTIVE_MAX_LINES), skipping past blank lines AND pane chrome (the
  * spinner's `✻ Crunched for 0s` summary, the `● high · /effort` mode hint — see
- * isPaneChrome) that the TUI draws between that block and the box. An active
+ * isPaneChrome — plus the standing `N tasks (…)` panel, see taskPanelLines). An active
  * limit renders its notice as that block; a recovered session has a later
  * completed turn (and its typed `❯ continue`) between the old notice and the
  * box, so the nearest content block is that turn's tail, not the notice. With
@@ -571,10 +611,12 @@ export function paneUsageLimited(raw: string): boolean {
   const rules = lines.flatMap((l, i) => (/─{20,}/.test(l) ? [i] : []));
   if (rules.length === 0) return isUsageLimited(stripAnsi(raw));
   const top = rules.length >= 2 ? rules[rules.length - 2] : rules[rules.length - 1] - 2;
+  const plainLines = lines.map((l) => stripAnsi(l).trim());
+  const taskPanel = taskPanelLines(plainLines);
   const block: string[] = [];
   for (let i = top - 1; i >= 0 && block.length < LIMIT_ACTIVE_MAX_LINES; i--) {
-    const line = stripAnsi(lines[i]).trim();
-    if (line === "" || isPaneChrome(line)) {
+    const line = plainLines[i];
+    if (line === "" || isPaneChrome(line) || taskPanel.has(i)) {
       if (block.length) break; // reached the gap above the collected block
       continue; // still below the block: skip blanks and box-side chrome
     }
