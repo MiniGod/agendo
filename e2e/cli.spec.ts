@@ -1020,6 +1020,46 @@ test("--orchestrator rejects an inline value instead of guessing at it", async (
   expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
 });
 
+test("-O=<value> is refused too, rather than sliding into the prompt", async ({ mock }) => {
+  // Single-dash args fall through to positionals (they never reach the
+  // unknown-flag guard, which only inspects `--`-prefixed ones), so without an
+  // explicit check `-O=false` would launch a plain session whose prompt starts
+  // with "-O=false" — no error, no orchestrator, no clue why.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "-O=false", "Do a thing");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("--orchestrator takes no value");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
+});
+
+test("--orchestrator and --model compose: both are carried, neither is mistaken for the other", async ({ mock }) => {
+  // Regression guard for the rebase that merged orchestrator mode with the
+  // forwarded-agent-flags feature: `orchestrator` (boolean) and `forwardArgv`
+  // (string[]) are adjacent options, and a transposed union would either drop
+  // --model or land an array in the boolean slot — turning every --model launch
+  // into an orchestrator. Assert both directions.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--model", "opus", "Coordinate it");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  const spawned = tmux.find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(spawned).toBeTruthy();
+  // The orchestrator framing is there…
+  expect(appendedPrompt(spawned!)).toContain("ORCHESTRATOR MODE");
+  // …and the forwarded flag survived alongside it, as an adjacent pair.
+  expect(spawned!.join(" ")).toContain("--model opus");
+  expect(spawned!).toContain("Coordinate it");
+});
+
+test("a plain --model launch is NOT silently promoted to an orchestrator", async ({ mock }) => {
+  // The inverse of the above: the hazard is asymmetric, so check the common path.
+  const r = agendo(mock.env, "launch", "--no-worktree", "--model", "opus", "just implement it");
+  expect(r.status).toBe(0);
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(appendedPrompt(argv)).not.toContain("ORCHESTRATOR MODE");
+  // And it kept ordinary background autonomy — orchestrator-only prompting must
+  // not leak onto every launch that happens to pass a forwarded flag.
+  expect(argv).toContain("--permission-mode");
+});
+
 test("-O survives the unknown-flag guard and really launches an orchestrator", async ({ mock }) => {
   // Single-dash args fall through to positionals, so a dropped `-O` branch would
   // silently fold the flag into the prompt and launch an ordinary session.

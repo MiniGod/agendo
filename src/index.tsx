@@ -235,10 +235,13 @@ if (process.argv[2] === "launch") {
     // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
     // would be rejected outright and `-O` would fall through into the prompt —
     // launching an ordinary session that looks like it was asked to orchestrate.
-    else if (flag === "--orchestrator" || a === "-O") {
+    else if (flag === "--orchestrator" || a === "-O" || a.startsWith("-O=")) {
       // A boolean flag: `--orchestrator=false` reads as "off" to a human but
       // would enable it here, so an inline value is refused, never guessed.
-      if (inline) {
+      // `-O=…` is checked separately because `inline` only recognises the `--`
+      // form, and single-dash args fall through to the prompt rather than to the
+      // unknown-flag guard — so without this it would silently become prompt text.
+      if (inline || a.startsWith("-O=")) {
         console.error(`launch failed: --orchestrator takes no value (got "${a}")`);
         process.exit(1);
       }
