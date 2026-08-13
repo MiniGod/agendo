@@ -387,17 +387,20 @@ interface OpenTargets {
   pr?: { id: number; url: string };
   workItem?: { id: number; url: string };
 }
+// Each target is included only when it actually has a URL: a PullRequest/WorkItem
+// whose `url` is "" carries no link (see types.ts), and offering it would open
+// the browser on an empty address.
 function wiOpen(item: WorkItem): OpenTargets {
   const primary = item.prs[0];
   return {
-    workItem: { id: item.id, url: item.url },
-    ...(primary ? { pr: { id: primary.id, url: primary.url } } : {}),
+    ...(item.url ? { workItem: { id: item.id, url: item.url } } : {}),
+    ...(primary?.url ? { pr: { id: primary.id, url: primary.url } } : {}),
   };
 }
 function prOpen(pr: PRWithSessions): OpenTargets {
   const linked = pr as Partial<LinkedPR>;
   return {
-    pr: { id: pr.id, url: pr.url },
+    ...(pr.url ? { pr: { id: pr.id, url: pr.url } } : {}),
     ...(linked.workItemId != null && linked.workItemUrl
       ? { workItem: { id: linked.workItemId, url: linked.workItemUrl } }
       : {}),

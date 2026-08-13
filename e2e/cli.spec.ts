@@ -943,6 +943,27 @@ test("agendo open degrades gracefully where no browser exists (headless)", async
   expect(r.stderr).toContain("the URL above is still valid");
 });
 
+test("agendo open --print survives a reader that closes the pipe early", async ({ mock }) => {
+  // `agendo open <id> --print | head -1` is a natural way to grab just the PR
+  // link. head exits after the first line, so the remaining writes hit EPIPE —
+  // that must stay a clean exit, not an unhandled rejection with a stack trace.
+  const U = adoUrls(mock.ado.baseUrl);
+  // Async spawn: the mock ADO server is in-process, so a blocking spawnSync
+  // would freeze the event loop and the CLI's fetches could never be answered.
+  const script = `bun run ${JSON.stringify(join(REPO_ROOT, "src", "index.tsx"))} open ${SHORT_ID} --print | head -1`;
+  const child = spawn("bash", ["-c", script], { cwd: REPO_ROOT, env: mock.env });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => (stdout += d));
+  child.stderr.on("data", (d) => (stderr += d));
+  const r = await new Promise<{ stdout: string; stderr: string }>((res) =>
+    child.on("close", () => res({ stdout, stderr })),
+  );
+  expect(r.stdout).toContain(U.pr5001);
+  expect(r.stderr).not.toContain("EPIPE");
+  expect(r.stderr).not.toContain("broken pipe");
+});
+
 test("agendo open on an unknown id / with no id fails cleanly", async ({ mock }) => {
   const unknown = await agendoAsync(mock.env, "open", "no-such-session").done;
   expect(unknown.code).toBe(1);

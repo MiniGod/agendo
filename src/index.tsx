@@ -160,10 +160,15 @@ function printJson(value: unknown): Promise<void> {
  * dispatch calls `process.exit(0)` as soon as the runner returns, and a pipe
  * write still buffered at that point is dropped. Used where the printed text IS
  * the deliverable (`agendo open`'s URLs, which agents consume over a pipe).
+ *
+ * Best-effort by design: it never rejects. A write error means the reader is
+ * gone — `agendo open <id> --print | head -1` closes the pipe after the first
+ * line — and turning that routine EPIPE into an unhandled rejection would crash
+ * the command where a plain `console.log` would have exited cleanly.
  */
 function printLine(text: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    process.stdout.write(text + "\n", (err) => (err ? reject(err) : resolve()));
+  return new Promise((resolve) => {
+    process.stdout.write(text + "\n", () => resolve());
   });
 }
 
@@ -979,6 +984,10 @@ async function runList(opts: ListOptions): Promise<void> {
       shells = paneShells(raw);
     }
     const l = linkOf(s);
+    // A link whose URL couldn't be built reads as absent — applied once here so
+    // the nested object and the flattened *Url field can never disagree.
+    const prLink = l?.pr?.url ? l.pr : null;
+    const itemLink = l?.workItem?.url ? l.workItem : null;
     return {
       id: s.id,
       shortId: shortId(s.id),
@@ -992,12 +1001,10 @@ async function runList(opts: ListOptions): Promise<void> {
       dir: basename(s.cwd) || s.cwd,
       title: s.title.replace(/\s+/g, " ").trim(),
       lastUsed: s.lastUsed.toISOString(),
-      pr: l?.pr ?? null,
-      workItem: l?.workItem ?? null,
-      // `|| null`, not `?? null`: an empty url means the backend payload lacked
-      // the scope its link needs, which consumers must read as "no link".
-      prUrl: l?.pr?.url || null,
-      workItemUrl: l?.workItem?.url || null,
+      pr: prLink,
+      workItem: itemLink,
+      prUrl: prLink?.url ?? null,
+      workItemUrl: itemLink?.url ?? null,
       workflows: (s.workflows ?? []).map((w) => ({
         runId: w.runId,
         name: w.name,
@@ -1155,7 +1162,9 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
     branch: pr.branch,
     repositoryId: pr.repositoryId,
     repositoryName: pr.repositoryName ?? null,
-    url: pr.url,
+    // null rather than the "" a backend payload without repo scope yields, so a
+    // consumer never pastes a half-built link (see PullRequest.url).
+    url: pr.url || null,
     sessions: assocSessions(pr.sessions, model.liveTmux),
   }));
 
@@ -1217,7 +1226,7 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
     type: it.type,
     title: it.title.replace(/\s+/g, " ").trim(),
     state: it.state,
-    url: it.url,
+    url: it.url || null,
     sessions: assocSessions(it.sessions, model.liveTmux),
   }));
 

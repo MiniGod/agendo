@@ -94,6 +94,11 @@ via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com 
 found across your local sessions. Your selected backend is remembered in
 `~/.agendo/state.json`.
 
+Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
+platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
+executable to use instead, for hosts where that default isn't right (containers, WSL).
+Where nothing can be launched at all, `agendo open` still prints the full URL.
+
 ## Testing
 
 Browser-rendered integration tests live in [`e2e/`](e2e/README.md): they spawn the
