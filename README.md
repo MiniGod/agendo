@@ -94,6 +94,23 @@ via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com 
 found across your local sessions. Your selected backend is remembered in
 `~/.agendo/state.json`.
 
+### `resumeDialogChoice`
+
+Resuming a large session, the Claude CLI first asks how to reload it (_"Resume from
+summary (recommended)"_ / _"Resume full session as-is"_). agendo reports a session
+parked there as **ready**, not blocked, and answers the dialog itself the next time
+you `send` to it — then waits for the input box to actually come back before
+delivering your message.
+
+```jsonc
+// ~/.agendo/config.json
+{ "resumeDialogChoice": "summary" }  // default: whatever Claude marks (recommended)
+{ "resumeDialogChoice": "as-is" }    // resume the full session, at full token cost
+```
+
+The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
+it changes your global Claude CLI behaviour permanently, which is your call to make.
+
 ## Testing
 
 Browser-rendered integration tests live in [`e2e/`](e2e/README.md): they spawn the

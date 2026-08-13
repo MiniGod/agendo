@@ -1,0 +1,96 @@
+      937 +  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+      938 +  await writeFile(
+      939 +    join(mock.home, ".agendo", "orchestrators.json"),
+      940 +    JSON.stringify({ ids: [CRASH_SESSION_ID], roles: { [CRASH_SESSION_ID]: "global" } }),
+      941 +  );
+      942 +  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+      943 +  expect(r.status).toBe(0);
+      944 +  const resumed = (await mock.tmuxLog()).find(
+      945 +    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+      946 +  );
+      947 +  const appended = appendedPrompt(resumed!);
+      948 +  expect(appended).toContain("GLOBAL ORCHESTRATOR MODE");
+      949 +  expect(appended).not.toContain("# You are running in ORCHESTRATOR MODE");
+      950 +});
+      951 +
+      952 +test("a marker file written before roles existed still resumes as a repo orchestrator", async ({ mock }) => {
+      953 +  // Back-compat: an existing install's `{ids:[…]}` has no `roles` key at all, and
+      954 +  // every orchestrator it recorded predates the global level — so it is a repo one.
+      955 +  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+      956 +  await writeFile(
+      957 +    join(mock.home, ".agendo", "orchestrators.json"),
+      958 +    JSON.stringify({ ids: [CRASH_SESSION_ID] }),
+      959 +  );
+      960 +  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+      961 +  expect(r.status).toBe(0);
+      962 +  const resumed = (await mock.tmuxLog()).find(
+      963 +    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+      964 +  );
+      965 +  const appended = appendedPrompt(resumed!);
+      966 +  expect(appended).toContain("# You are running in ORCHESTRATOR MODE");
+      967 +  expect(appended).not.toContain("GLOBAL ORCHESTRATOR MODE");
+      968 +});
+      969 +
+      970 +test("marking a new orchestrator preserves the ids an older agendo wrote", async ({ mock }) => {
+      971 +  // The read-modify-write must not drop pre-existing markers, or upgrading agendo
+      972 +  // would silently strip the framing from every orchestrator already running.
+      973 +  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+      974 +  await writeFile(
+      975 +    join(mock.home, ".agendo", "orchestrators.json"),
+      976 +    JSON.stringify({ ids: ["legacy-orchestrator-id"] }),
+      977 +  );
+      978 +  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Coordinate");
+      979 +  expect(r.status).toBe(0);
+      980 +  const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
+      981 +  expect(marker.ids).toContain("legacy-orchestrator-id");
+      982 +  // …and the legacy id gains no role entry, so it keeps reading back as "repo".
+      983 +  expect(marker.roles["legacy-orchestrator-id"]).toBeUndefined();
+      984 +});
+      985 +
+      986  test("orchestrator mode survives a cold resume; an ordinary session isn't given it", async ({ mock }) => {
+      987    // claude records neither --append-system-prompt nor --agent in its session state,
+      988    // so resume must re-inject from the launcher's own marker file. Mark the (idle)
+
+❯ continue at 19:01
+
+● Picking up where I left off — running the new CLI tests:
+
+  Ran 1 shell command
+
+❯ do not do more work until 19:01
+
+● Pausing here as asked — I'll pick this back up at 19:01.
+
+  Where things stand
+
+  Stacked correctly on PR #15 (git rebase origin/worktree-orchestrator-mode clean, src/orchestrator.ts present). Implementation is written and both typechecks pass; the full suite was green before I started adding the new CLI tests (only the expected sessions-view hint snapshot changed, and I regenerated it).
+
+  Done:
+  - globalOrchestratorSystemPrompt + systemPromptForRole, marker file extended to {ids, roles} with back-compat on the flat ids array
+  - globalOrchestratorCwd / commonParent in repos.ts
+  - Pane hosting in tmux.ts (@cl_pane_target, splitPaneIn, windowWidth, MIN_SPLIT_COLS), threaded through liveManagedPaths → reconcileLive → liveWindows as an addressable target
+  - launchGlobalOrchestrator with pane → window → detached-session fallback chain
+  - CLI --global-orchestrator|-G|--global, --window/--pane, HELP; list kind column (orch/global) + per-repo orchestrator summary; list --json gains orchestrator/role/repoRoot/repoName; new list repos [--json]
+  - llmGuide() three-level hierarchy section
+  - TUI G binding + hint line
+  - Tests: orchestrator.spec.ts (24 passing, incl. all global-prompt and cwd assertions), detection.spec.ts pane-attribution tests, fake tmux taught split-window/set-option -p/display-message
+
+  3 new CLI tests failing — all my test-fixture bugs, not product bugs:
+  1. --global-orchestrator marker assertion — needs a look at the actual output
+  2. split-window test: setTmuxState replaces the whole fixture, and launcherWindowLive isn't seeing the launcher window ("no live agendo menu in tmux session agendo") — the fake's list-windows emits #{pane_dead} from a record that has no dead field but my window fixture also lacks the field the real path reads
+  3. narrow-terminal test fails for the same reason — it falls back before ever reaching the width check, so the "90 cols" note is never produced
+
+  Still to do after that: sub-agent review loop until clean, then commit and open the PR with base worktree-orchestrator-mode.
+
+✻ Cogitated for 1m 8s
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  This session is 1h 14m old and 249.4k tokens.
+
+  Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again
+
+  Enter to confirm · Esc to cancel

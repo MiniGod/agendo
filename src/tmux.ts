@@ -290,7 +290,10 @@ function inputRealText(line: string): string {
  * prompt. Conservative: only "ready" is auto-sendable; everything else (a turn
  * generating → "busy", conversation being compacted → "compacting", unsent text
  * already in the box → "queued", an open question/menu → "dialog", or an
- * unrecognized screen → "unknown") is left for the caller to handle. Calibrated
+ * unrecognized screen → "unknown") is left for the caller to handle. The one
+ * exception, checked before all of those, is the CLI's own resume dialog: it
+ * reports "ready" without an input box behind it (see paneResumeDialogActive and
+ * paneAcceptsPaste). Calibrated
  * against the real TUI:
  *  - Generating: a live spinner shows a time/token counter, e.g.
  *    `✢ Tinkering… (58s · ↓ 3.9k tokens)` — the counter (not an "esc to
@@ -312,6 +315,25 @@ function inputRealText(line: string): string {
  */
 export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readiness {
   const plain = stripAnsi(raw);
+  // The claude CLI's OWN startup prompt about *how* to resume this session — not
+  // the agent asking anything about the work, so from a caller's point of view
+  // the session is available and we report it as "ready".
+  //
+  // Checked FIRST, before busy/limited/dialog. Everything above the dialog is
+  // the PREVIOUS run's replayed transcript, which routinely ends in the very
+  // notice that made the user resume — "You've hit your session limit …" — or in
+  // an interrupted spinner's token counter. Judged in the usual order, such a
+  // pane read "limited"/"busy" (verified on the real capture with a limit notice
+  // spliced into its tail): `status` would print a stale reset time and
+  // `agendo wait` would never settle, i.e. the exact blocked-forever reporting
+  // this exists to fix, just wearing a different label. Nothing in that
+  // scrollback is the CURRENT state: no turn has run yet.
+  //
+  // NB this is the one "ready" that does NOT mean "there's an empty input box to
+  // paste into" — the dialog replaces the box — which is why every sender must
+  // re-check `paneResumeDialogActive` and answer the dialog first (see
+  // `answerResumeDialog`) instead of pasting on the strength of "ready".
+  if (paneResumeDialogActive(raw)) return "ready";
   // Compacting the conversation — a distinct, blocking state. Must be checked
   // *before* the input-box read below: compaction shows no token counter and no
   // "esc to interrupt" hint, and leaves the box empty, so it would otherwise
@@ -380,6 +402,323 @@ function isDialog(raw: string): boolean {
   }
   return true;
 }
+
+// ── the CLI's own "how should I resume?" dialog ───────────────────────────────
+// Resuming a large session, the claude CLI asks — before any turn runs — how to
+// reload it:
+//
+//   This session is 1h 14m old and 249.4k tokens.
+//
+//   Resuming the full session will consume a substantial portion of your usage
+//   limits. We recommend resuming from a summary.
+//
+//   ❯ 1. Resume from summary (recommended)
+//     2. Resume full session as-is
+//     3. Don't ask me again
+//
+//   Enter to confirm · Esc to cancel
+//
+// Structurally that IS a dialog — numbered options under a rule, no input box —
+// so `isDialog` (correctly, and load-bearingly for auto-resume safety) fires on
+// it and the session sat blocked forever. But nothing is waiting on a human
+// decision about the *work*: it's a startup prompt agendo can answer itself. So
+// it gets its own narrow detector rather than any loosening of `isDialog`.
+//
+// Anchored on the literal OPTION LABELS, not the header: the header carries a
+// variable age and token count and reads like prose, so it's the likelier of the
+// two to churn between CLI versions. Both resume labels are required, which no
+// genuine agent question offers.
+
+/** `1. Resume from summary (recommended)` — the option Claude marks recommended. */
+const RESUME_SUMMARY_RE = /^resume from summary\b/i;
+/** `2. Resume full session as-is` — reload the whole transcript. */
+const RESUME_AS_IS_RE = /^resume full session as-is\b/i;
+/**
+ * `3. Don't ask me again` — deliberately NEVER selectable by agendo: it flips
+ * the user's global claude CLI behaviour permanently, for every future session
+ * in every project, which is not agendo's call to make. Matched only so it can
+ * be filtered out of the choosable set (including from the `(recommended)`
+ * fallback, should the marker ever land on it).
+ */
+const RESUME_DONT_ASK_RE = /^don['’]?t ask me again\b/i;
+
+/** One numbered option of an open menu, as printed by the TUI. */
+export interface ResumeDialogOption {
+  /** The number the TUI prints — the key that selects it (`2` in `2. Resume …`). */
+  number: number;
+  /** Option text with the number stripped, e.g. `Resume from summary (recommended)`. */
+  label: string;
+  /** Whether the label carries claude's own `(recommended)` marker. */
+  recommended: boolean;
+  /** Whether the `❯` cursor currently highlights this option. */
+  selected: boolean;
+}
+
+/**
+ * The pane's ACTIVE menu region: the lines below the last horizontal rule,
+ * ANSI-stripped. Anchoring below the last `─{20,}` is the same "nothing below
+ * it" structure `isDialog`/`isActiveLimitDialog` use: an open dialog replaces the
+ * input box, so once it's dismissed a rule appears beneath the (now historical)
+ * option lines and they stop counting.
+ */
+function activeMenuLines(raw: string): string[] {
+  const lines = raw.replace(/\r/g, "").split("\n").map(stripAnsi);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/─{20,}/.test(lines[i])) return lines.slice(i + 1);
+  }
+  return lines;
+}
+
+/**
+ * The `N. label` options among `lines`. The TUI paints the number and the label
+ * in different colours, so the lines must already be ANSI-stripped (see
+ * activeMenuLines).
+ */
+function menuOptions(lines: string[]): ResumeDialogOption[] {
+  const out: ResumeDialogOption[] = [];
+  for (const line of lines) {
+    // The selection cursor `❯` marks whichever option is highlighted.
+    const m = line.match(/^\s*(❯\s*)?(\d+)\.\s+(\S.*?)\s*$/);
+    if (m) {
+      out.push({
+        number: Number(m[2]),
+        label: m[3],
+        recommended: /\(recommended\)/i.test(m[3]),
+        selected: !!m[1],
+      });
+    }
+  }
+  return out;
+}
+
+/** The dialog's own footer — the affordance that proves a menu is really OPEN. */
+const DIALOG_FOOTER_RE = /Enter to confirm|Esc to cancel/i;
+
+/**
+ * Whether the pane is sitting on the claude CLI's own resume-choice dialog (see
+ * the block comment above). Four conditions, all within the active menu region:
+ * BOTH resume option labels, the confirm/cancel footer, and a `❯` selection
+ * cursor on one of the options.
+ *
+ * The footer and cursor are not redundant. A false positive here is
+ * fail-DANGEROUS in a way `isDialog`'s is not: `isDialog` only ever costs a
+ * refusal, whereas this verdict makes `send` press keys into the pane. With the
+ * labels alone, turn output merely *quoting* them ("the CLI asked: 1. Resume
+ * from summary … 2. Resume full session as-is") matched whenever no input-box
+ * rule happened to sit below it — a mid-paint capture, say. Requiring the two
+ * affordances only a live menu draws costs the real capture nothing, and the
+ * cursor is needed to answer the dialog anyway (see answerResumeDialog).
+ *
+ * Known limit: on a pane narrow enough to WRAP an option label the anchors don't
+ * match and the dialog reads as a plain `dialog` again — the pre-fix behaviour,
+ * i.e. it fails safe (and `paneResumeMenuSuspect` keeps a forced send from
+ * pasting into it regardless). `raw` may include SGR escapes (see capturePane).
+ */
+export function paneResumeDialogActive(raw: string): boolean {
+  const lines = activeMenuLines(raw);
+  if (!lines.some((l) => DIALOG_FOOTER_RE.test(l))) return false;
+  const opts = menuOptions(lines);
+  // EXACTLY one cursor. When the pane has no rule at all, the "active menu" is
+  // the whole capture, and claude echoes user prompts with a bare `❯` — so a
+  // replayed line like `❯ 1. rerun the failing spec` could add a second
+  // "selected" option and leave the walk anchored on a highlight that isn't the
+  // real one. Ambiguity here means we cannot know where a move would land.
+  if (opts.filter((o) => o.selected).length !== 1) return false;
+  return opts.some((o) => RESUME_SUMMARY_RE.test(o.label)) && opts.some((o) => RESUME_AS_IS_RE.test(o.label));
+}
+
+/**
+ * The WEAK signal: a pane with NO input box whose active menu carries a resume
+ * option label, whether or not the full detector fires. Used only to refuse a
+ * *forced* paste (`send --force`) into a menu that looks like this one but didn't
+ * fully match — a wrapped label, a reworded footer, a future option set. Without
+ * it, `--force` (which `--help` and the agent guide both offer as the way past a
+ * refusal) would type the message straight into the menu, where its digits pick
+ * options and the trailing Enter confirms one.
+ *
+ * The cost to everything else is nil, because "active menu" means *below the last
+ * `─` rule*: a session whose own output quotes these labels — one working on this
+ * very feature, say — has them above its input box, so they're not in the region
+ * at all and `--force` behaves there exactly as before. The explicit no-input-box
+ * condition is belt-and-braces on top of that (if there's a box, there's somewhere
+ * safe to paste, whatever the lines below it say). "Don't ask me again" is
+ * deliberately NOT among the labels checked: it's generic enough to head a
+ * numbered option in an unrelated CLI's menu.
+ */
+export function paneResumeMenuSuspect(raw: string): boolean {
+  if (inputBox(raw) !== null) return false;
+  // Matched on the label's HEAD, not the whole phrase: a pane narrow enough to
+  // wrap BOTH labels leaves only "Resume from" / "Resume full" on the numbered
+  // lines, and that is precisely the case this signal exists for.
+  return menuOptions(activeMenuLines(raw)).some((o) => /^resume (from|full)\b/i.test(o.label));
+}
+
+/** Which resume option agendo picks for the user (see Config.resumeDialogChoice). */
+export type ResumeDialogChoice = "summary" | "as-is";
+
+/**
+ * The option to select on the resume dialog for `choice`, or null if the pane
+ * isn't showing one. "Don't ask me again" is filtered out first and can never be
+ * returned (see RESUME_DONT_ASK_RE).
+ *
+ * The default ("summary") resolves by claude's own `(recommended)` MARKER rather
+ * than by option index or position — the marker is what "recommended" actually
+ * means, and the option could move — falling back to the literal
+ * `Resume from summary` label if a future version drops the marker.
+ */
+export function resumeDialogOption(raw: string, choice: ResumeDialogChoice): ResumeDialogOption | null {
+  // Only ever choose on a pane the detector fully vouches for — never on a
+  // numbered menu that merely happens to carry one of the labels.
+  if (!paneResumeDialogActive(raw)) return null;
+  const opts = menuOptions(activeMenuLines(raw)).filter((o) => !RESUME_DONT_ASK_RE.test(o.label));
+  if (choice === "as-is") return opts.find((o) => RESUME_AS_IS_RE.test(o.label)) ?? null;
+  return opts.find((o) => o.recommended) ?? opts.find((o) => RESUME_SUMMARY_RE.test(o.label)) ?? null;
+}
+
+/**
+ * The option the `❯` cursor currently highlights, or null when that can't be read
+ * unambiguously (no cursor, or more than one — see paneResumeDialogActive).
+ */
+export function resumeDialogSelection(raw: string): ResumeDialogOption | null {
+  const selected = menuOptions(activeMenuLines(raw)).filter((o) => o.selected);
+  return selected.length === 1 ? selected[0] : null;
+}
+
+/**
+ * The single `send-keys` argv for one step of answering the dialog: Enter when
+ * the cursor already sits on the option we want, otherwise one move toward it.
+ * Pure, so the key choice can be asserted without a tmux server.
+ *
+ * Arrow keys, deliberately, rather than typing the option's NUMBER. A digit may
+ * activate an option outright in some CLI versions and merely select it in
+ * others — an ambiguity with no safe resolution: send Enter as well and it can
+ * land on whatever screen the reloading session draws next (accepting ITS
+ * default); don't, and a dialog whose footer says "Enter to confirm" is never
+ * answered at all. Up/Down only ever move the highlight, so Enter's meaning is
+ * unambiguous — and the caller re-reads the cursor after every step, so nothing
+ * is ever confirmed on an assumption about where the selection ended up.
+ */
+export function resumeDialogStep(target: string, at: number, want: number): string[] {
+  const key = at === want ? "Enter" : at < want ? "Down" : "Up";
+  return ["send-keys", "-t", target, key];
+}
+
+/**
+ * Gap between the pane reads that answer the dialog. Its own constant, NOT
+ * RESUME_KEY_DELAY_MS: that one is a pty-write-coalescing gap ("any real gap"),
+ * whereas this is a repaint budget for an Ink TUI that is also reloading a
+ * quarter-million-token session. Comfortably larger than the coalescing gap, so
+ * it satisfies that constraint too.
+ */
+const RESUME_DIALOG_STEP_MS = 250;
+
+/**
+ * How many pane reads to spend answering the dialog before giving up. A move
+ * costs two reads to settle plus however many frames the pane needs to show it,
+ * so this covers any reachable distance in a three-option menu with room for a
+ * slow repaint. The bound only matters when the pane stops responding to the
+ * arrows, in which case we must not loop forever.
+ */
+const RESUME_DIALOG_LOOKS = 16;
+
+/**
+ * Answer the resume dialog on `target` with `option`: walk the `❯` cursor onto it
+ * with arrow keys, then press Enter. Returns whether Enter was actually sent.
+ *
+ * The pane is re-read RESUME_DIALOG_STEP_MS apart, and three rules together make
+ * a lagging repaint harmless — the whole hazard being that the option one past
+ * the target is "Don't ask me again", which flips the user's global claude CLI
+ * behaviour permanently and must never be pressed:
+ *
+ *  1. After a move, every frame that still shows the selection we moved FROM is
+ *     discarded — the key isn't on screen yet, and acting on it would issue a
+ *     second move the menu never needed. This is the load-bearing one: "the same
+ *     selection twice running" alone does not mean "settled", because a display
+ *     that is uniformly N frames behind is perfectly stable frame to frame.
+ *  2. Only a selection seen twice running is acted on at all, so a half-drawn
+ *     frame between two states isn't mistaken for either.
+ *  3. Enter goes out only when that settled selection's LABEL is the one we
+ *     chose — not its number, not a count of the moves we've made — and the
+ *     target is re-resolved by label from every capture, so a menu that gains,
+ *     drops or reorders an option moves the target with it.
+ *
+ * A pane that never shows the move therefore receives exactly ONE arrow and then
+ * gives up, rather than walking the highlight down the menu and abandoning it on
+ * the option we must never press. (Rule 1 covers lag that our OWN moves induce.
+ * A pane whose very first capture is already stale — because something else moved
+ * the cursor — is outside what any of this can see, and nothing short of a probe
+ * keypress into the menu could establish where the highlight really is.)
+ *
+ * Anything unexpected — the dialog gone, an unreadable cursor, arrows with no
+ * effect — returns false, having sent only arrows. Those are harmless while the
+ * menu is up. If it closes underneath us (a human answered it) the pane can
+ * receive one stray arrow: Down is a no-op in the restored input box, Up recalls
+ * history into it. `waitForInputBox` then reads that as a draft and refuses to
+ * paste over it, so the message is never delivered blind — but note the Enter
+ * that follows a *successful* walk could, in that same window, submit it.
+ *
+ * Answering is all this does. It does NOT verify the input box came back — the
+ * caller must re-capture and check that before pasting anything (see runSend).
+ */
+export function answerResumeDialog(target: string, option: ResumeDialogOption): boolean {
+  let seen: number | null = null;
+  let times = 0;
+  let movedFrom: number | null = null;
+  for (let i = 0; i < RESUME_DIALOG_LOOKS; i++) {
+    if (i > 0) sleepSync(RESUME_DIALOG_STEP_MS);
+    const raw = capturePane(target);
+    // Gone (someone answered it, or it was never really there): nothing to confirm.
+    if (!paneResumeDialogActive(raw)) return false;
+    const at = resumeDialogSelection(raw);
+    // Belt-and-braces: paneResumeDialogActive already required exactly one
+    // cursor on this same capture, so this can't be null today.
+    if (at === null) return false; // can't read the cursor — never guess where it is
+    // Rule 1: the frame predates our last move. Wait for one that doesn't.
+    if (movedFrom !== null && at.number === movedFrom) continue;
+    movedFrom = null;
+    // Where the option we chose sits in the menu AS IT IS NOW. Re-resolved by
+    // label every look, so a menu that gains, drops or reorders an option
+    // between frames moves the target with it instead of aiming at a number
+    // that now belongs to something else.
+    const want = menuOptions(activeMenuLines(raw)).find((o) => o.label === option.label);
+    if (!want) return false; // our option is no longer on the menu
+    times = at.number === seen ? times + 1 : 1;
+    seen = at.number;
+    if (times < 2) continue; // not a settled frame yet — look again
+    if (at.label === option.label) {
+      tmuxQuiet(resumeDialogStep(target, at.number, at.number)); // Enter
+      return true;
+    }
+    tmuxQuiet(resumeDialogStep(target, at.number, want.number));
+    movedFrom = at.number; // ignore frames still showing this until the move lands
+    seen = null; // whatever the next frame shows must settle again before we act
+    times = 0;
+  }
+  return false;
+}
+
+/**
+ * Whether a captured pane is genuinely at an empty input box — i.e. "ready"
+ * MINUS the single case where that word doesn't imply a box behind it: the CLI's
+ * own resume dialog (see paneResumeDialogActive). `sendToPane` is keystroke
+ * injection, not a queue, so this must be checked on a FRESH capture immediately
+ * before pasting; a message pasted into a numbered menu picks an option.
+ */
+export function paneAcceptsPaste(raw: string, cursor?: PaneCursor | null): boolean {
+  return !paneResumeDialogActive(raw) && paneReadiness(raw, cursor) === "ready";
+}
+
+/**
+ * How long to wait for the input box after answering the resume dialog. Generous
+ * on purpose: the dialog only appears for BIG sessions (the captured one was
+ * 249.4k tokens), and "resume from summary" makes the CLI build and load that
+ * summary before it draws a box — the pane reads busy, or unknown, throughout.
+ * Overridable per call with `send --timeout`.
+ */
+export const RESUME_DIALOG_WAIT_MS = 120_000;
+
+/** Poll cadence while waiting for that input box to appear. */
+export const RESUME_DIALOG_POLL_MS = 250;
 
 /** The claude input box, located inside a capture. */
 interface InputBox {
@@ -644,6 +983,13 @@ export function paneUsageLimited(raw: string): boolean {
  */
 export function paneResumeSafe(raw: string, cursor?: PaneCursor | null): boolean {
   if (!paneUsageLimited(raw)) return false;
+  // Never fire into the CLI's own resume dialog. Its replayed transcript can
+  // still carry the limit notice that stopped the previous run (so the check
+  // above can be true), and the resume keystrokes lead with Escape — which here
+  // is the dialog's own "Esc to cancel", i.e. cancelling the resume. Stated
+  // explicitly rather than left to the isDialog check below, since this is the
+  // one dialog whose *other* consumers now treat the pane as available.
+  if (paneResumeDialogActive(raw)) return false;
   const lines = raw.replace(/\r/g, "").split("\n");
   if (isActiveLimitDialog(lines)) return true;
   if (isDialog(raw)) return false;

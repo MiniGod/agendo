@@ -11,6 +11,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import type { ProviderName } from "./types.ts";
+import type { ResumeDialogChoice } from "./tmux.ts";
 
 export interface Config {
   /** Azure DevOps organization name (the slug in dev.azure.com/<org>). */
@@ -26,9 +27,24 @@ export interface Config {
   resource: string;
   /** Work item states considered "done" — hidden unless expanded. */
   closedStates: string[];
+  /**
+   * Which option agendo picks when a resumed claude session opens the CLI's own
+   * "how should I resume?" dialog (see paneResumeDialogActive in tmux.ts):
+   *   - "summary" (default) — the option claude itself marks `(recommended)`,
+   *     i.e. resume from a summary rather than replaying the whole transcript;
+   *   - "as-is"             — resume the full session, at full token cost.
+   * Its third option, "Don't ask me again", is intentionally NOT offered here:
+   * it permanently changes the user's global claude CLI behaviour, which is the
+   * user's call to make, not agendo's.
+   *
+   * Optional so a config.json — or a Config literal built elsewhere in the tree —
+   * needn't carry it; `resumeDialogChoice()` below resolves absence to the default.
+   */
+  resumeDialogChoice?: ResumeDialogChoice;
 }
 
-const DEFAULTS: Config = {
+/** Shipped defaults — every field a config.json may override. */
+export const DEFAULT_CONFIG: Config = {
   org: "",
   project: "",
   team: "",
@@ -37,6 +53,9 @@ const DEFAULTS: Config = {
   // tenant) — used as the token resource/audience, not a secret.
   resource: "499b84ac-1321-427f-aa17-267ca6975798",
   closedStates: ["Closed", "Done", "Removed", "Resolved"],
+  // Default to whatever claude marks `(recommended)` — resuming from a summary,
+  // which is also the cheaper of the two.
+  resumeDialogChoice: "summary",
 };
 
 // New data dir (`~/.agendo/`) — all writes go here. The older dirs are read-only,
@@ -62,15 +81,34 @@ function firstExisting(paths: string[]): string {
   return paths[0];
 }
 
+/**
+ * A fresh copy of the shipped defaults, arrays included. DEFAULT_CONFIG is
+ * exported, so handing it (or its `closedStates` array) out by identity would let
+ * one caller's edit leak into every later load.
+ */
+function defaults(): Config {
+  return { ...DEFAULT_CONFIG, closedStates: [...DEFAULT_CONFIG.closedStates] };
+}
+
 export function loadConfig(): Config {
   const path = firstExisting([CONFIG_PATH, PREV_CONFIG_PATH, OLD_CONFIG_PATH]);
-  if (!existsSync(path)) return DEFAULTS;
+  if (!existsSync(path)) return defaults();
   try {
     const override = JSON.parse(readFileSync(path, "utf-8"));
-    return { ...DEFAULTS, ...override };
+    return { ...defaults(), ...override };
   } catch {
-    return DEFAULTS;
+    return defaults();
   }
+}
+
+/**
+ * The resume-dialog choice to act on: the configured value when it's one we
+ * recognize, else the default. Config is hand-edited JSON, and an unrecognized
+ * value must not leave `send` unable to answer the dialog — the fallback is the
+ * option claude itself recommends, which is the safe, cheap one.
+ */
+export function resumeDialogChoice(c: Config = loadConfig()): ResumeDialogChoice {
+  return c.resumeDialogChoice === "as-is" ? "as-is" : "summary";
 }
 
 // ── Persisted UI state ────────────────────────────────────────────────────────
