@@ -2189,7 +2189,14 @@ export default function App({
       // characters and keep the rest. Deliberately NOT treated as submit: the
       // destination preview exists so no clone starts unreviewed.
       if (input && !key.ctrl && !key.meta) {
-        const text = input.replace(/[^\x20-\x7e]+/g, "");
+        // Only CONTROL characters are dropped — deliberately not "everything
+        // outside printable ASCII". An ADO project name is routinely non-ASCII
+        // (`…/innovamps/Þróun/_git/hmi-framework`, and Chrome's omnibox hands
+        // that over unencoded), and stripping those letters doesn't reject the
+        // URL — it quietly turns it into a *different, still valid* one
+        // (`…/innovamps/run/_git/…`), which then previews a destination for a
+        // repo the user never named and fails at clone time as "not found".
+        const text = input.replace(/[\x00-\x1f\x7f]+/g, "");
         if (!text) return;
         return edit((v, c) => ({ value: v.slice(0, c) + text + v.slice(c), cursor: c + text.length }));
       }

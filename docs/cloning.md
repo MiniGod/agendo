@@ -138,8 +138,18 @@ segment right after `_git`, so any trailing web path (`/pullrequest/42`,
 | `https://dev.azure.com/org/proj` | **rejected** (no `_git`) |
 
 Percent-encoding is decoded for the identity and the directory name
-(`My%20Project` → `My Project`) but the **remote keeps its encoded form**, since
-that's what git has to send.
+(`My%20Project` → `My Project`), and re-encoded for the remote, since that's
+what git has to send. Re-encoding rather than passing through matters because
+ADO project names are routinely non-ASCII — this repo's own org has `Þróun` and
+`Vörur` — and a browser's address bar hands those over **unencoded** while ADO's
+Clone button hands over the encoded form. Both spellings therefore resolve to
+one identity (so the reuse check works across them) and one valid clone URL. The
+round-trip is idempotent, so an already-encoded segment isn't double-encoded.
+
+For the same reason the URL prompt strips only *control* characters from a
+paste, not everything outside printable ASCII: dropping the letters of `Þróun`
+wouldn't reject the URL, it would quietly turn it into a different valid one
+(`…/run/_git/…`) and preview a destination for a repo the user never named.
 
 ADO hands out clone URLs with the credentials embedded
 (`https://org:<PAT>@dev.azure.com/…`), and people paste them. The token stays in

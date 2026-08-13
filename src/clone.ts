@@ -106,6 +106,15 @@ function dec(s: string): string {
   }
 }
 
+/**
+ * Percent-encode a path segment for the remote, whatever form it arrived in.
+ * Decode-then-encode, so it's idempotent: `My%20Proj` stays `My%20Proj`, while a
+ * segment pasted raw (`Þróun`, which is what a browser's address bar hands you
+ * for a non-ASCII ADO project) becomes `%C3%9Er%C3%B3un` rather than reaching
+ * git as raw bytes.
+ */
+const enc = (s: string) => encodeURIComponent(dec(s));
+
 const segments = (path: string) => path.split("/").filter(Boolean);
 
 // The ADO host must sit at the very start, after at most a scheme and a `user@`
@@ -217,7 +226,7 @@ function parseAdo(url: string): RepoUrl | null {
       org,
       project: pr.project,
       repo: pr.repo,
-      remote: `https://${userinfo}dev.azure.com/${org}/${pr.project}/_git/${pr.repo}`,
+      remote: `https://${userinfo}dev.azure.com/${enc(org)}/${enc(pr.project)}/_git/${enc(pr.repo)}`,
     });
   }
 
@@ -230,7 +239,7 @@ function parseAdo(url: string): RepoUrl | null {
       org,
       project: pr.project,
       repo: pr.repo,
-      remote: `https://${userinfo}${org}.visualstudio.com/${pr.project}/_git/${pr.repo}`,
+      remote: `https://${userinfo}${org}.visualstudio.com/${enc(pr.project)}/_git/${enc(pr.repo)}`,
     });
   }
 

@@ -171,6 +171,22 @@ test.describe("parseRepoUrl: Azure DevOps", () => {
     expect(cloneDirName(u!.repo)).toBe("My-Repo");
   });
 
+  test("a non-ASCII project name works pasted raw or encoded, and means the same repo", () => {
+    // ADO project names are routinely non-ASCII (this repo's own org has
+    // `Þróun` and `Vörur`), and a browser's address bar hands them over
+    // unencoded while ADO's Clone button hands over the encoded form.
+    const raw = parseRepoUrl("https://dev.azure.com/innovamps/Þróun/_git/hmi-framework")!;
+    const encoded = parseRepoUrl("https://dev.azure.com/innovamps/%C3%9Er%C3%B3un/_git/hmi-framework")!;
+    expect(raw.project).toBe("Þróun");
+    expect(raw.key).toBe(encoded.key); // one repo, however it was pasted
+    // Encoded on the way to git either way — never raw bytes in the URL.
+    expect(raw.remote).toBe("https://dev.azure.com/innovamps/%C3%9Er%C3%B3un/_git/hmi-framework");
+    expect(encoded.remote).toBe(raw.remote);
+    // Re-encoding is idempotent: an already-encoded space isn't double-encoded.
+    expect(parseRepoUrl("https://dev.azure.com/org/My%20Proj/_git/repo")?.remote)
+      .toBe("https://dev.azure.com/org/My%20Proj/_git/repo");
+  });
+
   test("userinfo is preserved in the remote — it's the account the creds are for", () => {
     expect(parseRepoUrl("https://org@dev.azure.com/org/proj/_git/repo")?.remote)
       .toBe("https://org@dev.azure.com/org/proj/_git/repo");

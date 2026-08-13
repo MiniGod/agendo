@@ -170,6 +170,27 @@ test("REGRESSION: a URL pasted with its trailing newline is accepted", async ({ 
   expect((await mock.callLog()).filter((c) => c.includes('"clone"'))).toEqual([]);
 });
 
+// REGRESSION: the prompt used to keep only printable ASCII, which didn't reject
+// a non-ASCII URL — it silently turned it into a DIFFERENT valid one
+// (`…/Þróun/_git/…` → `…/run/_git/…`), previewing a destination for a repo the
+// user never named. ADO project names are routinely non-ASCII.
+test("REGRESSION: a non-ASCII ADO project name survives the prompt intact", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("https://dev.azure.com/innovamps/Þróun/_git/hmi-framework");
+
+  const screen = await wt.waitForText("clones into");
+  // The identity keeps the project it was given, letters and all.
+  expect(screen).toContain("innovamps/Þróun/hmi-framework");
+  expect(screen).not.toContain("innovamps/run/");
+  expect(screen).toMatch(/clones into[^\n]*repos\/hmi-framework/);
+});
+
 test("the destination is shown BEFORE enter — a clone is never a surprise", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const parent = join(mock.home, "repos");
