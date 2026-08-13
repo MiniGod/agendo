@@ -24,8 +24,17 @@ clone; the picker looks exactly as it does today.
 the target — so cloning from inside a checkout would drop a nested repository
 into that repo's working tree, where it becomes untracked clutter forever.
 Cloning belongs in a folder *of* checkouts, not in one, so the row is absent
-there too (checked through `repoRootForCwd`, so a path deep inside a repo is
-caught, not just its root).
+there too.
+
+The test is `enclosingCheckout(filterRoot, homedir())`, which walks up from the
+target — catching a path deep inside a repo, not just its root — but **stops at
+`$HOME`**. That boundary is why it isn't `repoRootForCwd`: keeping dotfiles in a
+git repo at `~` is a common setup, and an unbounded walk-up would find `~/.git`
+from every directory the user owns and silently disable cloning across the whole
+machine. `$HOME` is not a project checkout in any sense that matters here. The
+visible consequence of the carve-out is that `agendo ~` *does* offer cloning
+even with a dotfiles repo at `~`, and the clone lands in its working tree — the
+right trade against disabling the feature everywhere.
 
 ## Where the clone lands
 

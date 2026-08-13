@@ -467,9 +467,16 @@ export interface CloneOutcome {
 export interface CloneRun {
   done: Promise<CloneOutcome>;
   /**
-   * Kill the clone and remove the partial directory. Safe to call twice.
-   * `immediate` is for teardown (unmount), where there is no time left for the
-   * child's exit to be observed: it kills hard and cleans up synchronously.
+   * Kill the clone and remove the partial directory.
+   *
+   * The plain form is the user's esc: SIGTERM, and cleanup deferred to the
+   * child's exit (git removes its own junk on a signal, and it may still be
+   * writing). `immediate` is for teardown, where nothing will ever observe that
+   * exit: it kills hard and cleans up synchronously.
+   *
+   * Safe to call repeatedly. A repeat soft cancel does nothing; a repeat
+   * `immediate` still escalates, since it can follow a soft cancel that the
+   * child hasn't answered yet.
    */
   cancel(opts?: { immediate?: boolean }): void;
 }
@@ -638,12 +645,18 @@ export function startClone(
   return {
     done,
     cancel(opts) {
-      if (canceled) return;
+      const immediate = !!opts?.immediate;
+      // A repeat cancel is a no-op — EXCEPT an immediate one, which must still
+      // escalate. esc (soft cancel) followed by the app going down is a real
+      // sequence: git may not have exited yet, the `close` handler that owns the
+      // deferred cleanup will never run once the process is gone, and returning
+      // here would leave both the child and its half-written directory behind.
+      if (canceled && !immediate) return;
       canceled = true;
       try {
         // SIGKILL on teardown: SIGTERM leaves git a window to keep writing, and
         // there is no later tick in which to notice it finished.
-        child.kill(opts?.immediate ? "SIGKILL" : "SIGTERM");
+        child.kill(immediate ? "SIGKILL" : "SIGTERM");
       } catch {
         // Already gone — the close handler still runs the cleanup.
       }
@@ -652,7 +665,7 @@ export function startClone(
       // because SIGKILL delivery is asynchronous and an already-issued write can
       // land after the first pass. What must not survive is a `.git` carrying an
       // origin and no refs, which the next run would read as "already cloned".
-      if (opts?.immediate) {
+      if (immediate) {
         cleanup();
         if (existsSync(dest)) cleanup();
       }

@@ -9,7 +9,7 @@
 // here is either "agendo can't clone the thing I pasted" or — much worse — "agendo
 // cloned something else".
 import { test, expect } from "@playwright/test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +19,7 @@ import {
   enclosingCheckout,
   findMatchingCheckout,
   freeCloneDest,
+  startClone,
 } from "../src/clone.ts";
 
 // Just the identity, for the cases where the remote isn't what's under test.
@@ -404,6 +405,49 @@ test.describe("where the clone lands", () => {
     mkdirSync(join(dir, "git", "projects", "app", ".git"), { recursive: true });
     expect(enclosingCheckout(join(dir, "git", "projects", "app"), dir))
       .toBe(join(dir, "git", "projects", "app"));
+  });
+
+  // startClone against a stub `git` that ignores SIGTERM and keeps a directory
+  // on disk — the case the escalation path exists for. Driven directly (no TUI):
+  // what's under test is the cancel contract, not the screen.
+  test("REGRESSION: teardown after an esc-cancel still kills and cleans up", async () => {
+    const bin = join(dir, "bin");
+    const dest = join(dir, "clone-dest");
+    mkdirSync(bin, { recursive: true });
+    // A `git` that creates the destination (as a real clone does, config first)
+    // and then refuses to die on SIGTERM.
+    writeFileSync(
+      join(bin, "git"),
+      [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs');",
+        "process.on('SIGTERM', () => {});",
+        `fs.mkdirSync(${JSON.stringify(join(dest, ".git"))}, { recursive: true });`,
+        `fs.writeFileSync(${JSON.stringify(join(dest, ".git", "config"))}, 'origin');`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    );
+    chmodSync(join(bin, "git"), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const run = startClone("https://github.com/owner/repo.git", dest, () => {});
+      // Wait for the stub to have written something to clean up.
+      for (let i = 0; i < 100 && !existsSync(dest); i++) await new Promise((r) => setTimeout(r, 20));
+      expect(existsSync(dest)).toBe(true);
+
+      run.cancel(); // esc: SIGTERM, cleanup deferred to the child's exit…
+      run.cancel({ immediate: true }); // …then the app goes down before it exits.
+
+      // A guard that returned early on the second call would leave both the
+      // child and its half-written `.git` (origin set, no refs) behind — and
+      // that directory reads as "already cloned" on the next run.
+      expect(existsSync(dest)).toBe(false);
+      await run.done;
+    } finally {
+      process.env.PATH = prevPath;
+    }
   });
 
   test("findMatchingCheckout: non-repos and origin-less checkouts are skipped, not crashed on", () => {

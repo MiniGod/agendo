@@ -2104,7 +2104,15 @@ export default function App({
     // ── agent picker (first step of every fresh flow) ──
     if (mode.kind === "agent") {
       const len = AGENT_CHOICES.length;
-      if (key.escape) return setMode({ kind: "list" });
+      if (key.escape) {
+        // Last exit from the fresh flow, so it's where an unconsumed clone note
+        // dies. Escaping all the way out (wtchoice → repo → agent → list) and
+        // then resuming some existing session would otherwise prefix that
+        // launch with "✓ cloned …", crediting it to an unrelated clone.
+        setCloneNote(null);
+        cloneNoteRef.current = null;
+        return setMode({ kind: "list" });
+      }
       if (key.upArrow || input === "k")
         return setMode((p) => (p.kind === "agent" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
       if (key.downArrow || input === "j")
