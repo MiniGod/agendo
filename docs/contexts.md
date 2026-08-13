@@ -172,5 +172,11 @@ so a launch from inside a scoped host session is restored by that same launcher.
 ## Invariants
 
 - Bare `agendo` is byte-identical to today: session `agendo`, no filter, legacy
-  restore file honored, `g` still groups.
+  restore file honored, `g` still groups. One deliberate exception, for the
+  bootstrap case only: when the session-derived repo list is **empty** (a fresh
+  install — no sessions anywhere), the new-session picker falls back to the
+  launcher's cwd resolved to its enclosing checkout. Without it the picker has
+  nothing to offer and the first session can never be created, since a repo only
+  enters that list by already having a session in it. An install with any
+  session at all keeps its ranking untouched.
 - Live window→session attribution is never gated by the path filter.
