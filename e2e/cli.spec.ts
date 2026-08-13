@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
+import { stripAnsi } from "../src/tmux.ts";
 import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
@@ -969,9 +970,22 @@ test("agendo open on an unknown id / with no id fails cleanly", async ({ mock })
   expect(unknown.code).toBe(1);
   expect(unknown.stderr).toContain("No session found");
 
+  // No id → one actionable usage line. The program prefix is SELF_CMD, which
+  // deliberately adapts to how agendo was invoked (the bare name when it's
+  // installed on PATH, `bunx`/`npx agendo` under a package runner, else the
+  // literal argv — see src/launch.ts), so pinning a literal "agendo" here only
+  // holds on machines that happen to have it installed. What IS the contract:
+  // a single `usage:` line, behind a genuinely re-invokable prefix, naming the
+  // subcommand form and every flag it takes.
   const noId = agendo(mock.env, "open");
   expect(noId.status).toBe(1);
-  expect(noId.stderr).toContain("usage: agendo open <id>");
+  // stripAnsi: the mock env forces color, so bun wraps console.error output in
+  // SGR codes — harmless for `toContain`, fatal for an anchored match.
+  const usage = stripAnsi(noId.stderr).trim();
+  expect(usage.split("\n")).toHaveLength(1); // a usage line, never a stack trace
+  expect(usage).toMatch(
+    /^usage: (agendo|bunx agendo|npx agendo|.+\bindex\.tsx) open <id> \[--pr \| --work-item\] \[--print\]$/,
+  );
 
   const badFlag = agendo(mock.env, "open", SHORT_ID, "--nope");
   expect(badFlag.status).toBe(1);
