@@ -237,6 +237,16 @@ export function sendDialogReveal(target: string): void {
 export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "limited" | "unknown";
 
 /**
+ * The readiness states that mean the agent is actively working right now.
+ * Everything else is settled in some way — idle, waiting on a human, blocked at
+ * a usage limit, or unreadable. Canonical here (next to the type) because two
+ * unrelated features key off the same distinction: `agendo wait`'s default
+ * "still busy" predicate, and the stalled-session qualifier (see src/idle.ts),
+ * which must never flag a session that is simply mid-turn.
+ */
+export const WORKING_READINESS: ReadonlySet<Readiness> = new Set<Readiness>(["busy", "compacting"]);
+
+/**
  * Real (user-typed) text on the claude input line, ignoring the `❯` marker and
  * any gray/dim *suggestion* placeholder. The TUI renders a suggestion in faint
  * (`\e[2m`) / gray, and real text in the default color — so we count only

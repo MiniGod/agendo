@@ -7,12 +7,14 @@ import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
-  sessionRoot, currentSessionName, killWindow,
+  sessionRoot, currentSessionName, killWindow, WORKING_READINESS,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
+import { durationLabel, idleSeconds, isStalled, resolveStalledAfterMs, shortAge } from "./idle.ts";
+import { branchSync, type BranchSync } from "./gitrefs.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
@@ -46,10 +48,19 @@ Usage:
                                 Any other dashed argument is an error; put prompt
                                 text that starts with -- after a bare --.
   agendo list, ls [dir]        List the sessions running right now, one per line
-                                (readiness, kind, id, dir, title). With a dir,
-                                only sessions whose cwd is under it are shown.
+                                (readiness, kind, id, age, dir, title). "age" is
+                                how long since the session last did anything; a
+                                live, non-busy session idle past the stall
+                                threshold is marked ⚠stalled. With a dir, only
+                                sessions whose cwd is under it are shown.
       --json                    Emit machine-readable JSON (with branch + linked
-                                PR + work-item/issue per session).
+                                PR + work-item/issue + idleSeconds/stalled and
+                                unpushed-work state per session).
+      --stalled-after <dur>     Idle time after which a live, non-busy session is
+                                flagged stalled (default 4h; persist your own via
+                                "stalledAfterMinutes" in ~/.agendo/config.json).
+                                ⚠stalled only means "nothing has happened for
+                                that long" — agendo cannot know if work finished.
       --all, --include-idle     Also list idle (not-running) sessions, each marked
                                 running vs idle.
       --pr <n>                  Only sessions linked to PR #n (resolved via the
@@ -75,12 +86,14 @@ Usage:
       --all                     All running sessions
       --prefix <p>              Sessions whose dir basename starts with p
       --repo <name>             Sessions whose repo root basename is name
-  agendo status <id>           Show a session's state, task checklist, workflows
-                                (Workflow-tool runs with agent progress), recent
-                                activity + full final response, and input
+  agendo status <id>           Show a session's state, idle age, task checklist,
+                                workflows (Workflow-tool runs with agent progress),
+                                recent activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
       --full, -F                Don't truncate the prompt / activity details
+      --stalled-after <dur>     Idle time after which a live, non-busy session is
+                                reported stalled (as for list)
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
                                 its input is idle/ready (not mid-turn, no open
                                 question, nothing already typed).
@@ -112,6 +125,15 @@ const WF_GLYPH: Record<WorkflowStatus, string> = {
   interrupted: "[?]",
 };
 
+/**
+ * Trailing marker for a stalled session, in the same slot as the ⛁ (background
+ * shells) and ◆ (running workflows) markers. Deliberately a marker rather than a
+ * new column or a changed `ready` value: readiness is load-bearing for `send` /
+ * `wait` / auto-resume and must keep reading exactly as before. The `age` column
+ * already carries the idle time this qualifies.
+ */
+const STALLED_MARK = "⚠stalled";
+
 /** Short kind labels for the `list` columns, matching the menu's {bg}/{new} badges. */
 const KIND_LABEL: Record<SessionKind, string> = {
   background: "bg",
@@ -120,14 +142,6 @@ const KIND_LABEL: Record<SessionKind, string> = {
   pr: "pr",
   resumed: "—",
 };
-
-/**
- * Readiness states that mean the session is actively working (not settled) — the
- * default "still busy" set `agendo wait` polls against. Declared here, before the
- * subcommand dispatch runs, so the hoisted `waitSatisfied` never reads it in the
- * temporal dead zone during an early `wait` invocation.
- */
-const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
 
 /**
  * Print a JSON payload and await the write. The subcommand dispatch calls
@@ -143,13 +157,14 @@ function printJson(value: unknown): Promise<void> {
   });
 }
 
-/** Compact "last used" age for the list columns (matches the menu's timeAgo). */
+/**
+ * Compact "last used" age for the list columns (matches the menu's timeAgo).
+ * Built from the same `idleSeconds`/`shortAge` pair the `idle:` line and the
+ * `--json` `idleSeconds` field use, so the age column can't disagree with them
+ * at a bucket boundary.
+ */
 function timeAgo(d: Date): string {
-  const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  return `${shortAge(idleSeconds(d))} ago`;
 }
 
 if (process.argv.includes("--help") || process.argv.includes("-h") || process.argv[2] === "help") {
@@ -173,9 +188,25 @@ if (!tmuxAvailable()) {
 // menu shows, so an agent that launched a background session can poll it.
 if (process.argv[2] === "status") {
   const rest = process.argv.slice(3);
-  const full = rest.includes("--full") || rest.includes("-F");
-  const token = rest.find((a) => a !== "--full" && a !== "-F");
-  await runStatus(token, full);
+  let full = false;
+  let token: string | undefined;
+  // `--stalled-after` takes a value, so the argv walk can't be a bare `find` any
+  // more — the duration must not be mistaken for the session id.
+  let stalledAfterMs: number | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--full" || a === "-F") full = true;
+    else if (a === "--stalled-after") stalledAfterMs = requireDuration("status", "--stalled-after", rest[++i]);
+    // A dashed argument is never a session id. Rejecting it loudly beats the old
+    // behaviour of treating it as the token and failing with a baffling
+    // `No session found for "--stalled-after=1h"` (the inline GNU form isn't
+    // supported here — `list`'s flags don't take it either).
+    else if (a.startsWith("-")) {
+      console.error(`status: unknown flag "${a}" (expected: --full/-F, --stalled-after <dur>)`);
+      process.exit(1);
+    } else if (token === undefined) token = a;
+  }
+  await runStatus(token, full, stalledAfterMs);
   process.exit(0);
 }
 
@@ -339,6 +370,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   let all = false;
   let pr: number | undefined;
   let item: number | undefined;
+  let stalledAfterMs: number | undefined;
   // Optional `[dir]` positional scopes the listing to sessions whose cwd is under
   // it, mirroring the TUI's path filter; resolved against the current directory.
   let dirArg: string | undefined;
@@ -347,6 +379,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     const a = rest[i];
     if (a === "--json") json = true;
     else if (a === "--all" || a === "--include-idle") all = true;
+    else if (a === "--stalled-after") stalledAfterMs = requireDuration("list", "--stalled-after", rest[++i]);
     else if (a === "--pr") pr = Number(rest[++i]);
     else if (a === "--issue" || a === "--work-item" || a === "--workitem") item = Number(rest[++i]);
     else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
@@ -360,7 +393,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     process.exit(1);
   }
   const filterRoot = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
-  await runList({ json, all, pr, item, filterRoot });
+  await runList({ json, all, pr, item, filterRoot, stalledAfterMs });
   process.exit(0);
 }
 
@@ -416,8 +449,8 @@ if (process.argv[2] === "wait") {
     else if (a === "--repo") repo = rest[++i];
     else if (a === "--state") state = rest[++i];
     else if (a === "--not") not = rest[++i];
-    else if (a === "--timeout") timeoutMs = requireDuration("--timeout", rest[++i]);
-    else if (a === "--interval") intervalMs = requireDuration("--interval", rest[++i]);
+    else if (a === "--timeout") timeoutMs = requireDuration("wait", "--timeout", rest[++i]);
+    else if (a === "--interval") intervalMs = requireDuration("wait", "--interval", rest[++i]);
     else if (a === "--") { ids.push(...rest.slice(i + 1)); break; }
     else ids.push(a);
   }
@@ -507,9 +540,9 @@ if (!process.argv.includes("--no-tmux")) {
  * written its log yet — if so we still report it as running from its live tmux
  * window. `token` may be a full session id, a short id, or a `cl-…-<id>` name.
  */
-async function runStatus(token: string | undefined, full = false): Promise<void> {
+async function runStatus(token: string | undefined, full = false, stalledAfterMs?: number): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id> [--full]`);
+    console.error(`usage: ${SELF_CMD} status <id> [--full] [--stalled-after <dur>]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
@@ -527,14 +560,32 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   const target = liveTargetForShortId(shortId(s.id));
   const running = !!target || liveTargets().has(sessionName(s));
   const act = await loadActivity(s, { full });
+  // The pane is captured up front (rather than inside the `if (target)` block
+  // below) because the stall qualifier needs readiness — a session that is
+  // mid-turn is never stalled, however old its transcript looks — and it prints
+  // above the readiness line.
+  const pane = target ? capturePaneState(target) : null;
+  const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
+  const idle = idleSeconds(s.lastUsed);
+  const thresholdMs = resolveStalledAfterMs(stalledAfterMs);
+  const stalled = isStalled({ running, readiness, idleSeconds: idle }, thresholdMs);
   console.log(`${running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
   console.log(`  id:     ${s.id}`);
   console.log(`  dir:    ${s.cwd}`);
   if (s.branch) console.log(`  branch: ${s.branch}`);
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
-  if (target) {
-    const { raw, cursor } = capturePaneState(target);
-    const readiness = paneReadiness(raw, cursor);
+  console.log(`  idle:   ${shortAge(idle)} (${idle}s since its last recorded activity)`);
+  if (stalled) {
+    console.log(`          ⚠ stalled: live and not busy, but nothing has happened for ${shortAge(idle)}`);
+    console.log(`          (threshold ${durationLabel(thresholdMs)}). agendo cannot tell "finished" from "fell over" — read`);
+    console.log(`          the final response below to judge.`);
+  }
+  // Unpushed-work state, read straight from the checkout's .git refs (no `git`
+  // process, no fetch — see src/gitrefs.ts). Silent when it can't be determined.
+  const sync = branchSync(s.cwd);
+  if (sync) console.log(`  work:   ${describeSync(sync)}`);
+  if (pane) {
+    const { raw } = pane;
     console.log(`  ready:  ${readiness}`);
     if (readiness === "limited") {
       const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
@@ -588,6 +639,24 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   }
   // The FULL final response, always untruncated — the key orchestrator read.
   if (act.finalResponse) console.log(`\n  final response:\n${indent(act.finalResponse)}`);
+}
+
+/**
+ * One line describing a checkout's local-vs-tracked state for `status`. It names
+ * the LIVE HEAD branch (the `branch:` line above it is the transcript-recorded
+ * one, which can be stale), and says where the answer came from — the comparison
+ * is deliberately fetch-free, against the tracking ref as this clone last saw it.
+ * When the branch has no configured upstream the wording stays hedged rather
+ * than asserting the work was never pushed.
+ */
+function describeSync(sync: BranchSync): string {
+  const where = "(from .git refs, no fetch)";
+  const head = `HEAD on ${sync.branch}`;
+  if (!sync.unpushed) return `${head} — matches ${sync.upstream} ${where}`;
+  if (sync.hasRemoteRef) return `${head} — differs from ${sync.upstream}: unpushed or diverged ${where}`;
+  return sync.upstreamConfigured
+    ? `${head} — nothing at ${sync.upstream} yet: never pushed ${where}`
+    : `${head} — no ${sync.upstream} ref and no configured upstream: unpushed, or tracking another remote ${where}`;
 }
 
 /** Indent every line of a block by four spaces for the status output. */
@@ -667,6 +736,8 @@ interface ListOptions {
   item?: number;
   /** Scope to sessions whose cwd is under this absolute root (TUI path filter). */
   filterRoot: string | null;
+  /** `--stalled-after` override, in ms; falls back to config (see src/idle.ts). */
+  stalledAfterMs?: number;
 }
 
 /** One session as reported by the enriched (`--json` / `--all` / query) list. */
@@ -687,6 +758,22 @@ interface ListRow {
   title: string;
   /** When the session was last active (ISO 8601), for machine consumers. */
   lastUsed: string;
+  /** Seconds since that last activity — idle age, without parsing a timestamp. */
+  idleSeconds: number;
+  /**
+   * QUALIFIER, not a readiness state: the session is live, isn't mid-turn, and
+   * has done nothing for at least `stalledAfterSeconds`. It does NOT mean the
+   * work is unfinished — agendo cannot know that. See src/idle.ts.
+   */
+  stalled: boolean;
+  /** The threshold `stalled` was judged against, so the flag reads standalone. */
+  stalledAfterSeconds: number;
+  /**
+   * Local-vs-origin state of the session's checkout, read from `.git` ref files
+   * (never a `git` process, never a fetch). `null` when undeterminable — which
+   * is NOT the same as "in sync". See src/gitrefs.ts.
+   */
+  git: BranchSync | null;
   /** Linked PR, resolved through the model's reverse index (null if none/unknown). */
   pr: { id: number; url: string } | null;
   /** Linked work item / issue, resolved through the model's reverse index. */
@@ -721,8 +808,9 @@ function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProv
  */
 async function runList(opts: ListOptions): Promise<void> {
   const index = await SessionIndex.build();
+  const thresholdMs = resolveStalledAfterMs(opts.stalledAfterMs);
   const enriched = opts.json || opts.all || opts.pr !== undefined || opts.item !== undefined;
-  if (!enriched) return runPlainList(index, opts.filterRoot);
+  if (!enriched) return runPlainList(index, opts.filterRoot, thresholdMs);
 
   const isQuery = opts.pr !== undefined || opts.item !== undefined;
   // Associations come from the model's reverse index. A query MUST have it (the
@@ -782,6 +870,7 @@ async function runList(opts: ListOptions): Promise<void> {
       shells = paneShells(raw);
     }
     const l = linkOf(s);
+    const idle = idleSeconds(s.lastUsed);
     return {
       id: s.id,
       shortId: shortId(s.id),
@@ -795,6 +884,18 @@ async function runList(opts: ListOptions): Promise<void> {
       dir: basename(s.cwd) || s.cwd,
       title: s.title.replace(/\s+/g, " ").trim(),
       lastUsed: s.lastUsed.toISOString(),
+      idleSeconds: idle,
+      stalled: isStalled({ running, readiness, idleSeconds: idle }, thresholdMs),
+      // Exact, NOT floored: a consumer re-deriving `idleSeconds >= stalledAfterSeconds`
+      // must reach the same verdict this row already carries, including for
+      // sub-second thresholds.
+      stalledAfterSeconds: thresholdMs / 1000,
+      // Ref-file reads only, and only here on the one-shot CLI path — never from
+      // SessionIndex.build()/loadLocalSessions(), which the 2s rescan drives.
+      // Skipped entirely unless a JSON consumer will actually read it: the human
+      // table below doesn't render it, and `--all` can enumerate every session
+      // on disk.
+      git: opts.json ? branchSync(s.cwd) : null,
       pr: l?.pr ?? null,
       workItem: l?.workItem ?? null,
       workflows: (s.workflows ?? []).map((w) => ({
@@ -834,7 +935,10 @@ async function runList(opts: ListOptions): Promise<void> {
         r.dir.slice(0, 20).padEnd(20),
         (r.pr ? `!${r.pr.id}` : "-").padEnd(6),
         (r.workItem ? `#${r.workItem.id}` : "-").padEnd(6),
-        r.title.slice(0, 44) + (r.shells > 0 ? `  ⛁${r.shells}` : "") + (wfRunning > 0 ? `  ◆${wfRunning}` : ""),
+        r.title.slice(0, 44) +
+          (r.stalled ? `  ${STALLED_MARK}` : "") +
+          (r.shells > 0 ? `  ⛁${r.shells}` : "") +
+          (wfRunning > 0 ? `  ◆${wfRunning}` : ""),
       ].join("  ").trimEnd(),
     );
   }
@@ -846,9 +950,10 @@ async function runList(opts: ListOptions): Promise<void> {
  * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by
  * embedded short id, work-item / PR names by working directory (as in model.ts)
  * — then report readiness, kind, id, location and title. Running-only and
- * model-free by design. An optional `filterRoot` scopes to sessions under it.
+ * model-free by design. An optional `filterRoot` scopes to sessions under it, and
+ * `thresholdMs` (already resolved by the caller) decides the ⚠stalled marker.
  */
-function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
+function runPlainList(index: SessionIndex, filterRoot: string | null, thresholdMs: number): void {
   const seen = new Set<string>();
   const rows: string[] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
@@ -869,18 +974,23 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     seen.add(key);
     const { raw, cursor } = capturePaneState(name);
     const shells = paneShells(raw);
+    const readiness = paneReadiness(raw, cursor);
     // Running-workflow marker (◆N): the session is live here by construction.
     const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
+    // …and so is the liveness the stall qualifier requires.
+    const stalled = isStalled({ running: true, readiness, idleSeconds: idleSeconds(s.lastUsed) }, thresholdMs);
     rows.push(
       [
         "●",
-        paneReadiness(raw, cursor).padEnd(10),
+        readiness.padEnd(10),
         KIND_LABEL[kind].padEnd(3),
         shortId(s.id),
         timeAgo(s.lastUsed).padEnd(8),
         (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
         s.title.replace(/\s+/g, " ").slice(0, 44),
-        [shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""].filter(Boolean).join(" "),
+        [stalled ? STALLED_MARK : "", shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""]
+          .filter(Boolean)
+          .join(" "),
       ].join("  ").trimEnd(),
     );
   }
@@ -1115,7 +1225,7 @@ interface WaitOptions {
 function waitSatisfied(r: Readiness, o: WaitOptions): boolean {
   if (o.state) return r === o.state;
   if (o.not) return r !== o.not;
-  return !BUSY_STATES.has(r) && r !== "unknown";
+  return !WORKING_READINESS.has(r) && r !== "unknown";
 }
 
 /** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
@@ -1136,10 +1246,10 @@ function parseDuration(s: string | undefined): number | null {
 }
 
 /** Parse a required duration flag, exiting with a clear error on bad/missing input. */
-function requireDuration(flag: string, s: string | undefined): number {
+function requireDuration(cmd: string, flag: string, s: string | undefined): number {
   const ms = parseDuration(s);
   if (ms === null) {
-    console.error(`wait: ${flag} needs a duration like 500ms, 2s, 5m, 1h (got "${s ?? ""}")`);
+    console.error(`${cmd}: ${flag} needs a duration like 500ms, 2s, 5m, 1h (got "${s ?? ""}")`);
     process.exit(1);
   }
   return ms;

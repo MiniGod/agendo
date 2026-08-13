@@ -73,6 +73,19 @@ monitor and steer them through the same commands. One orchestrator session can f
 large task out across many worktrees and coordinate them, instead of hand-rolling
 tmux and `git worktree`. The sessions it starts inherit the same ability.
 
+### Telling a finished session from a stalled one
+
+A session that fell over mid-task 22 hours ago and one that answered cleanly 20
+seconds ago both sit at a `ready` prompt. So `agendo list`/`status` also report how
+long since a session last did anything, and mark a live, non-busy one that has been
+silent past a threshold (4h by default — `stalledAfterMinutes` in
+`~/.agendo/config.json`, or `--stalled-after <dur>`) with `⚠stalled`. That flag only
+ever means "nothing has happened for that long"; agendo cannot know whether the work
+finished. Alongside it, `--json` carries `idleSeconds` and whether the checkout holds
+commits the remote doesn't — read straight from its `.git` refs, never by shelling out
+to `git` — which is usually enough for an orchestrator to spot a parked session
+without reading its transcript.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
@@ -91,7 +104,8 @@ Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `proj
 `team`, `tenant`. There are no baked-in defaults and nothing is auto-discovered, so
 set them for your own setup (see `src/config.ts` for the shape); the token is fetched
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
-found across your local sessions. Your selected backend is remembered in
+found across your local sessions. The stall threshold (`stalledAfterMinutes`, default
+240) lives in the same file. Your selected backend is remembered in
 `~/.agendo/state.json`.
 
 ## Testing

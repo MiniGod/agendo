@@ -91,6 +91,70 @@ export async function materializeHome(home: string): Promise<void> {
     await mkdir(join(root, ".git"), { recursive: true });
   }
 
+  // Real `.git` REF FILES (no git binary involved) for the unpushed-work signal
+  // in `agendo status` / `list --json`, which reads them directly rather than
+  // spawning git (see src/gitrefs.ts).
+  //
+  //  • standalone: a plain checkout on `main` with a CONFIGURED origin upstream,
+  //    in sync — and the remote ref is PACKED, the normal state right after a
+  //    clone, so the packed-refs fallback is exercised too.
+  //  • appweb's `login` LINKED WORKTREE: the layout every agendo session actually
+  //    uses — the worktree's `.git` is a FILE pointing at
+  //    <repo>/.git/worktrees/login, which holds its own HEAD plus a `commondir`
+  //    back to the shared refs. feature/login has no configured upstream and no
+  //    origin/feature/login ref → the hedged "unpushed, or tracking another
+  //    remote" case, and the "parked mid-task" story.
+  //  • appweb's `fix-crash-102` worktree: a branch whose configured upstream is a
+  //    DIFFERENTLY-NAMED remote AND branch (`upstream/renamed-crash-fix`), in
+  //    sync with it. Assuming `origin/<same name>` would report this fully-pushed
+  //    work as "never pushed" — the false "unfinished work here" signal.
+  //  • applib is a COMPLETE repo (HEAD + a ref) whose `experiment` worktree dir
+  //    deliberately does NOT exist — the copilot session points at a deleted
+  //    worktree, the routine post-merge state. The ref lookup must report
+  //    "unknown" for it and must NOT walk up and describe applib's own master as
+  //    if it were that session's branch.
+  const SHA_MAIN = "1111111111111111111111111111111111111111";
+  const SHA_LOGIN = "2222222222222222222222222222222222222222";
+  const SHA_CRASH = "3333333333333333333333333333333333333333";
+  const SHA_APPLIB = "5555555555555555555555555555555555555555";
+  await mkdir(join(p.applib, ".git", "refs", "heads"), { recursive: true });
+  await writeFile(join(p.applib, ".git", "HEAD"), "ref: refs/heads/master\n");
+  await writeFile(join(p.applib, ".git", "refs", "heads", "master"), `${SHA_APPLIB}\n`);
+  await mkdir(join(p.standalone, ".git", "refs", "heads"), { recursive: true });
+  await writeFile(join(p.standalone, ".git", "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(p.standalone, ".git", "refs", "heads", "main"), `${SHA_MAIN}\n`);
+  await writeFile(
+    join(p.standalone, ".git", "packed-refs"),
+    `# pack-refs with: peeled fully-peeled sorted \n${SHA_MAIN} refs/remotes/origin/main\n`,
+  );
+  await writeFile(
+    join(p.standalone, ".git", "config"),
+    ['[branch "main"]', "\tremote = origin", "\tmerge = refs/heads/main", ""].join("\n"),
+  );
+
+  await mkdir(join(p.appweb, ".git", "refs", "heads", "feature"), { recursive: true });
+  await mkdir(join(p.appweb, ".git", "refs", "remotes", "upstream"), { recursive: true });
+  await writeFile(join(p.appweb, ".git", "HEAD"), "ref: refs/heads/master\n");
+  await writeFile(join(p.appweb, ".git", "refs", "heads", "feature", "login"), `${SHA_LOGIN}\n`);
+  await writeFile(join(p.appweb, ".git", "refs", "heads", "worktree-fix-crash-102"), `${SHA_CRASH}\n`);
+  await writeFile(join(p.appweb, ".git", "refs", "remotes", "upstream", "renamed-crash-fix"), `${SHA_CRASH}\n`);
+  // Only the crash branch declares an upstream; feature/login deliberately has none.
+  await writeFile(
+    join(p.appweb, ".git", "config"),
+    ['[branch "worktree-fix-crash-102"]', "\tremote = upstream", "\tmerge = refs/heads/renamed-crash-fix", ""].join("\n"),
+  );
+  for (const [name, cwd, head] of [
+    ["login", p.loginCwd, "refs/heads/feature/login"],
+    ["fix-crash-102", p.crashCwd, "refs/heads/worktree-fix-crash-102"],
+  ] as const) {
+    const wtGitDir = join(p.appweb, ".git", "worktrees", name);
+    await mkdir(wtGitDir, { recursive: true });
+    await writeFile(join(wtGitDir, "HEAD"), `ref: ${head}\n`);
+    await writeFile(join(wtGitDir, "commondir"), "../..\n");
+    await mkdir(cwd, { recursive: true });
+    await writeFile(join(cwd, ".git"), `gitdir: ${wtGitDir}\n`);
+  }
+
   const projects = join(home, ".claude", "projects");
 
   // 1) login session — running. Its gitBranch DELIBERATELY progresses across the

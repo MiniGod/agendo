@@ -4,16 +4,18 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
 const SHORT_ID = shortIdOf(LOGIN_SESSION_ID);
 const CRASH_SHORT_ID = shortIdOf(CRASH_SESSION_ID);
 const COP_SHORT_ID = shortIdOf(COPILOT_SESSION_ID);
+const STANDALONE_SHORT_ID = shortIdOf(STANDALONE_SESSION_ID);
 
 // A mid-generation TUI: the live token counter is the reliable "busy" signal, so
 // `paneReadiness` classifies this as "busy" (not sendable / not settled).
@@ -300,6 +302,274 @@ test("agendo list [dir] scopes the listing to sessions under the dir", async ({ 
   expect(inApplib.status).toBe(0);
   expect(inApplib.stdout).toContain("Experiment spike");
   expect(inApplib.stdout).not.toContain("Implement login form");
+});
+
+// ── idle age + the stalled qualifier ─────────────────────────────────────────
+// The problem these guard: a session that fell over mid-task 22 hours ago and one
+// that finished cleanly 20 seconds ago both render as `ready`, so an orchestrator
+// has to fetch the last message and judge the prose to tell them apart. Idle age
+// plus the ⚠stalled qualifier make it decidable — WITHOUT touching readiness,
+// which stays load-bearing for send / wait / auto-resume.
+//
+// Fixture ages (see materializeHome): login 5m (running), crash 1h, copilot 2h,
+// standalone 5h — only login has a live window.
+
+/** The one output row for a session, so an assertion can't be satisfied by the
+ *  header or by a different session's row. */
+const rowFor = (stdout: string, id: string) => stdout.split("\n").find((l) => l.includes(id)) ?? "";
+
+/** Write a minimal extra Claude transcript into the fixture HOME, so a test can
+ *  place a session at an arbitrary cwd that materializeHome doesn't cover. */
+async function writeSessionAt(home: string, id: string, cwd: string, title: string) {
+  const dir = join(home, ".claude", "projects", `extra-${id}`);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, `${id}.jsonl`),
+    [
+      JSON.stringify({ type: "summary", cwd, gitBranch: "main", timestamp: "2026-06-20T10:00:00.000Z" }),
+      JSON.stringify({ type: "ai-title", aiTitle: title, timestamp: "2026-06-20T10:00:01.000Z" }),
+      "",
+    ].join("\n"),
+  );
+}
+
+test("agendo list surfaces idle age, and --json carries it as seconds per session", async ({ mock }) => {
+  const plain = agendo(mock.env, "list");
+  expect(plain.status).toBe(0);
+  // The age sits on the session's OWN row, after its readiness — not merely
+  // somewhere in the output.
+  expect(rowFor(plain.stdout, SHORT_ID)).toMatch(/ready\s+.*\s\d+[smhd] ago\s/);
+
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  // Machine-readable: seconds AND the ISO timestamp, not a humanized string.
+  expect(login.idleSeconds).toBeGreaterThanOrEqual(240); // ~5 minutes
+  expect(login.idleSeconds).toBeLessThan(3600);
+  expect(Number.isFinite(new Date(login.lastUsed).getTime())).toBe(true);
+  // It's per-session, not one clock for the listing: standalone is far older.
+  const standalone = rows.find((x) => x.shortId === STANDALONE_SHORT_ID);
+  expect(standalone.idleSeconds).toBeGreaterThan(login.idleSeconds);
+});
+
+test("⚠stalled trips past the threshold and not before, leaving readiness alone", async ({ mock }) => {
+  // The login session is live with a ready pane and last did something 5m ago.
+  const under = agendo(mock.env, "list", "--stalled-after", "1h");
+  expect(under.status).toBe(0);
+  expect(under.stdout).toContain("ready");
+  expect(under.stdout).not.toContain("⚠stalled");
+
+  const over = agendo(mock.env, "list", "--stalled-after", "1m");
+  expect(over.status).toBe(0);
+  // …and it is a QUALIFIER riding alongside an UNCHANGED readiness column: both
+  // appear on the same row, readiness still reading exactly "ready".
+  expect(rowFor(over.stdout, SHORT_ID)).toMatch(/●\s+ready\s+.*⚠stalled/);
+});
+
+test("a busy session is never stalled, and neither is one that isn't running", async ({ mock }) => {
+  // Mid-generation pane: demonstrably alive and working, so no threshold — not
+  // even 1ms — may flag it, however old its transcript mtime is.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const plain = agendo(mock.env, "list", "--stalled-after", "1ms");
+  expect(plain.status).toBe(0);
+  expect(plain.stdout).toContain("busy");
+  expect(plain.stdout).not.toContain("⚠stalled");
+
+  const r = await agendoAsync(mock.env, "list", "--all", "--json", "--stalled-after", "1ms").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("busy"); // readiness value itself is unchanged
+  expect(login.stalled).toBe(false);
+  expect(login.idleSeconds).toBeGreaterThan(1); // …despite being well past 1ms
+  // A session with no live window is "not running", never "stalled" — otherwise
+  // every session on disk would be permanently stalled as it ages.
+  const crash = rows.find((x) => x.shortId === CRASH_SHORT_ID);
+  expect(crash.running).toBe(false);
+  expect(crash.stalled).toBe(false);
+  expect(crash.idleSeconds).toBeGreaterThan(login.idleSeconds);
+  // The threshold each verdict was judged against travels with the row, EXACTLY
+  // — a consumer re-deriving the comparison must not disagree with `stalled`.
+  expect(login.stalledAfterSeconds).toBe(0.001);
+});
+
+test("a session whose pane can't be read is never stalled (no evidence, no verdict)", async ({ mock }) => {
+  // The tmux session exists, but there is no readable pane behind it — the shape a
+  // restored-but-unopened placeholder tab or an uncapturable window takes. We can't
+  // see that it ISN'T working, so the flag must stay off however long it's been.
+  await mock.setTmuxState({ ...tmuxState, panes: [], captures: {} });
+  const r = await agendoAsync(mock.env, "list", "--all", "--json", "--stalled-after", "1ms").done;
+  expect(r.code).toBe(0);
+  const login = (JSON.parse(r.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.running).toBe(true);
+  expect(login.readiness).toBeNull();
+  expect(login.stalled).toBe(false);
+});
+
+test("the stall threshold is configurable in config.json, and the flag still wins", async ({ mock }) => {
+  // Same fixture config (org/project/team must survive — the ADO paths need it)
+  // plus a one-minute threshold, so the 5-minute-idle login session trips it with
+  // no flag at all.
+  await writeFile(
+    join(mock.home, ".claude-launcher", "config.json"),
+    JSON.stringify({ org: "acme", project: "Widgets", team: "Team A", stalledAfterMinutes: 1 }, null, 2),
+  );
+  const configured = agendo(mock.env, "list");
+  expect(configured.status).toBe(0);
+  expect(configured.stdout).toContain("⚠stalled");
+
+  // An explicit --stalled-after overrides the configured value.
+  const flagged = agendo(mock.env, "list", "--stalled-after", "6h");
+  expect(flagged.status).toBe(0);
+  expect(flagged.stdout).not.toContain("⚠stalled");
+});
+
+test("agendo status reports idle age and, past the threshold, the stall verdict", async ({ mock }) => {
+  const r = agendo(mock.env, "status", SHORT_ID);
+  expect(r.status).toBe(0);
+  // Both forms: compact for humans, raw seconds for machines.
+  expect(r.stdout).toMatch(/idle:\s+\d+[smhd] \(\d+s since its last recorded activity\)/);
+  expect(r.stdout).not.toContain("⚠ stalled"); // 5m idle, 4h default threshold
+
+  const stalled = agendo(mock.env, "status", SHORT_ID, "--stalled-after", "1m");
+  expect(stalled.status).toBe(0);
+  expect(stalled.stdout).toContain("⚠ stalled");
+  expect(stalled.stdout).toContain("threshold 1m");
+  // Honest about what it can and cannot know.
+  expect(stalled.stdout).toContain(`cannot tell "finished" from`);
+  // The readiness line is untouched by the qualifier.
+  expect(stalled.stdout).toContain("ready:");
+
+  // The threshold is quoted back EXACTLY as configured. It has to be one the
+  // 5-minute-idle session actually trips (or the line never prints), and one
+  // that spans two units: a single-unit rendering would report 90s as "1m".
+  const odd = agendo(mock.env, "status", SHORT_ID, "--stalled-after", "90s");
+  expect(odd.status).toBe(0);
+  expect(odd.stdout).toContain("threshold 1m30s");
+});
+
+test("agendo status rejects an unknown dashed argument instead of reading it as an id", async ({ mock }) => {
+  // Previously any dashed junk fell through to the session-id slot and failed
+  // with a baffling `No session found for "--stalled-after=1h"`. The inline GNU
+  // form isn't supported here (list's flags don't take it either), so it must
+  // name itself as the problem.
+  const r = agendo(mock.env, "status", "--stalled-after=1h", SHORT_ID);
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain(`unknown flag "--stalled-after=1h"`);
+  expect(r.stderr).not.toContain("No session found");
+});
+
+test("unpushed work is read from .git refs — no `git` process, in status and --json", async ({ mock }) => {
+  // The login session lives in a LINKED WORKTREE on feature/login: no configured
+  // upstream and no origin/feature/login ref. Work that exists nowhere but this
+  // checkout — which, next to "idle for hours", is the orchestrator's real
+  // "unfinished work here" — but the wording stays hedged, because a branch
+  // tracking a differently-named remote looks the same from here.
+  const login = agendo(mock.env, "status", SHORT_ID);
+  expect(login.status).toBe(0);
+  expect(login.stdout).toContain("HEAD on feature/login");
+  expect(login.stdout).toContain("no origin/feature/login ref and no configured upstream");
+  expect(login.stdout).toContain("no fetch"); // says where the answer came from
+
+  // The standalone checkout is on main, tracking a CONFIGURED origin/main whose
+  // ref is PACKED (the packed-refs fallback) — and matching it.
+  const standalone = agendo(mock.env, "status", STANDALONE_SHORT_ID);
+  expect(standalone.status).toBe(0);
+  expect(standalone.stdout).toContain("HEAD on main — matches origin/main");
+
+  // The crash worktree tracks a differently-named remote AND branch
+  // (upstream/renamed-crash-fix) and is in sync with it. Assuming
+  // origin/<same name> would call this fully-pushed work "never pushed".
+  const crash = agendo(mock.env, "status", CRASH_SHORT_ID);
+  expect(crash.status).toBe(0);
+  expect(crash.stdout).toContain("matches upstream/renamed-crash-fix");
+  expect(crash.stdout).not.toContain("never pushed");
+
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  expect(rows.find((x) => x.shortId === SHORT_ID).git).toEqual({
+    branch: "feature/login",
+    upstream: "origin/feature/login",
+    upstreamConfigured: false,
+    hasRemoteRef: false,
+    unpushed: true,
+  });
+  expect(rows.find((x) => x.shortId === STANDALONE_SHORT_ID).git).toEqual({
+    branch: "main",
+    upstream: "origin/main",
+    upstreamConfigured: true,
+    hasRemoteRef: true,
+    unpushed: false,
+  });
+  expect(rows.find((x) => x.shortId === CRASH_SHORT_ID).git).toEqual({
+    branch: "worktree-fix-crash-102",
+    upstream: "upstream/renamed-crash-fix",
+    upstreamConfigured: true,
+    hasRemoteRef: true,
+    unpushed: false,
+  });
+  // The copilot session's worktree is GONE (the routine post-merge state) while
+  // its parent repo applib is a complete checkout on master. That must read as
+  // null — "unknown" — and must NOT walk up and report applib's own master as
+  // this session's branch, which would be the most misleading answer available.
+  expect(rows.find((x) => x.shortId === COP_SHORT_ID).git).toBeNull();
+
+  // Not one git invocation for ANY of the above — including the --json path
+  // (the fake-bin shims log every call).
+  expect((await mock.callLog()).some((l) => l.startsWith("git "))).toBe(false);
+});
+
+test("the rescan path never reaches the git-ref reader at all", async ({ mock }) => {
+  // The no-`git`-spawn guard in launcher.spec only catches someone RE-IMPLEMENTING
+  // this with a subprocess. The likelier regression is moving `branchSync` itself
+  // into the index build — no spawn, but a handful of per-session reads on a 2s
+  // timer across the whole session corpus, which is the CPU regression the parse
+  // cache exists to prevent. A static import check is what actually pins that.
+  for (const file of ["sessions.ts", "model.ts"]) {
+    const src = await readFile(join(REPO_ROOT, "src", file), "utf-8");
+    expect(src, `${file} must not reach src/gitrefs.ts — it runs on the rescan timer`).not.toContain("gitrefs");
+  }
+});
+
+test("a branch whose tip has moved past its tracking ref reads as unpushed", async ({ mock }) => {
+  // Same standalone checkout, one commit further on than the packed origin/main.
+  await writeFile(
+    join(mock.home, "repos", "standalone", ".git", "refs", "heads", "main"),
+    "4444444444444444444444444444444444444444\n",
+  );
+  const r = agendo(mock.env, "status", STANDALONE_SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("differs from origin/main: unpushed or diverged");
+});
+
+test("a branch tracking its BASE branch still counts as pushed once its own remote ref matches", async ({ mock }) => {
+  // What `git worktree add -b x` produces: the branch's configured upstream is
+  // the base branch it forked from, not its own name. Once the work is pushed,
+  // comparing only against that configured upstream would report the branch as
+  // permanently "unpushed" — the exact false signal, in agendo's own workflow.
+  await writeFile(
+    join(mock.home, "repos", "standalone", ".git", "config"),
+    ['[branch "main"]', "\tremote = origin", "\tmerge = refs/heads/master", ""].join("\n"),
+  );
+  const r = agendo(mock.env, "status", STANDALONE_SHORT_ID);
+  expect(r.status).toBe(0);
+  // origin/master doesn't exist here; origin/main does and matches the local tip.
+  expect(r.stdout).toContain("HEAD on main — matches origin/main");
+});
+
+test("unpushed work is found from a session started in a SUBDIRECTORY of the checkout", async ({ mock }) => {
+  // `cd src && claude` records the subdirectory verbatim as the session cwd, so
+  // the ref lookup has to walk up to the checkout — otherwise the signal is
+  // silently absent for every such session.
+  const sub = join(mock.home, "repos", "standalone", "src");
+  await mkdir(sub, { recursive: true });
+  await writeSessionAt(mock.home, "sub-dir-session", sub, "Work started in a subdir");
+
+  const r = agendo(mock.env, "status", shortIdOf("sub-dir-session"));
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("HEAD on main — matches origin/main");
 });
 
 // The usage-limit notice a throttled Claude Code pane shows — VERBATIM wording

@@ -754,6 +754,55 @@ test("(b) the fast rescan does NO backend fetch; work items stay put across seve
   await wt.waitForText("Another late session", 12000);
 });
 
+test("(c) the fast rescan spawns NO `git` process — the unpushed-work signal stays off the hot path", async ({ launch, mock }) => {
+  // Sibling guard to (b), for the shell rather than the network. `agendo status`
+  // / `list --json` report whether a checkout holds unpushed work; that answer is
+  // read from `.git` ref files precisely because SessionIndex.build() /
+  // loadLocalSessions() — which this 2s timer drives — must never spawn `git`.
+  // A per-repo spawn here is the ~62% CPU regression the parse cache exists to
+  // prevent, so the count of git invocations must not move across rescans.
+  //
+  // Scope: this catches a subprocess re-implementation of the signal. Moving the
+  // (spawn-free) ref reader itself onto this path wouldn't show up here — that is
+  // pinned separately by the static import check in cli.spec.ts.
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Add login screen", 20000); // full load done
+
+  // Snapshot only once the initial load's own git calls have stopped arriving —
+  // a fixed sleep would race a late one and move the count under us.
+  const gitCalls = async () => (await mock.callLog()).filter((l) => l.startsWith("git ")).length;
+  let before = -1;
+  for (let i = 0; i < 10; i++) {
+    const n = await gitCalls();
+    if (n === before) break;
+    before = n;
+    await sleep(1000);
+  }
+
+  // A new session mid-run in a repo root the initial load has NEVER seen. That
+  // matters: a naive per-repo `git` call memoized by root (the pattern already
+  // in src/sessions.ts) would spawn nothing for an already-indexed root, so the
+  // regression would slip past a probe pointed at appweb.
+  const SID = "55556666-7777-8888-9999-aaaabbbbcccc";
+  const win = `cl-claude-${shortIdOf(SID)}`;
+  const cwd = join(mock.home, "repos", "probe");
+  await mkdir(join(cwd, ".git"), { recursive: true });
+  await writeSession(mock.home, SID, cwd, "Unpushed probe session");
+  await mock.setTmuxState({
+    ...tmuxState,
+    windows: [{ session: RUNNING_TARGET, index: 1, name: win }],
+    panes: [...tmuxState.panes, { session: RUNNING_TARGET, window: win, cwd, placeholder: false }],
+    captures: { ...tmuxState.captures, [win]: IDLE_READY },
+  });
+
+  await sleep(6000); // several LIVE_POLL_MS rescans go by
+  expect(await gitCalls()).toBe(before);
+  // …and the rescan really did run (otherwise the assertion above is vacuous).
+  wt.write("3");
+  await wt.waitForText("Unpushed probe session", 12000);
+});
+
 test("(d) a rescan must not re-fire `continue` for an already-resumed limited window", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   await writeFile(join(mock.home, ".agendo", "state.json"), JSON.stringify({ provider: "ado", autoResumeOnUsageLimit: true }));

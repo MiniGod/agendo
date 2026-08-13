@@ -26,7 +26,20 @@ export interface Config {
   resource: string;
   /** Work item states considered "done" — hidden unless expanded. */
   closedStates: string[];
+  /**
+   * Minutes of inactivity after which a live, non-busy session is qualified as
+   * "stalled" in `agendo list` / `agendo status` (see src/idle.ts). Overridable
+   * per invocation with `--stalled-after <dur>`.
+   */
+  stalledAfterMinutes: number;
 }
+
+/**
+ * Default stall threshold, in minutes. Lives here (not in src/idle.ts) so
+ * `DEFAULTS` below and the fallback idle.ts uses for a malformed configured
+ * value can't drift apart — idle.ts imports it.
+ */
+export const DEFAULT_STALLED_AFTER_MINUTES = 240;
 
 const DEFAULTS: Config = {
   org: "",
@@ -37,6 +50,7 @@ const DEFAULTS: Config = {
   // tenant) — used as the token resource/audience, not a secret.
   resource: "499b84ac-1321-427f-aa17-267ca6975798",
   closedStates: ["Closed", "Done", "Removed", "Resolved"],
+  stalledAfterMinutes: DEFAULT_STALLED_AFTER_MINUTES,
 };
 
 // New data dir (`~/.agendo/`) — all writes go here. The older dirs are read-only,
