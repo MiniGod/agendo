@@ -199,6 +199,26 @@ test.describe("parseRepoUrl: Azure DevOps", () => {
       .toBe("git@ssh.dev.azure.com:v3/org/proj/repo");
   });
 
+  test("an EMPTY username with the token in the password slot is masked too", () => {
+    // `https://:$(System.AccessToken)@dev.azure.com/…` is the form Azure
+    // Pipelines documents — no username at all — so a username pattern
+    // requiring one character would skip exactly the case this is here for.
+    expect(parseRepoUrl("https://:sup3rs3cr3t@dev.azure.com/org/proj/_git/repo")?.displayRemote)
+      .toBe("https://:***@dev.azure.com/org/proj/_git/repo");
+    expect(parseRepoUrl("https://:ghp_SECRET@github.com/acme/private")?.displayRemote)
+      .toBe("https://:***@github.com/acme/private.git");
+  });
+
+  test("a non-default SSH port survives, exactly as it does on GitHub", () => {
+    // The scp-like form always means port 22 (`:` is its path separator), so a
+    // pasted port needs the explicit ssh:// URL or it silently becomes 22.
+    expect(parseRepoUrl("ssh://git@ssh.dev.azure.com:2222/v3/org/proj/repo")?.remote)
+      .toBe("ssh://git@ssh.dev.azure.com:2222/v3/org/proj/repo");
+    // …and an explicit :22 is the default, so it collapses back to the scp form.
+    expect(parseRepoUrl("ssh://git@ssh.dev.azure.com:22/v3/org/proj/repo")?.remote)
+      .toBe("git@ssh.dev.azure.com:v3/org/proj/repo");
+  });
+
   test("no `_git` segment means it isn't a repo URL", () => {
     expect(parseRepoUrl("https://dev.azure.com/org/proj")).toBeNull();
     expect(parseRepoUrl("https://dev.azure.com/org")).toBeNull();

@@ -1071,9 +1071,13 @@ type Mode =
  * make those repos literally untypeable.
  *
  * `cloning` is in this set for a different reason: a `git clone` is mid-write,
- * and its partial directory is cleaned up by *cancelling* it (esc), not by
- * abandoning the process. Exiting here would leave the half-made checkout on
- * disk for the next attempt to trip over.
+ * so `q` should not walk away from it — esc cancels, which cleans up.
+ *
+ * Note this only holds `q`. Ink handles ctrl-c itself (`exitOnCtrlC` defaults
+ * on) and never forwards it here, so ctrl-c still quits from every mode — the
+ * `key.ctrl` half below is unreachable, kept only to mirror the `branch`
+ * prompt's long-standing shape. What makes that safe is the unmount cleanup,
+ * which kills the clone and removes the partial directory on the way out.
  */
 const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
 
@@ -1392,7 +1396,13 @@ export default function App({
   );
   const [cloneDest, setCloneDest] = useState<{ key: string; match: string | null; dest: string | null } | null>(null);
   useEffect(() => {
-    if (!cloneUrl || !filterRoot) return;
+    // Clearing on the way out matters: leaving the resolution behind would let a
+    // later visit to the prompt match it by key and show a pre-clone answer
+    // ("clones into …" for a repo that is now on disk) until the effect caught up.
+    if (!cloneUrl || !filterRoot) {
+      setCloneDest(null);
+      return;
+    }
     const match = findMatchingCheckout(filterRoot, cloneUrl.key);
     setCloneDest({
       key: cloneUrl.key,
@@ -1833,6 +1843,9 @@ export default function App({
       if (res.error) {
         setBusy(null);
         setMode({ kind: "list" });
+        // Nothing launched, so no launch notice will consume the clone note —
+        // drop it here or it would attach itself to some later, unrelated one.
+        cloneNoteRef.current = null;
         setNotice(`Worktree failed: ${res.error}`);
         return;
       }
@@ -1859,6 +1872,7 @@ export default function App({
     if (res.error) {
       setBusy(null);
       setMode({ kind: "list" });
+      cloneNoteRef.current = null; // see startFresh — nothing launched to carry it
       setNotice(`Worktree failed: ${res.error}`);
       return;
     }
@@ -2159,8 +2173,18 @@ export default function App({
       if (key.ctrl && input === "u") return edit(() => ({ value: "", cursor: 0 }));
       if (key.backspace || key.delete || input === "\x7f" || input === "\b")
         return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input))
-        return edit((v, c) => ({ value: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
+      // A PASTE arrives as one chunk, and copying a URL as a whole line brings
+      // its trailing newline along. Ink doesn't read that chunk as Enter (the
+      // `\r` isn't alone), so a printable-only guard like the branch prompt's
+      // would reject the entire paste and insert nothing at all — on the one
+      // prompt whose whole instruction is "paste a URL". Strip the control
+      // characters and keep the rest. Deliberately NOT treated as submit: the
+      // destination preview exists so no clone starts unreviewed.
+      if (input && !key.ctrl && !key.meta) {
+        const text = input.replace(/[^\x20-\x7e]+/g, "");
+        if (!text) return;
+        return edit((v, c) => ({ value: v.slice(0, c) + text + v.slice(c), cursor: c + text.length }));
+      }
       return;
     }
 

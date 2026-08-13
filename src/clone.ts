@@ -115,7 +115,7 @@ const segments = (path: string) => path.split("/").filter(Boolean);
 // parseGithubRemote's anchoring, expressed for a leading rather than embedded
 // host. Port-aware and case-insensitive throughout.
 const ADO_SSH_RE =
-  /^(?:ssh:\/\/)?([^/@\s]*@)?(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)(?::\d+)?[:/]v3\/([^/\s]+)\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i;
+  /^(?:ssh:\/\/)?([^/@\s]*@)?(ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)(?::(\d+))?[:/]v3\/([^/\s]+)\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i;
 const ADO_HTTPS_RE = /^(?:https?:\/\/)?([^/@\s]*@)?dev\.azure\.com(?::\d+)?\/(\S+)$/i;
 // `{org}.visualstudio.com` — the org label may not itself contain a dot, so
 // `evil.visualstudio.com.example.org` can't slip through.
@@ -155,7 +155,10 @@ function adoProjectAndRepo(segs: string[]): { project: string; repo: string } | 
  */
 export function redactUrl(url: string, keepUser?: string): string {
   return url.replace(
-    /(\/\/|^)([^/@\s:]+)(:[^/@\s]*)?@/,
+    // The username is `*`, not `+`: `https://:$(System.AccessToken)@dev.azure.com/…`
+    // — an EMPTY username with the token in the password slot — is the form
+    // Azure Pipelines documents, and a `+` here would skip it entirely.
+    /(\/\/|^)([^/@\s:]*)(:[^/@\s]*)?@/,
     (_m, lead: string, user: string, secret: string | undefined) => {
       if (secret) return `${lead}${user}:***@`;
       const vouched =
@@ -183,15 +186,23 @@ function adoUrl(opts: { org: string; project: string; repo: string; remote: stri
 function parseAdo(url: string): RepoUrl | null {
   const ssh = url.match(ADO_SSH_RE);
   if (ssh) {
-    const [, userinfo = "", host, org, project, repo] = ssh;
+    const [, userinfo = "", host, port = "", org, project, repo] = ssh;
     // The legacy host wants the org as the SSH user; `git@` is right for
     // ssh.dev.azure.com. Keep whatever was pasted when it was explicit.
     const user = userinfo || (/^vs-ssh\./i.test(host) ? `${org}@` : "git@");
+    const path = `v3/${org}/${project}/${repo}`;
+    // A non-default port can't be expressed in the scp-like form (`:` is the
+    // path separator there), so it needs the explicit ssh:// URL — same call
+    // githubRemote makes, and for the same reason: silently rewriting it to
+    // port 22 would connect somewhere the user didn't ask for.
     return adoUrl({
       org,
       project,
       repo,
-      remote: `${user}${host.toLowerCase()}:v3/${org}/${project}/${repo}`,
+      remote:
+        port && port !== "22"
+          ? `ssh://${user}${host.toLowerCase()}:${port}/${path}`
+          : `${user}${host.toLowerCase()}:${path}`,
     });
   }
 

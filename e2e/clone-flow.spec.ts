@@ -146,6 +146,30 @@ test("REGRESSION: typing `q` in the URL prompt types a q — it does not quit ag
   expect(screen).toMatch(/clones into[^\n]*repos\/qmk_firmware/);
 });
 
+// REGRESSION: a paste arrives as ONE chunk, and a URL copied as a whole line
+// brings its trailing newline with it. Ink doesn't read that chunk as Enter, so
+// a printable-only input guard rejected the entire paste and inserted nothing —
+// on the one prompt whose whole instruction is "paste a URL".
+test("REGRESSION: a URL pasted with its trailing newline is accepted", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("https://github.com/ada/newthing\r");
+
+  // The URL lands, the newline doesn't…
+  const screen = await wt.waitForText("clones into");
+  expect(screen).toContain("ada/newthing");
+  expect(screen).toMatch(/clones into[^\n]*repos\/newthing/);
+  // …and it is NOT auto-submitted: the preview exists so no clone starts
+  // unreviewed, so the user still has to press enter.
+  expect(screen).toContain("Clone a repo into");
+  expect((await mock.callLog()).filter((c) => c.includes('"clone"'))).toEqual([]);
+});
+
 test("the destination is shown BEFORE enter — a clone is never a surprise", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const parent = join(mock.home, "repos");

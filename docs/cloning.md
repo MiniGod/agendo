@@ -159,7 +159,15 @@ URL that works in their shell into one that fails in agendo:
 - **an alternate SSH host and port** — `ssh://git@ssh.github.com:443/owner/repo`
   is what you use when your network blocks port 22; collapsing it to
   `git@github.com:` would hang until the TCP connect timed out. That one needs
-  the explicit `ssh://` form, since the scp-like form can't carry a port.
+  the explicit `ssh://` form, since the scp-like form can't carry a port (its
+  `:` is the path separator). The ADO SSH path makes the same call for the same
+  reason; an explicit `:22` collapses back to the scp form, being the default.
+
+The prompt accepts a **pasted** URL, which arrives as a single chunk and usually
+carries the trailing newline of the line it was copied from. Control characters
+are stripped and the rest is inserted — but the paste is deliberately *not*
+treated as a submit, because the destination preview only means something if the
+user gets to read it before pressing enter.
 
 Anything else — a bare path, `file://`, a GitLab remote, junk text, a leading
 `-` — is rejected, and `git clone` is invoked with `--` before its arguments so
@@ -274,13 +282,15 @@ An elapsed-seconds ticker runs alongside, so the screen still changes during the
 silent phases (DNS, TLS, server-side `Enumerating objects`) — it can never look
 frozen. **esc cancels**: the child is killed and the partial directory removed.
 
-`q` and ctrl-c are suppressed on this screen, and on the URL prompt before it.
-On the prompt that's because it's a text input and `q` is an ordinary character
-— `github.com/qmk/qmk_firmware` has to be typeable. On the clone screen it's
+`q` is suppressed on this screen and on the URL prompt before it. On the prompt
+that's because it's a text input and `q` is an ordinary character —
+`github.com/qmk/qmk_firmware` has to be typeable. On the clone screen it's
 because a `git clone` is mid-write: the way out is cancelling it (esc), which
-cleans up, not abandoning the process and leaving a half-made checkout behind.
-Unmount is still handled — if agendo goes down some other way, the teardown
-kills the clone and removes the directory synchronously.
+cleans up, rather than walking away from a half-made checkout.
+
+Ctrl-c is *not* suppressed — ink handles it before the app sees it, so it quits
+from everywhere. What makes that safe is the unmount cleanup: teardown kills the
+clone and removes the partial directory synchronously.
 
 Resolving the destination reads the filesystem (one `git remote get-url` per
 sibling checkout, a stat per candidate directory), so it runs off the render
