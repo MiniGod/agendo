@@ -1,0 +1,240 @@
+# Cloning a repo you don't have locally
+
+agendo could only ever start a session in a checkout that already existed on
+disk. Someone who works across many repos — most of them not cloned — had no way
+in: the new-session picker offered exactly the repos their past sessions were
+already in.
+
+This adds one step in front of that picker: **paste a repo URL, agendo clones
+it, and from that point the clone is an ordinary repo row.** Nothing downstream
+of the picker changes — the same worktree / in-place rules, the same launch path.
+
+## Gate: only when the launcher is scoped to a directory
+
+The clone entry appears **only when agendo was given a target directory**
+(`agendo ~/git`) and the scope is active (`a` hasn't toggled to global view).
+That's `scoped` in `App.tsx` — the same condition the scope line renders under.
+
+Cloning writes to the filesystem, so agendo must never have to guess *where*.
+A bare `agendo` has no answer to that question and therefore doesn't offer to
+clone; the picker looks exactly as it does today.
+
+## Where the clone lands
+
+As a **direct child of the target directory** — a sibling of the checkouts
+already discovered there:
+
+```
+~/git/                 ← agendo ~/git
+├── agendo/            ← discovered
+├── appweb/            ← discovered
+└── new-repo/          ← cloned here
+```
+
+The directory name is the repo name from the URL, sanitized to
+`[A-Za-z0-9._-]` (`cloneDirName`) with leading dots stripped, so an ADO repo
+named `My Repo` lands in `My-Repo` and nothing can produce a hidden directory or
+a literal `.git`.
+
+Never nested, never `~/src/…`, never next to agendo itself: the user named a
+directory, and that directory is the only place cloning is allowed to write.
+
+## Where the URL is entered
+
+In the existing repo picker, as a last row below the real repos:
+
+```
+New session — pick a repo
+Pick a repo  ·  ↑/↓ move · enter select · esc back · c clone
+
+❯ git                    (no sessions yet)         ~/git
+  agendo                  12 sessions (12 claude, 0 copilot)  ~/git/agendo
+  appweb                   3 sessions (3 claude, 0 copilot)   ~/git/appweb
+  ＋ Clone from URL…        clone into ~/git
+```
+
+`c` jumps straight to it. Enter opens a one-line prompt (the same editable input
+the branch prompt uses — arrows, ctrl-a/e, backspace):
+
+```
+Clone a repo into ~/git
+Paste a GitHub or Azure DevOps repo URL  ·  enter clone · esc back
+
+  https://github.com/owner/repo▮
+
+  → github  owner/repo   →  ~/git/repo
+```
+
+The third line is **live feedback while typing**: the parsed host, the identity
+agendo derived, and the exact directory it will create. A URL that doesn't parse
+shows `not a recognizable GitHub or Azure DevOps repo URL` instead, in yellow,
+and enter is inert — you never start a clone you can't predict.
+
+## What is accepted
+
+`parseRepoUrl` in `src/clone.ts`. Query strings and fragments are dropped first
+(ADO web URLs carry `?path=/x&version=GBmain`), as are surrounding quotes and
+angle brackets, so a URL pasted out of a chat client works.
+
+**GitHub** — reuses `parseGithubRemote` from `src/github.ts`, which is
+host-anchored (`github.com` must sit right after the scheme `//`, an SSH `@`, or
+the string start) and port-aware. That function is extended here to stop at the
+repo segment, so a *web* URL with trailing path works; a look-alike host is
+still rejected:
+
+| input | → |
+| --- | --- |
+| `https://github.com/owner/repo` | `owner/repo` |
+| `https://github.com/owner/repo.git` / `…/` | `owner/repo` |
+| `https://github.com/owner/repo/tree/main/src` | `owner/repo` |
+| `https://github.com/owner/repo/pull/12` | `owner/repo` |
+| `git@github.com:owner/repo.git` | `owner/repo` |
+| `ssh://git@ssh.github.com:443/owner/repo` | `owner/repo` |
+| `https://mygithub.com/owner/repo` | **rejected** |
+| `https://github.com.evil.org/owner/repo` | **rejected** |
+| `https://github.com/owner` | **rejected** (no repo) |
+
+**Azure DevOps** — the messy ones. The host must again sit at the very start
+(after an optional scheme and `user@` userinfo), so `https://evil.example/dev.azure.com/x`
+and `https://dev.azure.com@evil.example/x` are both rejected. The repo is the
+segment right after `_git`, so any trailing web path (`/pullrequest/42`,
+`/commit/abc`) falls away:
+
+| input | org / project / repo |
+| --- | --- |
+| `https://dev.azure.com/org/proj/_git/repo` | `org` / `proj` / `repo` |
+| `https://org@dev.azure.com/org/proj/_git/repo` | same (userinfo preserved in the remote) |
+| `https://dev.azure.com/org/proj/_git/repo/pullrequest/42` | same |
+| `https://dev.azure.com/org/_git/repo` | `org` / `repo` / `repo` (project omitted ⇒ named after the repo) |
+| `https://org.visualstudio.com/proj/_git/repo` | `org` / `proj` / `repo` |
+| `https://org.visualstudio.com/DefaultCollection/proj/_git/repo` | same (collection segment ignored) |
+| `git@ssh.dev.azure.com:v3/org/proj/repo` | `org` / `proj` / `repo` |
+| `ssh://git@ssh.dev.azure.com:22/v3/org/proj/repo` | same |
+| `org@vs-ssh.visualstudio.com:v3/org/proj/repo` | same |
+| `https://dev.azure.com/org/proj` | **rejected** (no `_git`) |
+
+Percent-encoding is decoded for the identity and the directory name
+(`My%20Project` → `My Project`) but the **remote keeps its encoded form**, since
+that's what git has to send.
+
+The clone URL agendo actually runs is canonical, not the pasted string: HTTPS
+input → `https://…/_git/repo` (ADO) or `https://github.com/owner/repo.git`;
+SSH input → the SSH clone form. The scheme family the user pasted is preserved,
+because that's the credential path they have.
+
+Anything else — a bare path, `file://`, a GitLab remote, junk text, a leading
+`-` — is rejected, and `git clone` is invoked with `--` before its arguments so
+a remote can never be read as a flag.
+
+## Collisions
+
+Checked in this order, against `parseRepoUrl`'s canonical key
+(`github:owner/repo`, `ado:org/project/repo`, lowercased):
+
+1. **An existing checkout of the same repo** — the target directory itself and
+   each direct child that is a git checkout are asked for their `origin`; the
+   first whose origin parses to the same key **is reused**. No second clone, no
+   second copy. The picker jumps straight on with a notice:
+   `already cloned — using ~/git/repo`. This is the case that matters most: the
+   tester pastes a URL for something he cloned last month under a different
+   folder name, and gets his existing checkout.
+2. **The destination doesn't exist, or exists and is empty** — clone into it.
+3. **The destination exists with something else in it** — try `repo-2`,
+   `repo-3`, … up to `repo-20`, and say where it landed
+   (`cloned into ~/git/repo-2`). Failing outright would strand a user whose
+   folder name merely collides; landing somewhere unannounced would be worse, so
+   it lands and reports. After 20 tries it gives up with a legible error rather
+   than inventing a name.
+
+Note the asymmetry: a *same-repo* checkout is reused wherever it sits in the
+target directory, but a *name* collision only ever shifts the new directory.
+
+## Auth
+
+agendo invents no credential path. It runs `git clone` and lets the user's own
+git resolve credentials — SSH agent, credential helper, `gh auth setup-git`,
+Git Credential Manager. Whatever `git clone` works with in their shell works
+here.
+
+What it *does* do is refuse to hang. A private repo with no credentials makes
+git block on a `Username:` prompt — on a stdin agendo doesn't own, which would
+freeze the TUI with no way out. So the clone runs with:
+
+- `GIT_TERMINAL_PROMPT=0` — no terminal prompting,
+- `GIT_ASKPASS` / `SSH_ASKPASS` removed from the child env — no GUI prompt,
+- `GIT_SSH_COMMAND` defaulting to `ssh -o BatchMode=yes` (only if the user
+  hasn't set their own) — no passphrase prompt. Agent-held keys, which is how
+  SSH auth normally works, are unaffected.
+
+Failures are classified: a stderr matching authentication / permission /
+`terminal prompts disabled` / `repository not found` / `403` patterns reports
+
+```
+Clone failed — authentication. agendo uses your existing git credentials;
+check your SSH agent, or `gh auth setup-git` / `az repos` for HTTPS.
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+```
+
+so the user sees both agendo's reading and git's own words. Anything else
+reports git's `fatal:` line verbatim.
+
+**Partial clones are always cleaned up.** If agendo created the destination
+directory and the clone fails or is cancelled, the directory is removed. A
+directory that already existed (the empty-directory case) is left alone — git
+cleans up its own contents, and removing a directory the user made isn't
+agendo's call.
+
+## A very large repo
+
+The clone is asynchronous — `spawn`, not `spawnSync` — so the TUI keeps
+rendering throughout. `git clone --progress` writes its counters to stderr even
+when stdout isn't a TTY, and the last line is shown live:
+
+```
+Cloning repo  (18s)
+  from  https://github.com/owner/repo.git
+  into  ~/git/repo
+
+  Receiving objects:  47% (52134/110921), 88.4 MiB | 11.2 MiB/s
+
+  esc cancels
+```
+
+An elapsed-seconds ticker runs alongside, so the screen still changes during the
+silent phases (DNS, TLS, server-side `Enumerating objects`) — it can never look
+frozen. **esc cancels**: the child is killed and the partial directory removed.
+
+**Full clone, not `--depth`.** Every downstream thing agendo does with a repo
+needs history: `git worktree add -b … origin/HEAD`, diffing against the base
+branch, `git log` for the agent to read. A shallow clone makes the first of
+those work and quietly breaks the rest, which is a worse failure than a slow
+clone the user can watch and cancel. `--filter=blob:none` (full history, lazy
+blobs) is the interesting middle and is worth revisiting — it trades a fast
+first clone for needing the network later, so it isn't obviously right for
+someone about to work offline.
+
+## After the clone
+
+The clone becomes a zero-session `RepoInfo` and is fed into **the exact same**
+`chooseRepo` the picker's enter key calls — `wtchoice` for a free session,
+`branch` for a work item, `startCheckout` for a PR. There is no second
+session-creation path, and `src/clone.ts` knows nothing about sessions,
+worktrees, or tmux.
+
+Until the next reload discovers it through a session's cwd, the fresh clone is
+held in local state and merged into the picker's repo list, so backing out with
+esc still leaves it selectable.
+
+## What is deliberately not here
+
+- **No credential prompting or token storage.** If the user's git can't clone
+  it, agendo says so.
+- **No `git init`** for an empty folder — the picker's non-repo row is
+  `new-user-bootstrap`'s territory.
+- **No clone from the work-item / PR views.** A PR row already knows its repo;
+  cloning the repo a PR lives in is a reasonable follow-up but a separate flow.
+- **No ADO remote parser unification.** PR #13 adds an ADO branch to
+  `repoScopeKeys()` in `src/repos.ts` for a different purpose (repo *identity*
+  for filtering). `parseRepoUrl` here is the more complete parser and exports
+  its canonical key; whichever lands second should collapse into it rather than
+  leaving the repo with two.

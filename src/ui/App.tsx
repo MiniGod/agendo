@@ -10,7 +10,18 @@ import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
 import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
-import { isUnderRoot } from "../context.ts";
+import {
+  parseRepoUrl,
+  repoUrlLabel,
+  cloneDirName,
+  findMatchingCheckout,
+  freeCloneDest,
+  startClone,
+  type CloneOutcome,
+  type CloneRun,
+  type RepoUrl,
+} from "../clone.ts";
+import { isUnderRoot, normalizeCwd } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
@@ -253,6 +264,20 @@ function prMatches(pr: PullRequest, query: string): boolean {
 // Relativize a path to ~ for display (no truncation — the row truncates it).
 function homeShort(p: string): string {
   return p.replace(/^\/home\/[^/]+\//, "~/").replace(/^\/Users\/[^/]+\//, "~/");
+}
+
+// Why a clone failed, phrased for someone who can act on it. agendo never
+// handles credentials itself, so an auth failure is always "your git couldn't do
+// this" — say that, then quote git verbatim underneath. Two lines rather than
+// one long one: git's own words are the half that identifies the actual problem,
+// and they must not be the half a terminal truncates.
+const CLONE_AUTH_HINT =
+  "Authentication — agendo uses your existing git credentials; check your SSH agent, " +
+  "or `gh auth setup-git` / `az repos` for HTTPS.";
+
+function cloneError(res: CloneOutcome): string[] {
+  const detail = res.error ?? "git clone failed";
+  return res.auth ? [CLONE_AUTH_HINT, detail] : [detail];
 }
 
 // Labeled context lines shown under an expanded session — one [label, value]
@@ -1015,6 +1040,10 @@ type Mode =
   | { kind: "identity"; cursor: number; fromSettings?: boolean }
   | { kind: "agent"; target: FreshTarget; cursor: number }
   | { kind: "repo"; target: FreshTarget; agent: AgentSource; cursor: number }
+  // Clone flow — only reachable from a scoped launcher (see `canClone`). `clone`
+  // is the URL prompt; `cloning` is the live `git clone`, cancellable with esc.
+  | { kind: "clone"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string[] }
+  | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
   | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
   | { kind: "open"; targets: OpenTargets; title: string };
@@ -1051,6 +1080,16 @@ export default function App({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
+  // Repos cloned during this run, merged into the picker until a reload
+  // discovers them for real (see `scopedRepos`).
+  const [cloned, setCloned] = useState<RepoInfo[]>([]);
+  // What the clone step did, carried into the screens that follow it. `notice`
+  // is a list-view banner, and a clone hands off directly to the next dialog —
+  // without this, "reused the checkout you already had" would be invisible until
+  // the user found their way back to the list. Cleared when a fresh flow starts.
+  const [cloneNote, setCloneNote] = useState<string | null>(null);
+  // The in-flight `git clone`, so esc can cancel it and unmount can't orphan it.
+  const cloneRun = useRef<CloneRun | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [grouped, setGrouped] = useState(true); // Sessions view: group by repo
   // Path-scope toggle: when a filterRoot exists, `a` flips between the scoped
@@ -1218,9 +1257,16 @@ export default function App({
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
     if (!scoped) return model.repos;
-    const inScopeRepos = model.repos.filter(
+    const discovered = model.repos.filter(
       (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
     );
+    // Repos cloned this run are offered immediately. A reload only discovers a
+    // repo once a session has run in it, so without this, backing out of the
+    // post-clone flow with esc would hide the clone the user just waited for.
+    const inScopeRepos = [
+      ...discovered,
+      ...cloned.filter((c) => !discovered.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
+    ];
     // Always offer the scoped folder itself, ranked FIRST — above child repos
     // that already have sessions. Scoping to a folder is a statement that the
     // folder is what you're working on, so a new session there is the "supervise
@@ -1233,7 +1279,7 @@ export default function App({
     // Resolved through repoRootForCwd so scoping INSIDE a checkout still offers
     // the repo root, and worktrees land at the root rather than a subdir.
     return ensureRepoAtTop(inScopeRepos, repoRootForCwd(filterRoot!));
-  }, [model, scoped, filterRoot]);
+  }, [model, scoped, filterRoot, cloned]);
 
   // The same list, reordered for targets that MUST create a worktree. Work-item
   // ("new") and PR flows structurally cannot run in place — `pr` goes straight
@@ -1270,6 +1316,35 @@ export default function App({
   /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
   const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
     kind === "free" ? scopedRepos : worktreeRepos;
+
+  // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
+  // chatty once it's transferring, but silent while it resolves DNS, completes
+  // the TLS handshake and waits for the server to enumerate objects — on a large
+  // repo that's long enough to read as a frozen UI. A second-hand that always
+  // moves is the cheapest possible proof that it hasn't.
+  const cloning = mode.kind === "cloning";
+  useEffect(() => {
+    if (!cloning) return;
+    const t = setInterval(() => {
+      setMode((p) => (p.kind === "cloning" ? { ...p, elapsed: p.elapsed + 1 } : p));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [cloning]);
+
+  // Never leave a `git clone` (and its half-written directory) behind on unmount.
+  useEffect(() => () => cloneRun.current?.cancel(), []);
+
+  // What the typed URL resolves to, recomputed only when it changes: the render
+  // path touches the filesystem (an origin per sibling checkout, a stat per
+  // candidate directory), so it must not run on every unrelated re-render.
+  const cloneValue = mode.kind === "clone" ? mode.value : null;
+  const clonePreview = useMemo(() => {
+    if (cloneValue === null || !filterRoot) return null;
+    const url = cloneValue.trim() ? parseRepoUrl(cloneValue) : null;
+    if (!url) return { url: null, match: null, dest: null };
+    const match = findMatchingCheckout(filterRoot, url.key);
+    return { url, match, dest: match ? null : freeCloneDest(filterRoot, cloneDirName(url.repo)) };
+  }, [cloneValue, filterRoot]);
 
   const rows = useMemo(() => {
     if (!model) return [];
@@ -1629,11 +1704,13 @@ export default function App({
   // picked, `proceedFresh` runs the original repo/branch/checkout routing.
   const enterFresh = (target: FreshTarget) => {
     setNotice(null);
+    setCloneNote(null);
     setMode({ kind: "agent", target, cursor: 0 });
   };
 
   const enterNewSession = () => {
     setNotice(null);
+    setCloneNote(null);
     // A scoped picker is never empty — `scopedRepos` always keeps at least the
     // scoped folder itself when nothing else is in scope — so the only ways to
     // land here are the model not being loaded yet, or an unscoped launcher on a
@@ -1722,6 +1799,101 @@ export default function App({
     setBusy(null);
     setMode({ kind: "list" });
     open(launchFresh(res.path, target.tmuxName, agent));
+  };
+
+  // A repo has been chosen — from the picker, or as the result of a clone. Every
+  // downstream route (PR checkout / branch prompt / worktree-vs-main) hangs off
+  // this one function, so a cloned repo takes the exact same path as one that was
+  // already on disk; there is no second session-creation flow.
+  const chooseRepo = (target: FreshTarget, repo: RepoInfo, agent: AgentSource) => {
+    if (target.kind === "pr") return startCheckout(target, repo, agent);
+    // Default to "New git worktree" (cursor 0) only where one can exist: in a
+    // non-repo folder (`agendo ~/git` → the scoped parent itself) `git worktree
+    // add` can only ever print "fatal: not a git repository", so defaulting to
+    // it makes the enter-enter-enter happy path dead-end. Point those at "Main
+    // repo checkout" (cursor 1) instead; both options stay on screen.
+    // INTERIM: the non-repo case really wants its own pair of options (run
+    // here / clone-or-init something), not a worktree-vs-checkout question —
+    // this just stops the default from being the one that cannot work.
+    if (target.kind === "free")
+      return setMode({ kind: "wtchoice", target, agent, repo, cursor: isGitCheckout(repo.root) ? 0 : 1 });
+    return setMode({
+      kind: "branch",
+      target,
+      agent,
+      repo,
+      value: target.defaultBranch,
+      cursor: target.defaultBranch.length,
+      worktree: true,
+    });
+  };
+
+  // ── clone a repo that isn't on disk yet ──
+  // Gated on `canClone`: agendo must have been given a target directory, since
+  // that directory is the only place it may write. See docs/cloning.md.
+  const canClone = scoped && !!filterRoot;
+
+  /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
+  const clonedRepo = (root: string): RepoInfo => ({
+    root,
+    name: basename(root) || root,
+    total: 0,
+    claude: 0,
+    copilot: 0,
+  });
+
+  /** Remember the checkout and continue into the ordinary session flow. */
+  const useClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
+    const repo = clonedRepo(root);
+    setCloned((prev) =>
+      prev.some((r) => normalizeCwd(r.root) === normalizeCwd(root)) ? prev : [...prev, repo],
+    );
+    setNotice(note);
+    setCloneNote(note);
+    chooseRepo(target, repo, agent);
+  };
+
+  /**
+   * Enter on the URL prompt. Resolves where the repo should live before touching
+   * the network: an existing checkout of the same repo anywhere in the target
+   * directory wins outright (never a second copy), otherwise a free directory
+   * name is chosen and the clone starts.
+   */
+  const beginClone = (target: FreshTarget, agent: AgentSource, raw: string) => {
+    const url = parseRepoUrl(raw);
+    const fail = (...error: string[]) =>
+      setMode({ kind: "clone", target, agent, value: raw, cursor: raw.length, error });
+    if (!url) return fail("Not a recognizable GitHub or Azure DevOps repo URL.");
+
+    const existing = findMatchingCheckout(filterRoot!, url.key);
+    if (existing) {
+      return useClonedRepo(target, agent, existing, `already cloned — using ${homeShort(existing)}`);
+    }
+
+    const dest = freeCloneDest(filterRoot!, cloneDirName(url.repo));
+    if (!dest) return fail(`No free directory name for "${url.repo}" in ${homeShort(filterRoot!)}.`);
+
+    setMode({ kind: "cloning", target, agent, url, dest, progress: "starting…", elapsed: 0 });
+    const run = startClone(url.remote, dest, (line) =>
+      setMode((p) => (p.kind === "cloning" ? { ...p, progress: line } : p)),
+    );
+    cloneRun.current = run;
+    run.done.then((res) => {
+      if (cloneRun.current !== run) return; // superseded by a newer attempt
+      cloneRun.current = null;
+      if (res.canceled) {
+        setNotice("Clone cancelled.");
+        return setMode({ kind: "repo", target, agent, cursor: 0 });
+      }
+      if (!res.ok) return fail(...cloneError(res));
+      const landed = basename(dest) === cloneDirName(url.repo) ? "" : ` as ${basename(dest)}`;
+      useClonedRepo(target, agent, dest, `cloned ${repoUrlLabel(url)}${landed} into ${homeShort(dest)}`);
+    });
+  };
+
+  /** Cancel an in-flight clone (esc) — kills git and removes the partial dir. */
+  const cancelClone = () => {
+    cloneRun.current?.cancel();
   };
 
   // Convert a session's transcript into the other agent's format (via the
@@ -1856,35 +2028,55 @@ export default function App({
     // ── repo picker ──
     if (mode.kind === "repo") {
       const repos = reposForTarget(mode.target.kind);
-      const len = repos.length || 1;
+      // The clone row sits one past the last repo — see docs/cloning.md for why
+      // it's offered only when the launcher was given a directory.
+      const cloneRow = canClone ? repos.length : -1;
+      const len = repos.length + (canClone ? 1 : 0) || 1;
+      const openClone = () =>
+        setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
       if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
       if (key.upArrow || input === "k")
         return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
       if (key.downArrow || input === "j")
         return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return && repos[mode.cursor]) {
-        const repo = repos[mode.cursor];
-        if (mode.target.kind === "pr") return startCheckout(mode.target, repo, mode.agent);
-        // Default to "New git worktree" (cursor 0) only where one can exist: in a
-        // non-repo folder (`agendo ~/git` → the scoped parent itself) `git worktree
-        // add` can only ever print "fatal: not a git repository", so defaulting to
-        // it makes the enter-enter-enter happy path dead-end. Point those at "Main
-        // repo checkout" (cursor 1) instead; both options stay on screen.
-        // INTERIM: the non-repo case really wants its own pair of options (run
-        // here / clone-or-init something), not a worktree-vs-checkout question —
-        // this just stops the default from being the one that cannot work.
-        if (mode.target.kind === "free")
-          return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo, cursor: isGitCheckout(repo.root) ? 0 : 1 });
-        return setMode({
-          kind: "branch",
-          target: mode.target,
-          agent: mode.agent,
-          repo,
-          value: mode.target.defaultBranch,
-          cursor: mode.target.defaultBranch.length,
-          worktree: true,
-        });
+      if (input === "c" && canClone) return openClone();
+      if (key.return && mode.cursor === cloneRow) return openClone();
+      if (key.return && repos[mode.cursor]) return chooseRepo(mode.target, repos[mode.cursor], mode.agent);
+      return;
+    }
+
+    // ── clone: paste a repo URL ──
+    // Same editable single-line input as the branch prompt (see there for why the
+    // updates are functional).
+    if (mode.kind === "clone") {
+      if (key.escape) return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
+      if (key.return) {
+        if (mode.value.trim()) beginClone(mode.target, mode.agent, mode.value.trim());
+        return;
       }
+      const edit = (fn: (v: string, c: number) => { value?: string; cursor: number }) =>
+        setMode((p) => {
+          if (p.kind !== "clone") return p;
+          const r = fn(p.value, p.cursor);
+          // Any edit clears a stale error — it described the *previous* value.
+          return { ...p, value: r.value ?? p.value, cursor: r.cursor, error: undefined };
+        });
+      if (key.leftArrow) return edit((v, c) => ({ cursor: Math.max(0, c - 1) }));
+      if (key.rightArrow) return edit((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
+      if (key.ctrl && input === "a") return edit(() => ({ cursor: 0 }));
+      if (key.ctrl && input === "e") return edit((v) => ({ cursor: v.length }));
+      if (key.ctrl && input === "u") return edit(() => ({ value: "", cursor: 0 }));
+      if (key.backspace || key.delete || input === "\x7f" || input === "\b")
+        return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
+      if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input))
+        return edit((v, c) => ({ value: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
+      return;
+    }
+
+    // ── clone in progress ── (esc kills git and removes the partial directory;
+    // everything else is ignored so a stray keystroke can't abandon the clone)
+    if (mode.kind === "cloning") {
+      if (key.escape) cancelClone();
       return;
     }
 
@@ -2201,12 +2393,15 @@ export default function App({
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
+    const repoRows = reposForTarget(mode.target.kind);
     return (
       <Box flexDirection="column">
         <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
-        <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
+        <Text dimColor>
+          {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
+        </Text>
         <Box marginTop={1} flexDirection="column">
-          {reposForTarget(mode.target.kind).map((r, i) => {
+          {repoRows.map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
@@ -2224,6 +2419,72 @@ export default function App({
               </Text>
             );
           })}
+          {canClone ? (
+            <Text
+              color={mode.cursor === repoRows.length ? "black" : undefined}
+              backgroundColor={mode.cursor === repoRows.length ? "cyan" : undefined}
+            >
+              {mode.cursor === repoRows.length ? "❯ " : "  "}
+              <Text bold>{"＋ Clone from URL…".padEnd(21).slice(0, 21)}</Text>
+              <Text dimColor={mode.cursor !== repoRows.length}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
+            </Text>
+          ) : null}
+        </Box>
+      </Box>
+    );
+  }
+
+  if (mode.kind === "clone") {
+    // Live parse of what's typed so far (see `clonePreview`): the exact
+    // directory that will be created is on screen *before* enter, so no clone is
+    // ever a surprise. An existing checkout of the same repo is reported here
+    // too — the reuse then reads as expected rather than as a clone that
+    // silently didn't happen.
+    const { url, match, dest } = clonePreview ?? { url: null, match: null, dest: null };
+    const preview: { text: string; color: string } = url
+      ? match
+        ? { text: `→ ${repoUrlLabel(url)}  ·  already cloned at ${homeShort(match)}`, color: "green" }
+        : dest
+          ? { text: `→ ${repoUrlLabel(url)}  ·  clones into ${homeShort(dest)}`, color: "cyan" }
+          : { text: `→ ${repoUrlLabel(url)}  ·  no free directory name in ${homeShort(filterRoot!)}`, color: "yellow" }
+      : mode.value.trim()
+        ? { text: "not a recognizable GitHub or Azure DevOps repo URL", color: "yellow" }
+        : { text: "e.g. https://github.com/owner/repo · https://dev.azure.com/org/proj/_git/repo", color: "gray" };
+    return (
+      <Box flexDirection="column">
+        <Text bold>{`Clone a repo into ${homeShort(filterRoot!)}`}</Text>
+        <Text dimColor>{"Paste a GitHub or Azure DevOps repo URL  ·  enter clone · esc back"}</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text>
+            {"  "}
+            <Text>{mode.value.slice(0, mode.cursor)}</Text>
+            <Text inverse>{mode.value[mode.cursor] ?? " "}</Text>
+            <Text>{mode.value.slice(mode.cursor + 1)}</Text>
+          </Text>
+          <Text color={preview.color}>{`  ${preview.text}`}</Text>
+          {(mode.error ?? []).map((line, i) => (
+            <Text key={i} color="red">{`  ${line}`}</Text>
+          ))}
+        </Box>
+      </Box>
+    );
+  }
+
+  if (mode.kind === "cloning") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>
+          <Text color="cyan">⟳</Text>
+          {` Cloning ${repoUrlLabel(mode.url)}  `}
+          <Text dimColor>{`(${mode.elapsed}s)`}</Text>
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text dimColor wrap="truncate">{`  from  ${mode.url.remote}`}</Text>
+          <Text dimColor wrap="truncate">{`  into  ${homeShort(mode.dest)}`}</Text>
+          <Text wrap="truncate">{`  ${mode.progress}`}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>{"  esc cancels (the partial clone is removed)"}</Text>
         </Box>
       </Box>
     );
@@ -2349,6 +2610,7 @@ export default function App({
       <Box flexDirection="column">
         <Text bold>{`New session in ${mode.repo.name} — choose where to run`}</Text>
         <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
+        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
         <Box marginTop={1} flexDirection="column">
           {opts.map((label, i) => {
             const sel = i === mode.cursor;
@@ -2375,6 +2637,7 @@ export default function App({
       <Box flexDirection="column">
         <Text bold>{isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}</Text>
         <Text dimColor>{mode.worktree ? "New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back" : "Session name · ←/→ move · ⌃a/⌃e start/end · enter launch · esc back"}</Text>
+        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
         <Box marginTop={1}>
           <Text>{mode.worktree ? "branch: " : "name:   "}</Text>
           <Text color="cyan">{value.slice(0, cursor)}</Text>
