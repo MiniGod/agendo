@@ -271,13 +271,20 @@ function homeShort(p: string): string {
 // this" — say that, then quote git verbatim underneath. Two lines rather than
 // one long one: git's own words are the half that identifies the actual problem,
 // and they must not be the half a terminal truncates.
-const CLONE_AUTH_HINT =
-  "Authentication — agendo uses your existing git credentials; check your SSH agent, " +
-  "or `gh auth setup-git` / `az repos` for HTTPS.";
+const CLONE_HINTS: Record<string, string> = {
+  auth:
+    "Authentication — agendo uses your existing git credentials; check your SSH agent, " +
+    "or `gh auth setup-git` / `az repos` for HTTPS.",
+  // Never phrased as "check your credentials" alone: a 404 is what GitHub also
+  // returns for a private repo you can't see, so both readings stay on screen.
+  missing:
+    "Not found — check the URL, or (if it's private) that your git has access to it.",
+};
 
 function cloneError(res: CloneOutcome): string[] {
   const detail = res.error ?? "git clone failed";
-  return res.auth ? [CLONE_AUTH_HINT, detail] : [detail];
+  const hint = res.failure ? CLONE_HINTS[res.failure] : undefined;
+  return hint ? [hint, detail] : [detail];
 }
 
 // Labeled context lines shown under an expanded session — one [label, value]
@@ -1048,6 +1055,21 @@ type Mode =
   | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
   | { kind: "open"; targets: OpenTargets; title: string };
 
+/**
+ * Modes where `q` / ctrl-c must NOT quit the app.
+ *
+ * `branch` and `clone` are text inputs — `q` is an ordinary character in a
+ * branch name, and in a repo URL it's unavoidable (`github.com/qmk/qmk_firmware`,
+ * anything with "quarkus", "requests", "sequelize" in it). Quitting on it would
+ * make those repos literally untypeable.
+ *
+ * `cloning` is in this set for a different reason: a `git clone` is mid-write,
+ * and its partial directory is cleaned up by *cancelling* it (esc), not by
+ * abandoning the process. Exiting here would leave the half-made checkout on
+ * disk for the next attempt to trip over.
+ */
+const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
+
 /** Agents offered by the fresh-session picker, in display order. */
 const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
   { source: "claude", label: "Claude", desc: "claude --session-id …" },
@@ -1088,6 +1110,11 @@ export default function App({
   // without this, "reused the checkout you already had" would be invisible until
   // the user found their way back to the list. Cleared when a fresh flow starts.
   const [cloneNote, setCloneNote] = useState<string | null>(null);
+  // The same value, readable synchronously. A PR target routes clone → checkout
+  // → launch inside one keystroke, and `open()` overwrites the notice on the way
+  // out; without a ref the note set moments earlier would still be the stale
+  // render value there, so the PR flow would never report what it cloned.
+  const cloneNoteRef = useRef<string | null>(null);
   // The in-flight `git clone`, so esc can cancel it and unmount can't orphan it.
   const cloneRun = useRef<CloneRun | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -1254,19 +1281,21 @@ export default function App({
   // Repos offered by the fresh-session picker, scoped the same way: a repo is in
   // scope if its root is under the filter root (parent-folder case) or the filter
   // root is under it (inside-a-repo case).
+  // Repos cloned this run are offered immediately. A reload only discovers a
+  // repo once a session has actually run in it, so without this, backing out of
+  // the post-clone flow with esc would hide the clone the user just waited for.
+  // Applied in BOTH views: toggling `a` to global must not make a fresh clone
+  // disappear either.
+  const withCloned = (repos: RepoInfo[]) => [
+    ...repos,
+    ...cloned.filter((c) => !repos.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
+  ];
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
-    if (!scoped) return model.repos;
-    const discovered = model.repos.filter(
-      (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
+    if (!scoped) return withCloned(model.repos);
+    const inScopeRepos = withCloned(
+      model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root)),
     );
-    // Repos cloned this run are offered immediately. A reload only discovers a
-    // repo once a session has run in it, so without this, backing out of the
-    // post-clone flow with esc would hide the clone the user just waited for.
-    const inScopeRepos = [
-      ...discovered,
-      ...cloned.filter((c) => !discovered.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
-    ];
     // Always offer the scoped folder itself, ranked FIRST — above child repos
     // that already have sessions. Scoping to a folder is a statement that the
     // folder is what you're working on, so a new session there is the "supervise
@@ -1331,20 +1360,36 @@ export default function App({
     return () => clearInterval(t);
   }, [cloning]);
 
-  // Never leave a `git clone` (and its half-written directory) behind on unmount.
-  useEffect(() => () => cloneRun.current?.cancel(), []);
+  // Never leave a `git clone` (and its half-written directory) behind on
+  // unmount. `immediate` because the child's exit will never be observed here.
+  useEffect(() => () => cloneRun.current?.cancel({ immediate: true }), []);
 
-  // What the typed URL resolves to, recomputed only when it changes: the render
-  // path touches the filesystem (an origin per sibling checkout, a stat per
-  // candidate directory), so it must not run on every unrelated re-render.
+  // What the typed URL means. Two halves, split by cost: parsing is pure string
+  // work and belongs in render, but resolving *where it would land* reads the
+  // filesystem — an `origin` per sibling checkout (spawned git), a stat per
+  // candidate directory. In a folder holding dozens of checkouts that is long
+  // enough to see, so it runs in an effect and lands as state: the identity
+  // appears the instant you type, the destination a beat later, and the render
+  // path never blocks.
   const cloneValue = mode.kind === "clone" ? mode.value : null;
-  const clonePreview = useMemo(() => {
-    if (cloneValue === null || !filterRoot) return null;
-    const url = cloneValue.trim() ? parseRepoUrl(cloneValue) : null;
-    if (!url) return { url: null, match: null, dest: null };
-    const match = findMatchingCheckout(filterRoot, url.key);
-    return { url, match, dest: match ? null : freeCloneDest(filterRoot, cloneDirName(url.repo)) };
-  }, [cloneValue, filterRoot]);
+  const cloneUrl = useMemo(
+    () => (cloneValue?.trim() ? parseRepoUrl(cloneValue) : null),
+    [cloneValue],
+  );
+  const [cloneDest, setCloneDest] = useState<{ key: string; match: string | null; dest: string | null } | null>(null);
+  useEffect(() => {
+    if (!cloneUrl || !filterRoot) return;
+    const match = findMatchingCheckout(filterRoot, cloneUrl.key);
+    setCloneDest({
+      key: cloneUrl.key,
+      match,
+      dest: match ? null : freeCloneDest(filterRoot, cloneDirName(cloneUrl.repo)),
+    });
+  }, [cloneUrl, filterRoot]);
+  // Only trust a resolution that belongs to the URL currently on screen — the
+  // previous one is about a different repo, and a stale destination is worse
+  // than none.
+  const resolved = cloneUrl && cloneDest?.key === cloneUrl.key ? cloneDest : null;
 
   const rows = useMemo(() => {
     if (!model) return [];
@@ -1705,12 +1750,14 @@ export default function App({
   const enterFresh = (target: FreshTarget) => {
     setNotice(null);
     setCloneNote(null);
+    cloneNoteRef.current = null;
     setMode({ kind: "agent", target, cursor: 0 });
   };
 
   const enterNewSession = () => {
     setNotice(null);
     setCloneNote(null);
+    cloneNoteRef.current = null;
     // A scoped picker is never empty — `scopedRepos` always keeps at least the
     // scoped folder itself when nothing else is in scope — so the only ways to
     // land here are the model not being loaded yet, or an unscoped launcher on a
@@ -1750,7 +1797,12 @@ export default function App({
       return;
     }
     runInline(plan);
-    setNotice(`▸ ${plan.alreadyRunning ? "switched to" : "opened"} ${plan.tmuxName} — switch back to this window for more`);
+    // A clone that fed straight into this launch (the PR flow does it in one
+    // keystroke) reports itself here — otherwise "where did it clone to?" would
+    // have no screen left to appear on.
+    const cloned = cloneNoteRef.current ? `${cloneNoteRef.current} · ` : "";
+    cloneNoteRef.current = null;
+    setNotice(`${cloned}▸ ${plan.alreadyRunning ? "switched to" : "opened"} ${plan.tmuxName} — switch back to this window for more`);
     reload();
   };
 
@@ -1850,6 +1902,7 @@ export default function App({
     );
     setNotice(note);
     setCloneNote(note);
+    cloneNoteRef.current = note;
     chooseRepo(target, repo, agent);
   };
 
@@ -2004,7 +2057,7 @@ export default function App({
       if ((key.upArrow || input === "k") && cursor === selectableIdx[0]) { setSearchFocus("input"); return; }
     }
 
-    if (mode.kind !== "branch" && (input === "q" || (key.ctrl && input === "c"))) {
+    if (!HOLDS_QUIT_KEYS.has(mode.kind) && (input === "q" || (key.ctrl && input === "c"))) {
       exit();
       return;
     }
@@ -2435,18 +2488,19 @@ export default function App({
   }
 
   if (mode.kind === "clone") {
-    // Live parse of what's typed so far (see `clonePreview`): the exact
+    // Live read of what's typed so far (see `cloneUrl` / `cloneDest`): the exact
     // directory that will be created is on screen *before* enter, so no clone is
     // ever a surprise. An existing checkout of the same repo is reported here
     // too — the reuse then reads as expected rather than as a clone that
     // silently didn't happen.
-    const { url, match, dest } = clonePreview ?? { url: null, match: null, dest: null };
-    const preview: { text: string; color: string } = url
-      ? match
-        ? { text: `→ ${repoUrlLabel(url)}  ·  already cloned at ${homeShort(match)}`, color: "green" }
-        : dest
-          ? { text: `→ ${repoUrlLabel(url)}  ·  clones into ${homeShort(dest)}`, color: "cyan" }
-          : { text: `→ ${repoUrlLabel(url)}  ·  no free directory name in ${homeShort(filterRoot!)}`, color: "yellow" }
+    const preview: { text: string; color: string } = cloneUrl
+      ? !resolved
+        ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  …`, color: "gray" }
+        : resolved.match
+          ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  already cloned at ${homeShort(resolved.match)}`, color: "green" }
+          : resolved.dest
+            ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  clones into ${homeShort(resolved.dest)}`, color: "cyan" }
+            : { text: `→ ${repoUrlLabel(cloneUrl)}  ·  no free directory name in ${homeShort(filterRoot!)}`, color: "yellow" }
       : mode.value.trim()
         ? { text: "not a recognizable GitHub or Azure DevOps repo URL", color: "yellow" }
         : { text: "e.g. https://github.com/owner/repo · https://dev.azure.com/org/proj/_git/repo", color: "gray" };
@@ -2479,7 +2533,7 @@ export default function App({
           <Text dimColor>{`(${mode.elapsed}s)`}</Text>
         </Text>
         <Box marginTop={1} flexDirection="column">
-          <Text dimColor wrap="truncate">{`  from  ${mode.url.remote}`}</Text>
+          <Text dimColor wrap="truncate">{`  from  ${mode.url.displayRemote}`}</Text>
           <Text dimColor wrap="truncate">{`  into  ${homeShort(mode.dest)}`}</Text>
           <Text wrap="truncate">{`  ${mode.progress}`}</Text>
         </Box>

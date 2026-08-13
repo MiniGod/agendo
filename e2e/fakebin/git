@@ -45,7 +45,8 @@ if (args[0] === "clone") {
   // FAKE_GIT_CLONE selects the outcome so specs can drive each branch:
   //   • unset / "ok" → succeeds, creating <dest>/.git
   //   • "auth"       → the credentials failure (clone.ts must classify it)
-  //   • "fail"       → a non-auth failure
+  //   • "missing"    → a 404, which must NOT be reported as a credentials problem
+  //   • "fail"       → neither of the above
   // In every failing case a PARTIAL directory is left behind on purpose: the
   // cleanup of it is clone.ts's job, and specs assert it happened.
   const mode = process.env.FAKE_GIT_CLONE || "ok";
@@ -57,6 +58,10 @@ if (args[0] === "clone") {
   process.stderr.write("Receiving objects: 100% (120/120), 1.10 MiB | 5.00 MiB/s, done.\r\n");
   if (mode === "auth") {
     process.stderr.write(`fatal: could not read Username for '${remote}': terminal prompts disabled\n`);
+    process.exit(128);
+  }
+  if (mode === "missing") {
+    process.stderr.write(`remote: Repository not found.\nfatal: repository '${remote}' not found\n`);
     process.exit(128);
   }
   if (mode === "fail") {

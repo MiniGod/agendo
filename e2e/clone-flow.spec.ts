@@ -78,6 +78,33 @@ test("a bad URL is refused at the prompt — nothing is cloned", async ({ launch
   expect((await mock.callLog()).filter((c) => c.includes('"clone"'))).toEqual([]);
 });
 
+// REGRESSION: `q` is the global quit key, and the URL prompt is a TEXT INPUT.
+// Before this was fixed, typing the `q` of `github.com/qmk/qmk_firmware` exited
+// agendo — making every repo with a `q` in its name literally untypeable. Note
+// the `q` is sent as its OWN keystroke: a whole URL delivered in one chunk
+// arrives as one multi-character `input` and would sail past the bug.
+test("REGRESSION: typing `q` in the URL prompt types a q — it does not quit agendo", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("https://github.com/");
+  await wt.waitForStable();
+  await wt.press("q");
+  wt.write("mk/qmk_firmware");
+
+  // Still alive, still on the prompt, and the URL parsed with the q in it.
+  // (`clones into` rather than the identity line: the destination is resolved
+  // off the render path, so it lands a beat after the parse.)
+  const screen = await wt.waitForText("clones into");
+  expect(screen).toContain("Clone a repo into");
+  expect(screen).toContain("qmk/qmk_firmware");
+  expect(screen).toMatch(/clones into[^\n]*repos\/qmk_firmware/);
+});
+
 test("the destination is shown BEFORE enter — a clone is never a surprise", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const parent = join(mock.home, "repos");
@@ -169,6 +196,29 @@ test("an auth failure says so, and removes the partial clone", async ({ launch, 
   expect(screen).toContain("ada/secretthing");
   // Nothing half-made is left behind.
   expect(existsSync(join(parent, "secretthing"))).toBe(false);
+});
+
+test("a 404 is reported as not-found, NOT as a credentials problem", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  mock.env.FAKE_GIT_CLONE = "missing";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("https://github.com/ada/typodthing");
+  await wt.waitForText("clones into");
+  await wt.press(KEY.enter);
+
+  // GitHub answers an unauthorized private repo with a 404 too, so the message
+  // must cover both readings — and must not confidently blame credentials for
+  // what is far more often a typo.
+  const screen = await wt.waitForText("Not found", 20000);
+  expect(screen).toContain("check the URL");
+  expect(screen).toContain("if it's private");
+  expect(screen).not.toContain("Authentication —");
+  expect(existsSync(join(parent, "typodthing"))).toBe(false);
 });
 
 test("a non-auth failure reports git verbatim, and also cleans up", async ({ launch, mock }) => {

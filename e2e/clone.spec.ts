@@ -75,6 +75,23 @@ test.describe("parseRepoUrl: GitHub", () => {
     expect(parseRepoUrl("https://github.com/owner")).toBeNull();
     expect(parseRepoUrl("https://github.com/")).toBeNull();
   });
+
+  test("github.com SITE pages are not repos, however much they look like owner/repo", () => {
+    // These parse structurally (two path segments on the right host) but are
+    // reserved GitHub routes. Accepting them means the user is told "repository
+    // not found" for a URL that was never a repository.
+    for (const u of [
+      "https://github.com/orgs/anthropics/repositories",
+      "https://github.com/features/copilot",
+      "https://github.com/settings/profile",
+      "https://github.com/marketplace/actions/checkout",
+      "https://github.com/search?q=agendo",
+      "https://github.com/topics/typescript",
+      "https://github.com/sponsors/someone",
+    ]) {
+      expect(parseRepoUrl(u), u).toBeNull();
+    }
+  });
 });
 
 test.describe("parseRepoUrl: Azure DevOps", () => {
@@ -134,6 +151,17 @@ test.describe("parseRepoUrl: Azure DevOps", () => {
   test("userinfo is preserved in the remote — it's the account the creds are for", () => {
     expect(parseRepoUrl("https://org@dev.azure.com/org/proj/_git/repo")?.remote)
       .toBe("https://org@dev.azure.com/org/proj/_git/repo");
+  });
+
+  test("an embedded PAT still clones, but is never the string shown on screen", () => {
+    // ADO hands out `https://org:<PAT>@dev.azure.com/…`, and people paste it.
+    const u = parseRepoUrl("https://org:sup3rs3cr3t@dev.azure.com/org/proj/_git/repo")!;
+    // git gets the real thing — dropping it would break a clone the user
+    // explicitly authenticated.
+    expect(u.remote).toContain("sup3rs3cr3t");
+    // The UI does not. The username survives; only the secret half is masked.
+    expect(u.displayRemote).toBe("https://org:***@dev.azure.com/org/proj/_git/repo");
+    expect(u.displayRemote).not.toContain("sup3rs3cr3t");
   });
 
   test("no `_git` segment means it isn't a repo URL", () => {

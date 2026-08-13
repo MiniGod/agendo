@@ -32,6 +32,15 @@ export interface RepoUrl {
   /** Canonical URL to hand `git clone` (never the pasted string verbatim). */
   remote: string;
   /**
+   * `remote` with any password/token in its userinfo replaced by `***`. People
+   * do paste `https://org:<PAT>@dev.azure.com/…` (ADO hands that form out), and
+   * the clone screen shows the remote — this is the one the UI must render, so a
+   * token doesn't end up in terminal scrollback. The secret is kept in `remote`
+   * itself: dropping it would break a clone the user explicitly authenticated,
+   * and it reaches git's argv either way, exactly as it would from their shell.
+   */
+  displayRemote: string;
+  /**
    * Canonical lowercase identity: `github:owner/repo` / `ado:org/project/repo`.
    * Two URLs for the same repo (web vs. clone, HTTPS vs. SSH, dev.azure.com vs.
    * the legacy visualstudio.com host) share a key, which is what lets an
@@ -57,6 +66,21 @@ function tidy(token: string): string {
 
 /** How many whitespace-separated tokens of the input to consider (see below). */
 const MAX_TOKENS = 8;
+
+/**
+ * github.com paths that look like `owner/repo` but are site pages, not repos —
+ * `https://github.com/orgs/anthropics/repositories`,
+ * `https://github.com/features/copilot`. GitHub reserves these names, so no real
+ * owner can be shadowed by rejecting them. Without this they parse happily and
+ * the user only finds out when `git clone` reports "repository not found" for a
+ * URL that was never a repository.
+ */
+const GITHUB_RESERVED = new Set([
+  "about", "apps", "collections", "codespaces", "contact", "enterprise", "events",
+  "explore", "features", "issues", "join", "login", "marketplace", "new",
+  "notifications", "orgs", "pricing", "pulls", "search", "security", "settings",
+  "sponsors", "stars", "topics", "trending", "users",
+]);
 
 /**
  * The candidate URLs in a pasted string, in order. A URL contains no whitespace,
@@ -114,6 +138,15 @@ function adoProjectAndRepo(segs: string[]): { project: string; repo: string } | 
   return { project: before[before.length - 1] ?? repo, repo };
 }
 
+/**
+ * Mask the password half of a `user:secret@host` userinfo. Only the half after
+ * the colon is a secret; the username identifies the account and is worth
+ * seeing. Applied to whole URLs, so it is a no-op on anything without userinfo.
+ */
+export function redactUrl(url: string): string {
+  return url.replace(/(\/\/|^)([^/@\s:]+):[^/@\s]*@/, "$1$2:***@");
+}
+
 function adoUrl(opts: { org: string; project: string; repo: string; remote: string }): RepoUrl {
   return {
     host: "ado",
@@ -121,6 +154,7 @@ function adoUrl(opts: { org: string; project: string; repo: string; remote: stri
     project: dec(opts.project),
     repo: dec(opts.repo),
     remote: opts.remote,
+    displayRemote: redactUrl(opts.remote),
     key: `ado:${dec(opts.org)}/${dec(opts.project)}/${dec(opts.repo)}`.toLowerCase(),
   };
 }
@@ -190,7 +224,7 @@ export function parseRepoUrl(input: string): RepoUrl | null {
     if (ado) return ado;
 
     const gh = parseGithubRemote(url);
-    if (gh && gh.owner && gh.repo) {
+    if (gh && gh.owner && gh.repo && !GITHUB_RESERVED.has(gh.owner.toLowerCase())) {
       // Preserve the scheme family — it's the credential path the user has — but
       // normalize the URL itself, since a web URL is not a clone URL.
       const ssh = /^ssh:\/\//i.test(url) || /^[^/\s]*@/.test(url);
@@ -200,6 +234,10 @@ export function parseRepoUrl(input: string): RepoUrl | null {
         project: "",
         repo: gh.repo,
         remote: ssh
+          ? `git@github.com:${gh.owner}/${gh.repo}.git`
+          : `https://github.com/${gh.owner}/${gh.repo}.git`,
+        // Rebuilt from owner/repo, so it never carried userinfo to begin with.
+        displayRemote: ssh
           ? `git@github.com:${gh.owner}/${gh.repo}.git`
           : `https://github.com/${gh.owner}/${gh.repo}.git`,
         key: `github:${gh.owner}/${gh.repo}`.toLowerCase(),
@@ -309,28 +347,39 @@ export function freeCloneDest(parent: string, base: string): string | null {
 
 // ── Running the clone ─────────────────────────────────────────────────────────
 
+/** How agendo reads a clone failure — decides which explanation is offered. */
+export type CloneFailure = "auth" | "missing" | "other";
+
 export interface CloneOutcome {
   ok: boolean;
   /** One-line failure reason, git's own words where it had any. */
   error?: string;
-  /** The failure looks like missing or refused credentials. */
-  auth?: boolean;
+  /** agendo's reading of `error` (absent when the clone succeeded). */
+  failure?: CloneFailure;
   /** The user cancelled (esc) rather than git failing. */
   canceled?: boolean;
 }
 
 export interface CloneRun {
   done: Promise<CloneOutcome>;
-  /** Kill the clone and remove the partial directory. Safe to call twice. */
-  cancel(): void;
+  /**
+   * Kill the clone and remove the partial directory. Safe to call twice.
+   * `immediate` is for teardown (unmount), where there is no time left for the
+   * child's exit to be observed: it kills hard and cleans up synchronously.
+   */
+  cancel(opts?: { immediate?: boolean }): void;
 }
 
 // Git's vocabulary for "you are not authenticated / not allowed", across the
-// transports and hosts we clone from. "repository not found" is in here on
-// purpose: for a private repo GitHub reports a 404 rather than a 403, so the
-// honest reading is "not found, or you don't have access".
+// transports and hosts we clone from.
 const AUTH_RE =
-  /authentication failed|could not read (?:username|password)|permission denied \(publickey|terminal prompts disabled|no such identity|403 forbidden|invalid username or (?:password|token)|repository not found|access denied|tf401019|authorization failed|host key verification failed/i;
+  /authentication failed|could not read (?:username|password)|permission denied \(publickey|terminal prompts disabled|no such identity|403 forbidden|invalid username or (?:password|token)|access denied|tf401019|authorization failed|host key verification failed/i;
+
+// Distinct from AUTH_RE on purpose. GitHub answers an unauthorized *private*
+// repo with a 404, so "not found" genuinely means "doesn't exist, OR you can't
+// see it" — telling the user flatly to check their credentials would be a
+// confident wrong answer for the (likelier) typo. The message covers both.
+const MISSING_RE = /repository .*not found|could not read from remote repository|does not (?:exist|appear to be a git repository)|project does not exist/i;
 
 /**
  * The child environment for `git clone`. agendo never prompts for credentials
@@ -344,7 +393,12 @@ function cloneEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
   delete env.GIT_ASKPASS;
   delete env.SSH_ASKPASS;
-  if (!env.GIT_SSH_COMMAND) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
+  // APPEND rather than only-set-if-unset: ssh reads passphrases straight from
+  // /dev/tty, not stdin, so a user's own `GIT_SSH_COMMAND` (`ssh -i ~/.ssh/…`,
+  // a wrapper script) would prompt into the terminal the TUI is drawing on and
+  // hang the clone screen. Their command is preserved — the later `-o` simply
+  // adds BatchMode to it.
+  env.GIT_SSH_COMMAND = `${env.GIT_SSH_COMMAND ?? "ssh"} -o BatchMode=yes`;
   return env;
 }
 
@@ -411,7 +465,7 @@ export function startClone(
   const done = new Promise<CloneOutcome>((resolve) => {
     child.on("error", (e) => {
       cleanup();
-      resolve({ ok: false, error: `could not run git: ${e.message}` });
+      resolve({ ok: false, failure: "other", error: `could not run git: ${e.message}` });
     });
     child.on("close", (code) => {
       if (canceled) {
@@ -424,20 +478,32 @@ export function startClone(
         return;
       }
       cleanup();
-      resolve({ ok: false, error: failureLine(stderr), auth: AUTH_RE.test(stderr) });
+      // "not found" is checked FIRST: a missing repo also trips several of the
+      // auth patterns, and the honest reading of it covers both possibilities.
+      const failure: CloneFailure = MISSING_RE.test(stderr)
+        ? "missing"
+        : AUTH_RE.test(stderr)
+          ? "auth"
+          : "other";
+      resolve({ ok: false, failure, error: failureLine(stderr) });
     });
   });
 
   return {
     done,
-    cancel() {
+    cancel(opts) {
       if (canceled) return;
       canceled = true;
       try {
-        child.kill("SIGTERM");
+        // SIGKILL on teardown: SIGTERM leaves git a window to keep writing, and
+        // there is no later tick in which to notice it finished.
+        child.kill(opts?.immediate ? "SIGKILL" : "SIGTERM");
       } catch {
         // Already gone — the close handler still runs the cleanup.
       }
+      // Normally the close handler owns cleanup (git may still be writing). On
+      // teardown that handler will never run, so do it here instead.
+      if (opts?.immediate) cleanup();
     },
   };
 }

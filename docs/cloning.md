@@ -93,6 +93,13 @@ still rejected:
 | `https://mygithub.com/owner/repo` | **rejected** |
 | `https://github.com.evil.org/owner/repo` | **rejected** |
 | `https://github.com/owner` | **rejected** (no repo) |
+| `https://github.com/orgs/anthropics/repositories` | **rejected** (reserved route) |
+| `https://github.com/features/copilot` | **rejected** (reserved route) |
+
+That last pair is why `GITHUB_RESERVED` exists: a GitHub *site page* is
+structurally `owner/repo` and parses happily, and the user only finds out when
+git reports "not found" for something that was never a repository. GitHub
+reserves those names, so rejecting them can't shadow a real owner.
 
 **Azure DevOps** — the messy ones. The host must again sit at the very start
 (after an optional scheme and `user@` userinfo), so `https://evil.example/dev.azure.com/x`
@@ -116,6 +123,13 @@ segment right after `_git`, so any trailing web path (`/pullrequest/42`,
 Percent-encoding is decoded for the identity and the directory name
 (`My%20Project` → `My Project`) but the **remote keeps its encoded form**, since
 that's what git has to send.
+
+ADO hands out clone URLs with the credentials embedded
+(`https://org:<PAT>@dev.azure.com/…`), and people paste them. The token stays in
+`remote` — dropping it would break a clone the user explicitly authenticated,
+and it reaches git's argv either way, exactly as it would from their shell — but
+the UI renders `displayRemote`, in which the secret half of the userinfo is
+masked. A pasted PAT must not end up in terminal scrollback.
 
 The clone URL agendo actually runs is canonical, not the pasted string: HTTPS
 input → `https://…/_git/repo` (ADO) or `https://github.com/owner/repo.git`;
@@ -162,21 +176,28 @@ freeze the TUI with no way out. So the clone runs with:
 
 - `GIT_TERMINAL_PROMPT=0` — no terminal prompting,
 - `GIT_ASKPASS` / `SSH_ASKPASS` removed from the child env — no GUI prompt,
-- `GIT_SSH_COMMAND` defaulting to `ssh -o BatchMode=yes` (only if the user
-  hasn't set their own) — no passphrase prompt. Agent-held keys, which is how
-  SSH auth normally works, are unaffected.
+- `-o BatchMode=yes` **appended** to `GIT_SSH_COMMAND` — no passphrase prompt.
+  Appended rather than set-only-when-unset: `ssh` reads passphrases straight
+  from `/dev/tty`, not stdin, so a user's own `GIT_SSH_COMMAND` (`ssh -i …`, a
+  wrapper script) would prompt into the terminal the TUI is drawing on and hang
+  the clone screen. Their command is preserved; the extra `-o` just adds the
+  guarantee. Agent-held keys, which is how SSH auth normally works, are
+  unaffected by BatchMode.
 
-Failures are classified: a stderr matching authentication / permission /
-`terminal prompts disabled` / `repository not found` / `403` patterns reports
+Failures get one of three readings, and each shows agendo's interpretation *and*
+git's own words, on separate lines — git's line is the half that identifies the
+real problem, so it must not be the half a narrow terminal truncates:
 
-```
-Clone failed — authentication. agendo uses your existing git credentials;
-check your SSH agent, or `gh auth setup-git` / `az repos` for HTTPS.
-fatal: could not read Username for 'https://github.com': terminal prompts disabled
-```
+| stderr looks like | reported as |
+| --- | --- |
+| auth failed / permission denied / `terminal prompts disabled` / 403 / TF401019 | `Authentication — agendo uses your existing git credentials; check your SSH agent, or \`gh auth setup-git\` / \`az repos\` for HTTPS.` |
+| repository not found / could not read from remote | `Not found — check the URL, or (if it's private) that your git has access to it.` |
+| anything else | git's `fatal:` line alone |
 
-so the user sees both agendo's reading and git's own words. Anything else
-reports git's `fatal:` line verbatim.
+The not-found case is deliberately **not** folded into the auth case even though
+GitHub answers an unauthorized private repo with a 404: "check your credentials"
+would be a confident wrong answer for what is far more often a typo, so the
+message carries both readings.
 
 **Partial clones are always cleaned up.** If agendo created the destination
 directory and the clone fails or is cancelled, the directory is removed. A
@@ -204,6 +225,20 @@ An elapsed-seconds ticker runs alongside, so the screen still changes during the
 silent phases (DNS, TLS, server-side `Enumerating objects`) — it can never look
 frozen. **esc cancels**: the child is killed and the partial directory removed.
 
+`q` and ctrl-c are suppressed on this screen, and on the URL prompt before it.
+On the prompt that's because it's a text input and `q` is an ordinary character
+— `github.com/qmk/qmk_firmware` has to be typeable. On the clone screen it's
+because a `git clone` is mid-write: the way out is cancelling it (esc), which
+cleans up, not abandoning the process and leaving a half-made checkout behind.
+Unmount is still handled — if agendo goes down some other way, the teardown
+kills the clone and removes the directory synchronously.
+
+Resolving the destination reads the filesystem (one `git remote get-url` per
+sibling checkout, a stat per candidate directory), so it runs off the render
+path in an effect: the parsed identity appears the instant you type, the
+destination line a beat later, and the TUI never blocks on it. Origins are
+cached per directory for the process lifetime.
+
 **Full clone, not `--depth`.** Every downstream thing agendo does with a repo
 needs history: `git worktree add -b … origin/HEAD`, diffing against the base
 branch, `git log` for the agent to read. A shallow clone makes the first of
@@ -222,8 +257,14 @@ session-creation path, and `src/clone.ts` knows nothing about sessions,
 worktrees, or tmux.
 
 Until the next reload discovers it through a session's cwd, the fresh clone is
-held in local state and merged into the picker's repo list, so backing out with
-esc still leaves it selectable.
+held in local state and merged into the picker's repo list (in both the scoped
+and global views), so backing out with esc — or toggling `a` — still leaves it
+selectable.
+
+What the clone step did is carried onto the screens that follow it, since those
+replace the list the notice banner lives on: the where-to-run and branch prompts
+show it as a `✓` line, and the PR flow — which goes clone → checkout → launch in
+a single keystroke — folds it into the launch notice.
 
 ## What is deliberately not here
 
