@@ -4,6 +4,7 @@
 // request a token scoped to the configured tenant.
 import { spawn, spawnSync } from "child_process";
 import { loadConfig, type Config } from "./config.ts";
+import { httpError, networkError, readJsonResponse, scrub, snippetOf } from "./errors.ts";
 import type {
   Identity,
   PullRequest,
@@ -75,16 +76,52 @@ export function checkAuth(): Promise<boolean> {
 }
 
 // ── Low-level fetch ───────────────────────────────────────────────────────────
+/** Bearer token(s) to scrub from any error text we surface. The Authorization
+ *  header is never echoed; this covers a URL or response body that happens to
+ *  contain the same string. */
+function tokenSecrets(): string[] {
+  return cachedToken ? [cachedToken.value] : [];
+}
+
+/**
+ * One request, with every failure mode carrying its context:
+ *   • no response at all (DNS / refused / TLS / timeout) → tagged retryable
+ *   • an error status → the status rides on the error, so the UI's auto-retry
+ *     can tell a 503 (worth another go) from a 401/404 (never will be), plus a
+ *     body excerpt: ADO puts the actual explanation there ("VS403496: The team
+ *     … does not exist"), and a URL with a bare "404 Not Found" is undiagnosable
+ *   • a 2xx whose body isn't JSON → the method, URL, status and a short body
+ *     excerpt, so an ADO auth redirect to an HTML sign-in page reads as one
+ *     instead of as the runtime's bare "Failed to parse JSON".
+ * Every echoed string is scrubbed of the bearer token; the Authorization header
+ * is never included at all.
+ */
+async function adoFetch(method: "GET" | "POST", url: string, init: RequestInit): Promise<any> {
+  const secrets = tokenSecrets();
+  const safeUrl = scrub(url, secrets);
+  let r: Response;
+  try {
+    r = await fetch(url, init);
+  } catch (cause) {
+    throw networkError(`ADO ${method} ${safeUrl}`, cause);
+  }
+  if (!r.ok) {
+    // Also drains the body, so the connection returns to the pool.
+    const body = await r.text().catch(() => "");
+    const detail = body ? ` (${snippetOf(body, secrets)})` : "";
+    throw httpError(`ADO ${method} ${safeUrl} -> ${r.status} ${r.statusText}${detail}`, r.status);
+  }
+  return readJsonResponse(r, method, url, secrets);
+}
+
 async function adoGet(path: string): Promise<any> {
   const url = path.startsWith("http") ? path : `${BASE}/${path}`;
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
-  if (!r.ok) throw new Error(`ADO GET ${url} -> ${r.status} ${r.statusText}`);
-  return r.json();
+  return adoFetch("GET", url, { headers: { Authorization: `Bearer ${getToken()}` } });
 }
 
 async function adoPost(path: string, body: unknown): Promise<any> {
   const url = `${BASE}/${path}`;
-  const r = await fetch(url, {
+  return adoFetch("POST", url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${getToken()}`,
@@ -92,8 +129,6 @@ async function adoPost(path: string, body: unknown): Promise<any> {
     },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`ADO POST ${url} -> ${r.status} ${r.statusText}`);
-  return r.json();
 }
 
 // ── Current iteration for the configured team ─────────────────────────────────

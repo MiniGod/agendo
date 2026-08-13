@@ -11,6 +11,7 @@
 //     phases, per-agent meta for models), paid only when a run is displayed.
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
+import { parseJsonFileOr, parseJsonLine } from "./errors.ts";
 import type { WorkflowDetails, WorkflowPhase, WorkflowRef, WorkflowStatus } from "./types.ts";
 
 // ── index-time transcript scan ───────────────────────────────────────────────
@@ -117,21 +118,18 @@ async function readJournal(dir?: string): Promise<{ started: Set<string>; done: 
   const started = new Set<string>();
   const done = new Set<string>();
   if (!dir) return { started, done };
+  const path = join(dir, "journal.jsonl");
   let raw: string;
   try {
-    raw = await readFile(join(dir, "journal.jsonl"), "utf-8");
+    raw = await readFile(path, "utf-8");
   } catch {
     return { started, done };
   }
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    const e: Record<string, any> | null = parseJsonLine(t, path, i + 1, { isLast: i === lines.length - 1 });
     if (!e || typeof e !== "object" || typeof e.agentId !== "string") continue;
     if (e.type === "started") started.add(e.agentId);
     else if (e.type === "result") done.add(e.agentId);
@@ -160,12 +158,12 @@ async function scanRunDir(dir?: string): Promise<{ lastActivity?: Date; modelCou
       const st = await stat(p).catch(() => null);
       if (st && st.mtimeMs > last) last = st.mtimeMs;
       if (f.startsWith("agent-") && f.endsWith(".meta.json")) {
-        try {
-          const m = JSON.parse(await readFile(p, "utf-8"));
-          if (m && typeof m.model === "string") counts[m.model] = (counts[m.model] ?? 0) + 1;
-        } catch {
-          /* unreadable meta: skip */
-        }
+        const text = await readFile(p, "utf-8").catch(() => null);
+        if (text === null) return; // unreadable meta: skip
+        // Only the model tally is at stake, so a malformed file is reported by
+        // path (via parseJsonFileOr) and skipped rather than failing the scan.
+        const m = parseJsonFileOr<any>(text, p, null);
+        if (m && typeof m.model === "string") counts[m.model] = (counts[m.model] ?? 0) + 1;
       }
     }),
   );
