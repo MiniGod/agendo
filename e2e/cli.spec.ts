@@ -62,9 +62,21 @@ test("agendo --llm prints the background-session guide", async ({ mock }) => {
   // command list an agent is pointed at, so a verb missing from it effectively
   // does not exist — which is why orchestrators re-polled `status` on a guessed
   // cadence instead of being notified.
-  expect(r.stdout).toContain("agendo wait");
-  expect(r.stdout).toContain("--any");
-  expect(r.stdout).toContain("--json");
+  //
+  // Match only text that is INDEPENDENT of SELF_CMD. Every invocation line is
+  // prefixed with however this launcher can re-invoke itself, which varies by
+  // environment: `agendo` when it's on PATH, `bunx agendo` under a package
+  // runner, and a bare `<bun> <abs path to index.tsx>` in CI. Asserting on
+  // "agendo wait" passes locally and fails on a runner for reasons that have
+  // nothing to do with the guide.
+  expect(r.stdout).toContain(" wait <id...> --any --json --timeout 30m");
+  // …and that it actually teaches the workflow, not just that the verb exists:
+  // run it in the background, don't re-poll, and here's what each flag buys.
+  expect(r.stdout).toContain("Be told when it needs you (DON'T poll)");
+  expect(r.stdout).toContain("treat its exit as the");
+  expect(r.stdout).toContain("--any wakes on the first of several sessions to settle");
+  expect(r.stdout).toContain("--json prints what you woke up to find out");
+  expect(r.stdout).toContain("--state limited");
 });
 
 test("agendo list shows the running session with readiness", async ({ mock }) => {
