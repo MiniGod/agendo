@@ -22,6 +22,13 @@ function readState() {
       // '#{cursor_x} #{cursor_y}'` — the second signal the input-box classifier
       // reads (a greyed-out suggestion leaves the caret at the prompt).
       cursors: s.cursors ?? {},
+      // Optional per-location override of `#{window_name}` (`{"agendo:3": "…"}`),
+      // letting a fixture say a `session:index` holds a DIFFERENT window than the
+      // window list does. That divergence is real — tmux renumbers windows when
+      // one closes under `renumber-windows on`, so an index resolved by one
+      // command can name something else by the next — and no static state file
+      // can otherwise express a change *between* two commands.
+      windowAt: s.windowAt ?? {},
     };
   } catch {
     return { sessions: [], windows: [], panes: [], captures: {}, cursors: {} };
@@ -44,11 +51,62 @@ function flag(name) {
 function format() {
   return flag("-F");
 }
+/**
+ * Resolve a `-t` target the way real tmux does, against a list of candidate
+ * names: a leading `=` pins resolution to an EXACT match, otherwise exact wins
+ * and a prefix/fnmatch match is accepted next. Returns the matched name, or
+ * undefined. Managed names are prefixes of each other (`cl-pr-5`⊂`cl-pr-50`), so
+ * this is what makes a bare (unpinned) target bind to the wrong window here just
+ * as it would on a real server.
+ */
+function resolveTarget(target, names) {
+  let t = target ?? "";
+  const exactOnly = t.startsWith("=");
+  if (exactOnly) t = t.slice(1);
+  if (names.includes(t)) return t;
+  if (exactOnly) return undefined;
+  // Real tmux needs the prefix match to be UNIQUE — "multiple matches produce an
+  // error" (man tmux, target-session) — so an ambiguous prefix resolves to
+  // nothing here rather than to whichever name happens to be listed first.
+  const hits = [...new Set(names.filter((n) => n.startsWith(t)))];
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/** Every window name in the state, however the fixture spelled it. */
+function windowNames(state) {
+  return [
+    ...state.windows.flatMap((w) => [w.name, w.window].filter(Boolean)),
+    ...state.panes.map((p) => p.window).filter(Boolean),
+  ];
+}
+
+/**
+ * Reduce a `-t` value to the plain window/session name the fixtures key their
+ * captures and cursors by: drop the `=` pin, and resolve the `session:window`
+ * form (which agendo uses to address a launcher tab unambiguously) to the window
+ * it names — by index, as real tmux resolves `mysession:1`, or by name.
+ * Falls back to the raw value so the historical bare-name form keeps working.
+ */
+function targetName(state, target) {
+  const t = target ?? "";
+  const colon = t.indexOf(":");
+  if (colon === -1) return t.startsWith("=") ? t.slice(1) : t;
+  const session = resolveTarget(t.slice(0, colon), state.sessions);
+  const win = t.slice(colon + 1);
+  const inSession = state.windows.filter((w) => w.session === session);
+  const byIndex = /^\d+$/.test(win) ? inSession.find((w) => String(w.index) === win) : undefined;
+  const hit = byIndex ?? inSession.find((w) => (w.name ?? w.window) === win.replace(/^=/, ""));
+  return hit ? hit.name ?? hit.window : win.replace(/^=/, "");
+}
+
 function emit(fmt, record) {
   return fmt
     .replace(/#\{session_name\}/g, record.session ?? "")
     .replace(/#\{window_index\}/g, String(record.index ?? 0))
-    .replace(/#\{window_name\}/g, record.window ?? "")
+    // Window records are written either way round — a pane carries `window`, a
+    // window record its `name` — and both stand for the window's name (the
+    // has-session/kill-window target lookups accept both too).
+    .replace(/#\{window_name\}/g, record.window ?? record.name ?? "")
     .replace(/#\{pane_current_path\}/g, record.cwd ?? "")
     .replace(/#\{pane_dead\}/g, record.dead ? "1" : "0")
     // The placeholder conditional `#{?@cl_placeholder,1,0}` → the pane's flag.
@@ -85,9 +143,12 @@ switch (cmd) {
   }
   case "capture-pane": {
     // -p prints to stdout; -t <target> selects the pane. We serve the stored
-    // capture text for that target (empty string if none).
-    const target = flag("-t");
-    const text = state.captures[target] ?? "";
+    // capture text for that target (empty string if none). The target is
+    // normalized first: agendo reads a launcher tab through its unambiguous
+    // `=session:index` location, which must land on the same window a bare name
+    // would — a pane read that silently came back empty would read as "unknown"
+    // and wave a busy session through the close guard.
+    const text = state.captures[targetName(state, flag("-t"))] ?? "";
     process.stdout.write(text);
     process.exit(0);
   }
@@ -96,8 +157,18 @@ switch (cmd) {
     // state.cursors[target]); every other format prints nothing, which is how
     // this stub has always answered `#{session_name}` (⇒ currentSessionName null).
     const fmt = argv[argv.length - 1] ?? "";
-    const cursor = state.cursors?.[flag("-t")];
+    const target = flag("-t");
+    const cursor = state.cursors?.[targetName(state, target)];
     if (fmt.includes("#{cursor_x}") && cursor) process.stdout.write(`${cursor.x} ${cursor.y}\n`);
+    // `#{window_name}` at a `session:index` location — what agendo re-reads right
+    // before a kill to prove the index still names the window it resolved.
+    // Prints nothing when the location holds no window, as tmux does on an
+    // unresolvable target.
+    else if (fmt.includes("#{window_name}") && target !== undefined) {
+      const at = state.windowAt?.[target.replace(/^=/, "")];
+      const name = at ?? targetName(state, target);
+      if (at || windowNames(state).includes(name)) process.stdout.write(`${name}\n`);
+    }
     process.exit(0);
   }
   case "has-session": {
@@ -106,13 +177,48 @@ switch (cmd) {
     // fnmatch; a leading `=` pins it to an exact match only. Managed names are
     // prefixes of each other (`cl-pr-5`⊂`cl-pr-50`), so bare resolution would
     // bind the shorter name to the longer live target — the T1 bug.
-    let target = flag("-t") ?? "";
-    const exactOnly = target.startsWith("=");
-    if (exactOnly) target = target.slice(1);
     const names = [...state.sessions, ...state.windows.flatMap((w) => [w.name, w.window].filter(Boolean))];
-    const exact = names.includes(target);
-    const prefix = !exactOnly && names.some((n) => n.startsWith(target));
-    process.exit(exact || prefix ? 0 : 1);
+    // Historically this lookup ignores window names a fixture spells only on a
+    // pane, so it stays on the narrower set the has-session callers were written
+    // against (kill-window uses the full one — see windowNames).
+    process.exit(resolveTarget(flag("-t"), names) !== undefined ? 0 : 1);
+  }
+  case "kill-window":
+  case "kill-session": {
+    // Destructive, so modelled rather than stubbed — a mistargeted kill has to
+    // show up as the WRONG entry disappearing instead of silently passing.
+    //
+    // `kill-session` takes a target-session: exact name, else a UNIQUE prefix,
+    // else an fnmatch — unless pinned with `=` (man tmux). `kill-window` takes a
+    // target-window, `session:window`; with the session omitted the window is
+    // looked up in the caller's current session only, which is precisely why
+    // agendo resolves a tab to `session:index` before killing it. This stub has
+    // no current session to scope by, so a bare window name is looked up across
+    // all windows before falling back to a session of that name. That is the one
+    // deliberate infidelity here, and it is permissive: it cannot reproduce the
+    // miss a bare target suffers on a real server, so the tests pin the target
+    // FORM directly (argv assertions) instead of relying on this stub to fail.
+    // Unresolvable targets fail the way tmux's "can't find window" does.
+    //
+    // Killing a session takes its panes with it. Killing a window removes just
+    // that window — and the session too if it was the last one, as tmux does.
+    const target = flag("-t") ?? "";
+    const victim =
+      cmd === "kill-session"
+        ? resolveTarget(target, state.sessions)
+        : target.includes(":")
+          ? targetName(state, target)
+          : resolveTarget(target, windowNames(state)) ?? resolveTarget(target, state.sessions);
+    const live = [...state.sessions, ...windowNames(state)];
+    if (victim === undefined || !live.includes(victim)) process.exit(1);
+    const asSession = state.sessions.includes(victim);
+    state.windows = state.windows.filter((w) => w.name !== victim && w.window !== victim);
+    state.panes = state.panes.filter((p) => p.window !== victim && !(asSession && p.session === victim));
+    state.sessions = state.sessions.filter(
+      (s) => s !== victim && (state.windows.some((w) => w.session === s) || state.panes.some((p) => p.session === s)),
+    );
+    writeState(state);
+    process.exit(0);
   }
   case "new-session": {
     // ...-s <name> -n <window> -c <cwd> -- <argv...>

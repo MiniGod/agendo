@@ -67,11 +67,14 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`. So an agent can spin off _new_ sessions — each in its
-own fresh worktree — for separate pieces of work that deserve their own PR, then
-monitor and steer them through the same commands. One orchestrator session can fan a
-large task out across many worktrees and coordinate them, instead of hand-rolling
-tmux and `git worktree`. The sessions it starts inherit the same ability.
+launch`/`list`/`status`/`send`/`close`. So an agent can spin off _new_ sessions — each
+in its own fresh worktree — for separate pieces of work that deserve their own PR,
+then monitor, steer and finally close them through the same commands. One
+orchestrator session can fan a large task out across many worktrees and coordinate
+them, instead of hand-rolling tmux and `git worktree`. `agendo close <id>` ends a
+finished session's window and only that — its worktree, branch and commits stay on
+disk — so no one has to reach for a raw `tmux kill-window`. The sessions it starts
+inherit the same ability.
 
 ### Fresh sessions in isolated worktrees
 

@@ -101,6 +101,12 @@ export function llmGuide(): string {
     "  Sends a follow-up prompt, but only when its input is idle/ready (not mid-turn, no",
     "  open question, nothing already typed). Refuses otherwise (--force to override).",
     "",
+    `Close it:     ${SELF_CMD} close <id>`,
+    "  Ends the session by killing ONLY its tmux window. Its git worktree, branch and",
+    "  commits are guaranteed untouched on disk, so nothing is lost and `resume <id>`",
+    "  brings it back. Refuses a session with work in flight (--force to override).",
+    "  Use this instead of `tmux kill-window`/`kill-session` — never hand-roll a kill.",
+    "",
     "The <id> is printed when you launch. Background sessions you start carry these same",
     "instructions, so they can launch and coordinate their own background sessions too.",
   ].join("\n");

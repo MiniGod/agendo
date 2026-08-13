@@ -756,10 +756,91 @@ export function setSessionRoot(session: string, root: string): void {
   tmuxQuiet(["set-option", "-t", exactTarget(session), ROOT_OPTION, root]);
 }
 
-/** Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
- *  dormant restore placeholder before a headless resume recreates it for real. */
+/**
+ * Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
+ * dormant restore placeholder before a headless resume recreates it for real,
+ * and by `agendo close` to end a managed session's window.
+ *
+ * EXACT-targeted (see `exactTarget`): a bare `-t <name>` resolves by exact →
+ * unique-prefix → fnmatch, so killing `cl-pr-5` while `cl-pr-50` is the only
+ * live match would destroy the WRONG session's window. Every kill in this file
+ * pins its target with the leading `=` for that reason.
+ *
+ * A managed agent runs as either a window in a host session or a session of its
+ * own (see the file header); `kill-window` covers both, since tmux resolves a
+ * bare session name to that session's current window — and a managed session has
+ * exactly the one. Nothing outside tmux is touched: the agent's git worktree,
+ * branch and commits are left on disk.
+ */
 export function killWindow(name: string): void {
-  tmuxQuiet(["kill-window", "-t", name]);
+  tmuxQuiet(["kill-window", "-t", exactTarget(name)]);
+}
+
+/** Kill the tmux SESSION `name` outright (exact-targeted; no-op if absent). */
+export function killSession(name: string): void {
+  tmuxQuiet(["kill-session", "-t", exactTarget(name)]);
+}
+
+/**
+ * End a live managed target — the window it names, or the whole session when the
+ * name IS a session of its own (how an agent launched outside tmux runs). Backs
+ * `agendo close`. Reports how it addressed the target and whether tmux still
+ * lists the name afterwards.
+ *
+ * ADDRESSING is the subtle part. `man tmux`: a target-window is `session:window`
+ * and "if a session is omitted, the current session is used if available; if no
+ * current session is available, the most recently used is chosen". So a bare
+ * window name is looked up inside ONE session — whichever the caller happens to
+ * be in, or an arbitrary one when the CLI runs outside tmux — and a launcher tab
+ * addressed from anywhere else simply isn't found. `tmuxQuiet` throws the exit
+ * status away, so that failure would be invisible. We therefore resolve the
+ * window to its unambiguous `session:index` location first (`windowLocation`)
+ * and target that; a target with no such window is a session and is killed as
+ * one. Both forms are `=`-pinned (see `exactTarget`), which drops tmux's
+ * prefix/fnmatch fallback — the one that would bind `cl-pr-5` to `cl-pr-50` if
+ * the exact target died between the listing and this call.
+ *
+ * `location` defaults to the lookup and is accepted explicitly so a caller that
+ * already resolved it (to READ the same pane, which needs the identical
+ * unambiguous target) can prove both operations addressed one window.
+ *
+ * The post-check is deliberate: every write here goes through `tmuxQuiet`, so
+ * "we asked" is not "it's gone" — callers report what actually happened rather
+ * than assuming success. Nothing outside tmux is touched either way: the agent's
+ * git worktree, branch and commits stay on disk.
+ */
+export function killManagedTarget(
+  name: string,
+  location: string | null = windowLocation(name),
+): { how: "window" | "session" | "moved" | "none"; gone: boolean } {
+  if (location) {
+    // Re-read the name at that location first. A window index is not a stable
+    // handle: with `renumber-windows on` (a common setting) every index above a
+    // closing window shifts down, and an agent tab exiting on its own is routine
+    // here — so between the lookup and this call `agendo:3` can come to mean a
+    // different window, up to and including the launcher's own menu. Cheap
+    // re-check, and it closes the only gap where this command could hit a window
+    // nobody asked it to.
+    if (windowNameAt(location) !== name) return { how: "moved", gone: false };
+    killWindow(location);
+    // Confirm THIS location no longer holds it — not merely that the name is
+    // gone somewhere, which a duplicate name in another session would satisfy.
+    return { how: "window", gone: !windowLocations(name).includes(location) };
+  }
+  if (liveSessions().has(name)) {
+    killSession(name);
+    return { how: "session", gone: !liveSessions().has(name) };
+  }
+  return { how: "none", gone: !liveTargets().has(name) };
+}
+
+/** The window name currently at a `session:index` location, or null. */
+function windowNameAt(location: string): string | null {
+  const r = spawnSync("tmux", ["display-message", "-p", "-t", exactTarget(location), "#{window_name}"], {
+    encoding: "utf-8",
+  });
+  const name = r.status === 0 ? (r.stdout ?? "").trim() : "";
+  return name || null;
 }
 
 /**
@@ -784,13 +865,25 @@ export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name:
   return out;
 }
 
-/** `session:window_index` of the first window named `name`, or null. */
-export function windowLocation(name: string): string | null {
+/**
+ * `session:window_index` of EVERY live window named `name`, across all sessions.
+ * tmux allows duplicate window names, and this launcher creates them — two host
+ * sessions (the global `agendo` and a path-scoped one) can each hold a tab for
+ * the same session. So a caller that is about to do something destructive has to
+ * see all of them, not just the first (see `windowLocation`).
+ */
+export function windowLocations(name: string): string[] {
+  const out: string[] = [];
   for (const line of tmuxLines(["list-windows", "-a", "-F", "#{session_name}:#{window_index}\t#{window_name}"])) {
     const [loc, wname] = line.split("\t");
-    if (wname === name) return loc;
+    if (wname === name) out.push(loc);
   }
-  return null;
+  return out;
+}
+
+/** `session:window_index` of the first window named `name`, or null. */
+export function windowLocation(name: string): string | null {
+  return windowLocations(name)[0] ?? null;
 }
 
 /**

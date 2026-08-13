@@ -4,6 +4,8 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
@@ -350,6 +352,397 @@ test("agendo unblock refuses a session that isn't limited (no clobber)", async (
   expect(r.stderr).toContain("not limited");
   const tmux = await mock.tmuxLog();
   expect(tmux.some((argv) => argv[0] === "send-keys" && argv.includes("continue"))).toBe(false);
+});
+
+// ── `agendo close` ───────────────────────────────────────────────────────────
+// Ends a session by killing its tmux window and NOTHING else. Every test below
+// runs against the fake tmux, which models real target resolution (window before
+// session, exact → prefix → fnmatch unless pinned with `=`) and actually deletes
+// what it matched — so a mistargeted kill shows up as the wrong entry vanishing.
+
+/** Every kill argv the CLI issued, in order — whichever verb it used. */
+const killsIn = (tmux: string[][]) =>
+  tmux.filter((argv) => argv[0] === "kill-window" || argv[0] === "kill-session");
+
+test("agendo close ends a running session and leaves worktree, branch and commits alone", async ({ mock }) => {
+  // A worktree with uncommitted work in it, so "we didn't touch the filesystem"
+  // is asserted against something real rather than an absent directory.
+  const worktree = join(mock.home, "repos", "appweb", ".claude", "worktrees", "login");
+  await mkdir(worktree, { recursive: true });
+  await writeFile(join(worktree, "WORK.txt"), "uncommitted work");
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`closed ${RUNNING_TARGET}`);
+  expect(r.stdout).toContain("untouched");
+
+  // Exactly one kill, `=`-pinned. This agent runs as its own detached tmux
+  // session (the outside-tmux launch path), so the session is what's ended.
+  const tmux = await mock.tmuxLog();
+  expect(killsIn(tmux)).toEqual([["kill-session", "-t", `=${RUNNING_TARGET}`]]);
+  // …and it really went: the target is no longer live.
+  const after = await mock.getTmuxState();
+  expect(after.sessions).not.toContain(RUNNING_TARGET);
+  expect(agendo(mock.env, "list").stdout).toContain("No running sessions.");
+
+  // THE GUARANTEE: nothing on disk was removed. No git ran at all (so certainly
+  // no `worktree remove`), the worktree and its uncommitted file are still
+  // there, and the transcript survives — so `resume` can bring the session back.
+  const calls = await mock.callLog();
+  expect(calls.some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
+  expect(existsSync(join(worktree, "WORK.txt"))).toBe(true);
+  expect(existsSync(join(mock.home, ".claude", "projects", "appweb-login", `${LOGIN_SESSION_ID}.jsonl`))).toBe(true);
+});
+
+test("agendo close targets tmux by EXACT name — a prefix-colliding session survives (T1)", async ({ mock }) => {
+  // Two live agent sessions whose names collide by prefix: `cl-claude-<crash>` ⊂
+  // `cl-claude-<crash>x`. Per man tmux a target-session is matched exact → start
+  // of name → fnmatch, "unless the session name is prefixed with an `=`" — so the
+  // pin is what guarantees the shorter name can never resolve onto the longer
+  // neighbour (which is what an unpinned target does the moment the exact one
+  // dies between our listing and the kill).
+  const canonical = `cl-claude-${CRASH_SHORT_ID}`;
+  const neighbour = `${canonical}x`;
+  await mock.setTmuxState({
+    sessions: [canonical, neighbour],
+    windows: [],
+    panes: [
+      { session: canonical, window: canonical, cwd: "/run/crash", placeholder: false },
+      { session: neighbour, window: neighbour, cwd: "/run/other", placeholder: false },
+    ],
+    captures: {
+      [canonical]: tmuxState.captures[RUNNING_TARGET],
+      [neighbour]: tmuxState.captures[RUNNING_TARGET],
+    },
+  });
+
+  const r = agendo(mock.env, "close", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`closed ${canonical}`);
+
+  const tmux = await mock.tmuxLog();
+  expect(killsIn(tmux)).toEqual([["kill-session", "-t", `=${canonical}`]]);
+  // The right one died; the prefix-colliding neighbour is untouched.
+  const after = await mock.getTmuxState();
+  expect(after.sessions).toEqual([neighbour]);
+  expect(after.panes.some((p: { session: string }) => p.session === neighbour)).toBe(true);
+});
+
+test("agendo close addresses a launcher TAB by session:index, for both the read and the kill", async ({ mock }) => {
+  // A session running as a tab in the `agendo` host session, mid-turn.
+  //
+  // What this pins is the TARGET FORM, on both the read and the kill. A bare
+  // `-t <window name>` is resolved inside ONE session only — the caller's current
+  // one, or an arbitrary one when there is no client (man tmux: "if no current
+  // session is available, the most recently used is chosen") — so addressed that
+  // way from outside tmux, the pane read comes back empty (classifying "unknown",
+  // which close treats as safe to kill) and the kill quietly hits nothing, with
+  // `tmuxQuiet` swallowing the error. The stub has no notion of a current session
+  // and resolves names globally, so it can't reproduce that miss; the argv
+  // assertions below are what hold the `session:index` form in place.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 3, name: RUNNING_TARGET },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+      { session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: BUSY_PANE },
+  });
+
+  const busy = agendo(mock.env, "close", SHORT_ID);
+  expect(busy.status).not.toBe(0);
+  expect(busy.stderr).toContain("busy"); // the read reached the tab's real pane
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  // The pane was read through the tab's unambiguous, `=`-pinned location.
+  expect((await mock.tmuxLog()).some((a) => a[0] === "capture-pane" && a.includes("=agendo:3"))).toBe(true);
+
+  const forced = agendo(mock.env, "close", "-f", SHORT_ID);
+  expect(forced.status).toBe(0);
+  // The kill goes to the same location — not the bare window name.
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-window", "-t", "=agendo:3"]]);
+  // Only the agent tab went: the host session and its menu window are untouched.
+  const after = await mock.getTmuxState();
+  expect(after.windows.map((w: { name: string }) => w.name)).toEqual(["launcher"]);
+  expect(after.sessions).toEqual(["agendo"]);
+});
+
+test("agendo close won't kill a window that moved out from under the index it resolved", async ({ mock }) => {
+  // Window indices are not stable handles: with `renumber-windows on` every index
+  // above a closing window shifts down, and agent tabs exit on their own all the
+  // time. Between resolving `agendo:3` and killing it, that index can come to mean
+  // a different window — including the launcher's own menu. So the name at the
+  // location is re-read immediately before the kill. `windowAt` is the stub's way
+  // of expressing that mid-command divergence: the window list still places the
+  // tab at agendo:3, but asking what's *at* agendo:3 now answers something else.
+  // The command must refuse, kill nothing, and say why.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 3, name: RUNNING_TARGET }],
+    panes: [{ session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false }],
+    captures: { [RUNNING_TARGET]: tmuxState.captures[RUNNING_TARGET] },
+    // The window at agendo:3 is reported as something else entirely.
+    windowAt: { "agendo:3": "someone-elses-shell" },
+  });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("no longer it");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  expect((await mock.getTmuxState()).windows).toHaveLength(1); // nothing died
+});
+
+test("agendo close reports failure when tmux can't place the target", async ({ mock }) => {
+  // tmux listed the pane a moment ago but can put it in neither a window nor a
+  // session — so no kill was issued. Every tmux write here is fire-and-forget
+  // (tmuxQuiet drops the exit status), so this is the case where "we asked" must
+  // not be reported as "it's gone".
+  await mock.setTmuxState({
+    sessions: [],
+    windows: [],
+    panes: [{ session: "ghost", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false }],
+    captures: { [RUNNING_TARGET]: tmuxState.captures[RUNNING_TARGET] },
+  });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("Could not close");
+  expect(r.stdout).not.toContain("closed");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+});
+
+test("agendo close refuses when two launchers hold a window of the same name", async ({ mock }) => {
+  // tmux allows duplicate window names and agendo produces them: a global
+  // launcher and a path-scoped one can each hold a tab for the same session.
+  // Reading the wrong one is harmless, killing it is not — and killing "the first
+  // one tmux lists" would destroy a live agent in the other launcher.
+  await mock.setTmuxState({
+    sessions: ["agendo", "agendo-appweb"],
+    windows: [
+      { session: "agendo", index: 1, name: RUNNING_TARGET },
+      { session: "agendo-appweb", index: 4, name: RUNNING_TARGET },
+    ],
+    panes: [
+      { session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+      { session: "agendo-appweb", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: tmuxState.captures[RUNNING_TARGET] },
+  });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("2 live windows are named");
+  expect(r.stderr).toContain("agendo:1");
+  expect(r.stderr).toContain("agendo-appweb:4");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  expect((await mock.getTmuxState()).windows).toHaveLength(2); // both still there
+});
+
+test("agendo close works on a session too new to have a transcript", async ({ mock }) => {
+  // `agendo launch` prints the session id before the agent has written any log,
+  // so the session index can't see it yet — but its window is named after that
+  // very short id. Closing a launch that went wrong in its first seconds is the
+  // flow this command exists for, so it must not fail with "No session found".
+  //
+  // Its restore tab was already written by `agendo launch`, under the CANONICAL
+  // name (cl-claude-<id>) while the live window is in the launch namespace
+  // (cl-bg-<id>) — same session, different prefix — so the tab must be matched by
+  // the id it embeds or the closed session comes straight back as a placeholder.
+  const sid = "abcdef123456";
+  const fresh = `cl-bg-${sid}`;
+  const restoreFile = join(mock.home, ".agendo", "restore", "agendo.json");
+  await mkdir(join(mock.home, ".agendo", "restore"), { recursive: true });
+  await writeFile(
+    restoreFile,
+    JSON.stringify({ tabs: [{ name: `cl-claude-${sid}`, cwd: "/run/fresh", title: "brand new", argv: ["claude", "--resume", sid] }] }, null, 2),
+  );
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 5, name: fresh },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+      { session: "agendo", window: fresh, cwd: "/run/fresh", placeholder: false },
+    ],
+    captures: { [fresh]: tmuxState.captures[RUNNING_TARGET] },
+  });
+
+  const r = agendo(mock.env, "close", sid);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`closed ${fresh}`);
+  // No `resume:` hint — there's no transcript for `resume` to find yet.
+  expect(r.stdout).not.toContain("resume:");
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-window", "-t", "=agendo:5"]]);
+  expect((await mock.getTmuxState()).windows.map((w: { name: string }) => w.name)).toEqual(["launcher"]);
+  expect(JSON.parse(await readFile(restoreFile, "utf-8")).tabs).toEqual([]);
+});
+
+test("agendo close refuses an id-less window when two sessions share its directory", async ({ mock }) => {
+  // A `cl-wi-…` window carries a WORK-ITEM id, not a session id, so it is
+  // attributed to the most-recently-used session in its cwd. Give that cwd a
+  // second, newer session and the attribution flips to it — while the agent
+  // actually running in the window may still be the older one. Reading a pane on
+  // that guess is harmless; killing it is not, so it takes --force.
+  const loginCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "login");
+  await writeFile(
+    join(mock.home, ".claude", "projects", "appweb-login", "second-session.jsonl"),
+    [
+      JSON.stringify({ type: "summary", cwd: loginCwd, gitBranch: "feature/login", timestamp: "2026-06-20T11:00:00.000Z" }),
+      JSON.stringify({ type: "user", message: { role: "user", content: "second session, same worktree" }, cwd: loginCwd, timestamp: "2026-06-20T11:00:05.000Z" }),
+    ].join("\n") + "\n",
+  );
+  await mock.setTmuxState({
+    ...tmuxState,
+    sessions: ["cl-wi-101"],
+    panes: [{ session: "cl-wi-101", window: "cl-wi-101", cwd: loginCwd, placeholder: false }],
+    captures: { "cl-wi-101": tmuxState.captures[RUNNING_TARGET] },
+  });
+
+  const r = agendo(mock.env, "close", shortIdOf("second-session"));
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("carries no session id");
+  expect(r.stderr).toContain("sessions share");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+
+  // --force closes that window anyway, for the caller who knows which it is.
+  const forced = agendo(mock.env, "close", "-f", shortIdOf("second-session"));
+  expect(forced.status).toBe(0);
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-session", "-t", "=cl-wi-101"]]);
+});
+
+test("agendo close removes a dormant restore placeholder without reading its pane", async ({ mock }) => {
+  // An unopened restore tab is an idle bash waiting for a keypress, not an agent:
+  // there's no readiness to read and nothing in flight to lose, so it closes
+  // without a pane verdict. The capture is deliberately a BUSY screen — if the
+  // placeholder path ever started consulting it, this close would be refused.
+  const crashTarget = `cl-claude-${CRASH_SHORT_ID}`;
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 2, name: crashTarget },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+      { session: "agendo", window: crashTarget, cwd: "/run/crash", placeholder: true },
+    ],
+    captures: { [crashTarget]: BUSY_PANE },
+  });
+
+  const r = agendo(mock.env, "close", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("unopened restore tab");
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-window", "-t", "=agendo:2"]]);
+  expect((await mock.getTmuxState()).windows.map((w: { name: string }) => w.name)).toEqual(["launcher"]);
+});
+
+test("agendo close refuses a busy session unless forced", async ({ mock }) => {
+  // Mid-turn: killing here throws away the turn being written, so it takes an
+  // explicit --force — the same bar `send` applies before typing into a pane.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("busy"); // names the state it saw
+  expect(killsIn(await mock.tmuxLog())).toEqual([]); // nothing was killed
+  expect((await mock.getTmuxState()).sessions).toContain(RUNNING_TARGET);
+
+  const forced = agendo(mock.env, "close", "--force", SHORT_ID);
+  expect(forced.status).toBe(0);
+  expect(forced.stdout).toContain(`closed ${RUNNING_TARGET}`);
+  expect(forced.stdout).toContain(`(was "busy")`);
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-session", "-t", `=${RUNNING_TARGET}`]]);
+});
+
+test("agendo close refuses a session holding an unsent draft", async ({ mock }) => {
+  // Text typed but not submitted reads "queued" — closing would silently discard
+  // it, so it's held to the same --force bar as a mid-turn session.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: GHOST_PANE },
+    cursors: {
+      [RUNNING_TARGET]: { x: GHOST_PROMPT_CURSOR.x + "wait for the review, then commit and open the PR".length, y: 2 },
+    },
+  });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("queued");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+});
+
+test("agendo close refuses an unknown target and kills nothing", async ({ mock }) => {
+  // A typo must never reach tmux: with no session behind the id there is nothing
+  // agendo can vouch for, so it stops before any kill (a bare `tmux kill-window
+  // -t no-such-session` would have fnmatched onto whatever was live).
+  const r = agendo(mock.env, "close", "no-such-session");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("No session found");
+  expect(r.stderr).toContain("refusing to close anything");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  expect((await mock.getTmuxState()).sessions).toContain(RUNNING_TARGET);
+
+  // Unknown flags are rejected too, rather than swallowed by a kill command.
+  const bad = agendo(mock.env, "close", SHORT_ID, "--yolo");
+  expect(bad.status).toBe(1);
+  expect(bad.stderr).toContain("unknown flag");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+});
+
+test("agendo close on an idle session is a no-op success", async ({ mock }) => {
+  // The crash session exists on disk but has no live window — the desired end
+  // state already holds, so close reports it and exits 0 (idempotent for scripts).
+  const r = agendo(mock.env, "close", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("not running");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  expect((await mock.getTmuxState()).sessions).toContain(RUNNING_TARGET);
+});
+
+test("agendo kill / agendo stop are aliases for close", async ({ mock }) => {
+  // An agent that guesses the wrong verb must not fall back to raw tmux.
+  const killed = agendo(mock.env, "kill", SHORT_ID);
+  expect(killed.status).toBe(0);
+  expect(killed.stdout).toContain(`closed ${RUNNING_TARGET}`);
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-session", "-t", `=${RUNNING_TARGET}`]]);
+
+  // `stop` resolves the same way; the session is gone now, so it reports that.
+  const stopped = agendo(mock.env, "stop", SHORT_ID);
+  expect(stopped.status).toBe(0);
+  expect(stopped.stdout).toContain("not running");
+});
+
+test("agendo close drops the session's restore tab from that host only", async ({ mock }) => {
+  // The login session as a TAB in a PATH-SCOPED host session (`agendo-appweb`),
+  // whose snapshot holds it plus another tab — while the global `agendo` launcher
+  // has a snapshot of its own. Closing here must edit exactly one file: the tab of
+  // the window that was killed, in the snapshot of the host that held it.
+  const other = { name: "cl-claude-elsewhere", cwd: "/run/elsewhere", title: "Other", argv: ["claude", "--resume", "elsewhere"] };
+  const loginTab = { name: RUNNING_TARGET, cwd: "/run/login", title: "Implement login form", argv: ["claude", "--resume", LOGIN_SESSION_ID] };
+  const restoreDir = join(mock.home, ".agendo", "restore");
+  await mkdir(restoreDir, { recursive: true });
+  await writeFile(join(restoreDir, "agendo-appweb.json"), JSON.stringify({ tabs: [loginTab, other] }, null, 2));
+  // The global launcher's own snapshot — a different launcher's tabs, off limits.
+  await writeFile(join(restoreDir, "agendo.json"), JSON.stringify({ tabs: [loginTab] }, null, 2));
+  await mock.setTmuxState({
+    ...tmuxState,
+    sessions: ["agendo-appweb"],
+    windows: [{ session: "agendo-appweb", index: 1, name: RUNNING_TARGET }],
+    panes: [{ session: "agendo-appweb", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false }],
+  });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-window", "-t", "=agendo-appweb:1"]]);
+  // This host's snapshot lost only this session's tab…
+  expect(JSON.parse(await readFile(join(restoreDir, "agendo-appweb.json"), "utf-8")).tabs).toEqual([other]);
+  // …and the other launcher's snapshot is untouched.
+  expect(JSON.parse(await readFile(join(restoreDir, "agendo.json"), "utf-8")).tabs).toEqual([loginTab]);
 });
 
 test("agendo status on an unknown id fails cleanly", async ({ mock }) => {

@@ -7,14 +7,14 @@ import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
-  sessionRoot, currentSessionName, killWindow,
+  sessionRoot, currentSessionName, killWindow, killManagedTarget, windowLocations, exactTarget,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
-import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
-import { resolveContext, isUnderRoot } from "./context.ts";
+import { restoreTabs, recordLaunchedSession, resolveWindowSession, forgetRestoreTab, idBearingName } from "./restore.ts";
+import { resolveContext, isUnderRoot, normalizeCwd } from "./context.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState } from "./config.ts";
@@ -85,6 +85,16 @@ Usage:
                                 its input is idle/ready (not mid-turn, no open
                                 question, nothing already typed).
       --force, -f               Send even if the input doesn't look ready
+  agendo close <id>            End a running session: kills ONLY the tmux window
+       (aliases: kill, stop)    (or session) it runs in. Its git worktree, branch
+                                and commits are guaranteed untouched on disk —
+                                nothing there is deleted, and \`agendo resume
+                                <id>\` brings the session back. Only ever kills a
+                                managed cl-… target, and refuses a session with
+                                work in flight (mid-turn, compacting, text queued,
+                                or an open question) or a window it can't
+                                attribute to that session alone.
+      --force, -f               Close despite work in flight / an ambiguous window
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
                                 pane is still showing the usage-limit notice.
@@ -128,6 +138,25 @@ const KIND_LABEL: Record<SessionKind, string> = {
  * temporal dead zone during an early `wait` invocation.
  */
 const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
+
+/**
+ * Readiness states where closing a session would destroy work in flight, so
+ * `close` refuses them without `--force` (mirroring how `send` refuses to type
+ * into a non-ready pane): a turn being generated ("busy"), a conversation being
+ * rewritten ("compacting"), text typed but not yet submitted ("queued"), or an
+ * open question waiting on an answer ("dialog").
+ *
+ * The states NOT listed are deliberately closeable: "ready" (idle, the finished
+ * session this command exists for), "limited" (stuck at its usage cap — a prime
+ * close candidate) and "unknown". "unknown" is what a pane whose agent already
+ * exited looks like — a bare shell prompt with no input box — which is the most
+ * obvious thing of all to want closed; refusing it would push callers straight
+ * back to hand-rolled `tmux kill-window`, the failure this command replaces.
+ *
+ * Declared beside BUSY_STATES, before the subcommand dispatch, so the hoisted
+ * `runClose` never reads it in the temporal dead zone.
+ */
+const UNSAFE_CLOSE_STATES = new Set<Readiness>(["busy", "compacting", "queued", "dialog"]);
 
 /**
  * Print a JSON payload and await the write. The subcommand dispatch calls
@@ -377,6 +406,33 @@ if (process.argv[2] === "resume") {
     else if (id === undefined) id = a;
   }
   await runResume(id, attach);
+  process.exit(0);
+}
+
+// `close <id>` (aliases `kill`, `stop`): end a running session by killing the
+// tmux window it lives in, and nothing else. The aliases exist because an agent
+// that guesses the wrong verb and gets "no such command" falls back to raw
+// `tmux kill-window` — the exact hand-rolled tmux this subcommand exists to
+// remove. Everything the session produced (worktree, branch, commits) stays on
+// disk, so `resume` can bring it back.
+if (process.argv[2] === "close" || process.argv[2] === "kill" || process.argv[2] === "stop") {
+  const verb = process.argv[2];
+  let id: string | undefined;
+  let force = false;
+  for (const a of process.argv.slice(3)) {
+    if (a === "--force" || a === "-f") force = true;
+    // A command that kills things parses strictly: an unknown flag or a stray
+    // extra positional is a mistake, never something to silently ignore.
+    else if (a.startsWith("-")) {
+      console.error(`${verb}: unknown flag "${a}" (only --force/-f)`);
+      process.exit(1);
+    } else if (id === undefined) id = a;
+    else {
+      console.error(`${verb}: unexpected argument "${a}" — close takes exactly one session id`);
+      process.exit(1);
+    }
+  }
+  await runClose(id, force, verb);
   process.exit(0);
 }
 
@@ -1093,6 +1149,171 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   console.log(`▸ resumed session ${shortId(s.id)}${plan.alreadyRunning ? " (was already running)" : ""}`);
   console.log(`  window:  ${plan.tmuxName}   (in ${s.cwd})`);
   console.log(`  status:  ${SELF_CMD} status ${shortId(s.id)}`);
+}
+
+/**
+ * End a running session: kill the tmux target it lives in — a window in a host
+ * session, or the whole session when the agent was launched outside tmux — and
+ * nothing else.
+ *
+ * WHAT IT DOES NOT TOUCH — this is a guarantee of the command, not a hope. The
+ * only writes are the tmux kill itself and, when the window was a launcher tab,
+ * dropping that one tab from the launcher's restore snapshot. Nothing under a
+ * worktree is read, moved or removed: the worktree, its branch and every commit
+ * in it survive, and the session's transcript stays on disk so `agendo resume
+ * <id>` restarts it.
+ *
+ * The guards, in order, because a mistargeted kill in this environment can take
+ * out someone's live agent — including the launcher itself:
+ *  1. RESOLUTION. The id resolves exactly as it does for `status`/`send`/`resume`
+ *     (full id, short id, or a `cl-…-<id>` tmux name), then the session's live
+ *     window comes from `refreshLiveTmux` — the same reconciliation the menu and
+ *     `wait` use — so a session running under a `cl-wi-…`/`cl-pr-…` window is
+ *     found rather than missed. A session too new to have a transcript falls back
+ *     to its id-bearing window (as `runStatus` does), since `agendo launch`
+ *     prints an id well before the agent writes its log — otherwise the flow this
+ *     command exists for (launch → it goes wrong → close) couldn't close it.
+ *     An id that resolves to neither kills nothing.
+ *  2. MANAGED-ONLY. The target must be a managed `cl-…` name (`managedKind`).
+ *     That already holds by construction — `liveWindows` is built only from
+ *     managed windows — so the check is defense in depth: if that ever stops
+ *     holding, a typo must abort rather than kill the user's own shell or the
+ *     launcher window.
+ *  3. UNAMBIGUOUS ATTRIBUTION. A `cl-wi-…`/`cl-pr-…` window embeds an ITEM id,
+ *     not a session id, so it is attributed to the most-recently-used session in
+ *     its working directory. That heuristic is fine for reading a pane; for a
+ *     kill it is not, because when two sessions share a directory the newest wins
+ *     the attribution while the OTHER may be the agent actually running there.
+ *     So an id-less window with rival sessions in its dir needs `--force`.
+ *  4. WORK IN FLIGHT. A pane mid-turn (or compacting, or holding queued text /
+ *     an open question) is refused unless `force` — killing an agent mid-write
+ *     is how work gets lost. See UNSAFE_CLOSE_STATES.
+ *
+ * Both the readiness READ and the kill address a window through its
+ * `session:index` location rather than by name (see `killManagedTarget`): a bare
+ * window name resolves only inside the caller's current session, so from outside
+ * tmux the read would come back empty — classifying "unknown", which guard 4
+ * treats as closeable — while the kill quietly hit nothing. Two further checks
+ * bound what a location can mean: more than one live window may carry the same
+ * name (two launchers, one session), which is refused rather than guessed; and
+ * the name at the location is re-read immediately before the kill, since tmux
+ * renumbers windows when one closes. Finally, because every tmux write here is
+ * fire-and-forget, the target is confirmed gone before success is reported.
+ *
+ * A dormant restore placeholder (an idle bash tab that was never opened) is
+ * closeable too, and skips the readiness read: there's no agent in it to lose.
+ */
+async function runClose(token: string | undefined, force: boolean, verb = "close"): Promise<void> {
+  if (!token) {
+    console.error(`usage: ${SELF_CMD} ${verb} <id> [--force]`);
+    process.exit(1);
+  }
+  const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
+  const index = await SessionIndex.build();
+  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  // For a known session: its canonical name, and whatever window it's live in.
+  // For one too new to be indexed: the live id-bearing window named after this
+  // very short id — which is only ever that session's own window, so it's as
+  // safe a target as the canonical name.
+  const canon = s ? sessionName(s) : liveTargetForShortId(sid);
+  if (!canon) {
+    console.error(`No session found for "${token}" — refusing to close anything.`);
+    process.exit(1);
+  }
+  const liveWindow = s ? liveWindows.get(canon) : canon;
+  // A placeholder squats the canonical name with no agent behind it; close it by
+  // that name (it's a real tmux window) when no live window vouches for the session.
+  const placeholder = !liveWindow && livePlaceholders.has(canon);
+  const target = liveWindow ?? (placeholder ? canon : undefined);
+  const label = s ? shortId(s.id) : sid;
+  if (!target) {
+    // Already closed / never started. The desired end state holds, so this is a
+    // success — `close` is idempotent for the scripts and agents driving it.
+    console.log(`○ session ${label} is not running — nothing to close.`);
+    return;
+  }
+  if (!managedKind(target)) {
+    console.error(`Refusing to close "${target}": not a managed agendo window.`);
+    process.exit(1);
+  }
+  // Guard 3: an id-less window is attributed by working directory, so it only
+  // names one session unambiguously when it's the only session in that dir.
+  if (!idBearingName(target) && !force) {
+    const cwd = liveManagedPaths().find((p) => p.name === target)?.cwd;
+    const rivals = cwd ? index.all.filter((x) => normalizeCwd(x.cwd) === normalizeCwd(cwd)) : [];
+    if (rivals.length > 1) {
+      console.error(
+        `Not closing: window ${target} carries no session id, and ${rivals.length} sessions share ` +
+          `its directory (${cwd}) — the one running in it may not be ${label}. Candidates: ` +
+          `${rivals.map((x) => shortId(x.id)).join(", ")}. Pass --force to close that window anyway.`,
+      );
+      process.exit(2);
+    }
+  }
+  // Where the window actually lives, used for BOTH the pane read and the kill so
+  // neither falls back to tmux's current-session lookup. No location means the
+  // target is a tmux session of its own (an agent launched outside tmux).
+  //
+  // tmux allows duplicate window names and this launcher produces them — a global
+  // and a path-scoped launcher can each hold a tab for the same session — so more
+  // than one location means we cannot tell which window the caller meant. Reading
+  // the wrong one is harmless; killing it is not.
+  const locations = windowLocations(target);
+  if (locations.length > 1 && !force) {
+    console.error(
+      `Not closing: ${locations.length} live windows are named ${target} (${locations.join(", ")}) — ` +
+        `agendo can't tell which one is ${label}. Close the one you mean from its launcher, or pass --force.`,
+    );
+    process.exit(2);
+  }
+  const location = locations[0] ?? null;
+  const readTarget = exactTarget(location ?? target);
+  // One pane read serves both the verdict and, if we refuse, the screen tail that
+  // explains it — the same shape `send` uses when it declines.
+  const pane = placeholder ? null : capturePaneState(readTarget);
+  const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
+  if (pane && readiness && UNSAFE_CLOSE_STATES.has(readiness) && !force) {
+    console.error(`Not closing: session looks "${readiness}" — work is in flight. Pass --force to close it anyway.`);
+    console.error(`\n  current screen (tail):`);
+    for (const l of stripAnsi(pane.raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
+    process.exit(2);
+  }
+  // `how === "none"` means tmux listed the target a moment ago but can now place
+  // it in neither a window nor a session — so nothing was killed, whatever the
+  // (vacuously true) `gone` check says. Report the failure rather than the
+  // reassuring lie; the caller can look and re-run.
+  const { how, gone } = killManagedTarget(target, location);
+  if (!gone || how === "none") {
+    console.error(
+      how === "moved"
+        ? `Not closing ${target}: the window at ${location} is no longer it (tmux renumbered while we looked). Nothing was killed — re-run to pick it up at its new index.`
+        : `Could not close ${target}: tmux ${how === "none" ? "can no longer place it in any session" : "still reports it live"}. Nothing else was changed.`,
+    );
+    process.exit(1);
+  }
+  // A dormant placeholder can carry the canonical name alongside the real window
+  // we just killed — reconcileLive drops it from `livePlaceholders` in exactly
+  // that case (a real window vouched for the name), so ask tmux directly rather
+  // than trust the reconciled set. Without this the closed session is still
+  // sitting in the tab strip as an unopened tab.
+  if (!placeholder) {
+    const leftover = liveManagedPaths().find((p) => p.placeholder && p.name === canon);
+    if (leftover) killManagedTarget(canon);
+  }
+  // Drop the tab from the restore snapshot of the host session that held the
+  // window we just killed — and only that one, so a parallel path-scoped
+  // launcher's tabs are untouched. A standalone agent session was never a tab.
+  const host = location?.split(":")[0];
+  if (host) forgetRestoreTab(canon, host);
+  console.log(
+    `▸ closed ${target}${placeholder ? " (unopened restore tab)" : readiness && readiness !== "ready" ? ` (was "${readiness}")` : ""}`,
+  );
+  console.log(`  kept:    worktree, branch and commits are untouched${s ? ` in ${s.cwd}` : ""}`);
+  // Only an indexed session can be resumed by id — one whose transcript hasn't
+  // landed yet has nothing for `resume` to find (that's why it took the
+  // window-name path to get here in the first place).
+  if (s) console.log(`  resume:  ${SELF_CMD} resume ${label}`);
 }
 
 interface WaitOptions {

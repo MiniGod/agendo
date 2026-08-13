@@ -26,6 +26,9 @@ export interface MockEnv {
   ado: AdoServer;
   /** Overwrite the fake-tmux state (e.g. to flip a session to "running"). */
   setTmuxState(state: unknown): Promise<void>;
+  /** Read the fake-tmux state back — mutating commands (new-window, kill-window)
+   *  write to it, so this is how a test asserts what is still live afterwards. */
+  getTmuxState(): Promise<any>;
   /** Overwrite the fake-`gh` state (auth flag + user + issue/PR fixtures). */
   setGhState(state: unknown): Promise<void>;
   /** Switch the persisted backend (writes ~/.agendo/state.json). */
@@ -90,6 +93,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     tmpDir,
     ado,
     setTmuxState: (state) => writeFile(tmuxStatePath, JSON.stringify(state, null, 2)),
+    getTmuxState: async () => JSON.parse(await readFile(tmuxStatePath, "utf-8")),
     setGhState: (state) => writeFile(ghStatePath, JSON.stringify(state, null, 2)),
     setProvider: (name) => writeFile(join(home, ".agendo", "state.json"), JSON.stringify({ provider: name }, null, 2)),
     setAdoPr: (id, patch) => ado.setPr(id, patch),
