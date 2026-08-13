@@ -112,8 +112,21 @@ function dec(s: string): string {
  * segment pasted raw (`Þróun`, which is what a browser's address bar hands you
  * for a non-ASCII ADO project) becomes `%C3%9Er%C3%B3un` rather than reaching
  * git as raw bytes.
+ *
+ * Non-throwing, like `dec`: `encodeURIComponent` rejects a lone surrogate, and
+ * this runs on the render path (the destination preview parses on every
+ * keystroke), where an exception would take the whole TUI down rather than
+ * produce a bad URL. Both of its inputs — terminal stdin and `git remote
+ * get-url` — are UTF-8-decoded upstream and yield U+FFFD instead, so this is
+ * belt-and-braces; a URL that survives unencoded is a failed clone, not a crash.
  */
-const enc = (s: string) => encodeURIComponent(dec(s));
+function enc(s: string): string {
+  try {
+    return encodeURIComponent(dec(s));
+  } catch {
+    return s;
+  }
+}
 
 const segments = (path: string) => path.split("/").filter(Boolean);
 
