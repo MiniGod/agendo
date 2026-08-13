@@ -248,9 +248,10 @@ function mapPR(raw: any, ref: RepoRef): PullRequest {
     ci: rollupCI(raw.statusCheckRollup, raw.mergeStateStatus),
     createdDate,
     updatedDate,
-    // Built, not taken from `raw.url`, so every PR link in the app comes out of
-    // the one canonical builder (gh returns the identical string for github.com).
-    url: githubPullRequestUrl(slug, raw.number),
+    // Built through `urls`, not taken from `raw.url`, so every PR link in the
+    // app comes out of the one provider-level entry point (gh returns the
+    // identical string for github.com). A slug is always present here.
+    url: urls.pullRequest({ id: raw.number, repositoryId: slug }) ?? "",
     ...voteSummary(raw.reviews, raw.reviewDecision),
   };
 }
@@ -351,7 +352,7 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
         // Authorship drives the two buckets (see header comment).
         inCurrentSprint: isMe(iss.author?.login),
         prs: prsByIssue.get(iss.number) ?? [],
-        url: githubIssueUrl(slug, iss.number),
+        url: urls.workItem({ id: iss.number, project: slug }) ?? "",
       });
     }
   }

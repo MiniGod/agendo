@@ -155,6 +155,18 @@ function printJson(value: unknown): Promise<void> {
   });
 }
 
+/**
+ * Print one line and await the write — same reason as printJson: the subcommand
+ * dispatch calls `process.exit(0)` as soon as the runner returns, and a pipe
+ * write still buffered at that point is dropped. Used where the printed text IS
+ * the deliverable (`agendo open`'s URLs, which agents consume over a pipe).
+ */
+function printLine(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(text + "\n", (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 /** Compact "last used" age for the list columns (matches the menu's timeAgo). */
 function timeAgo(d: Date): string {
   const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
@@ -204,9 +216,15 @@ if (process.argv[2] === "open") {
   let want: "pr" | "item" | undefined;
   let printOnly = false;
   for (const a of process.argv.slice(3)) {
-    if (a === "--pr") want = "pr";
-    else if (a === "--issue" || a === "--work-item" || a === "--workitem") want = "item";
-    else if (a === "--print" || a === "-p") printOnly = true;
+    const sel = a === "--pr" ? "pr" : a === "--issue" || a === "--work-item" || a === "--workitem" ? "item" : null;
+    if (sel) {
+      // Two conflicting selectors is a mistake, not a silent last-one-wins.
+      if (want && want !== sel) {
+        console.error(`open: use only one of --pr / --work-item`);
+        process.exit(1);
+      }
+      want = sel;
+    } else if (a === "--print" || a === "-p") printOnly = true;
     else if (a.startsWith("-")) {
       console.error(`open: unknown argument "${a}"`);
       process.exit(1);
@@ -581,12 +599,15 @@ async function runStatus(token: string | undefined, full = false, withUrls = fal
   if (withUrls) {
     const resolved = await resolveSessionLink(s);
     const V = linkVocab(resolved.provider);
+    // As in runOpen: a link with no resolvable URL reads as absent, never as a
+    // partial link a human might paste.
+    const pr = resolved.link?.pr?.url ? resolved.link.pr : undefined;
+    const workItem = resolved.link?.workItem?.url ? resolved.link.workItem : undefined;
     if (resolved.error) {
       console.log(`  links:  (unavailable — ${resolved.error})`);
-    } else if (!resolved.link?.pr && !resolved.link?.workItem) {
+    } else if (!pr && !workItem) {
       console.log(`  links:  (no linked PR or ${V.noun})`);
     } else {
-      const { pr, workItem } = resolved.link;
       if (pr) console.log(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
       if (workItem) console.log(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
     }
@@ -722,8 +743,11 @@ async function runOpen(
     console.error(`open: could not resolve associations from the backend: ${resolved.error}`);
     process.exit(1);
   }
-  const pr = resolved.link?.pr;
-  const workItem = resolved.link?.workItem;
+  // A link the backend couldn't give a URL for (a payload missing the repo scope
+  // its link needs) counts as absent: better to say "nothing to open" than to
+  // launch — or hand a human — a partial URL.
+  const pr = resolved.link?.pr?.url ? resolved.link.pr : undefined;
+  const workItem = resolved.link?.workItem?.url ? resolved.link.workItem : undefined;
   if (!pr && !workItem) {
     console.error(
       `Session ${shortId(s.id)} has no linked pull request or ${V.noun} to open.\n` +
@@ -743,8 +767,10 @@ async function runOpen(
     process.exit(1);
   }
 
-  if (pr) console.log(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
-  if (workItem) console.log(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
+  // Awaited writes: this text is what the caller came for, and the dispatch
+  // exits the moment we return (see printLine).
+  if (pr) await printLine(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
+  if (workItem) await printLine(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
   if (printOnly) return;
 
   // Default to the PR when both exist: it's the artifact you act on, and the
@@ -753,7 +779,7 @@ async function runOpen(
   const label = target === pr ? `PR ${V.prPrefix}${target.id}` : `${V.noun} #${target.id}`;
   try {
     await openUrlAsync(target.url);
-    console.log(`▸ opened ${label} in your browser`);
+    await printLine(`▸ opened ${label} in your browser`);
   } catch (e) {
     // No opener on this host (headless, container, stripped image). The URL is
     // already on stdout, so this is a warning, not a failure.
@@ -968,8 +994,10 @@ async function runList(opts: ListOptions): Promise<void> {
       lastUsed: s.lastUsed.toISOString(),
       pr: l?.pr ?? null,
       workItem: l?.workItem ?? null,
-      prUrl: l?.pr?.url ?? null,
-      workItemUrl: l?.workItem?.url ?? null,
+      // `|| null`, not `?? null`: an empty url means the backend payload lacked
+      // the scope its link needs, which consumers must read as "no link".
+      prUrl: l?.pr?.url || null,
+      workItemUrl: l?.workItem?.url || null,
       workflows: (s.workflows ?? []).map((w) => ({
         runId: w.runId,
         name: w.name,

@@ -20,7 +20,7 @@ const cfg: Config = loadConfig();
 // normal use neither var is set and we talk to the real Azure DevOps hosts.
 const BASE = (process.env.ADO_BASE_URL ?? `https://dev.azure.com/${encodeURIComponent(cfg.org)}`).replace(/\/$/, "");
 const VSSPS = (process.env.ADO_VSSPS_URL ?? "https://app.vssps.visualstudio.com").replace(/\/$/, "");
-const GRAPH = (process.env.ADO_GRAPH_URL ?? `https://vssps.dev.azure.com/${cfg.org}`).replace(/\/$/, "");
+const GRAPH = (process.env.ADO_GRAPH_URL ?? `https://vssps.dev.azure.com/${encodeURIComponent(cfg.org)}`).replace(/\/$/, "");
 const API = "api-version=7.1";
 
 // ── Canonical web URLs ────────────────────────────────────────────────────────
@@ -57,7 +57,12 @@ export const urls: EntityUrls = {
   workItem: (ref) => adoWorkItemUrl(BASE, ref.id),
   // ADO accepts either the repo's name or its guid in the path; prefer the name
   // (readable, and what the web UI itself links to), falling back to the guid.
-  pullRequest: (ref) => adoPullRequestUrl(BASE, cfg.project, ref.repositoryName || ref.repositoryId, ref.id),
+  // A PR link is repo-scoped with no repo-less form, so a reference carrying
+  // neither yields null rather than `…/_git//pullrequest/<id>`, which 404s.
+  pullRequest: (ref) => {
+    const repo = ref.repositoryName || ref.repositoryId;
+    return repo ? adoPullRequestUrl(BASE, cfg.project, repo, ref.id) : null;
+  },
 };
 
 // ── Token (cached for the process lifetime, refreshed before expiry) ──────────
@@ -230,7 +235,16 @@ function mapPr(pr: any): PullRequest {
     ci,
     createdDate,
     updatedDate: createdDate, // refined to the last pushed iteration during enrichment
-    url: adoPullRequestUrl(BASE, cfg.project, pr.repository?.name || repoId, pr.pullRequestId),
+    // Through `urls`, not the raw builder, so the provider-level entry point is
+    // the one the app actually exercises. "" means the payload carried no repo
+    // at all (never seen from the real API) — callers read a falsy url as "no
+    // link" rather than opening something that 404s.
+    url:
+      urls.pullRequest({
+        id: pr.pullRequestId,
+        repositoryId: repoId,
+        repositoryName: pr.repository?.name,
+      }) ?? "",
     ...votes,
   };
 }
@@ -631,7 +645,7 @@ export async function mapRawWorkItem(
     project: f["System.TeamProject"] ?? "",
     inCurrentSprint: !!currentIterationPath && iterationPath === currentIterationPath,
     prs,
-    url: adoWorkItemUrl(BASE, id),
+    url: urls.workItem({ id }) ?? "",
   };
 }
 

@@ -955,6 +955,11 @@ test("agendo open on an unknown id / with no id fails cleanly", async ({ mock })
   const badFlag = agendo(mock.env, "open", SHORT_ID, "--nope");
   expect(badFlag.status).toBe(1);
   expect(badFlag.stderr).toContain('unknown argument "--nope"');
+
+  // Two conflicting entity selectors is a mistake, not a silent last-one-wins.
+  const both = agendo(mock.env, "open", SHORT_ID, "--pr", "--work-item");
+  expect(both.status).toBe(1);
+  expect(both.stderr).toContain("only one of");
 });
 
 test("agendo open (GitHub) resolves the issue/PR links from the GitHub builders", async ({ mock }) => {

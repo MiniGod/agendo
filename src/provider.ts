@@ -25,7 +25,12 @@ export interface FetchContext {
   repos: RepoInfo[];
 }
 
-/** Enough of a PullRequest to build its web URL (a real PullRequest satisfies it). */
+/**
+ * Enough of a PullRequest to build its web URL (a real PullRequest satisfies
+ * it). There is no project field because a PullRequest carries none: ADO scopes
+ * the link to the configured project, which is where every PR the app fetches
+ * lives (see ado.fetchActivePRs / getPullRequest).
+ */
 export type PrUrlRef = Pick<PullRequest, "id" | "repositoryId"> &
   Partial<Pick<PullRequest, "repositoryName">>;
 
