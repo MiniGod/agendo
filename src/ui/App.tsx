@@ -14,6 +14,7 @@ import {
   parseRepoUrl,
   repoUrlLabel,
   cloneDirName,
+  enclosingCheckout,
   findMatchingCheckout,
   freeCloneDest,
   startClone,
@@ -25,6 +26,7 @@ import { isUnderRoot, normalizeCwd } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
+import { homedir } from "os";
 import type {
   ActionLine,
   AgentSession,
@@ -272,6 +274,11 @@ function homeShort(p: string): string {
 // one long one: git's own words are the half that identifies the actual problem,
 // and they must not be the half a terminal truncates.
 const CLONE_HINTS: Record<string, string> = {
+  // A consequence of agendo's own BatchMode — ssh would normally *ask*. Says
+  // what to do rather than what went wrong, because the fix is one command.
+  hostkey:
+    "Unknown SSH host — agendo runs git non-interactively, so it can't accept a new " +
+    "host key for you. Run `ssh -T <host>` once, accept it, then try again.",
   auth:
     "Authentication — agendo uses your existing git credentials; check your SSH agent, " +
     "or `gh auth setup-git` / `az repos` for HTTPS.",
@@ -1069,6 +1076,13 @@ type Mode =
  * disk for the next attempt to trip over.
  */
 const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
+
+/**
+ * Cursor value for the repo picker's "＋ Clone from URL…" row. A sentinel rather
+ * than `repos.length`, so a background rescan that grows the repo list can't
+ * slide the cursor off it onto a real repo.
+ */
+const CLONE_ROW = -1;
 
 /** Agents offered by the fresh-session picker, in display order. */
 const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
@@ -1889,9 +1903,8 @@ export default function App({
   // or any path under one — all of which the scoping logic supports) would drop
   // a nested repository into that repo's working tree, where it sits as
   // untracked clutter forever. Cloning belongs in a folder OF checkouts, not in
-  // one. Resolved through repoRootForCwd so a path deep inside a checkout is
-  // caught too, not just the root.
-  const canClone = scoped && !!filterRoot && !isGitCheckout(repoRootForCwd(filterRoot));
+  // one. `enclosingCheckout` walks up, but stops below $HOME — see there for why.
+  const canClone = scoped && !!filterRoot && !enclosingCheckout(filterRoot, homedir());
 
   /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
   const clonedRepo = (root: string): RepoInfo => ({
@@ -2089,19 +2102,29 @@ export default function App({
     // ── repo picker ──
     if (mode.kind === "repo") {
       const repos = reposForTarget(mode.target.kind);
-      // The clone row sits one past the last repo — see docs/cloning.md for why
-      // it's offered only when the launcher was given a directory.
-      const cloneRow = canClone ? repos.length : -1;
-      const len = repos.length + (canClone ? 1 : 0) || 1;
+      const len = repos.length || 1;
       const openClone = () =>
         setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
+      // The clone row is rendered last but addressed by a SENTINEL, never by
+      // `repos.length`: the background rescan replaces `model.repos` while the
+      // picker is open (a sibling session starting in a new repo grows the list),
+      // and a positional index would slide off the clone row onto whatever repo
+      // took its place — enter would then launch a session instead of cloning.
+      const onClone = mode.cursor === CLONE_ROW;
+      // ↑/↓ treat the clone row as one past the end, wrapping through it.
+      const move = (d: 1 | -1) =>
+        setMode((p) => {
+          if (p.kind !== "repo") return p;
+          if (!canClone) return { ...p, cursor: (p.cursor + d + len) % len };
+          if (p.cursor === CLONE_ROW) return { ...p, cursor: d === 1 ? 0 : len - 1 };
+          const next = p.cursor + d;
+          return { ...p, cursor: next < 0 || next >= len ? CLONE_ROW : next };
+        });
       if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor + 1) % len } : p));
+      if (key.upArrow || input === "k") return move(-1);
+      if (key.downArrow || input === "j") return move(1);
       if (input === "c" && canClone) return openClone();
-      if (key.return && mode.cursor === cloneRow) return openClone();
+      if (key.return && onClone && canClone) return openClone();
       if (key.return && repos[mode.cursor]) {
         // Picking a repo off the list is not the result of a clone. Without
         // this, backing out of the post-clone flow and choosing a different repo
@@ -2489,12 +2512,12 @@ export default function App({
           })}
           {canClone ? (
             <Text
-              color={mode.cursor === repoRows.length ? "black" : undefined}
-              backgroundColor={mode.cursor === repoRows.length ? "cyan" : undefined}
+              color={mode.cursor === CLONE_ROW ? "black" : undefined}
+              backgroundColor={mode.cursor === CLONE_ROW ? "cyan" : undefined}
             >
-              {mode.cursor === repoRows.length ? "❯ " : "  "}
+              {mode.cursor === CLONE_ROW ? "❯ " : "  "}
               <Text bold>{"＋ Clone from URL…".padEnd(21).slice(0, 21)}</Text>
-              <Text dimColor={mode.cursor !== repoRows.length}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
+              <Text dimColor={mode.cursor !== CLONE_ROW}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
             </Text>
           ) : null}
         </Box>

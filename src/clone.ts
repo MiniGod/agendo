@@ -15,7 +15,7 @@
 // See docs/cloning.md for the flow and the decisions behind it.
 import { spawn, spawnSync } from "child_process";
 import { existsSync, readdirSync, rmSync, statSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { normalizeCwd } from "./context.ts";
 import { parseGithubRemote } from "./github.ts";
 
@@ -139,12 +139,30 @@ function adoProjectAndRepo(segs: string[]): { project: string; repo: string } | 
 }
 
 /**
- * Mask the password half of a `user:secret@host` userinfo. Only the half after
- * the colon is a secret; the username identifies the account and is worth
- * seeing. Applied to whole URLs, so it is a no-op on anything without userinfo.
+ * Mask credentials in a URL's userinfo for display.
+ *
+ * `user:secret@` is easy — the half after the colon is the secret, the username
+ * identifies the account and is worth seeing. A *bare* `something@` is the hard
+ * one, because the two things it can be are structurally identical: ADO's own
+ * Clone-button URL puts the org there (`https://org@dev.azure.com/…`), and a
+ * token pasted without a username looks exactly the same. So bare userinfo is
+ * masked unless it's a name we can vouch for — `git`, the SSH user in every scp
+ * form, or `keepUser` (the org the URL itself parsed to). Masking a real
+ * username costs nothing; printing a PAT into scrollback is the thing this
+ * exists to prevent.
+ *
+ * A no-op on URLs without userinfo, which is most of them.
  */
-export function redactUrl(url: string): string {
-  return url.replace(/(\/\/|^)([^/@\s:]+):[^/@\s]*@/, "$1$2:***@");
+export function redactUrl(url: string, keepUser?: string): string {
+  return url.replace(
+    /(\/\/|^)([^/@\s:]+)(:[^/@\s]*)?@/,
+    (_m, lead: string, user: string, secret: string | undefined) => {
+      if (secret) return `${lead}${user}:***@`;
+      const vouched =
+        user.toLowerCase() === "git" || (!!keepUser && user.toLowerCase() === keepUser.toLowerCase());
+      return `${lead}${vouched ? user : "***"}@`;
+    },
+  );
 }
 
 function adoUrl(opts: { org: string; project: string; repo: string; remote: string }): RepoUrl {
@@ -154,7 +172,9 @@ function adoUrl(opts: { org: string; project: string; repo: string; remote: stri
     project: dec(opts.project),
     repo: dec(opts.repo),
     remote: opts.remote,
-    displayRemote: redactUrl(opts.remote),
+    // The org is the legitimate username in ADO's own clone URLs, so it's the
+    // one bare userinfo worth showing; anything else there is treated as a token.
+    displayRemote: redactUrl(opts.remote, opts.org),
     key: `ado:${dec(opts.org)}/${dec(opts.project)}/${dec(opts.repo)}`.toLowerCase(),
   };
 }
@@ -206,6 +226,46 @@ function parseAdo(url: string): RepoUrl | null {
   return null;
 }
 
+// The transport half of a github.com URL, on the SAME anchored host pattern
+// parseGithubRemote uses: optional userinfo, the host (github.com or GitHub's
+// SSH-over-HTTPS ssh.github.com), an optional port. Only ever applied to a
+// string parseGithubRemote has already accepted, so it can't widen what parses.
+const GITHUB_PARTS_RE = /(?:^|\/\/)([^/@\s]*)@?((?:ssh\.)?github\.com)(?::(\d+))?[:/]/i;
+
+/**
+ * The URL to actually clone a github.com repo from. A web URL is not a clone
+ * URL, so this is rebuilt from `owner`/`repo` rather than passed through — but
+ * everything about the pasted URL that is part of the user's *access path* is
+ * carried over, because rewriting it away turns a URL that works in their shell
+ * into one that fails in agendo:
+ *
+ *  - **Credentials.** `https://x-access-token:TOKEN@github.com/acme/private`
+ *    keeps its userinfo. Someone with no credential helper configured pasted
+ *    that precisely because it's the only form that works for them. (This is
+ *    what the ADO path does too — see `displayRemote` for how it stays off the
+ *    screen.)
+ *  - **The SSH host and port.** `ssh://git@ssh.github.com:443/owner/repo` is
+ *    what you use when your network blocks port 22; canonicalizing it to
+ *    `git@github.com:` would hang until the TCP connect timed out.
+ *
+ * Everything else collapses to the plain `git@github.com:owner/repo.git` /
+ * `https://github.com/owner/repo.git` pair.
+ */
+function githubRemote(url: string, owner: string, repo: string): string {
+  const [, userinfo = "", host = "github.com", port = ""] = url.match(GITHUB_PARTS_RE) ?? [];
+  const isSsh = /^ssh:\/\//i.test(url) || /^[^/\s]*@/.test(url);
+  if (!isSsh) {
+    const creds = userinfo ? `${userinfo}@` : "";
+    return `https://${creds}github.com/${owner}/${repo}.git`;
+  }
+  // A non-default host or port can't be expressed in the scp-like form (`:` is
+  // the path separator there), so those need the explicit ssh:// URL.
+  if (port || /^ssh\./i.test(host)) {
+    return `ssh://${userinfo || "git"}@${host.toLowerCase()}${port ? `:${port}` : ""}/${owner}/${repo}.git`;
+  }
+  return `${userinfo || "git"}@github.com:${owner}/${repo}.git`;
+}
+
 /**
  * A pasted repo URL → everything needed to clone it, or null when it isn't a
  * repo URL we recognize. Deliberately strict: only github.com and Azure DevOps,
@@ -225,21 +285,14 @@ export function parseRepoUrl(input: string): RepoUrl | null {
 
     const gh = parseGithubRemote(url);
     if (gh && gh.owner && gh.repo && !GITHUB_RESERVED.has(gh.owner.toLowerCase())) {
-      // Preserve the scheme family — it's the credential path the user has — but
-      // normalize the URL itself, since a web URL is not a clone URL.
-      const ssh = /^ssh:\/\//i.test(url) || /^[^/\s]*@/.test(url);
+      const remote = githubRemote(url, gh.owner, gh.repo);
       return {
         host: "github",
         owner: gh.owner,
         project: "",
         repo: gh.repo,
-        remote: ssh
-          ? `git@github.com:${gh.owner}/${gh.repo}.git`
-          : `https://github.com/${gh.owner}/${gh.repo}.git`,
-        // Rebuilt from owner/repo, so it never carried userinfo to begin with.
-        displayRemote: ssh
-          ? `git@github.com:${gh.owner}/${gh.repo}.git`
-          : `https://github.com/${gh.owner}/${gh.repo}.git`,
+        remote,
+        displayRemote: redactUrl(remote),
         key: `github:${gh.owner}/${gh.repo}`.toLowerCase(),
       };
     }
@@ -334,6 +387,30 @@ export function findMatchingCheckout(
   return null;
 }
 
+/**
+ * The checkout `dir` sits in (itself, or the nearest ancestor), or null when it
+ * sits in none. This is the "is this a place we may clone into" test: the clone
+ * lands as a direct child of `dir`, so anywhere inside a repo would mean a
+ * nested repository in that repo's working tree.
+ *
+ * The walk stops *below* `$HOME` and the filesystem root, and that boundary is
+ * the whole reason this isn't `repoRootForCwd`. Keeping dotfiles in a git repo
+ * at `~` is a common setup, and an unbounded walk-up would find `~/.git` from
+ * every directory the user owns — silently disabling cloning across the entire
+ * machine. `$HOME` is not a project checkout in any sense that matters here.
+ */
+export function enclosingCheckout(dir: string, home: string): string | null {
+  const stop = normalizeCwd(home);
+  let cur = normalizeCwd(dir);
+  while (cur && cur !== "/" && cur !== stop) {
+    if (existsSync(join(cur, ".git"))) return cur;
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return null;
+}
+
 /** Cap on the `repo-2`, `repo-3`, … search — see freeCloneDest. */
 const MAX_NAME_ATTEMPTS = 20;
 
@@ -364,7 +441,7 @@ export function freeCloneDest(parent: string, base: string): string | null {
 // ── Running the clone ─────────────────────────────────────────────────────────
 
 /** How agendo reads a clone failure — decides which explanation is offered. */
-export type CloneFailure = "auth" | "missing" | "other";
+export type CloneFailure = "hostkey" | "auth" | "missing" | "other";
 
 export interface CloneOutcome {
   ok: boolean;
@@ -386,6 +463,14 @@ export interface CloneRun {
   cancel(opts?: { immediate?: boolean }): void;
 }
 
+// Checked BEFORE auth, because it is a consequence of our own BatchMode: ssh
+// normally *asks* whether to trust an unknown host, and we've turned that off.
+// So the first-ever clone from a host the user hasn't reached over SSH before
+// (ssh.dev.azure.com, for anyone who has only used ADO over HTTPS) fails here —
+// and "check your SSH agent" would send them looking in the wrong place.
+const HOSTKEY_RE =
+  /host key verification failed|no matching host key|remote host identification has changed|no ed25519 host key is known/i;
+
 // Git's vocabulary for "you are not authenticated / not allowed", across the
 // transports and hosts we clone from.
 const AUTH_RE =
@@ -403,6 +488,14 @@ const AUTH_RE =
 // first would classify every SSH credentials failure as a missing repo. Nothing
 // in AUTH_RE appears in a genuine 404, so the reverse mix-up can't happen.
 const MISSING_RE = /repository .*not found|could not read from remote repository|does not (?:exist|appear to be a git repository)|project does not exist/i;
+
+// Tried in this order; the first match names the failure. `other` has no
+// pattern — it's what's left when none of them matched.
+const FAILURE_RE: Partial<Record<CloneFailure, RegExp>> = {
+  hostkey: HOSTKEY_RE,
+  auth: AUTH_RE,
+  missing: MISSING_RE,
+};
 
 /**
  * The child environment for `git clone`. agendo never prompts for credentials
@@ -440,7 +533,7 @@ function failureLine(stderr: string, failure: CloneFailure): string {
     .split(/[\r\n]+/)
     .map((l) => l.trim())
     .filter(Boolean);
-  const specific = failure === "auth" ? AUTH_RE : failure === "missing" ? MISSING_RE : null;
+  const specific = FAILURE_RE[failure] ?? null;
   return (
     (specific && lines.find((l) => specific.test(l))) ||
     [...lines].reverse().find((l) => /^(?:fatal|error|remote):/i.test(l)) ||
@@ -477,14 +570,15 @@ export function startClone(
   // anything, so a killed clone leaves behind a `.git` with an origin and no
   // refs — which findMatchingCheckout would then happily report as "already
   // cloned" and launch a session in.
+  const rm = (p: string) => rmSync(p, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
   const cleanup = () => {
     try {
       if (!existsSync(dest)) return;
       if (!preExisted) {
-        rmSync(dest, { recursive: true, force: true });
+        rm(dest);
         return;
       }
-      for (const entry of readdirSync(dest)) rmSync(join(dest, entry), { recursive: true, force: true });
+      for (const entry of readdirSync(dest)) rm(join(dest, entry));
     } catch {
       // Best-effort: a leftover directory is reported by the next attempt's
       // collision handling rather than being worth failing over here.
@@ -523,12 +617,9 @@ export function startClone(
         return;
       }
       cleanup();
-      // Order matters — see the comment on MISSING_RE.
-      const failure: CloneFailure = AUTH_RE.test(stderr)
-        ? "auth"
-        : MISSING_RE.test(stderr)
-          ? "missing"
-          : "other";
+      // Order matters — see the comments on HOSTKEY_RE and MISSING_RE.
+      const failure =
+        (Object.keys(FAILURE_RE) as CloneFailure[]).find((k) => FAILURE_RE[k]!.test(stderr)) ?? "other";
       resolve({ ok: false, failure, error: failureLine(stderr, failure) });
     });
   });
@@ -546,8 +637,14 @@ export function startClone(
         // Already gone — the close handler still runs the cleanup.
       }
       // Normally the close handler owns cleanup (git may still be writing). On
-      // teardown that handler will never run, so do it here instead.
-      if (opts?.immediate) cleanup();
+      // teardown that handler will never run, so do it here instead — twice,
+      // because SIGKILL delivery is asynchronous and an already-issued write can
+      // land after the first pass. What must not survive is a `.git` carrying an
+      // origin and no refs, which the next run would read as "already cloned".
+      if (opts?.immediate) {
+        cleanup();
+        if (existsSync(dest)) cleanup();
+      }
     },
   };
 }

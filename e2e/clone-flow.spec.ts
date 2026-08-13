@@ -46,6 +46,31 @@ test("the clone row is offered only when the launcher was given a directory", as
   expect(picker).toContain("c clone");
 });
 
+test("the clone row is reachable by ↑ from the top and ↓ off the bottom", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+
+  // ↑ from the first row wraps onto the clone row (it renders last)…
+  await wt.press(KEY.up);
+  expect(await wt.waitForText("Clone from URL")).toMatch(/❯[^\n]*Clone from URL/);
+  // …and ↓ from there lands back on the first repo, not past the end.
+  await wt.press(KEY.down);
+  await wt.waitForStable();
+  const back = await wt.screen();
+  expect(back).toMatch(/❯\s+repos\b/);
+  expect(back).not.toMatch(/❯[^\n]*Clone from URL/);
+
+  // Enter on the clone row opens the prompt — the row is addressed by a
+  // sentinel, so a repo list that grows underneath it can't steal the keystroke.
+  await wt.press(KEY.up);
+  await wt.waitForText("Clone from URL");
+  await wt.press(KEY.enter);
+  expect(await wt.waitForText("Clone a repo into")).toContain("Paste a GitHub or Azure DevOps repo URL");
+});
+
 test("an UNSCOPED launcher offers no cloning at all — there is no directory to write to", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const wt = await launch({ cols: 140, rows: 40 }); // bare `agendo`
@@ -238,6 +263,28 @@ test("REGRESSION: an SSH credentials failure is auth, and names the real cause",
   expect(screen).toContain("Permission denied (publickey)");
   expect(screen).not.toContain("Not found —");
   expect(existsSync(join(parent, "lockedthing"))).toBe(false);
+});
+
+test("an unknown SSH host gets its own advice, not the credentials advice", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  mock.env.FAKE_GIT_CLONE = "hostkey";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("git@ssh.dev.azure.com:v3/innovamps/proj/newthing");
+  await wt.waitForText("clones into");
+  await wt.press(KEY.enter);
+
+  // This failure is a consequence of agendo's own BatchMode, so the advice has
+  // to be "accept the host key", not "check your SSH agent" — which would send
+  // the user looking in entirely the wrong place.
+  const screen = await wt.waitForText("Unknown SSH host", 20000);
+  expect(screen).toContain("ssh -T");
+  expect(screen).not.toContain("Authentication —");
+  expect(screen).not.toContain("Not found —");
 });
 
 test("a 404 is reported as not-found, NOT as a credentials problem", async ({ launch, mock }) => {

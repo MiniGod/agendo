@@ -16,6 +16,7 @@ import {
   parseRepoUrl,
   repoUrlLabel,
   cloneDirName,
+  enclosingCheckout,
   findMatchingCheckout,
   freeCloneDest,
 } from "../src/clone.ts";
@@ -61,8 +62,29 @@ test.describe("parseRepoUrl: GitHub", () => {
       .toBe("https://github.com/owner/repo.git");
     expect(parseRepoUrl("git@github.com:owner/repo.git")?.remote)
       .toBe("git@github.com:owner/repo.git");
-    expect(parseRepoUrl("ssh://git@ssh.github.com:443/owner/repo")?.remote)
+    expect(parseRepoUrl("ssh://git@github.com/owner/repo.git")?.remote)
       .toBe("git@github.com:owner/repo.git");
+  });
+
+  test("an alternate SSH host/port survives — it's why that URL was pasted", () => {
+    // `ssh.github.com:443` is what you use when your network blocks port 22.
+    // Canonicalizing it to `git@github.com:` would hang until TCP timed out.
+    // It needs the explicit ssh:// form — the scp-like form can't carry a port.
+    expect(parseRepoUrl("ssh://git@ssh.github.com:443/owner/repo")?.remote)
+      .toBe("ssh://git@ssh.github.com:443/owner/repo.git");
+  });
+
+  test("pasted HTTPS credentials survive, exactly as they do for Azure DevOps", () => {
+    // Someone with no credential helper configured pasted a token URL because
+    // it's the only form that works for them; rebuilding it away turns a URL
+    // that clones in their shell into one that fails in agendo.
+    const u = parseRepoUrl("https://x-access-token:ghp_SECRET@github.com/acme/private.git")!;
+    expect(u.remote).toBe("https://x-access-token:ghp_SECRET@github.com/acme/private.git");
+    expect(u.displayRemote).toBe("https://x-access-token:***@github.com/acme/private.git");
+    // A bare token in the username position is masked whole — there's no
+    // username convention on github.com that would vouch for it.
+    expect(parseRepoUrl("https://ghp_SECRET@github.com/acme/private")?.displayRemote)
+      .toBe("https://***@github.com/acme/private.git");
   });
 
   test("look-alike hosts are rejected, not silently mis-parsed", () => {
@@ -162,6 +184,19 @@ test.describe("parseRepoUrl: Azure DevOps", () => {
     // The UI does not. The username survives; only the secret half is masked.
     expect(u.displayRemote).toBe("https://org:***@dev.azure.com/org/proj/_git/repo");
     expect(u.displayRemote).not.toContain("sup3rs3cr3t");
+  });
+
+  test("a token in the USERNAME position is masked too — but the org isn't", () => {
+    // `https://<something>@dev.azure.com/…` is structurally ambiguous: ADO's own
+    // Clone button puts the ORG there, and a bare PAT looks identical. Only a
+    // name we can vouch for is shown.
+    expect(parseRepoUrl("https://sup3rs3cr3t@dev.azure.com/org/proj/_git/repo")?.displayRemote)
+      .toBe("https://***@dev.azure.com/org/proj/_git/repo");
+    expect(parseRepoUrl("https://org@dev.azure.com/org/proj/_git/repo")?.displayRemote)
+      .toBe("https://org@dev.azure.com/org/proj/_git/repo");
+    // `git` is the SSH user in every scp form, so it's never mistaken for a token.
+    expect(parseRepoUrl("git@ssh.dev.azure.com:v3/org/proj/repo")?.displayRemote)
+      .toBe("git@ssh.dev.azure.com:v3/org/proj/repo");
   });
 
   test("no `_git` segment means it isn't a repo URL", () => {
@@ -326,6 +361,29 @@ test.describe("where the clone lands", () => {
     checkout("the-real-one");
     expect(findMatchingCheckout(dir, url.key, () => "https://github.com/owner/repo.git"))
       .toBe(join(dir, "the-real-one"));
+  });
+
+  test("enclosingCheckout: finds the repo a path sits in, at any depth", () => {
+    mkdirSync(join(dir, "myrepo", ".git"), { recursive: true });
+    mkdirSync(join(dir, "myrepo", "src", "deep"), { recursive: true });
+    expect(enclosingCheckout(join(dir, "myrepo"), dir)).toBe(join(dir, "myrepo"));
+    expect(enclosingCheckout(join(dir, "myrepo", "src", "deep"), dir)).toBe(join(dir, "myrepo"));
+    // A plain folder of checkouts is exactly where cloning belongs.
+    expect(enclosingCheckout(dir, dir)).toBeNull();
+  });
+
+  test("enclosingCheckout: a dotfiles repo at $HOME does not swallow the whole machine", () => {
+    // Keeping dotfiles in a git repo at ~ is a common setup. An unbounded
+    // walk-up would find `~/.git` from every directory the user owns and
+    // silently disable cloning everywhere.
+    mkdirSync(join(dir, ".git")); // `dir` stands in for $HOME here
+    mkdirSync(join(dir, "git", "projects"), { recursive: true });
+    expect(enclosingCheckout(join(dir, "git"), dir)).toBeNull();
+    expect(enclosingCheckout(join(dir, "git", "projects"), dir)).toBeNull();
+    // A real project checkout under it is still found.
+    mkdirSync(join(dir, "git", "projects", "app", ".git"), { recursive: true });
+    expect(enclosingCheckout(join(dir, "git", "projects", "app"), dir))
+      .toBe(join(dir, "git", "projects", "app"));
   });
 
   test("findMatchingCheckout: non-repos and origin-less checkouts are skipped, not crashed on", () => {

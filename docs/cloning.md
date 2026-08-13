@@ -136,13 +136,30 @@ ADO hands out clone URLs with the credentials embedded
 (`https://org:<PAT>@dev.azure.com/…`), and people paste them. The token stays in
 `remote` — dropping it would break a clone the user explicitly authenticated,
 and it reaches git's argv either way, exactly as it would from their shell — but
-the UI renders `displayRemote`, in which the secret half of the userinfo is
-masked. A pasted PAT must not end up in terminal scrollback.
+the UI renders `displayRemote`, in which credentials are masked. A pasted PAT
+must not end up in terminal scrollback.
+
+`user:secret@` is the easy case (mask the half after the colon, keep the name).
+A **bare** `something@` is the hard one, because the two things it can be are
+structurally identical: ADO's own Clone-button URL puts the *org* there, and a
+token pasted without a username looks exactly the same. So bare userinfo is
+masked unless it's a name we can vouch for — `git` (the SSH user in every scp
+form) or the org the URL itself parsed to. Masking a real username costs
+nothing; printing a PAT does not.
 
 The clone URL agendo actually runs is canonical, not the pasted string: HTTPS
 input → `https://…/_git/repo` (ADO) or `https://github.com/owner/repo.git`;
-SSH input → the SSH clone form. The scheme family the user pasted is preserved,
-because that's the credential path they have.
+SSH input → the SSH clone form. But everything about the pasted URL that is part
+of the user's **access path** is carried over, because rewriting it away turns a
+URL that works in their shell into one that fails in agendo:
+
+- **the scheme family** — HTTPS and SSH are different credential setups;
+- **embedded credentials** — `https://x-access-token:TOKEN@github.com/acme/private`
+  keeps its userinfo (see the redaction note below), same as the ADO form;
+- **an alternate SSH host and port** — `ssh://git@ssh.github.com:443/owner/repo`
+  is what you use when your network blocks port 22; collapsing it to
+  `git@github.com:` would hang until the TCP connect timed out. That one needs
+  the explicit `ssh://` form, since the scp-like form can't carry a port.
 
 Anything else — a bare path, `file://`, a GitLab remote, junk text, a leading
 `-` — is rejected, and `git clone` is invoked with `--` before its arguments so
@@ -201,14 +218,33 @@ real problem, so it must not be the half a narrow terminal truncates:
 
 | stderr looks like | reported as |
 | --- | --- |
+| host key verification failed / no matching host key | `Unknown SSH host — agendo runs git non-interactively, so it can't accept a new host key for you. Run \`ssh -T <host>\` once, accept it, then try again.` |
 | auth failed / permission denied / `terminal prompts disabled` / 403 / TF401019 | `Authentication — agendo uses your existing git credentials; check your SSH agent, or \`gh auth setup-git\` / \`az repos\` for HTTPS.` |
 | repository not found / could not read from remote | `Not found — check the URL, or (if it's private) that your git has access to it.` |
 | anything else | git's `fatal:` line alone |
 
-The not-found case is deliberately **not** folded into the auth case even though
+**Order is load-bearing, in both directions.**
+
+The host-key case comes first because it's a consequence of *our own* BatchMode:
+ssh would normally ask whether to trust an unknown host, and we turned that off,
+so a first-ever SSH clone from `ssh.dev.azure.com` fails here. "Check your SSH
+agent" would send that user looking in entirely the wrong place.
+
+Auth comes before not-found because git ends **every** failed SSH handshake with
+`fatal: Could not read from remote repository.` — including the one whose real
+cause is the line above it (`Permission denied (publickey).`). Matching the
+not-found pattern first would classify every SSH credentials failure as a
+missing repo. Nothing in the auth patterns appears in a genuine 404, so the
+reverse mix-up can't happen.
+
+And the not-found case is deliberately **not** folded into auth even though
 GitHub answers an unauthorized private repo with a 404: "check your credentials"
 would be a confident wrong answer for what is far more often a typo, so the
 message carries both readings.
+
+Which *line* is quoted follows the classification, not the `fatal:` prefix —
+otherwise the SSH case would show the generic summary and throw away
+`git@github.com: Permission denied (publickey).`, which has no prefix at all.
 
 **Partial clones are always cleaned up.** If agendo created the destination
 directory and the clone fails or is cancelled, the directory is removed. A

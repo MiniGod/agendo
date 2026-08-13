@@ -45,6 +45,8 @@ if (args[0] === "clone") {
   // FAKE_GIT_CLONE selects the outcome so specs can drive each branch:
   //   • unset / "ok" → succeeds, creating <dest>/.git
   //   • "auth"       → the HTTPS credentials failure
+  //   • "hostkey"    → an unknown SSH host, which BatchMode turns from a prompt
+  //                    into a failure — its own category, not "check your creds"
   //   • "sshauth"    → the SSH credentials failure, verbatim from real git: the
   //                    line that says WHY carries no `fatal:` prefix, and the
   //                    `fatal:` summary line reads like a missing repo
@@ -61,6 +63,13 @@ if (args[0] === "clone") {
   process.stderr.write("Receiving objects: 100% (120/120), 1.10 MiB | 5.00 MiB/s, done.\r\n");
   if (mode === "auth") {
     process.stderr.write(`fatal: could not read Username for '${remote}': terminal prompts disabled\n`);
+    process.exit(128);
+  }
+  if (mode === "hostkey") {
+    // What BatchMode turns the "trust this host?" question into. Note it ALSO
+    // ends with the generic "Could not read from remote repository." line.
+    process.stderr.write("Host key verification failed.\n");
+    process.stderr.write("fatal: Could not read from remote repository.\n");
     process.exit(128);
   }
   if (mode === "sshauth") {
