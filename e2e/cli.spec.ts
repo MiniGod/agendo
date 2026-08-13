@@ -4,7 +4,9 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripAnsi } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
 import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
@@ -325,6 +327,93 @@ test("agendo list/status report a usage-limited session", async ({ mock }) => {
   expect(status.stdout).toContain("limited");
   expect(status.stdout).toContain("usage limit reached");
   expect(status.stdout).toContain("resets at"); // reset time was parsed
+});
+
+// REAL captured limit panes (provenance in e2e/detection.spec.ts): raw
+// `capture-pane -p -e` output from a live limited Claude Code session, SGR
+// escapes intact, so `list` classifies and parses exactly what tmux would feed
+// it. Both forms matter here:
+//   - the esc-revealed TEXT notice, which states "resets 5pm (Atlantic/Reykjavik)";
+//   - the numbered DIALOG with that notice scrolled off, which states no time at
+//     all — and `list` must never press Escape to uncover it.
+const fixturePane = (name: string) => readFileSync(join(REPO_ROOT, "e2e", "fixtures", name), "utf-8");
+const REAL_LIMIT_PANE_WITH_TIME = fixturePane("limit-esc-revealed.ansi");
+const REAL_LIMIT_PANE_NO_TIME = fixturePane("limit-dialog-menu.ansi")
+  .split("\n")
+  .filter((l) => !/hit your session limit/i.test(stripAnsi(l)))
+  .join("\n");
+
+/**
+ * CLI env with the clock pinned, so the assertions don't depend on the CI box:
+ * TZ=UTC (Atlantic/Reykjavik is UTC+0 year-round, so the fixture's "5pm" is
+ * 17:00 UTC), and an explicit POSIX locale to choose 24h vs 12h.
+ */
+const withClock = (env: Record<string, string>, locale: string) => ({ ...env, TZ: "UTC", LC_ALL: locale });
+
+test("agendo list shows when a limited session's limit resets (locale-formatted + ISO in --json)", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: REAL_LIMIT_PANE_WITH_TIME } });
+
+  // 24-hour locale: the reset time rides next to the readiness word, and the
+  // column is widened to fit it (two spaces before the kind cell, as elsewhere).
+  const gb = agendo(withClock(mock.env, "en_GB.UTF-8"), "list");
+  expect(gb.status).toBe(0);
+  expect(gb.stdout).toMatch(/limited 17:00 {2}\S/);
+
+  // Same instant, 12-hour locale — Intl picks the format, we never hand-roll it.
+  const us = agendo(withClock(mock.env, "en_US.UTF-8"), "list");
+  expect(us.status).toBe(0);
+  expect(us.stdout).toMatch(/limited 5:00[\s ]PM {2}\S/);
+
+  // --json carries the machine-readable instant instead: ISO 8601, UTC, no
+  // localized text anywhere (other agents consume this).
+  const r = await agendoAsync(withClock(mock.env, "en_US.UTF-8"), "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("limited");
+  expect(login.limitResetAt).toMatch(/^\d{4}-\d{2}-\d{2}T17:00:00\.000Z$/);
+  expect(Number.isNaN(Date.parse(login.limitResetAt))).toBe(false);
+  expect(r.stdout).not.toMatch(/\d:\d{2}[\s ](AM|PM)/); // no localized clock in JSON
+  // A session that isn't limited reports null, not a stale/placeholder value.
+  const crash = rows.find((x) => x.shortId === CRASH_SHORT_ID);
+  expect(crash.limitResetAt).toBeNull();
+});
+
+test("agendo list renders a limited session with no parseable reset time as plain 'limited'", async ({ mock }) => {
+  // The numbered dialog hides the reset time behind an Escape. `list` is strictly
+  // read-only, so it reports what's on screen: "limited", no placeholder, no crash.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: REAL_LIMIT_PANE_NO_TIME } });
+
+  const list = agendo(withClock(mock.env, "en_GB.UTF-8"), "list");
+  expect(list.status).toBe(0);
+  expect(list.stdout).toContain("limited");
+  // Nothing but column padding follows the word — no time, no dash, no "unknown".
+  expect(list.stdout).not.toMatch(/limited \S/);
+
+  const r = await agendoAsync(withClock(mock.env, "en_GB.UTF-8"), "list", "--json").done;
+  expect(r.code).toBe(0);
+  const login = (JSON.parse(r.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("limited");
+  expect(login.limitResetAt).toBeNull();
+
+  // Strictly read-only: no keystroke was sent to reveal the timestamp.
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "send-keys")).toBe(false);
+});
+
+test("agendo list leaves a session that isn't limited untouched", async ({ mock }) => {
+  // Default fixture pane: idle/ready. The readiness column keeps its plain word
+  // and its usual width — the reset-time suffix is limited-only.
+  const r = agendo(withClock(mock.env, "en_GB.UTF-8"), "list");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toMatch(/ready {7}\S/); // "ready" padded to the standard 10, + the 2-space gap
+  expect(r.stdout).not.toContain("limited");
+
+  const j = await agendoAsync(withClock(mock.env, "en_GB.UTF-8"), "list", "--json").done;
+  expect(j.code).toBe(0);
+  const login = (JSON.parse(j.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("ready");
+  expect(login.limitResetAt).toBeNull();
 });
 
 test("agendo unblock sends <esc>continue<enter> to a limited session", async ({ mock }) => {

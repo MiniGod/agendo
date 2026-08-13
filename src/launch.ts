@@ -92,6 +92,8 @@ export function llmGuide(): string {
     "",
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
+    "  One at its usage limit reads \"limited <time>\" — when it comes back. Same instant",
+    `  as an ISO 8601 limitResetAt field in ${SELF_CMD} list --json.`,
     "",
     `Check on it:  ${SELF_CMD} status <id>`,
     "  Prints its state, task checklist, Workflow-tool runs (with agent progress),",

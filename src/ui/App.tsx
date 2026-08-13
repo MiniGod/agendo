@@ -5,7 +5,7 @@ import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedMod
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
-import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
+import { formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
@@ -914,7 +914,9 @@ function runningStatus(r: Readiness | undefined): { label: string; color: string
 // could parse one, else a note that we can't (and so won't auto-resume).
 function limitSuffix(resetAt: number | null | undefined): string {
   if (resetAt == null) return " · no reset time";
-  const t = new Date(resetAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // The same clock `agendo list` prints: one formatter, one locale rule, so the
+  // menu and the CLI can't disagree (unpadded hour, 24h vs 12h per the locale).
+  const t = formatResetTime(resetAt);
   return resetAt <= Date.now() ? ` · reset passed ${t}` : ` · resets ${t}`;
 }
 

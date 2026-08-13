@@ -10,7 +10,7 @@ import {
   sessionRoot, currentSessionName, killWindow,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
-import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
+import { formatResetTime, parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
@@ -46,10 +46,12 @@ Usage:
                                 Any other dashed argument is an error; put prompt
                                 text that starts with -- after a bare --.
   agendo list, ls [dir]        List the sessions running right now, one per line
-                                (readiness, kind, id, dir, title). With a dir,
-                                only sessions whose cwd is under it are shown.
+                                (readiness, kind, id, dir, title). A session at its
+                                usage limit reads "limited <time>" when the pane
+                                says when it resets. With a dir, only sessions
+                                whose cwd is under it are shown.
       --json                    Emit machine-readable JSON (with branch + linked
-                                PR + work-item/issue per session).
+                                PR + work-item/issue + ISO limitResetAt per session).
       --all, --include-idle     Also list idle (not-running) sessions, each marked
                                 running vs idle.
       --pr <n>                  Only sessions linked to PR #n (resolved via the
@@ -677,6 +679,13 @@ interface ListRow {
   running: boolean;
   /** Input readiness from the live pane, or null when idle (no pane to read). */
   readiness: Readiness | null;
+  /**
+   * When the usage limit resets, as an ISO 8601 instant — set only for a
+   * "limited" row whose pane states a time (the numbered limit dialog hides it,
+   * and we never press a key to reveal it), null otherwise. Machine-readable on
+   * purpose: the human list renders the same instant in the local locale.
+   */
+  limitResetAt: string | null;
   /** Background shells the running pane reports (0 when idle/unknown). */
   shells: number;
   /** How it was launched, when running (from the live-tmux reconciliation). */
@@ -693,6 +702,37 @@ interface ListRow {
   workItem: { id: number; url: string } | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
+}
+
+/**
+ * The reset instant for a limited pane, or null. Read-only: we parse whatever
+ * the pane already shows (`stripAnsi(raw)`) and never send a keystroke to
+ * uncover it, so a session parked in the numbered limit dialog — which hides the
+ * time until Escape — legitimately yields null. Uses the same lookback as the
+ * TUI's auto-resume so `list` and the menu agree on which window is meant.
+ */
+function paneResetAt(readiness: Readiness | null, raw: string): number | null {
+  if (readiness !== "limited") return null;
+  return parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
+}
+
+/**
+ * The readiness column's text: the bare state word, plus the locale-formatted
+ * reset time when a limited pane told us one ("limited 14:00"). No placeholder
+ * when it didn't — a plain "limited" is the honest answer.
+ */
+function readyCell(readiness: Readiness | null, resetAt: number | null): string {
+  const word = readiness ?? "-";
+  return resetAt === null ? word : `${word} ${formatResetTime(resetAt)}`;
+}
+
+/**
+ * Width of the readiness column: the usual 10 (fits every state word), widened
+ * only as far as the longest `limited <time>` on screen so the columns after it
+ * stay aligned whatever the locale's time format is.
+ */
+function readyWidth(cells: string[]): number {
+  return Math.max(10, ...cells.map((c) => c.length));
 }
 
 /**
@@ -776,10 +816,12 @@ async function runList(opts: ListOptions): Promise<void> {
     const window = liveWindows.get(canon);
     let readiness: Readiness | null = null;
     let shells = 0;
+    let resetAt: number | null = null;
     if (running && window) {
       const { raw, cursor } = capturePaneState(window);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
+      resetAt = paneResetAt(readiness, raw);
     }
     const l = linkOf(s);
     return {
@@ -788,6 +830,7 @@ async function runList(opts: ListOptions): Promise<void> {
       source: s.source,
       running,
       readiness,
+      limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
       shells,
       kind: running ? liveKinds.get(canon) ?? null : null,
       branch: s.branch ?? null,
@@ -819,15 +862,17 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   const itemLabel = model?.provider === "github" ? "issue" : "wi";
+  const ready = rows.map((r) => readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt)));
+  const rw = readyWidth(ready);
   console.log(
-    ["", "ready".padEnd(10), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+    ["", "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
-  for (const r of rows) {
+  for (const [i, r] of rows.entries()) {
     const wfRunning = r.workflows.filter((w) => w.status === "running").length;
     console.log(
       [
         r.running ? "●" : "○",
-        (r.readiness ?? "-").padEnd(10),
+        ready[i].padEnd(rw),
         (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
         r.shortId.padEnd(12),
         timeAgo(new Date(r.lastUsed)).padEnd(8),
@@ -850,7 +895,9 @@ async function runList(opts: ListOptions): Promise<void> {
  */
 function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
   const seen = new Set<string>();
-  const rows: string[] = [];
+  // Cells, not finished lines: the readiness column's width isn't known until
+  // every row is in (a `limited <time>` cell is wider than the state words).
+  const rows: string[][] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
@@ -869,23 +916,26 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     seen.add(key);
     const { raw, cursor } = capturePaneState(name);
     const shells = paneShells(raw);
+    const readiness = paneReadiness(raw, cursor);
     // Running-workflow marker (◆N): the session is live here by construction.
     const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
-    rows.push(
-      [
-        "●",
-        paneReadiness(raw, cursor).padEnd(10),
-        KIND_LABEL[kind].padEnd(3),
-        shortId(s.id),
-        timeAgo(s.lastUsed).padEnd(8),
-        (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
-        s.title.replace(/\s+/g, " ").slice(0, 44),
-        [shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""].filter(Boolean).join(" "),
-      ].join("  ").trimEnd(),
-    );
+    rows.push([
+      "●",
+      readyCell(readiness, paneResetAt(readiness, raw)),
+      KIND_LABEL[kind].padEnd(3),
+      shortId(s.id),
+      timeAgo(s.lastUsed).padEnd(8),
+      (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
+      s.title.replace(/\s+/g, " ").slice(0, 44),
+      [shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""].filter(Boolean).join(" "),
+    ]);
   }
-  if (rows.length === 0) console.log("No running sessions.");
-  else rows.forEach((r) => console.log(r));
+  if (rows.length === 0) {
+    console.log("No running sessions.");
+    return;
+  }
+  const rw = readyWidth(rows.map((r) => r[1]));
+  for (const [dot, ready, ...rest] of rows) console.log([dot, ready.padEnd(rw), ...rest].join("  ").trimEnd());
 }
 
 /** A session working a PR / issue's branch, as reported by the resource lists. */
