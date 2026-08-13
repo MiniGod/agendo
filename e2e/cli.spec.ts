@@ -7,13 +7,16 @@ import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
 const SHORT_ID = shortIdOf(LOGIN_SESSION_ID);
 const CRASH_SHORT_ID = shortIdOf(CRASH_SESSION_ID);
 const COP_SHORT_ID = shortIdOf(COPILOT_SESSION_ID);
+// The standalone fixture session is on `main` in a plain checkout — no PR and no
+// work item resolve onto it, so it's the "nothing linked" case.
+const STANDALONE_SHORT_ID = shortIdOf(STANDALONE_SESSION_ID);
 
 // A mid-generation TUI: the live token counter is the reliable "busy" signal, so
 // `paneReadiness` classifies this as "busy" (not sendable / not settled).
@@ -812,4 +815,154 @@ test("agendo list rejects unknown sub-flags; a non-keyword positional is a dir f
   const badFlag = agendo(mock.env, "list", "pr", "--nope");
   expect(badFlag.status).not.toBe(0);
   expect(badFlag.stderr).toContain('unknown argument "--nope"');
+});
+
+// ── full entity URLs + `agendo open` ─────────────────────────────────────────
+// Bare "PR 5001 / WI 101" identifiers force any consumer (a human, or an agent
+// reporting back to one) to hand-assemble a link, which is exactly where the
+// wrong ADO host/path shape creeps in. These pin the full URLs through the CLI,
+// built by the provider's canonical builders (unit-pinned in provider.spec.ts)
+// off the mock server's ADO_BASE_URL and the fixture project name ("Widgets").
+
+/** The URLs the ADO fixtures must produce, given the mock server's base URL. */
+const adoUrls = (baseUrl: string) => ({
+  pr5001: `${baseUrl}/Widgets/_git/appweb/pullrequest/5001`,
+  wi101: `${baseUrl}/_workitems/edit/101`,
+  wi102: `${baseUrl}/_workitems/edit/102`,
+});
+
+test("agendo list --json carries full prUrl / workItemUrl per session", async ({ mock }) => {
+  const U = adoUrls(mock.ado.baseUrl);
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  // Flattened top-level fields, and the nested objects agree with them.
+  expect(login.prUrl).toBe(U.pr5001);
+  expect(login.workItemUrl).toBe(U.wi101);
+  expect(login.pr.url).toBe(U.pr5001);
+  expect(login.workItem.url).toBe(U.wi101);
+
+  // The crash session resolves only a work item — its PR fields are null, not a
+  // half-built URL a consumer might paste.
+  const crash = rows.find((x) => x.shortId === CRASH_SHORT_ID);
+  expect(crash.workItemUrl).toBe(U.wi102);
+  expect(crash.prUrl).toBeNull();
+
+  // A session with nothing linked reports null for both.
+  const standalone = rows.find((x) => x.shortId === STANDALONE_SHORT_ID);
+  expect(standalone).toBeTruthy();
+  expect(standalone.prUrl).toBeNull();
+  expect(standalone.workItemUrl).toBeNull();
+  expect(standalone.pr).toBeNull();
+  expect(standalone.workItem).toBeNull();
+});
+
+test("agendo status --urls prints the linked PR + work-item URLs", async ({ mock }) => {
+  const U = adoUrls(mock.ado.baseUrl);
+  const r = await agendoAsync(mock.env, "status", SHORT_ID, "--urls").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain(`pr:     !5001   ${U.pr5001}`);
+  expect(r.stdout).toContain(`wi:     #101    ${U.wi101}`);
+
+  // Default `status` stays link-free (and backend-free) — the URLs are opt-in.
+  const plain = agendo(mock.env, "status", SHORT_ID);
+  expect(plain.status).toBe(0);
+  expect(plain.stdout).not.toContain(U.pr5001);
+});
+
+test("agendo status --urls on an unlinked session says so instead of inventing a link", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "status", STANDALONE_SHORT_ID, "--urls").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("no linked PR or work item");
+  expect(r.stdout).not.toContain("_workitems/edit");
+});
+
+test("agendo open launches the browser at the session's PR and prints both URLs", async ({ mock }) => {
+  const U = adoUrls(mock.ado.baseUrl);
+  const r = await agendoAsync(mock.env, "open", SHORT_ID).done;
+  expect(r.code).toBe(0);
+  // Both links are printed — the URL is the deliverable, the browser is a bonus.
+  expect(r.stdout).toContain(U.pr5001);
+  expect(r.stdout).toContain(U.wi101);
+  expect(r.stdout).toContain("opened PR !5001");
+  // …and it went through the real opener path (the fake xdg-open records it).
+  expect(await mock.callLog()).toContain(`xdg-open ${U.pr5001}`);
+});
+
+test("agendo open --work-item opens the work item instead of the PR", async ({ mock }) => {
+  const U = adoUrls(mock.ado.baseUrl);
+  const r = await agendoAsync(mock.env, "open", SHORT_ID, "--work-item").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("opened work item #101");
+  const log = await mock.callLog();
+  expect(log).toContain(`xdg-open ${U.wi101}`);
+  expect(log).not.toContain(`xdg-open ${U.pr5001}`);
+});
+
+test("agendo open --print emits the URLs without launching anything", async ({ mock }) => {
+  const U = adoUrls(mock.ado.baseUrl);
+  const r = await agendoAsync(mock.env, "open", SHORT_ID, "--print").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain(U.pr5001);
+  expect(r.stdout).toContain(U.wi101);
+  expect((await mock.callLog()).some((l) => l.startsWith("xdg-open"))).toBe(false);
+});
+
+test("agendo open on a session with no linked entity fails cleanly (no stack trace)", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "open", STANDALONE_SHORT_ID).done;
+  expect(r.code).toBe(1);
+  expect(r.stderr).toContain("no linked pull request or work item");
+  // A clean message, not a crash: no thrown-error noise, and no browser attempt.
+  expect(r.stderr).not.toContain("at ");
+  expect(r.stderr).not.toContain("TypeError");
+  expect((await mock.callLog()).some((l) => l.startsWith("xdg-open"))).toBe(false);
+});
+
+test("agendo open --pr on a work-item-only session names what IS available", async ({ mock }) => {
+  // The crash session resolves a work item but no PR; asking for the PR must be a
+  // clear message pointing at the other flag, not a silent open of the wrong thing.
+  const r = await agendoAsync(mock.env, "open", CRASH_SHORT_ID, "--pr").done;
+  expect(r.code).toBe(1);
+  expect(r.stderr).toContain("no linked pull request");
+  expect(r.stderr).toContain("work item #102");
+  expect((await mock.callLog()).some((l) => l.startsWith("xdg-open"))).toBe(false);
+});
+
+test("agendo open degrades gracefully where no browser exists (headless)", async ({ mock }) => {
+  // AGENDO_BROWSER points the opener at a binary that isn't there — the same
+  // ENOENT a headless container hits with no xdg-open installed. It must neither
+  // hang nor crash: the URL is still printed, the failure is a stderr warning.
+  const U = adoUrls(mock.ado.baseUrl);
+  const env = { ...mock.env, AGENDO_BROWSER: "/nonexistent/no-such-opener" };
+  const r = await agendoAsync(env, "open", SHORT_ID).done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain(U.pr5001);
+  expect(r.stderr).toContain("Couldn't launch a browser");
+  expect(r.stderr).toContain("the URL above is still valid");
+});
+
+test("agendo open on an unknown id / with no id fails cleanly", async ({ mock }) => {
+  const unknown = await agendoAsync(mock.env, "open", "no-such-session").done;
+  expect(unknown.code).toBe(1);
+  expect(unknown.stderr).toContain("No session found");
+
+  const noId = agendo(mock.env, "open");
+  expect(noId.status).toBe(1);
+  expect(noId.stderr).toContain("usage: agendo open <id>");
+
+  const badFlag = agendo(mock.env, "open", SHORT_ID, "--nope");
+  expect(badFlag.status).toBe(1);
+  expect(badFlag.stderr).toContain('unknown argument "--nope"');
+});
+
+test("agendo open (GitHub) resolves the issue/PR links from the GitHub builders", async ({ mock }) => {
+  await seedGitHubList(mock);
+  const r = await agendoAsync(mock.env, "open", SHORT_ID, "--print").done;
+  expect(r.code).toBe(0);
+  // Provider vocab follows the backend: '#' PR prefix and "issue", not "wi".
+  expect(r.stdout).toContain("https://github.com/ada/appweb/pull/401");
+  expect(r.stdout).toContain("https://github.com/ada/appweb/issues/301");
+  expect(r.stdout).toContain("#401");
 });

@@ -25,7 +25,30 @@ export interface FetchContext {
   repos: RepoInfo[];
 }
 
+/** Enough of a PullRequest to build its web URL (a real PullRequest satisfies it). */
+export type PrUrlRef = Pick<PullRequest, "id" | "repositoryId"> &
+  Partial<Pick<PullRequest, "repositoryName">>;
+
+/** Enough of a WorkItem to build its web URL. `project` scopes the id for
+ *  backends whose ids are per-repo (GitHub); ADO ignores it (ids are org-wide). */
+export type ItemUrlRef = Pick<WorkItem, "id"> & Partial<Pick<WorkItem, "project">>;
+
+/**
+ * Canonical web links for the backend's entities — the single place a PR or
+ * work-item URL is constructed, so no caller ever hand-assembles one. Each
+ * backend builds from what it already has configured (ADO: the org base +
+ * project; GitHub: the `owner/repo` slug parsed from the remote), never by
+ * re-parsing or guessing. Returns null when the reference lacks the scope that
+ * backend needs — a missing link is better than a plausible-looking wrong one.
+ */
+export interface EntityUrls {
+  pullRequest(ref: PrUrlRef): string | null;
+  workItem(ref: ItemUrlRef): string | null;
+}
+
 export interface Provider {
+  /** Canonical web URLs for this backend's pull requests / work items. */
+  urls: EntityUrls;
   /** Optional per-reload hook: invalidate any per-load caches so a refresh
    *  re-reads mutable state. ADO clears its PR cache here (mutable PR fields
    *  would otherwise stay frozen across reloads); GitHub fetches fresh every
@@ -65,6 +88,7 @@ export interface Provider {
 // ADO's functions predate the FetchContext shape, so adapt them here rather than
 // churn ado.ts: pull the field each one actually needs out of the context.
 const adoProvider: Provider = {
+  urls: ado.urls,
   beginLoad: ado.clearPrCache,
   checkAuth: ado.checkAuth,
   getMe: ado.getMe,

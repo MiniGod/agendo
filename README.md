@@ -67,7 +67,7 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`. So an agent can spin off _new_ sessions — each in its
+launch`/`list`/`status`/`send`/`open`. So an agent can spin off _new_ sessions — each in its
 own fresh worktree — for separate pieces of work that deserve their own PR, then
 monitor and steer them through the same commands. One orchestrator session can fan a
 large task out across many worktrees and coordinate them, instead of hand-rolling

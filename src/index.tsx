@@ -15,11 +15,12 @@ import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, 
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
-import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
+import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
+import { openUrlAsync } from "./browser.ts";
 import { loadState } from "./config.ts";
 import { repoRootForCwd } from "./repos.ts";
-import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
+import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
@@ -49,7 +50,8 @@ Usage:
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
       --json                    Emit machine-readable JSON (with branch + linked
-                                PR + work-item/issue per session).
+                                PR + work-item/issue per session, each carrying a
+                                full prUrl / workItemUrl).
       --all, --include-idle     Also list idle (not-running) sessions, each marked
                                 running vs idle.
       --pr <n>                  Only sessions linked to PR #n (resolved via the
@@ -81,6 +83,16 @@ Usage:
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
       --full, -F                Don't truncate the prompt / activity details
+      --urls, --links           Also resolve and print the full URLs of the linked
+                                PR / work item (needs the backend, so it's opt-in —
+                                the default status stays fast and auth-free).
+  agendo open <id>             Open the session's linked PR / work item in your
+                                browser — the CLI mirror of the menu's o key. Every
+                                resolved URL is printed first, so the link is
+                                usable even where no browser can be launched.
+      --pr                      Open the pull request (the default when both exist)
+      --issue, --work-item      Open the work item / issue instead
+      --print, -p               Only print the URL(s); never launch a browser
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
                                 its input is idle/ready (not mid-turn, no open
                                 question, nothing already typed).
@@ -174,8 +186,37 @@ if (!tmuxAvailable()) {
 if (process.argv[2] === "status") {
   const rest = process.argv.slice(3);
   const full = rest.includes("--full") || rest.includes("-F");
-  const token = rest.find((a) => a !== "--full" && a !== "-F");
-  await runStatus(token, full);
+  // `--urls` opts into the backend round-trip that resolves the session's linked
+  // PR / work item. Off by default: `status` is the command orchestrators poll,
+  // and a model load costs network + backend auth on every call.
+  const withUrls = rest.includes("--urls") || rest.includes("--links");
+  const token = rest.find((a) => !a.startsWith("-"));
+  await runStatus(token, full, withUrls);
+  process.exit(0);
+}
+
+// `open <id>`: open the PR / work item a session links to in the browser — the
+// CLI mirror of the menu's `o` action, resolved through the same model reverse
+// index (`sessionLinks`). The URLs are always printed, so the command is useful
+// as a "give me the link" even on a headless host with no browser to launch.
+if (process.argv[2] === "open") {
+  let token: string | undefined;
+  let want: "pr" | "item" | undefined;
+  let printOnly = false;
+  for (const a of process.argv.slice(3)) {
+    if (a === "--pr") want = "pr";
+    else if (a === "--issue" || a === "--work-item" || a === "--workitem") want = "item";
+    else if (a === "--print" || a === "-p") printOnly = true;
+    else if (a.startsWith("-")) {
+      console.error(`open: unknown argument "${a}"`);
+      process.exit(1);
+    } else if (token === undefined) token = a;
+    else {
+      console.error(`open: unexpected argument "${a}"`);
+      process.exit(1);
+    }
+  }
+  await runOpen(token, want, printOnly);
   process.exit(0);
 }
 
@@ -506,10 +547,13 @@ if (!process.argv.includes("--no-tmux")) {
  * (the same summary the menu surfaces). A just-launched session may not have
  * written its log yet — if so we still report it as running from its live tmux
  * window. `token` may be a full session id, a short id, or a `cl-…-<id>` name.
+ *
+ * `withUrls` additionally resolves the session's linked PR / work item from the
+ * backend and prints their full URLs (see `resolveSessionLink`).
  */
-async function runStatus(token: string | undefined, full = false): Promise<void> {
+async function runStatus(token: string | undefined, full = false, withUrls = false): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id> [--full]`);
+    console.error(`usage: ${SELF_CMD} status <id> [--full] [--urls]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
@@ -532,6 +576,21 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   console.log(`  dir:    ${s.cwd}`);
   if (s.branch) console.log(`  branch: ${s.branch}`);
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
+  // Full, clickable links for whatever this session is working on. Vertical
+  // output, so a long URL costs nothing here (unlike the `list` table).
+  if (withUrls) {
+    const resolved = await resolveSessionLink(s);
+    const V = linkVocab(resolved.provider);
+    if (resolved.error) {
+      console.log(`  links:  (unavailable — ${resolved.error})`);
+    } else if (!resolved.link?.pr && !resolved.link?.workItem) {
+      console.log(`  links:  (no linked PR or ${V.noun})`);
+    } else {
+      const { pr, workItem } = resolved.link;
+      if (pr) console.log(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
+      if (workItem) console.log(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
+    }
+  }
   if (target) {
     const { raw, cursor } = capturePaneState(target);
     const readiness = paneReadiness(raw, cursor);
@@ -596,6 +655,110 @@ function indent(text: string): string {
     .split("\n")
     .map((l) => `    ${l}`)
     .join("\n");
+}
+
+/** One `label: id  url` line, columns padded so the PR and work-item rows line
+ *  up under each other (and under `status`'s other `key:` lines). */
+function linkLine(label: string, id: string, url: string): string {
+  return `  ${`${label}:`.padEnd(7)} ${id.padEnd(7)} ${url}`;
+}
+
+/** Provider-specific labels for the CLI's entity-link output. (vocab.ts holds
+ *  the TUI's fuller vocabulary; the link lines only need these three.) */
+function linkVocab(provider: ProviderName): { prPrefix: string; abbrev: string; noun: string } {
+  return provider === "github"
+    ? { prPrefix: "#", abbrev: "issue", noun: "issue" }
+    : { prPrefix: "!", abbrev: "wi", noun: "work item" };
+}
+
+/**
+ * The PR / work item a session links to, resolved through the model's reverse
+ * index (`sessionLinks`) — the same association the menu's `o` action opens, so
+ * the CLI and the TUI can't drift. Loading the model costs a backend round-trip,
+ * hence the opt-in callers. A failed load is returned as `error` rather than
+ * thrown, so `status --urls` degrades to a note instead of dying.
+ */
+async function resolveSessionLink(
+  s: AgentSession,
+): Promise<{ link?: SessionLink; provider: ProviderName; error?: string }> {
+  const opts = currentModelOptions();
+  try {
+    const model = await loadModel(opts);
+    return { link: model.sessionLinks.get(`${s.source}:${s.id}`), provider: model.provider };
+  } catch (e) {
+    return { provider: opts.provider, error: (e as Error)?.message ?? String(e) };
+  }
+}
+
+/**
+ * Open a session's linked PR / work item in the browser — the CLI mirror of the
+ * menu's `o` action, down to the shared `openUrl` path. `want` picks the entity
+ * when the session has both (the menu asks p/i; the CLI defaults to the PR).
+ *
+ * Every URL we resolved is printed BEFORE anything is launched, because the link
+ * itself is the deliverable: a headless host with no opener, or `--print`, still
+ * leaves the caller with a full clickable URL rather than an error. A missing
+ * link is a clean message, never a stack trace.
+ */
+async function runOpen(
+  token: string | undefined,
+  want: "pr" | "item" | undefined,
+  printOnly: boolean,
+): Promise<void> {
+  if (!token) {
+    console.error(`usage: ${SELF_CMD} open <id> [--pr | --work-item] [--print]`);
+    process.exit(1);
+  }
+  const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
+  const index = await SessionIndex.build();
+  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  if (!s) {
+    console.error(`No session found for "${token}".`);
+    process.exit(1);
+  }
+  const resolved = await resolveSessionLink(s);
+  const V = linkVocab(resolved.provider);
+  if (resolved.error) {
+    console.error(`open: could not resolve associations from the backend: ${resolved.error}`);
+    process.exit(1);
+  }
+  const pr = resolved.link?.pr;
+  const workItem = resolved.link?.workItem;
+  if (!pr && !workItem) {
+    console.error(
+      `Session ${shortId(s.id)} has no linked pull request or ${V.noun} to open.\n` +
+        `  (links resolve against the backend's OPEN PRs / ${V.noun}s for the current identity — ` +
+        `a merged or out-of-scope one won't be found.)`,
+    );
+    process.exit(1);
+  }
+  // An explicit selector that can't be honoured names what IS available, so the
+  // caller can retry with the other flag instead of guessing.
+  if (want === "pr" && !pr) {
+    console.error(`Session ${shortId(s.id)} has no linked pull request (only ${V.noun} #${workItem!.id}).`);
+    process.exit(1);
+  }
+  if (want === "item" && !workItem) {
+    console.error(`Session ${shortId(s.id)} has no linked ${V.noun} (only PR ${V.prPrefix}${pr!.id}).`);
+    process.exit(1);
+  }
+
+  if (pr) console.log(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
+  if (workItem) console.log(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
+  if (printOnly) return;
+
+  // Default to the PR when both exist: it's the artifact you act on, and the
+  // work item is one line above if that's what you wanted.
+  const target = want === "item" ? workItem! : want === "pr" ? pr! : pr ?? workItem!;
+  const label = target === pr ? `PR ${V.prPrefix}${target.id}` : `${V.noun} #${target.id}`;
+  try {
+    await openUrlAsync(target.url);
+    console.log(`▸ opened ${label} in your browser`);
+  } catch (e) {
+    // No opener on this host (headless, container, stripped image). The URL is
+    // already on stdout, so this is a warning, not a failure.
+    console.error(`Couldn't launch a browser (${(e as Error)?.message ?? e}) — the URL above is still valid.`);
+  }
 }
 
 /**
@@ -691,6 +854,14 @@ interface ListRow {
   pr: { id: number; url: string } | null;
   /** Linked work item / issue, resolved through the model's reverse index. */
   workItem: { id: number; url: string } | null;
+  /**
+   * The same two links flattened to top-level fields — null when unlinked, never
+   * a partially-built URL. Agents consume this JSON to hand a human a clickable
+   * link; a first-class field beats making them reach into a nested object (or,
+   * worse, reconstruct the URL from an id and guess the host shape).
+   */
+  prUrl: string | null;
+  workItemUrl: string | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
 }
@@ -797,6 +968,8 @@ async function runList(opts: ListOptions): Promise<void> {
       lastUsed: s.lastUsed.toISOString(),
       pr: l?.pr ?? null,
       workItem: l?.workItem ?? null,
+      prUrl: l?.pr?.url ?? null,
+      workItemUrl: l?.workItem?.url ?? null,
       workflows: (s.workflows ?? []).map((w) => ({
         runId: w.runId,
         name: w.name,
