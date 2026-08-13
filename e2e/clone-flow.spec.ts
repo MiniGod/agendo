@@ -61,6 +61,22 @@ test("an UNSCOPED launcher offers no cloning at all — there is no directory to
   expect(await wt.screen()).not.toContain("Clone a repo into");
 });
 
+test("scoping INSIDE a checkout offers no cloning — a repo is not a place to put repos", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // appweb is a fixture checkout (it has a `.git`). The clone would land as its
+  // direct child — a nested repository inside its working tree.
+  const repo = join(mock.home, "repos", "appweb");
+  const wt = await launch({ args: [repo], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  expect(picker).toContain("appweb"); // scoped picker itself still works
+  expect(picker).not.toContain("Clone from URL");
+  await wt.press("c");
+  await wt.waitForStable();
+  expect(await wt.screen()).not.toContain("Clone a repo into");
+});
+
 test("a bad URL is refused at the prompt — nothing is cloned", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const parent = join(mock.home, "repos");
@@ -198,6 +214,32 @@ test("an auth failure says so, and removes the partial clone", async ({ launch, 
   expect(existsSync(join(parent, "secretthing"))).toBe(false);
 });
 
+// REGRESSION: git ends EVERY failed SSH handshake with "fatal: Could not read
+// from remote repository." — including the one caused by a locked SSH agent —
+// so classifying on that line first reported a credentials failure as a missing
+// repo, and the line that actually named the cause (no `fatal:` prefix) was
+// discarded. Both halves are pinned here.
+test("REGRESSION: an SSH credentials failure is auth, and names the real cause", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  mock.env.FAKE_GIT_CLONE = "sshauth";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("git@github.com:ada/lockedthing.git");
+  await wt.waitForText("clones into");
+  await wt.press(KEY.enter);
+
+  const screen = await wt.waitForText("Authentication", 20000);
+  expect(screen).toContain("SSH agent");
+  // The informative line survives; the generic summary is not what's shown.
+  expect(screen).toContain("Permission denied (publickey)");
+  expect(screen).not.toContain("Not found —");
+  expect(existsSync(join(parent, "lockedthing"))).toBe(false);
+});
+
 test("a 404 is reported as not-found, NOT as a credentials problem", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   mock.env.FAKE_GIT_CLONE = "missing";
@@ -238,6 +280,55 @@ test("a non-auth failure reports git verbatim, and also cleans up", async ({ lau
   // Not misreported as a credentials problem.
   expect(screen).not.toContain("Authentication");
   expect(existsSync(join(parent, "brokenthing"))).toBe(false);
+});
+
+test("the ✓ clone banner doesn't follow you onto a different repo", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("https://github.com/ada/newthing");
+  await wt.waitForText("clones into");
+  await wt.press(KEY.enter);
+  await wt.waitForText("cloned ada/newthing", 20000);
+
+  // Back out and pick a repo that has nothing to do with the clone.
+  await wt.press(KEY.escape);
+  await wt.waitForText("New session — pick a repo");
+  await wt.press(KEY.down);
+  await wt.press(KEY.enter);
+
+  const where = await wt.waitForText("choose where to run");
+  expect(where).not.toContain("cloned ada/newthing");
+});
+
+test("a killed clone can't leave a half-made checkout in a directory the user provided", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  mock.env.FAKE_GIT_CLONE = "fail";
+  const parent = join(mock.home, "repos");
+  // An EMPTY directory the user made earlier: freeCloneDest clones straight into
+  // it, so cleanup can't just remove the directory — it has to empty it. `git
+  // clone` writes the origin into `.git/config` before fetching anything, so a
+  // surviving `.git` here would be matched as "already cloned" on the next run.
+  await mkdir(join(parent, "newthing"), { recursive: true });
+
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await openRepoPicker(wt);
+  await openClonePrompt(wt);
+
+  wt.write("https://github.com/ada/newthing");
+  const preview = await wt.waitForText("clones into");
+  expect(preview).toMatch(/clones into[^\n]*repos\/newthing\b/); // the empty dir, not -2
+  await wt.press(KEY.enter);
+
+  await wt.waitForText("remote end hung up", 20000);
+  // The user's directory survives; git's leavings do not.
+  expect(existsSync(join(parent, "newthing"))).toBe(true);
+  expect(existsSync(join(parent, "newthing", ".git"))).toBe(false);
 });
 
 test("a name collision steps aside instead of clobbering the directory", async ({ launch, mock }) => {

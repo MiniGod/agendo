@@ -19,6 +19,14 @@ Cloning writes to the filesystem, so agendo must never have to guess *where*.
 A bare `agendo` has no answer to that question and therefore doesn't offer to
 clone; the picker looks exactly as it does today.
 
+**And the directory must not be inside a git checkout.** Scoping supports
+`agendo .` and paths under a repo, but the clone lands as a *direct child* of
+the target — so cloning from inside a checkout would drop a nested repository
+into that repo's working tree, where it becomes untracked clutter forever.
+Cloning belongs in a folder *of* checkouts, not in one, so the row is absent
+there too (checked through `repoRootForCwd`, so a path deep inside a repo is
+caught, not just its root).
+
 ## Where the clone lands
 
 As a **direct child of the target directory** — a sibling of the checkouts
@@ -146,9 +154,12 @@ Checked in this order, against `parseRepoUrl`'s canonical key
 (`github:owner/repo`, `ado:org/project/repo`, lowercased):
 
 1. **An existing checkout of the same repo** — the target directory itself and
-   each direct child that is a git checkout are asked for their `origin`; the
+   each direct child that is a *main* checkout are asked for their `origin`; the
    first whose origin parses to the same key **is reused**. No second clone, no
-   second copy. The picker jumps straight on with a notice:
+   second copy. ("Main" means `.git` is a directory: a linked worktree has a
+   `.git` file but reports the same origin, and handing one back as a repo root
+   would nest a worktree inside a worktree.) The picker jumps straight on with a
+   notice:
    `already cloned — using ~/git/repo`. This is the case that matters most: the
    tester pastes a URL for something he cloned last month under a different
    folder name, and gets his existing checkout.
@@ -201,9 +212,11 @@ message carries both readings.
 
 **Partial clones are always cleaned up.** If agendo created the destination
 directory and the clone fails or is cancelled, the directory is removed. A
-directory that already existed (the empty-directory case) is left alone — git
-cleans up its own contents, and removing a directory the user made isn't
-agendo's call.
+directory that already existed (the empty-directory case) is *emptied* instead —
+the same distinction git draws for itself. Not skipped: `git clone` writes
+`remote.origin.url` into the config before it fetches anything, so a killed
+clone would otherwise leave a `.git` with an origin and no refs, which the reuse
+check above would cheerfully report as "already cloned" and launch a session in.
 
 ## A very large repo
 

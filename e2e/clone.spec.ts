@@ -312,6 +312,22 @@ test.describe("where the clone lands", () => {
       .toBeNull();
   });
 
+  test("findMatchingCheckout: a linked WORKTREE is not mistaken for the checkout", () => {
+    // A linked worktree has a `.git` FILE, not a directory — but `git remote
+    // get-url origin` inside it answers with the main repo's origin, so matching
+    // on origin alone would hand back the worktree as if it were the repo root
+    // (and `git worktree add` would then nest a worktree inside a worktree).
+    mkdirSync(join(dir, "repo-feature"));
+    writeFileSync(join(dir, "repo-feature", ".git"), "gitdir: /elsewhere/.git/worktrees/feature\n");
+    const url = parseRepoUrl("https://github.com/owner/repo")!;
+    expect(findMatchingCheckout(dir, url.key, () => "https://github.com/owner/repo.git")).toBeNull();
+
+    // The real checkout, added afterwards so it sorts LATER, is still found.
+    checkout("the-real-one");
+    expect(findMatchingCheckout(dir, url.key, () => "https://github.com/owner/repo.git"))
+      .toBe(join(dir, "the-real-one"));
+  });
+
   test("findMatchingCheckout: non-repos and origin-less checkouts are skipped, not crashed on", () => {
     mkdirSync(join(dir, "just-a-folder"));
     checkout("no-origin");

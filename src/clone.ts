@@ -280,10 +280,26 @@ function gitOrigin(dir: string): string | null {
   return origin;
 }
 
-/** Direct children of `dir` that look like git checkouts, plus `dir` itself. */
+/**
+ * Whether `dir` is a repo's MAIN checkout — `.git` is a directory there, and a
+ * *file* in a linked worktree (and in a submodule). The distinction matters
+ * because `git remote get-url origin` answers identically in both: a sibling
+ * worktree (`~/git/repo-feature`) would otherwise match a pasted URL for
+ * `~/git/repo` and be handed downstream as a repo root, where `createWorktree`
+ * would nest a worktree inside a worktree.
+ */
+function isMainCheckout(dir: string): boolean {
+  try {
+    return statSync(join(dir, ".git")).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Direct children of `dir` that are main checkouts, plus `dir` itself. */
 function checkoutCandidates(dir: string): string[] {
   const out: string[] = [];
-  if (existsSync(join(dir, ".git"))) out.push(dir);
+  if (isMainCheckout(dir)) out.push(dir);
   let entries: string[] = [];
   try {
     entries = readdirSync(dir);
@@ -292,7 +308,7 @@ function checkoutCandidates(dir: string): string[] {
   }
   for (const name of entries.sort()) {
     const p = join(dir, name);
-    if (existsSync(join(p, ".git"))) out.push(p);
+    if (isMainCheckout(p)) out.push(p);
   }
   return out;
 }
@@ -379,6 +395,13 @@ const AUTH_RE =
 // repo with a 404, so "not found" genuinely means "doesn't exist, OR you can't
 // see it" — telling the user flatly to check their credentials would be a
 // confident wrong answer for the (likelier) typo. The message covers both.
+//
+// AUTH_RE is tested FIRST, and that order is load-bearing: git ends every failed
+// SSH handshake with "fatal: Could not read from remote repository." — including
+// the one whose real cause is on the line above it
+// ("git@github.com: Permission denied (publickey).") — so matching this pattern
+// first would classify every SSH credentials failure as a missing repo. Nothing
+// in AUTH_RE appears in a genuine 404, so the reverse mix-up can't happen.
 const MISSING_RE = /repository .*not found|could not read from remote repository|does not (?:exist|appear to be a git repository)|project does not exist/i;
 
 /**
@@ -402,15 +425,26 @@ function cloneEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-/** The most informative line of git's stderr: its own `fatal:`/`error:` if any. */
-function failureLine(stderr: string): string {
+/**
+ * The most informative line of git's stderr.
+ *
+ * Preferring a `fatal:` line alone is not good enough: git's summary line for a
+ * failed SSH handshake is the generic "Could not read from remote repository.",
+ * while the line that actually says what went wrong
+ * ("git@github.com: Permission denied (publickey).") carries no prefix at all
+ * and would be thrown away. So the line matching the classification wins, and
+ * the `fatal:` line is only the fallback.
+ */
+function failureLine(stderr: string, failure: CloneFailure): string {
   const lines = stderr
     .split(/[\r\n]+/)
     .map((l) => l.trim())
     .filter(Boolean);
+  const specific = failure === "auth" ? AUTH_RE : failure === "missing" ? MISSING_RE : null;
   return (
-    [...lines].reverse().find((l) => /^(?:fatal|error|remote):/i.test(l)) ??
-    lines[lines.length - 1] ??
+    (specific && lines.find((l) => specific.test(l))) ||
+    [...lines].reverse().find((l) => /^(?:fatal|error|remote):/i.test(l)) ||
+    lines[lines.length - 1] ||
     "git clone failed"
   );
 }
@@ -436,10 +470,21 @@ export function startClone(
   const preExisted = existsSync(dest);
   let canceled = false;
 
+  // A directory we created goes entirely; one that was already there (which
+  // freeCloneDest only ever hands back when it is EMPTY) is emptied instead —
+  // the same distinction git draws for itself. Skipping it would be a real leak:
+  // `git clone` writes `remote.origin.url` into the config before it fetches
+  // anything, so a killed clone leaves behind a `.git` with an origin and no
+  // refs — which findMatchingCheckout would then happily report as "already
+  // cloned" and launch a session in.
   const cleanup = () => {
-    if (preExisted) return;
     try {
-      if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
+      if (!existsSync(dest)) return;
+      if (!preExisted) {
+        rmSync(dest, { recursive: true, force: true });
+        return;
+      }
+      for (const entry of readdirSync(dest)) rmSync(join(dest, entry), { recursive: true, force: true });
     } catch {
       // Best-effort: a leftover directory is reported by the next attempt's
       // collision handling rather than being worth failing over here.
@@ -478,14 +523,13 @@ export function startClone(
         return;
       }
       cleanup();
-      // "not found" is checked FIRST: a missing repo also trips several of the
-      // auth patterns, and the honest reading of it covers both possibilities.
-      const failure: CloneFailure = MISSING_RE.test(stderr)
-        ? "missing"
-        : AUTH_RE.test(stderr)
-          ? "auth"
+      // Order matters — see the comment on MISSING_RE.
+      const failure: CloneFailure = AUTH_RE.test(stderr)
+        ? "auth"
+        : MISSING_RE.test(stderr)
+          ? "missing"
           : "other";
-      resolve({ ok: false, failure, error: failureLine(stderr) });
+      resolve({ ok: false, failure, error: failureLine(stderr, failure) });
     });
   });
 

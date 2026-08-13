@@ -1883,7 +1883,15 @@ export default function App({
   // ── clone a repo that isn't on disk yet ──
   // Gated on `canClone`: agendo must have been given a target directory, since
   // that directory is the only place it may write. See docs/cloning.md.
-  const canClone = scoped && !!filterRoot;
+  //
+  // …and that directory must not be inside a git checkout. The clone lands as a
+  // direct child of it, so scoping to a repo (`agendo .`, `agendo ~/git/myrepo`,
+  // or any path under one — all of which the scoping logic supports) would drop
+  // a nested repository into that repo's working tree, where it sits as
+  // untracked clutter forever. Cloning belongs in a folder OF checkouts, not in
+  // one. Resolved through repoRootForCwd so a path deep inside a checkout is
+  // caught too, not just the root.
+  const canClone = scoped && !!filterRoot && !isGitCheckout(repoRootForCwd(filterRoot));
 
   /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
   const clonedRepo = (root: string): RepoInfo => ({
@@ -2094,7 +2102,14 @@ export default function App({
         return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor + 1) % len } : p));
       if (input === "c" && canClone) return openClone();
       if (key.return && mode.cursor === cloneRow) return openClone();
-      if (key.return && repos[mode.cursor]) return chooseRepo(mode.target, repos[mode.cursor], mode.agent);
+      if (key.return && repos[mode.cursor]) {
+        // Picking a repo off the list is not the result of a clone. Without
+        // this, backing out of the post-clone flow and choosing a different repo
+        // would carry "✓ cloned ada/newthing…" onto a dialog about another one.
+        setCloneNote(null);
+        cloneNoteRef.current = null;
+        return chooseRepo(mode.target, repos[mode.cursor], mode.agent);
+      }
       return;
     }
 
