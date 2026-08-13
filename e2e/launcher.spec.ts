@@ -480,6 +480,37 @@ test("new-session picker: no sessions and cwd is a SUBDIR of a repo offers the r
   expect(picker).not.toMatch(/❯[^\n]*\bcore\b/);
 });
 
+// $HOME tracked as a git repo (chezmoi / yadm / a bare dotfiles checkout) is a
+// common setup, and it poisons the cwd fallback: `repoRootForCwd` walks up to
+// the nearest ancestor `.git`, so ANY non-repo cwd resolves to $HOME. Offering
+// that as a checkout would make enter-enter-enter `git worktree add` into
+// `$HOME/.claude/worktrees/<name>` — a worktree of the user's dotfiles inside the
+// live Claude Code config dir agendo itself scans for sessions. The fallback
+// must stop below $HOME instead (bootstrapRepoRoot).
+test("new-session picker: a dotfiles $HOME is never inferred as the bootstrap repo", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  await mkdir(join(mock.home, ".git"), { recursive: true }); // $HOME is a checkout
+  const plain = join(mock.home, "projects", "newthing"); // …but the cwd is not
+  await mkdir(plain, { recursive: true });
+
+  const wt = await launch({ cwd: plain, cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // The cwd is offered, NOT the dotfiles repo the walk-up would have reached.
+  expect(picker).toMatch(/❯[^\n]*\bnewthing\b/);
+  expect(pickerRepoOrder(picker)).toEqual(["newthing"]);
+
+  // And because it isn't a checkout, the where-to-run step defaults to running in
+  // place — never "New git worktree", which is the step that would have written
+  // into ~/.claude/worktrees.
+  await wt.press(KEY.enter);
+  const where = await wt.waitForText("choose where to run");
+  expect(where).toMatch(/❯[^\n]*Main repo checkout/);
+  expect(where).not.toMatch(/❯[^\n]*New git worktree/);
+});
+
 // The genuinely undiscoverable case: no sessions AND the cwd isn't a checkout.
 // The free flow can still run in place there, but a work item structurally must
 // create a worktree — so instead of an empty list (or an enter that dead-ends on
@@ -509,7 +540,9 @@ test("fresh-session picker (work item): no sessions and a non-repo cwd shows an 
 
   // The free flow gets no such warning — running in place is a valid outcome there.
   await wt.press(KEY.escape); // → agent picker
+  await wt.waitForStable();
   await wt.press(KEY.escape); // → list
+  await wt.waitForStable();
   const free = await openRepoPicker(wt);
   expect(free).toMatch(/❯[^\n]*\bsomewhere\b/);
   expect(free).not.toContain("No git checkout here");

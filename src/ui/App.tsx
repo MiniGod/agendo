@@ -9,7 +9,7 @@ import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
+import { repoRootForCwd, bootstrapRepoRoot, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
@@ -1228,10 +1228,12 @@ export default function App({
       // the directory itself when it isn't one — which is the one place we know
       // the user is standing in. `filterRoot` wins when there is one (only
       // reachable with `a` toggled to the global view, where the scoped folder is
-      // still the better guess than an unrelated cwd).
+      // still the better guess than an unrelated cwd), and goes through
+      // `repoRootForCwd` directly: an explicit path IS intent, so its walk-up
+      // needs none of `bootstrapRepoRoot`'s guard against climbing into $HOME.
       // Deliberately ONLY when the list is empty: an install with sessions keeps
       // its session-count ranking exactly as before.
-      return ensureRepoAtTop([], repoRootForCwd(filterRoot ?? process.cwd()));
+      return ensureRepoAtTop([], filterRoot ? repoRootForCwd(filterRoot) : bootstrapRepoRoot(process.cwd()));
     }
     const inScopeRepos = model.repos.filter(
       (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
@@ -1665,7 +1667,13 @@ export default function App({
       return;
     }
     if (scopedRepos.length === 0) {
-      setNotice("No repo to start in — cd into a git checkout, or run `agendo <dir>`.");
+      // Leads with `agendo <dir>` on purpose: a plain "cd there and rerun" is
+      // wrong in the default tmux mode, where rerunning re-attaches to the
+      // ALREADY-RUNNING launcher (enterLauncherSession only spawns a new one
+      // when the launcher window is dead), so the process keeps its original cwd
+      // and nothing changes. A path arg resolves to its own host session, so it
+      // always takes effect — and quitting first is the other way out.
+      setNotice("No repo to start in — run `agendo <dir>` pointing at a git checkout (or quit with q, cd there, rerun).");
       return;
     }
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
@@ -2234,7 +2242,7 @@ export default function App({
         <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
         {noCheckout ? (
           <Text color="yellow">
-            {"No git checkout here — cd into one and rerun, or run `agendo <dir>` pointing at a repo."}
+            {"No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
           </Text>
         ) : null}
         <Box marginTop={1} flexDirection="column">

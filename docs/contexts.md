@@ -172,11 +172,18 @@ so a launch from inside a scoped host session is restored by that same launcher.
 ## Invariants
 
 - Bare `agendo` is byte-identical to today: session `agendo`, no filter, legacy
-  restore file honored, `g` still groups. One deliberate exception, for the
-  bootstrap case only: when the session-derived repo list is **empty** (a fresh
-  install — no sessions anywhere), the new-session picker falls back to the
-  launcher's cwd resolved to its enclosing checkout. Without it the picker has
-  nothing to offer and the first session can never be created, since a repo only
-  enters that list by already having a session in it. An install with any
-  session at all keeps its ranking untouched.
+  restore file honored, `g` still groups. Two deliberate exceptions:
+  - **Bootstrap.** When the session-derived repo list is **empty** (a fresh
+    install — no sessions anywhere), the new-session picker falls back to the
+    launcher's cwd resolved to its enclosing checkout. Without it the picker has
+    nothing to offer and the first session can never be created, since a repo
+    only enters that list by already having a session in it. An install with any
+    session at all keeps its ranking untouched. The walk-up is bounded
+    (`bootstrapRepoRoot`): unlike a `[path]` argument, an inferred root must stop
+    below `$HOME`, or a dotfiles-tracked `$HOME` would be offered as the repo and
+    a worktree would land in `~/.claude/worktrees/`.
+  - **The no-checkout hint.** The work-item / PR repo picker warns when none of
+    its choices can host a worktree. That can also render on an established
+    unscoped install whose sessions all ran in plain folders — it is a warning,
+    never a change to what is offered or ranked.
 - Live window→session attribution is never gated by the path filter.
