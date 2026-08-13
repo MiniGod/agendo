@@ -101,7 +101,14 @@ export async function getCurrentIterationPath(): Promise<string | null> {
   const path =
     `${encodeURIComponent(cfg.project)}/${encodeURIComponent(cfg.team)}` +
     `/_apis/work/teamsettings/iterations?$timeframe=current&${API}`;
-  const data = await adoGet(path);
+  const url = `${BASE}/${path}`;
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
+  // A team that has never configured iterations (no sprints in use) 404s here
+  // instead of returning an empty `value` array — treat that the same as "no
+  // current iteration" rather than failing the whole model load over it.
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`ADO GET ${url} -> ${r.status} ${r.statusText}`);
+  const data: any = await r.json();
   return data.value?.[0]?.path ?? null;
 }
 
