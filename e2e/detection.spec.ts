@@ -10,7 +10,7 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,7 @@ import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
 import { ensureRepoAtTop, type RepoInfo } from "../src/repos.ts";
+import { resolveScopeRoots, makeSessionScope, describeScope, scopeFilter } from "../src/scope.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -1410,6 +1411,94 @@ test.describe("isUnderRoot: segment-aware prefix match", () => {
     expect(isUnderRoot("/anything/here", "/")).toBe(true);
     expect(isUnderRoot("/home/me/work/", "/home/me/work")).toBe(true);
     expect(isUnderRoot("/home/me/work", "/home/me/work/")).toBe(true);
+  });
+});
+
+// The CLI's `--path` selector (`agendo list/status/wait`). isUnderRoot above is
+// the matcher; this is the resolution feeding it — the only part that touches the
+// filesystem, and the only place a symlinked checkout can silently scope to
+// nothing. Both spellings must survive: recorded session cwds are real process
+// working directories (symlink-free), but the tree a session runs in can itself
+// be reached through a symlink, so neither form alone matches every setup.
+test.describe("resolveScopeRoots: --path resolution", () => {
+  test("a plain path resolves to exactly one root, normalized and absolute", () => {
+    expect(resolveScopeRoots("repos/appweb", "/home/me")).toEqual(["/home/me/repos/appweb"]);
+    expect(resolveScopeRoots("./repos/../repos/appweb/", "/home/me")).toEqual(["/home/me/repos/appweb"]);
+    expect(resolveScopeRoots("/home/me/work", "/anywhere")).toEqual(["/home/me/work"]);
+  });
+
+  test("a path that isn't on disk keeps its literal form (no throw)", () => {
+    expect(resolveScopeRoots("/no/such/dir/anywhere", "/")).toEqual(["/no/such/dir/anywhere"]);
+  });
+
+  test("a symlinked path keeps BOTH the literal and the resolved root", () => {
+    // mkdtemp itself can sit behind a symlink (macOS /tmp), so compare against
+    // the realpath of the temp dir rather than assuming the literal is unique.
+    const dir = mkdtempSync(join(tmpdir(), "agendo-scope-"));
+    try {
+      const real = join(dir, "real-repo");
+      const link = join(dir, "link-repo");
+      mkdirSync(real, { recursive: true });
+      symlinkSync(real, link);
+      const roots = resolveScopeRoots(link, "/");
+      // Both spellings are kept, so a session recorded under either is in scope.
+      expect(roots).toHaveLength(2);
+      expect(isUnderRoot(join(link, "sub"), roots[0])).toBe(true);
+      expect(isUnderRoot(join(real, "sub"), roots[1])).toBe(true);
+      // …and the literal one the user typed stays first (it's what error
+      // messages echo back).
+      expect(roots[0]).toBe(normalizeCwd(link));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The predicate the three subcommands filter with. `--repo` reuses
+// sessions.ts's work-item scope matcher, so a bare repo name never shells out to
+// git and a worktree resolves to the repo it belongs to.
+test.describe("scopeFilter: --path AND --repo", () => {
+  const login = sess("login", "/h/repos/appweb/.claude/worktrees/login", 3);
+  const legacy = sess("legacy", "/h/repos/appweb-legacy/.claude/worktrees/port", 2);
+  const applib = sess("applib", "/h/repos/applib/.claude/worktrees/exp", 1);
+  const all = [login, legacy, applib];
+  const kept = (scope: Parameters<typeof scopeFilter>[0]) => all.filter(scopeFilter(scope)).map((s) => s.id);
+
+  test("no scope keeps everything", () => {
+    expect(kept(null)).toEqual(["login", "legacy", "applib"]);
+  });
+
+  test("--repo attributes a worktree to its parent repo, and stops at the name boundary", () => {
+    expect(kept({ roots: [], repo: "appweb" })).toEqual(["login"]);
+    expect(kept({ roots: [], repo: "appweb-legacy" })).toEqual(["legacy"]);
+    expect(kept({ roots: [], repo: "APPWEB" })).toEqual(["login"]); // case-insensitive
+  });
+
+  test("--path scopes by cwd, sibling prefixes excluded", () => {
+    expect(kept({ roots: ["/h/repos/appweb"], repo: null })).toEqual(["login"]);
+    expect(kept({ roots: ["/h/repos"], repo: null })).toEqual(["login", "legacy", "applib"]);
+  });
+
+  test("both axes are AND-ed; any of several roots matches", () => {
+    expect(kept({ roots: ["/h/repos/appweb"], repo: "applib" })).toEqual([]);
+    expect(kept({ roots: ["/h/repos/appweb", "/h/repos/applib"], repo: null })).toEqual(["login", "applib"]);
+  });
+});
+
+// The scope object the three subcommands share. `null` (not an empty scope) is
+// what keeps "no selector given" byte-identical to the old behavior, and what
+// `wait` tests to decide whether a selector was supplied at all.
+test.describe("makeSessionScope / describeScope", () => {
+  test("no selector yields null; either one yields a scope", () => {
+    expect(makeSessionScope({}, "/home/me")).toBeNull();
+    expect(makeSessionScope({ path: "", repo: "  " }, "/home/me")).toBeNull(); // blank ⇒ no selector
+    expect(makeSessionScope({ repo: "appweb" }, "/home/me")).toEqual({ roots: [], repo: "appweb" });
+    expect(makeSessionScope({ path: "work" }, "/home/me")).toEqual({ roots: ["/home/me/work"], repo: null });
+  });
+
+  test("describeScope names the flags that produced it, literal path first", () => {
+    expect(describeScope(null)).toBe("");
+    expect(describeScope({ roots: ["/a/b", "/real/b"], repo: "appweb" })).toBe("--path /a/b --repo appweb");
   });
 });
 

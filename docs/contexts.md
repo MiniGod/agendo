@@ -40,10 +40,51 @@ with `./launch` or `-s`.
 
 `agendo list [dir]` / `agendo ls [dir]` accept the same optional path and filter
 the running-session listing to sessions whose cwd is under the resolved dir
-(`isUnderRoot`), so the CLI mirrors the TUI's scoping. `agendo status <id>` and
-`agendo send <id> …` operate on a specific session id, so they stay global
-lookups (a path filter there would only get in the way). `agendo launch` already
-runs in `cwd`.
+(`isUnderRoot`), so the CLI mirrors the TUI's scoping. `agendo launch` already
+runs in `cwd`, and `agendo send <id> …` acts on one specific session, so neither
+takes a scope.
+
+### Scope selectors on the CLI (`--path` / `--repo`)
+
+`src/scope.ts` generalizes that `[dir]` filter into the selector pair `list`,
+`status` and `wait` share, so the three can't drift into different ideas of
+"in this repo":
+
+| flag | meaning |
+| --- | --- |
+| `--path <dir>` | the session's cwd is `<dir>` or under it (`isUnderRoot`, segment-aware — `/x/repo` never matches `/x/repo-other`) |
+| `--repo <name>` | the session's checkout belongs to that repo — `repoScopeFilter` in `sessions.ts`, the *same* matcher as the work-item↔session join, so `owner/repo` slugs beat same-named forks and a worktree resolves to its parent repo |
+
+Both are optional and AND-ed. On `list` they apply to every mode (plain, `--all`,
+`--json`, `--pr`/`--issue` queries); `--path` is the flag spelling of the `[dir]`
+positional.
+
+A scope **narrows every other selector rather than competing with one**, which is
+the invariant that makes it trustworthy: `wait --all --repo X` waits on the
+sessions in X, not on all of them (the precedence *among* `wait`'s own selectors
+is untouched — `--all` still overrides `--prefix`), and an explicit
+`wait <id> --repo X` /
+`status <id> --repo X` refuses an id that isn't in X instead of quietly answering
+for it. So on `status` and `wait` an `<id>` still names the session — the scope
+narrows the set it is resolved *against*, so an orchestrator polling one repo
+can't be handed a same-short-id session from another project, and the "no session
+found" message names the scope that excluded it. `status` additionally declines
+its live-window fallback (the "running, no transcript yet" answer for a
+just-launched session) under a scope: a bare tmux target carries no cwd to hold
+against one. No selector ⇒ no filtering, unchanged.
+
+`--path` resolution (`resolveScopeRoots`) keeps **both** the literal
+`path.resolve` spelling and the symlink-resolved one when they differ. Recorded
+session cwds are real process working directories (already symlink-free), so a
+symlinked checkout needs the real form to match anything — but a tree that is
+itself reached through a symlink (macOS `/tmp` → `/private/tmp`) records the
+symlinked spelling, where only the literal form matches. Keeping both makes the
+filter a superset of the naive one, so it can never hide a session a plain
+`resolve` would have found.
+
+A scope flag with no value (`agendo list --repo`, or a flag immediately followed
+by another flag) is a hard error rather than a silent no-op: the one failure mode
+a scoping flag must not have is quietly returning *more* than was asked for.
 
 ### The context
 

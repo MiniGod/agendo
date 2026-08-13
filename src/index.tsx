@@ -14,11 +14,11 @@ import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
-import { resolveContext, isUnderRoot } from "./context.ts";
+import { resolveContext } from "./context.ts";
+import { describeScope, makeSessionScope, scopeFilter, type SessionScope } from "./scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState } from "./config.ts";
-import { repoRootForCwd } from "./repos.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
@@ -55,6 +55,10 @@ Usage:
       --pr <n>                  Only sessions linked to PR #n (resolved via the
                                 backend, so gh/az data is fetched).
       --issue, --work-item <n>  Only sessions linked to that issue / work item.
+      --path <dir>              Same as the [dir] positional: only sessions whose
+                                cwd is under dir. Combines with --repo.
+      --repo <name>             Only sessions in that repo — a bare name or an
+                                owner/repo slug. Worktrees count as their repo.
   agendo list pr, prs          List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
                                 approvals, branch, session, title). --json for full rows.
@@ -67,20 +71,26 @@ Usage:
       --attach, -a              Switch/attach to it immediately (default: detached)
   agendo wait [id...]          Poll until the target session(s) settle to a non-busy
                                 state, then exit 0; exit non-zero on timeout. With
-                                no ids, select with --all / --prefix / --repo.
+                                no ids, select with --all / --prefix / --repo /
+                                --path.
       --state <ready|busy|…>    Wait for exactly this readiness (default: non-busy)
       --not <state>             Wait until readiness is anything but this
       --timeout <dur>           Give up after this long (default 120s)
       --interval <dur>          Poll cadence (default 2s). Durations: 500ms, 2s, 5m…
       --all                     All running sessions
       --prefix <p>              Sessions whose dir basename starts with p
-      --repo <name>             Sessions whose repo root basename is name
+      --repo <name>             Sessions in that repo (bare name or owner/repo)
+      --path <dir>              Sessions whose cwd is under dir
+                                --repo/--path narrow whichever selector chose the
+                                set — including --all and explicit <id>s.
   agendo status <id>           Show a session's state, task checklist, workflows
                                 (Workflow-tool runs with agent progress), recent
                                 activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
       --full, -F                Don't truncate the prompt / activity details
+      --path <dir>              Only resolve <id> among sessions under dir
+      --repo <name>             Only resolve <id> among sessions in that repo
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
                                 its input is idle/ready (not mid-turn, no open
                                 question, nothing already typed).
@@ -173,9 +183,28 @@ if (!tmuxAvailable()) {
 // menu shows, so an agent that launched a background session can poll it.
 if (process.argv[2] === "status") {
   const rest = process.argv.slice(3);
-  const full = rest.includes("--full") || rest.includes("-F");
-  const token = rest.find((a) => a !== "--full" && a !== "-F");
-  await runStatus(token, full);
+  let full = false;
+  let token: string | undefined;
+  // The scope selectors don't pick the session (an id still does) — they narrow
+  // the set the id is resolved against, so an orchestrator polling one repo can
+  // never be handed a same-short-id session from a different project.
+  let pathArg: string | undefined;
+  let repoArg: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--full" || a === "-F") full = true;
+    else if (a === "--path") pathArg = requireValue("status", a, rest[++i]);
+    else if (a === "--repo") repoArg = requireValue("status", a, rest[++i]);
+    // A dashed token can't be an id, so reject it rather than take it as one: a
+    // typo'd or `=`-joined scope flag (`--rep x`, `--repo=x`) would otherwise
+    // parse to "no scope" and print a confidently UNSCOPED report — defeating,
+    // silently, the exact guard the caller asked for.
+    else if (a.startsWith("-")) {
+      console.error(`status: unknown argument "${a}"`);
+      process.exit(1);
+    } else if (token === undefined) token = a;
+  }
+  await runStatus(token, full, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()));
   process.exit(0);
 }
 
@@ -339,9 +368,11 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   let all = false;
   let pr: number | undefined;
   let item: number | undefined;
-  // Optional `[dir]` positional scopes the listing to sessions whose cwd is under
-  // it, mirroring the TUI's path filter; resolved against the current directory.
+  // Optional `[dir]` positional (or its `--path` flag form) scopes the listing to
+  // sessions whose cwd is under it, mirroring the TUI's path filter; resolved
+  // against the current directory. `--repo` scopes by repo instead/as well.
   let dirArg: string | undefined;
+  let repoArg: string | undefined;
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -349,8 +380,18 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     else if (a === "--all" || a === "--include-idle") all = true;
     else if (a === "--pr") pr = Number(rest[++i]);
     else if (a === "--issue" || a === "--work-item" || a === "--workitem") item = Number(rest[++i]);
-    else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
-    else {
+    // `--path` and the `[dir]` positional are the SAME slot, so a second one is a
+    // mistake — silently letting the later win would scope the listing to
+    // something other than what the command line reads as. Both spellings share
+    // one guard so the error doesn't depend on which came first.
+    else if (a === "--path") {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = requireValue("list", a, rest[++i]);
+    } else if (a === "--repo") repoArg = requireValue("list", a, rest[++i]);
+    else if (!a.startsWith("-")) {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = a;
+    } else {
       console.error(`list: unknown argument "${a}"`);
       process.exit(1);
     }
@@ -359,8 +400,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     console.error(`list: --pr/--issue/--work-item need a numeric id`);
     process.exit(1);
   }
-  const filterRoot = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
-  await runList({ json, all, pr, item, filterRoot });
+  await runList({ json, all, pr, item, scope: makeSessionScope({ path: dirArg, repo: repoArg }, process.cwd()) });
   process.exit(0);
 }
 
@@ -398,11 +438,14 @@ if (process.argv[2] === "unblock") {
 // `wait [id...]`: block until the selected session(s) reach a desired non-busy
 // state (like `gh run watch`), then exit 0; exit non-zero on timeout. Progress
 // goes to stderr, the final per-session state to stdout, so it composes in
-// scripts. Targets: explicit ids, or --all / --prefix / --repo selectors.
+// scripts. Targets: explicit ids, or the --all / --prefix selectors. --repo and
+// --path are not a fourth way to choose the set but a scope that narrows
+// whichever of those did.
 if (process.argv[2] === "wait") {
   let all = false;
   let prefix: string | undefined;
   let repo: string | undefined;
+  let pathArg: string | undefined;
   let state: string | undefined;
   let not: string | undefined;
   let timeoutMs = 120_000;
@@ -412,14 +455,25 @@ if (process.argv[2] === "wait") {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--all") all = true;
+    // `--prefix` deliberately keeps its raw read: an empty prefix has always
+    // meant "match every basename" (i.e. `--all`), and routing it through
+    // requireValue would turn a pre-existing, working invocation into an error.
     else if (a === "--prefix") prefix = rest[++i];
-    else if (a === "--repo") repo = rest[++i];
+    else if (a === "--repo") repo = requireValue("wait", a, rest[++i]);
+    else if (a === "--path") pathArg = requireValue("wait", a, rest[++i]);
     else if (a === "--state") state = rest[++i];
     else if (a === "--not") not = rest[++i];
     else if (a === "--timeout") timeoutMs = requireDuration("--timeout", rest[++i]);
     else if (a === "--interval") intervalMs = requireDuration("--interval", rest[++i]);
     else if (a === "--") { ids.push(...rest.slice(i + 1)); break; }
-    else ids.push(a);
+    // A session id can't start with `-` (shortId strips non-alphanumerics), so a
+    // dashed token here is a mistyped flag — `--repo=x` would otherwise become a
+    // bogus id and report "no session found for --repo=x". A literal `--`
+    // terminator is still the escape hatch, handled above.
+    else if (a.startsWith("-")) {
+      console.error(`wait: unknown argument "${a}"`);
+      process.exit(1);
+    } else ids.push(a);
   }
   const valid: Readiness[] = ["ready", "busy", "compacting", "queued", "dialog", "unknown"];
   for (const [flag, v] of [["--state", state], ["--not", not]] as const) {
@@ -436,7 +490,7 @@ if (process.argv[2] === "wait") {
     ids,
     all,
     prefix,
-    repo,
+    scope: makeSessionScope({ path: pathArg, repo }, process.cwd()),
     state: state as Readiness | undefined,
     not: not as Readiness | undefined,
     timeoutMs,
@@ -507,21 +561,26 @@ if (!process.argv.includes("--no-tmux")) {
  * written its log yet — if so we still report it as running from its live tmux
  * window. `token` may be a full session id, a short id, or a `cl-…-<id>` name.
  */
-async function runStatus(token: string | undefined, full = false): Promise<void> {
+async function runStatus(token: string | undefined, full: boolean, scope: SessionScope | null): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id> [--full]`);
+    console.error(`usage: ${SELF_CMD} status <id> [--full] [--path <dir>] [--repo <name>]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const index = await SessionIndex.build();
-  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  const inScope = scopeFilter(scope);
+  const s = index.all.find((x) => (x.id === token || shortId(x.id) === sid) && inScope(x));
   if (!s) {
-    const live = liveTargetForShortId(sid);
+    // The live-window fallback below answers for a session too young to have a
+    // transcript — but a bare tmux target carries no cwd we can hold against the
+    // scope, so under an explicit scope we decline rather than answer for a
+    // session that may well be in another repo.
+    const live = scope ? null : liveTargetForShortId(sid);
     if (live) {
       console.log(`● running (${live}) — no activity logged yet; it may still be starting.`);
       process.exit(0);
     }
-    console.error(`No session found for "${token}".`);
+    console.error(`No session found for "${token}"${scope ? ` in scope (${describeScope(scope)})` : ""}.`);
     process.exit(1);
   }
   const target = liveTargetForShortId(shortId(s.id));
@@ -665,8 +724,8 @@ interface ListOptions {
   pr?: number;
   /** Only sessions linked to this work-item / issue id (enriched path). */
   item?: number;
-  /** Scope to sessions whose cwd is under this absolute root (TUI path filter). */
-  filterRoot: string | null;
+  /** Scope to sessions by cwd (`[dir]`/`--path`) and/or repo (`--repo`); null = all. */
+  scope: SessionScope | null;
 }
 
 /** One session as reported by the enriched (`--json` / `--all` / query) list. */
@@ -717,12 +776,14 @@ function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProv
  * `--all`/`--include-idle`, and `--pr`/`--issue`/`--work-item` query flags opt
  * into the enriched path, which loads the model so each row carries its branch
  * and linked PR / work item (via `sessionLinks`) and can include idle sessions.
- * An optional `filterRoot` scopes every mode to sessions whose cwd is under it.
+ * An optional scope narrows every mode — plain, enriched and `--json` alike — to
+ * the sessions under a path and/or in a repo.
  */
 async function runList(opts: ListOptions): Promise<void> {
   const index = await SessionIndex.build();
+  const inScope = scopeFilter(opts.scope);
   const enriched = opts.json || opts.all || opts.pr !== undefined || opts.item !== undefined;
-  if (!enriched) return runPlainList(index, opts.filterRoot);
+  if (!enriched) return runPlainList(index, inScope);
 
   const isQuery = opts.pr !== undefined || opts.item !== undefined;
   // Associations come from the model's reverse index. A query MUST have it (the
@@ -766,8 +827,8 @@ async function runList(opts: ListOptions): Promise<void> {
   } else {
     sessions = index.all.filter((s) => live.has(sessionName(s)));
   }
-  // Path scoping (the `[dir]` positional): keep only sessions under the root.
-  if (opts.filterRoot) sessions = sessions.filter((s) => isUnderRoot(s.cwd, opts.filterRoot!));
+  // Scoping (`[dir]`/`--path`, `--repo`): keep only the sessions it selects.
+  sessions = sessions.filter(inScope);
   sessions.sort((a, b) => b.lastUsed.getTime() - a.lastUsed.getTime());
 
   const rows: ListRow[] = sessions.map((s) => {
@@ -811,10 +872,13 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   if (rows.length === 0) {
+    // Name the scope when there is one: an empty listing under a `--repo` typo
+    // otherwise reads as "nothing is running" rather than "nothing matched".
+    const where = opts.scope ? ` in scope (${describeScope(opts.scope)})` : "";
     console.log(
       isQuery
-        ? "No sessions linked to that item (query covers open PRs / work items in the current identity's scope)."
-        : "No sessions.",
+        ? `No sessions linked to that item${where} (query covers open PRs / work items in the current identity's scope).`
+        : `No sessions${where}.`,
     );
     return;
   }
@@ -846,9 +910,10 @@ async function runList(opts: ListOptions): Promise<void> {
  * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by
  * embedded short id, work-item / PR names by working directory (as in model.ts)
  * — then report readiness, kind, id, location and title. Running-only and
- * model-free by design. An optional `filterRoot` scopes to sessions under it.
+ * model-free by design. `inScope` is the `--path`/`--repo` filter (match-all when
+ * no selector was given).
  */
-function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
+function runPlainList(index: SessionIndex, inScope: (s: AgentSession) => boolean): void {
   const seen = new Set<string>();
   const rows: string[] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
@@ -862,8 +927,8 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     // path). Shared so the CLI list can't drift from the menu's running state.
     const s = resolveWindowSession(index.all, name, cwd);
     if (!s) continue;
-    // Path scoping: skip sessions whose cwd isn't under the requested dir.
-    if (filterRoot && !isUnderRoot(s.cwd, filterRoot)) continue;
+    // Scoping: skip sessions the requested path / repo filter doesn't select.
+    if (!inScope(s)) continue;
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1099,7 +1164,8 @@ interface WaitOptions {
   ids: string[];
   all: boolean;
   prefix?: string;
-  repo?: string;
+  /** `--path`/`--repo` selector; null when neither was given. */
+  scope: SessionScope | null;
   /** Desired readiness (exact match). Overrides the default non-busy predicate. */
   state?: Readiness;
   /** Wait until readiness is anything but this. */
@@ -1135,6 +1201,30 @@ function parseDuration(s: string | undefined): number | null {
   }
 }
 
+/**
+ * Read a flag's value, exiting with a clear error when it's missing. A flag at
+ * the very end of argv (`agendo list --repo`) or immediately followed by another
+ * flag would otherwise silently read as "no filter" — the one failure mode a
+ * scoping flag must never have, since it hands back MORE than was asked for.
+ */
+function requireValue(cmd: string, flag: string, v: string | undefined): string {
+  // Blank counts as missing, whitespace included: `--repo "  "` trims away to
+  // "no repo wanted" downstream and would hand back every session at exit 0 —
+  // the silent-widening failure this guard exists to prevent, just spelled with
+  // a space instead of an omission.
+  if (v === undefined || v.trim() === "" || v.startsWith("-")) {
+    console.error(`${cmd}: ${flag} needs a value`);
+    process.exit(1);
+  }
+  return v;
+}
+
+/** `list`'s path scope was named twice — as `[dir]`, as `--path`, or as both. */
+function duplicatePathScope(): never {
+  console.error(`list: the path scope was given twice — [dir] and --path <dir> name the same slot`);
+  process.exit(1);
+}
+
 /** Parse a required duration flag, exiting with a clear error on bad/missing input. */
 function requireDuration(flag: string, s: string | undefined): number {
   const ms = parseDuration(s);
@@ -1154,31 +1244,38 @@ function requireDuration(flag: string, s: string | undefined): number {
  */
 async function runWait(o: WaitOptions): Promise<void> {
   const index = await SessionIndex.build();
+  // The scope applies to EVERY selector, ids included — the same contract as
+  // `status`. A scoping flag that some other selector silently overrode would be
+  // worse than no flag at all: it would wait on more sessions than was asked for.
+  const inScope = scopeFilter(o.scope);
+  const scopeNote = o.scope ? ` in scope (${describeScope(o.scope)})` : "";
   let sessions: AgentSession[];
   if (o.ids.length) {
     sessions = [];
     const missing: string[] = [];
     for (const tok of o.ids) {
       const sid = tok.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(tok);
-      const s = index.all.find((x) => x.id === tok || shortId(x.id) === sid);
+      const s = index.all.find((x) => (x.id === tok || shortId(x.id) === sid) && inScope(x));
       if (s) sessions.push(s);
       else missing.push(tok);
     }
     if (missing.length) {
-      console.error(`wait: no session found for ${missing.join(", ")}`);
+      console.error(`wait: no session found for ${missing.join(", ")}${scopeNote}`);
       process.exit(1);
     }
-  } else if (o.all) {
-    sessions = [...index.all];
-  } else if (o.prefix !== undefined || o.repo !== undefined) {
+  } else if (o.all || o.prefix !== undefined || o.scope) {
     sessions = index.all.filter((s) => {
-      if (o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
-      if (o.repo !== undefined && basename(repoRootForCwd(s.cwd)) !== o.repo) return false;
-      return true;
+      // `--all` still overrides `--prefix`, exactly as it did when the two lived
+      // in separate branches — the merge here is about the scope, and must not
+      // quietly redefine a selector pair that predates it.
+      if (!o.all && o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
+      // …whereas the scope is not a competing selector but a narrowing, so it
+      // applies on top of whichever selector chose the set.
+      return inScope(s);
     });
   } else {
     console.error(
-      `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> ` +
+      `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> | --path <dir> ` +
         `[--state <s>] [--not <s>] [--timeout <dur>] [--interval <dur>]`,
     );
     process.exit(1);
@@ -1205,7 +1302,7 @@ async function runWait(o: WaitOptions): Promise<void> {
     process.exit(1);
   }
   if (targets.length === 0) {
-    console.error("wait: no running sessions matched — nothing to wait on.");
+    console.error(`wait: no running sessions matched${scopeNote} — nothing to wait on.`);
     process.exit(1);
   }
 
