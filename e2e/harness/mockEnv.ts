@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { materializeHome, tmuxState as initialTmuxState } from "./fixtures.ts";
-import { startAdoServer, type AdoServer } from "./adoServer.ts";
+import { startAdoServer, type AdoServer, type RawFault } from "./adoServer.ts";
 import { trackDir, untrackDir } from "./reaper.ts";
 
 const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +33,11 @@ export interface MockEnv {
   /** Patch an ADO PR's mutable fields at runtime (status/isDraft/title/…), so a
    *  test can change them between reloads to prove the app re-fetches PR state. */
   setAdoPr(id: number, patch: Record<string, unknown>): void;
+  /** Force a raw (deliberately non-JSON, or error-status) ADO response for paths
+   *  matching `match` — see AdoServer.setRaw. In-process like setAdoPr, so it
+   *  takes effect on the launcher's very next request; `times` bounds how many
+   *  requests are faulted, which is how a test lets an automatic retry succeed. */
+  setAdoRaw(match: RegExp, response: RawFault): void;
   /** Argv arrays of every fake-tmux invocation, in order. */
   tmuxLog(): Promise<string[][]>;
   /** Raw lines of the shared call log (az/gh/git/claude/xdg-open invocations). */
@@ -93,6 +98,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     setGhState: (state) => writeFile(ghStatePath, JSON.stringify(state, null, 2)),
     setProvider: (name) => writeFile(join(home, ".agendo", "state.json"), JSON.stringify({ provider: name }, null, 2)),
     setAdoPr: (id, patch) => ado.setPr(id, patch),
+    setAdoRaw: (match, response) => ado.setRaw(match, response),
     tmuxLog: async () => (await parseLog(tmuxLogPath)).map((l) => JSON.parse(l) as string[]),
     callLog: () => parseLog(callLogPath),
     async cleanup() {
