@@ -73,6 +73,22 @@ monitor and steer them through the same commands. One orchestrator session can f
 large task out across many worktrees and coordinate them, instead of hand-rolling
 tmux and `git worktree`. The sessions it starts inherit the same ability.
 
+### Messages that queue instead of waiting for an idle pane
+
+`agendo send` delivers to a running Claude session over the messaging socket that
+session advertises, rather than typing into its tmux pane. The difference is that the
+receiver **queues** it: you can message a session mid-turn and it picks the prompt up
+when it next reads input, instead of `send` refusing because the pane isn't idle. It
+is addressed by session id, so a recycled pid can't misdeliver into someone else's
+session — and a session running outside agendo entirely (a plain terminal) is
+reachable too, with no tmux window involved.
+
+This is an internal, undocumented channel, so agendo treats it as an optimization
+rather than a dependency: a session that doesn't advertise it (Copilot, older Claude
+builds) or whose socket refuses gets the prompt typed into the pane exactly as
+before. A session at its usage limit is refused either way — nothing would read the
+queued message until the cap resets.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
