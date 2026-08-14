@@ -9,7 +9,7 @@ as ⟨magenta⟩Ada Lovelace (you)⟨bold⟩
       dir     ⟨gray,dim⟩<HOME>/repos/appweb/.claude/worktrees/login⟨dim⟩
       repo    ⟨gray,dim⟩appweb⟨dim⟩
       branch  ⟨gray,dim⟩feature/login⟨dim⟩
-      profile ⟨gray,dim⟩.claude⟨dim⟩
+      profile ⟨gray,dim⟩.claude  ·  press m → move to another profile⟨dim⟩
       continue⟨gray,dim⟩press c → convert & resume in copilot⟨dim⟩
       ↳ "Add a login form with validation"⟨dim⟩
       ✔ ⟨green⟩Write the login form⟨dim⟩

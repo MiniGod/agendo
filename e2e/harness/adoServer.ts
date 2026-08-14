@@ -29,6 +29,12 @@ export interface AdoServer {
    *  so a test can flip status/isDraft/title between reloads to prove the app
    *  re-reads mutable PR state rather than serving a frozen cache. */
   setPr(id: number, patch: Record<string, unknown>): void;
+  /** Force the response for every request whose path matches — fault injection
+   *  for backend states the fixtures can't express, e.g. an endpoint that 404s
+   *  for a team with no sprints configured. Checked before routing, for any
+   *  method. Re-registering a path replaces the earlier rule, so a test can flip
+   *  a fault back off between reloads. */
+  setResponse(match: RegExp, response: { status?: number; body?: unknown }): void;
   close(): Promise<void>;
 }
 
@@ -41,6 +47,9 @@ export async function startAdoServer(): Promise<AdoServer> {
   const prOverrides = new Map<number, Record<string, unknown>>();
   const withOverride = (pr: any): any =>
     pr && prOverrides.has(pr.pullRequestId) ? { ...pr, ...prOverrides.get(pr.pullRequestId) } : pr;
+  // Forced responses (see setResponse), tried against the request path
+  // newest-first so a later registration overrides an earlier one.
+  const forced: { match: RegExp; status: number; body: unknown }[] = [];
 
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -56,6 +65,15 @@ export async function startAdoServer(): Promise<AdoServer> {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: `unmocked path: ${path}` }));
     };
+
+    // Fault injection wins over every route below.
+    const hit = forced.find((f) => f.match.test(path));
+    if (hit) {
+      req.resume(); // discard any request body — nothing below will read it
+      res.writeHead(hit.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(hit.body));
+      return;
+    }
 
     // ── identity / project metadata ──
     if (/_apis\/profile\/profiles\/me$/i.test(path)) return json(ADO.profile);
@@ -128,6 +146,16 @@ export async function startAdoServer(): Promise<AdoServer> {
     requests,
     wiqlQueries,
     setPr: (id, patch) => prOverrides.set(id, { ...prOverrides.get(id), ...patch }),
+    setResponse: (match, response) => {
+      const status = response.status ?? 200;
+      forced.unshift({
+        // Drop /g and /y: `test` on a sticky regex advances lastIndex, so the
+        // same rule would match every other request.
+        match: new RegExp(match.source, match.flags.replace(/[gy]/g, "")),
+        status,
+        body: "body" in response ? response.body : { error: `forced ${status}` },
+      });
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

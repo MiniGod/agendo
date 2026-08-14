@@ -784,6 +784,31 @@ export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name:
   return out;
 }
 
+/**
+ * Whether `name` is a live, still-unopened restore PLACEHOLDER window in
+ * `session` — an idle bash awaiting a keypress, not a running agent.
+ *
+ * Existence and the `@cl_placeholder` flag come from ONE query scoped to that
+ * host session, deliberately: the same canonical window name can exist in two
+ * host sessions (one session tabbed in two path-scoped launchers), so reading the
+ * flag from a global window list could authorize an action against a window whose
+ * own flag has since been cleared — i.e. one the user is now working in. A dead
+ * window (a `remain-on-exit` corpse) is never a placeholder.
+ */
+export function isPlaceholderWindow(session: string, name: string): boolean {
+  for (const line of tmuxLines([
+    "list-windows",
+    "-t",
+    exactTarget(session),
+    "-F",
+    `#{window_name}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_dead}`,
+  ])) {
+    const [wname, placeholder, dead] = line.split("\t");
+    if (wname === name) return placeholder === "1" && dead !== "1";
+  }
+  return false;
+}
+
 /** `session:window_index` of the first window named `name`, or null. */
 export function windowLocation(name: string): string | null {
   for (const line of tmuxLines(["list-windows", "-a", "-F", "#{session_name}:#{window_index}\t#{window_name}"])) {
