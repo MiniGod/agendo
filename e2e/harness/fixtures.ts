@@ -93,6 +93,13 @@ export async function materializeHome(home: string): Promise<void> {
 
   const projects = join(home, ".claude", "projects");
 
+  // A SECOND Claude config profile, deliberately empty of sessions. Profiles are
+  // the union of `~/.claude*` dirs that have a `projects/` subdir — not just the
+  // ones already holding sessions — so this is what gives the "move to another
+  // profile" picker somewhere to move TO. Empty on purpose: it adds a
+  // destination without perturbing any session count in the other specs.
+  await mkdir(join(home, ".claude-work", "projects"), { recursive: true });
+
   // 1) login session — running. Its gitBranch DELIBERATELY progresses across the
   // log: it starts on the base branch `master`, spends most records on an interim
   // worktree branch `worktree-login-101`, then settles on `feature/login` in the
@@ -271,6 +278,18 @@ const READY_PANE = [
   "  ❯ ",
   "  ─────────────────────────────────────────────",
   "  ? for shortcuts",
+].join("\n");
+
+/** A mid-generation claude TUI. The live token counter's directional ↑ arrow is
+ *  the signal `paneReadiness` keys on, so this classifies as "busy" — not
+ *  sendable, not settled. Shared by every spec/driver that needs a session to
+ *  keep working while something else is asserted around it. */
+export const BUSY_PANE = [
+  "  ● Implement login form",
+  "  ⠋ Working… (12s · ↑ 2.1k tokens)",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
 ].join("\n");
 
 export const tmuxState = {

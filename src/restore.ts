@@ -17,7 +17,7 @@
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { STATE_DIR, PREV_STATE_DIR, OLD_STATE_DIR } from "./config.ts";
-import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
+import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, exactTarget, isPlaceholderWindow, killWindow, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
 import { tmuxSafeName, normalizeCwd } from "./context.ts";
 import { resumeArgv } from "./launch.ts";
 import type { SessionIndex } from "./sessions.ts";
@@ -303,6 +303,86 @@ export function forgetRestoreTab(target: string, hostSession: string): void {
   if (kept.length !== tabs.length) saveRestore(hostSession, kept);
 }
 
+/**
+ * Repoint a persisted restore tab at a session's NEW config dir, after the
+ * session was moved between Claude profiles (see profiles.ts).
+ *
+ * A saved tab's argv bakes `CLAUDE_CONFIG_DIR=<old>` in (see `resumeArgv`), so an
+ * untouched snapshot would lazily resume the tab against a profile the session
+ * no longer lives in — `claude --resume` would simply report an unknown session,
+ * with nothing on screen explaining why. `captureRestore` does rebuild every tab
+ * from the freshly-indexed sessions on the next model load, but only when the
+ * host session is live; rewriting here means a move is durable even if the
+ * launcher is killed before that.
+ *
+ * The argv is rebuilt through `resumeArgv` rather than string-patched, so it
+ * can't drift from what a normal resume would run. No-op when the snapshot has
+ * no tab for this session, or when the rebuilt argv is identical.
+ *
+ * A tab that is ALREADY on screen as a live placeholder window is rebuilt too —
+ * see `refreshPlaceholder`. Rewriting only the file would leave the visible tab
+ * holding the old command in its pane's bash script; pressing a key in it would
+ * `exec` a resume against the profile the session just left and fail with
+ * "no conversation found", with nothing on screen explaining why. A placeholder
+ * isn't counted as running (`livePlaceholders` is deliberately separate from
+ * `liveTmux`), so the move was rightly allowed — this is what keeps the tab honest.
+ */
+export function retargetRestoreProfile(
+  s: Pick<AgentSession, "id" | "source" | "cwd">,
+  configDir: string,
+  hostSession: string = LAUNCHER_SESSION,
+): { tabUpdated: boolean; placeholderRefreshed: boolean } {
+  const canonical = sessionName(s);
+  const tabs = loadRestore(hostSession);
+  let updated: RestoreTab | null = null;
+  const next = tabs.map((t) => {
+    if (t.name !== canonical) return t;
+    const argv = resumeArgv({ id: s.id, source: s.source, cwd: t.cwd, title: t.title, lastUsed: new Date(), configDir });
+    if (JSON.stringify(argv) === JSON.stringify(t.argv)) return t;
+    updated = { ...t, argv };
+    return updated;
+  });
+  if (!updated) return { tabUpdated: false, placeholderRefreshed: false };
+  saveRestore(hostSession, next);
+  return { tabUpdated: true, placeholderRefreshed: refreshPlaceholder(hostSession, updated) };
+}
+
+/**
+ * Recreate a live, still-unopened placeholder window so its pane carries the
+ * tab's CURRENT argv. tmux bakes the command into the window at creation time, so
+ * there is no way to amend it in place — the window has to be killed and made
+ * again. Costs the tab its position in the strip, which is the cheap half of the
+ * trade. Returns whether a window was actually rebuilt.
+ *
+ * Two preconditions, both about not destroying something the user cares about:
+ *  • `isPlaceholderWindow` — existence AND the `@cl_placeholder` flag read from a
+ *    single query scoped to THIS host session, so the flag authorizing the kill
+ *    can't be borrowed from a same-named window in another launcher's session
+ *    while the one we're about to kill has already been woken into a real agent.
+ *  • the cwd still exists — `restoreTabs` refuses to spawn a tab whose directory
+ *    is gone (a pruned worktree) for the same reason it matters more here: the
+ *    kill would succeed and the respawn fail silently under `tmuxQuiet`, so a
+ *    *successful* move would destroy a visible tab and put nothing back.
+ */
+function refreshPlaceholder(hostSession: string, tab: RestoreTab): boolean {
+  if (!isPlaceholderWindow(hostSession, tab.name) || !existsSync(tab.cwd)) return false;
+  killWindow(`${exactTarget(hostSession)}:${tab.name}`);
+  spawnPlaceholder(hostSession, tab);
+  return true;
+}
+
+/**
+ * Create one lazy placeholder window for `tab` in the host session and flag it as
+ * unloaded. Shared by first-run restore and the retarget path above so the two
+ * can't drift on the marker or the argv.
+ */
+function spawnPlaceholder(hostSession: string, tab: RestoreTab): void {
+  newWindowIn(hostSession, tab.name, tab.cwd, placeholderArgv(tab));
+  // Mark it as an unloaded placeholder so isRunning doesn't report the idle
+  // bash window as a running session (the placeholder script clears this on resume).
+  markPlaceholder(`${hostSession}:${tab.name}`);
+}
+
 /** POSIX single-quote a string so it survives a `bash -c` script verbatim. */
 function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -344,9 +424,6 @@ export function restoreTabs(hostSession: string = LAUNCHER_SESSION): void {
       console.error(`restore: skipping ${tab.name} — working dir gone: ${tab.cwd}`);
       continue;
     }
-    newWindowIn(hostSession, tab.name, tab.cwd, placeholderArgv(tab));
-    // Mark it as an unloaded placeholder so isRunning doesn't report the idle
-    // bash window as a running session (the placeholder script clears this on resume).
-    markPlaceholder(`${hostSession}:${tab.name}`);
+    spawnPlaceholder(hostSession, tab);
   }
 }

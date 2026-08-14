@@ -131,8 +131,15 @@ switch (cmd) {
   }
   case "list-windows": {
     const fmt = format() ?? "#{window_name}";
-    process.stdout.write(state.windows.map((w) => emit(fmt, w)).join("\n"));
-    if (state.windows.length) process.stdout.write("\n");
+    // Real tmux scopes `list-windows -t <session>` to that session (and only `-a`
+    // spans every session). Modelled here so code that relies on the scoping —
+    // isPlaceholderWindow, which must not read a window option out of a DIFFERENT
+    // host session — is actually exercised rather than accidentally passing.
+    const target = (flag("-t") ?? "").replace(/^=/, "");
+    const windows =
+      argv.includes("-a") || !target ? state.windows : state.windows.filter((w) => w.session === target);
+    process.stdout.write(windows.map((w) => emit(fmt, w)).join("\n"));
+    if (windows.length) process.stdout.write("\n");
     process.exit(0);
   }
   case "list-panes": {

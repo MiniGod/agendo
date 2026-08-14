@@ -772,8 +772,33 @@ export function setSessionRoot(session: string, root: string): void {
  * exactly the one. Nothing outside tmux is touched: the agent's git worktree,
  * branch and commits are left on disk.
  */
-export function killWindow(name: string): void {
-  tmuxQuiet(["kill-window", "-t", exactTarget(name)]);
+export function killWindow(target: string): void {
+  tmuxQuiet(["kill-window", "-t", exactKillTarget(target)]);
+}
+
+/**
+ * Pin a kill target to an exact match on BOTH halves of a `session:window` ref
+ * (or on a bare name).
+ *
+ * The `=` prefix is PER-COMPONENT: `=host:name` pins only the session, and
+ * blindly prefixing the whole string instead yields `==host:name` — a session
+ * literally named `=host`, which matches nothing. Under `tmuxQuiet` that
+ * mismatch is silent, so callers passing an already-pinned session (see
+ * `refreshPlaceholder`) would kill nothing and never hear about it. Both halves
+ * are therefore normalized before being re-pinned.
+ *
+ * A numeric window half is left bare on purpose: `man tmux` looks a window up as
+ * an INDEX before a name, so `=3` would ask for a window whose name is "3"
+ * rather than window 3 — and `session:index` is exactly what `killManagedTarget`
+ * resolves its target to.
+ */
+function exactKillTarget(target: string): string {
+  const colon = target.indexOf(":");
+  const unpin = (s: string) => (s.startsWith("=") ? s.slice(1) : s);
+  if (colon === -1) return exactTarget(unpin(target));
+  const session = unpin(target.slice(0, colon));
+  const window = unpin(target.slice(colon + 1));
+  return `${exactTarget(session)}:${/^\d+$/.test(window) ? window : exactTarget(window)}`;
 }
 
 /** Kill the tmux SESSION `name` outright (exact-targeted; no-op if absent). */
@@ -822,10 +847,15 @@ export function killManagedTarget(
     // re-check, and it closes the only gap where this command could hit a window
     // nobody asked it to.
     if (windowNameAt(location) !== name) return { how: "moved", gone: false };
+    // Confirm by COUNT, not by whether the location string still appears. The
+    // same renumbering the check above guards against can move a surviving window
+    // off `agendo:3` — so "the location no longer holds it" is satisfied by a
+    // kill that failed while some other window happened to close alongside it,
+    // and we would print "closed" over a live agent. One fewer window carrying
+    // the name is the only evidence that stays true under renumbering.
+    const before = windowLocations(name).length;
     killWindow(location);
-    // Confirm THIS location no longer holds it — not merely that the name is
-    // gone somewhere, which a duplicate name in another session would satisfy.
-    return { how: "window", gone: !windowLocations(name).includes(location) };
+    return { how: "window", gone: windowLocations(name).length < before };
   }
   if (liveSessions().has(name)) {
     killSession(name);
@@ -866,11 +896,37 @@ export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name:
 }
 
 /**
+ * Whether `name` is a live, still-unopened restore PLACEHOLDER window in
+ * `session` — an idle bash awaiting a keypress, not a running agent.
+ *
+ * Existence and the `@cl_placeholder` flag come from ONE query scoped to that
+ * host session, deliberately: the same canonical window name can exist in two
+ * host sessions (one session tabbed in two path-scoped launchers), so reading the
+ * flag from a global window list could authorize an action against a window whose
+ * own flag has since been cleared — i.e. one the user is now working in. A dead
+ * window (a `remain-on-exit` corpse) is never a placeholder.
+ */
+export function isPlaceholderWindow(session: string, name: string): boolean {
+  for (const line of tmuxLines([
+    "list-windows",
+    "-t",
+    exactTarget(session),
+    "-F",
+    `#{window_name}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_dead}`,
+  ])) {
+    const [wname, placeholder, dead] = line.split("\t");
+    if (wname === name) return placeholder === "1" && dead !== "1";
+  }
+  return false;
+}
+
+/**
  * `session:window_index` of EVERY live window named `name`, across all sessions.
  * tmux allows duplicate window names, and this launcher creates them — two host
  * sessions (the global `agendo` and a path-scoped one) can each hold a tab for
- * the same session. So a caller that is about to do something destructive has to
- * see all of them, not just the first (see `windowLocation`).
+ * the same session, the same collision `isPlaceholderWindow` above scopes around.
+ * So a caller that is about to do something destructive has to see all of them,
+ * not just the first (see `windowLocation`).
  */
 export function windowLocations(name: string): string[] {
   const out: string[] = [];
