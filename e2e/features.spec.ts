@@ -403,9 +403,17 @@ async function pickerOnCrashSession(
   return wt;
 }
 
-/** Did the launcher kill the crash session's window in the launcher host session? */
+/**
+ * Did the launcher kill the crash session's window in the launcher host session?
+ *
+ * BOTH halves of the `session:window` target are `=`-pinned. The `=` is
+ * per-component (man tmux), so pinning only the session leaves the window half
+ * resolvable by prefix/fnmatch — and managed names nest (`cl-pr-5` ⊂ `cl-pr-50`),
+ * which is how a kill lands on the wrong tab of the same launcher.
+ */
+const CRASH_WINDOW_TARGET = `=agendo:=${CRASH_TARGET}`;
 const killedCrashWindow = (log: string[][]) =>
-  log.some((a) => a[0] === "kill-window" && a.includes(`=agendo:${CRASH_TARGET}`));
+  log.some((a) => a[0] === "kill-window" && a.includes(CRASH_WINDOW_TARGET));
 
 test("moving a session rebuilds its restored-but-unopened tab against the new profile", async ({ launch, mock }) => {
   const cwd = CRASH_TAB_CWD(mock.home);
@@ -425,7 +433,7 @@ test("moving a session rebuilds its restored-but-unopened tab against the new pr
   // profile — a placeholder pane's command can't be amended in place.
   await waitUntil(async () => {
     const log = await mock.tmuxLog();
-    const killed = log.findIndex((a) => a[0] === "kill-window" && a.includes(`=agendo:${CRASH_TARGET}`));
+    const killed = log.findIndex((a) => a[0] === "kill-window" && a.includes(CRASH_WINDOW_TARGET));
     const spawned = log.findIndex(
       (a) =>
         a[0] === "new-window" &&

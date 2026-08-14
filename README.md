@@ -67,11 +67,12 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`/`wait`. So an agent can spin off _new_ sessions — each in
-its own fresh worktree — for separate pieces of work that deserve their own PR, then
-monitor and steer them through the same commands. One orchestrator session can fan a
-large task out across many worktrees and coordinate them, instead of hand-rolling
-tmux and `git worktree`. The sessions it starts inherit the same ability.
+launch`/`list`/`status`/`send`/`open`/`wait`/`close`. So an agent can spin off _new_
+sessions — each in its own fresh worktree — for separate pieces of work that deserve
+their own PR, then monitor, steer and finally close them through the same commands. One
+orchestrator session can fan a large task out across many worktrees and coordinate them,
+instead of hand-rolling tmux and `git worktree`. The sessions it starts inherit the same
+ability.
 
 To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
 a watched session settles — a non-busy state, or its window closing — so it can be run
@@ -96,6 +97,11 @@ dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads *
 so it won't wake that wait. When a wake does find a session parked there, `--json` says
 so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
 
+When a session is finished with, `agendo close <id>` ends its window and only that — the
+worktree, branch and commits stay on disk, and `agendo resume <id>` brings it back — so
+no one has to reach for a raw `tmux kill-window`. A `wait` on a session closed underneath
+it doesn't hang: the window vanishing settles that session as `exited`.
+
 ### Telling a finished session from a stalled one
 
 A session that fell over mid-task 22 hours ago and one that answered cleanly 20
@@ -115,6 +121,20 @@ activity is hours old, but it hasn't run yet, so it is never marked stalled — 
 carries `resumeDialog: true` to say why. A session parked at its usage cap is excluded
 for the same reason: `limited` means waiting on a quota reset (the row shows when it
 lifts), not hung, so it is never marked stalled either.
+
+What that does and doesn't catch, from real sessions:
+
+| Session state | Reported as | Caught? |
+| --- | --- | --- |
+| Finished its turn, sitting at an empty input box | `ready` + idle age, `⚠stalled` past the threshold | **Yes**, and it is the case the feature exists for — but only by *duration*. Under the threshold, done-20-minutes-ago and wedged-20-minutes-ago are still the same row. |
+| Parked at a usage cap | `limited` + `limitResetAt` | **Yes** — and deliberately never `⚠stalled`: it resumes on its own. |
+| Parked on Claude's resume dialog | `ready` + `resumeDialog: true` | **Yes** — never `⚠stalled`; nothing has run yet, so the idle age is the previous run's. |
+| Feedback survey on screen (numbered options above a live input box) | `ready` | **Yes** — a menu above a *live* input box is not a dialog; pinned as a negative test. |
+| Busy-waiting: `until [ -f /sentinel ]; do sleep 30; done`, for an hour | `busy` | **No — known gap.** The pane is genuinely active, so neither readiness nor idle age moves. A session can spin forever and look like one that is working. Detecting it needs a signal this PR doesn't have (no assistant turn despite an active pane), and is the obvious next step. |
+
+The honest summary: `⚠stalled` answers "has anything happened lately", not "is this
+finished" and not "is this making progress". It catches the session that stopped;
+it does not catch the session that is busy doing nothing.
 
 ### Orchestrator mode, one keypress away
 
@@ -171,6 +191,11 @@ via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com 
 found across your local sessions. The stall threshold (`stalledAfterMinutes`, default
 240) lives in the same file. Your selected backend is remembered in
 `~/.agendo/state.json`.
+
+Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
+platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
+executable to use instead, for hosts where that default isn't right (containers, WSL).
+Where nothing can be launched at all, `agendo open` still prints the full URL.
 
 ### `resumeDialogChoice`
 

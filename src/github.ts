@@ -12,7 +12,7 @@
 import { spawn, spawnSync } from "child_process";
 import { messageOf, snippetOf, tag } from "./errors.ts";
 import type { RepoInfo } from "./repos.ts";
-import type { FetchContext } from "./provider.ts";
+import type { EntityUrls, FetchContext } from "./provider.ts";
 import type {
   CIStatus,
   Identity,
@@ -138,6 +138,35 @@ function reposToRefs(repos: RepoInfo[]): RepoRef[] {
 
 const slugOf = (ref: RepoRef) => `${ref.owner}/${ref.repo}`;
 
+// ── Canonical web URLs ────────────────────────────────────────────────────────
+// The one place GitHub entity links are built. Scope is github.com by
+// construction: `parseGithubRemote` only ever yields github.com slugs, so a repo
+// on another host never reaches these. Pure, so the exact strings can be pinned
+// in tests.
+
+/** Percent-encode each segment of an `owner/repo` slug (the separator stays). */
+const encodeSlug = (slug: string) => slug.split("/").map(encodeURIComponent).join("/");
+
+/** Web URL of a pull request in `owner/repo`. */
+export function githubPullRequestUrl(slug: string, id: number): string {
+  return `https://github.com/${encodeSlug(slug)}/pull/${id}`;
+}
+
+/** Web URL of an issue in `owner/repo` (GitHub's work-item equivalent). */
+export function githubIssueUrl(slug: string, id: number): string {
+  return `https://github.com/${encodeSlug(slug)}/issues/${id}`;
+}
+
+/** Entity URLs for this backend (see Provider.urls). GitHub numbers issues and
+ *  PRs per repo, so both need the owning slug — without one there is no URL to
+ *  build, and null is returned rather than a plausible-looking wrong link. */
+export const urls: EntityUrls = {
+  // `repositoryId` IS the `owner/repo` slug on this backend (see mapPR).
+  pullRequest: (ref) => (ref.repositoryId ? githubPullRequestUrl(ref.repositoryId, ref.id) : null),
+  // …and a WorkItem's `project` is the slug of the repo the issue lives in.
+  workItem: (ref) => (ref.project ? githubIssueUrl(ref.project, ref.id) : null),
+};
+
 // ── PR mapping ────────────────────────────────────────────────────────────────
 // The --json fields we request for every PR. `reviews` and `statusCheckRollup`
 // give us votes and CI without a second round-trip (so enrichPrCI is a no-op).
@@ -245,7 +274,10 @@ function mapPR(raw: any, ref: RepoRef): PullRequest {
     ci: rollupCI(raw.statusCheckRollup, raw.mergeStateStatus),
     createdDate,
     updatedDate,
-    url: raw.url ?? `https://github.com/${slug}/pull/${raw.number}`,
+    // Built through `urls`, not taken from `raw.url`, so every PR link in the
+    // app comes out of the one provider-level entry point (gh returns the
+    // identical string for github.com). A slug is always present here.
+    url: urls.pullRequest({ id: raw.number, repositoryId: slug }) ?? "",
     ...voteSummary(raw.reviews, raw.reviewDecision),
   };
 }
@@ -346,7 +378,7 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
         // Authorship drives the two buckets (see header comment).
         inCurrentSprint: isMe(iss.author?.login),
         prs: prsByIssue.get(iss.number) ?? [],
-        url: iss.url ?? `https://github.com/${slug}/issues/${iss.number}`,
+        url: urls.workItem({ id: iss.number, project: slug }) ?? "",
       });
     }
   }

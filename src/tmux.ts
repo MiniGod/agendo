@@ -94,10 +94,21 @@ export function liveTargetForShortId(sid: string): string | null {
   return null;
 }
 
+/**
+ * Raw visible text of a target's active pane, or null when tmux could not read
+ * it at all (unresolvable target, a pane that exited between the listing and
+ * this call, a server too busy to answer). That is NOT the same as a pane that
+ * is simply blank, and a caller about to do something destructive has to tell
+ * the two apart — see `readPaneState`.
+ */
+function capturePaneRaw(target: string): string | null {
+  const r = spawnSync("tmux", ["capture-pane", "-p", "-e", "-t", target], { encoding: "utf-8" });
+  return r.status === 0 ? (r.stdout ?? "") : null;
+}
+
 /** Raw visible text of a target's active pane, including SGR escape codes. */
 export function capturePane(target: string): string {
-  const r = spawnSync("tmux", ["capture-pane", "-p", "-e", "-t", target], { encoding: "utf-8" });
-  return r.status === 0 ? (r.stdout ?? "") : "";
+  return capturePaneRaw(target) ?? "";
 }
 
 /**
@@ -149,6 +160,22 @@ export interface PaneSnapshot {
  */
 export function capturePaneState(target: string): PaneSnapshot {
   return { raw: capturePane(target), cursor: paneCursor(target) };
+}
+
+/**
+ * `capturePaneState`, but null when tmux could not read the pane AT ALL rather
+ * than an empty snapshot.
+ *
+ * The distinction only matters where a missing read is dangerous. Readiness is
+ * classified from the screen, and an empty screen classifies as `unknown` — fine
+ * for a caller that only reports it, wrong for one that acts on it: `agendo
+ * close` treats `unknown` as "nothing in flight", so a read that merely FAILED
+ * would silently disarm the guard and kill a session mid-turn. Callers that just
+ * display a state keep using `capturePaneState`.
+ */
+export function readPaneState(target: string): PaneSnapshot | null {
+  const raw = capturePaneRaw(target);
+  return raw === null ? null : { raw, cursor: paneCursor(target) };
 }
 
 /** Strip ANSI SGR escape sequences, for plain-text display / matching. */
@@ -1152,10 +1179,121 @@ export function setSessionRoot(session: string, root: string): void {
   tmuxQuiet(["set-option", "-t", exactTarget(session), ROOT_OPTION, root]);
 }
 
-/** Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
- *  dormant restore placeholder before a headless resume recreates it for real. */
-export function killWindow(name: string): void {
-  tmuxQuiet(["kill-window", "-t", name]);
+/**
+ * Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
+ * dormant restore placeholder before a headless resume recreates it for real,
+ * and by `agendo close` to end a managed session's window.
+ *
+ * EXACT-targeted (see `exactTarget`): a bare `-t <name>` resolves by exact →
+ * unique-prefix → fnmatch, so killing `cl-pr-5` while `cl-pr-50` is the only
+ * live match would destroy the WRONG session's window. Every kill in this file
+ * pins its target with the leading `=` for that reason.
+ *
+ * A managed agent runs as either a window in a host session or a session of its
+ * own (see the file header); `kill-window` covers both, since tmux resolves a
+ * bare session name to that session's current window — and a managed session has
+ * exactly the one. Nothing outside tmux is touched: the agent's git worktree,
+ * branch and commits are left on disk.
+ */
+export function killWindow(target: string): void {
+  tmuxQuiet(["kill-window", "-t", exactKillTarget(target)]);
+}
+
+/**
+ * Pin a kill target to an exact match on BOTH halves of a `session:window` ref
+ * (or on a bare name).
+ *
+ * The `=` prefix is PER-COMPONENT: `=host:name` pins only the session, and
+ * blindly prefixing the whole string instead yields `==host:name` — a session
+ * literally named `=host`, which matches nothing. Under `tmuxQuiet` that
+ * mismatch is silent, so callers passing an already-pinned session (see
+ * `refreshPlaceholder`) would kill nothing and never hear about it. Both halves
+ * are therefore normalized before being re-pinned.
+ *
+ * A numeric window half is left bare on purpose: `man tmux` looks a window up as
+ * an INDEX before a name, so `=3` would ask for a window whose name is "3"
+ * rather than window 3 — and `session:index` is exactly what `killManagedTarget`
+ * resolves its target to.
+ */
+function exactKillTarget(target: string): string {
+  const colon = target.indexOf(":");
+  const unpin = (s: string) => (s.startsWith("=") ? s.slice(1) : s);
+  if (colon === -1) return exactTarget(unpin(target));
+  const session = unpin(target.slice(0, colon));
+  const window = unpin(target.slice(colon + 1));
+  return `${exactTarget(session)}:${/^\d+$/.test(window) ? window : exactTarget(window)}`;
+}
+
+/** Kill the tmux SESSION `name` outright (exact-targeted; no-op if absent). */
+export function killSession(name: string): void {
+  tmuxQuiet(["kill-session", "-t", exactTarget(name)]);
+}
+
+/**
+ * End a live managed target — the window it names, or the whole session when the
+ * name IS a session of its own (how an agent launched outside tmux runs). Backs
+ * `agendo close`. Reports how it addressed the target and whether tmux still
+ * lists the name afterwards.
+ *
+ * ADDRESSING is the subtle part. `man tmux`: a target-window is `session:window`
+ * and "if a session is omitted, the current session is used if available; if no
+ * current session is available, the most recently used is chosen". So a bare
+ * window name is looked up inside ONE session — whichever the caller happens to
+ * be in, or an arbitrary one when the CLI runs outside tmux — and a launcher tab
+ * addressed from anywhere else simply isn't found. `tmuxQuiet` throws the exit
+ * status away, so that failure would be invisible. We therefore resolve the
+ * window to its unambiguous `session:index` location first (`windowLocation`)
+ * and target that; a target with no such window is a session and is killed as
+ * one. Both forms are `=`-pinned (see `exactTarget`), which drops tmux's
+ * prefix/fnmatch fallback — the one that would bind `cl-pr-5` to `cl-pr-50` if
+ * the exact target died between the listing and this call.
+ *
+ * `location` defaults to the lookup and is accepted explicitly so a caller that
+ * already resolved it (to READ the same pane, which needs the identical
+ * unambiguous target) can prove both operations addressed one window.
+ *
+ * The post-check is deliberate: every write here goes through `tmuxQuiet`, so
+ * "we asked" is not "it's gone" — callers report what actually happened rather
+ * than assuming success. Nothing outside tmux is touched either way: the agent's
+ * git worktree, branch and commits stay on disk.
+ */
+export function killManagedTarget(
+  name: string,
+  location: string | null = windowLocation(name),
+): { how: "window" | "session" | "moved" | "none"; gone: boolean } {
+  if (location) {
+    // Re-read the name at that location first. A window index is not a stable
+    // handle: with `renumber-windows on` (a common setting) every index above a
+    // closing window shifts down, and an agent tab exiting on its own is routine
+    // here — so between the lookup and this call `agendo:3` can come to mean a
+    // different window, up to and including the launcher's own menu. Cheap
+    // re-check, and it closes the only gap where this command could hit a window
+    // nobody asked it to.
+    if (windowNameAt(location) !== name) return { how: "moved", gone: false };
+    // Confirm by COUNT, not by whether the location string still appears. The
+    // same renumbering the check above guards against can move a surviving window
+    // off `agendo:3` — so "the location no longer holds it" is satisfied by a
+    // kill that failed while some other window happened to close alongside it,
+    // and we would print "closed" over a live agent. One fewer window carrying
+    // the name is the only evidence that stays true under renumbering.
+    const before = windowLocations(name).length;
+    killWindow(location);
+    return { how: "window", gone: windowLocations(name).length < before };
+  }
+  if (liveSessions().has(name)) {
+    killSession(name);
+    return { how: "session", gone: !liveSessions().has(name) };
+  }
+  return { how: "none", gone: !liveTargets().has(name) };
+}
+
+/** The window name currently at a `session:index` location, or null. */
+function windowNameAt(location: string): string | null {
+  const r = spawnSync("tmux", ["display-message", "-p", "-t", exactTarget(location), "#{window_name}"], {
+    encoding: "utf-8",
+  });
+  const name = r.status === 0 ? (r.stdout ?? "").trim() : "";
+  return name || null;
 }
 
 /**
@@ -1205,13 +1343,26 @@ export function isPlaceholderWindow(session: string, name: string): boolean {
   return false;
 }
 
-/** `session:window_index` of the first window named `name`, or null. */
-export function windowLocation(name: string): string | null {
+/**
+ * `session:window_index` of EVERY live window named `name`, across all sessions.
+ * tmux allows duplicate window names, and this launcher creates them — two host
+ * sessions (the global `agendo` and a path-scoped one) can each hold a tab for
+ * the same session, the same collision `isPlaceholderWindow` above scopes around.
+ * So a caller that is about to do something destructive has to see all of them,
+ * not just the first (see `windowLocation`).
+ */
+export function windowLocations(name: string): string[] {
+  const out: string[] = [];
   for (const line of tmuxLines(["list-windows", "-a", "-F", "#{session_name}:#{window_index}\t#{window_name}"])) {
     const [loc, wname] = line.split("\t");
-    if (wname === name) return loc;
+    if (wname === name) out.push(loc);
   }
-  return null;
+  return out;
+}
+
+/** `session:window_index` of the first window named `name`, or null. */
+export function windowLocation(name: string): string | null {
+  return windowLocations(name)[0] ?? null;
 }
 
 /**

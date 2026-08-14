@@ -82,6 +82,16 @@ test("the prompt monitors via list/status and coordinates via send — never in 
   expect(prompt).toMatch(/Never run a background session's own git, build, test,\s+or fix commands inside its worktree/);
 });
 
+test("the prompt ends finished sessions through close, not raw tmux", async () => {
+  // An orchestrator that can start sessions but not end them reaches for
+  // `tmux kill-window` — which resolves its target by prefix, so it can kill a
+  // DIFFERENT session (`cl-pr-5` matching `cl-pr-50`). The command has to be in
+  // the list it is given, and the guarantee has to be stated, or it won't be used.
+  expect(prompt).toContain(`${SELF} close <id>`);
+  expect(flat).toContain("Never `tmux kill-window` yourself");
+  expect(flat).toContain("its worktree, branch and commits stay on disk");
+});
+
 test("the prompt auto squash-merges on the two gates, and hands conflicts back", async () => {
   // Auto-merge, unprompted, gated on BOTH a clean review and a completion report.
   // Exact substring rather than a dotAll regex, so the two halves of the sentence

@@ -6,8 +6,8 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
-  sessionRoot, currentSessionName, killWindow,
+  liveManagedPaths, managedKind, capturePaneState, readPaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
+  sessionRoot, currentSessionName, killWindow, killManagedTarget, windowLocations, isPlaceholderWindow, exactTarget,
   paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, answerResumeDialog, paneAcceptsPaste,
   capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
   type SessionKind, type Readiness, type PaneSnapshot,
@@ -17,16 +17,17 @@ import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, 
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { durationLabel, idleSeconds, isStalled, resolveStalledAfterMs, shortAge } from "./idle.ts";
 import { branchSync, type BranchSync } from "./gitrefs.ts";
-import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
-import { resolveContext } from "./context.ts";
+import { restoreTabs, recordLaunchedSession, resolveWindowSession, forgetRestoreTab, idBearingName } from "./restore.ts";
+import { resolveContext, normalizeCwd } from "./context.ts";
 import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
-import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
+import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
+import { openUrlAsync } from "./browser.ts";
 import { loadState, resumeDialogChoice } from "./config.ts";
 import { takeWarnings } from "./errors.ts";
-import { printJson } from "./output.ts";
+import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
-import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
+import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
@@ -83,7 +84,8 @@ Usage:
                                 cwd is under it are shown.
       --json                    Emit machine-readable JSON (with branch + linked
                                 PR + work-item/issue + idleSeconds/stalled +
-                                ISO limitResetAt + unpushed-work state per session).
+                                ISO limitResetAt + unpushed-work state per session,
+                                each link carrying a full prUrl / workItemUrl).
       --stalled-after <dur>     Idle time after which a live, non-busy session is
                                 flagged stalled (default 4h; persist your own via
                                 "stalledAfterMinutes" in ~/.agendo/config.json).
@@ -152,6 +154,18 @@ Usage:
       --full, -F                Don't truncate the prompt / activity details
       --stalled-after <dur>     Idle time after which a live, non-busy session is
                                 reported stalled (as for list)
+      --urls, --links           Also resolve and print the full URLs of the linked
+                                PR / work item (needs the backend, so it's opt-in —
+                                the default status stays fast and auth-free).
+      --path <dir>              Only resolve <id> among sessions under dir
+      --repo <name>             Only resolve <id> among sessions in that repo
+  agendo open <id>             Open the session's linked PR / work item in your
+                                browser — the CLI mirror of the menu's o key. Every
+                                resolved URL is printed first, so the link is
+                                usable even where no browser can be launched.
+      --pr                      Open the pull request (the default when both exist)
+      --issue, --work-item      Open the work item / issue instead
+      --print, -p               Only print the URL(s); never launch a browser
       --path <dir>              Only resolve <id> among sessions under dir
       --repo <name>             Only resolve <id> among sessions in that repo
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
@@ -164,6 +178,16 @@ Usage:
       --timeout <dur>           Deadline for the input box to appear after that
                                 dialog is answered — a ceiling, not a wait: it
                                 proceeds as soon as the box is there (default 120s)
+  agendo close <id>            End a running session: kills ONLY the tmux window
+       (aliases: kill, stop)    (or session) it runs in. Its git worktree, branch
+                                and commits are guaranteed untouched on disk —
+                                nothing there is deleted, and \`agendo resume
+                                <id>\` brings the session back. Only ever kills a
+                                managed cl-… target, and refuses a session with
+                                work in flight (mid-turn, compacting, text queued,
+                                or an open question), or a window it can't
+                                attribute to that session alone — or can't read.
+      --force, -f               Close despite work in flight / an ambiguous window
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
                                 pane is still showing the usage-limit notice.
@@ -208,6 +232,29 @@ const KIND_LABEL: Record<SessionKind, string> = {
   pr: "pr",
   resumed: "—",
 };
+
+/**
+ * Readiness states where closing a session would destroy work in flight, so
+ * `close` refuses them without `--force` (mirroring how `send` refuses to type
+ * into a non-ready pane): a turn being generated ("busy"), a conversation being
+ * rewritten ("compacting"), text typed but not yet submitted ("queued"), or an
+ * open question waiting on an answer ("dialog").
+ *
+ * The states NOT listed are deliberately closeable: "ready" (idle, the finished
+ * session this command exists for), "limited" (stuck at its usage cap — a prime
+ * close candidate) and "unknown". "unknown" is what a pane whose agent already
+ * exited looks like — a bare shell prompt with no input box — which is the most
+ * obvious thing of all to want closed; refusing it would push callers straight
+ * back to hand-rolled `tmux kill-window`, the failure this command replaces.
+ *
+ * Close-specific, so it stays here rather than in wait.ts beside that command's
+ * own BUSY_STATES: the two overlap today but answer different questions ("is it
+ * still working?" vs "would ending it lose something?"), and `close` refuses two
+ * settled-but-unsaved states that `wait` considers done. Declared before the
+ * subcommand dispatch so the hoisted `runClose` never reads it in the temporal
+ * dead zone.
+ */
+const UNSAFE_CLOSE_STATES = new Set<Readiness>(["busy", "compacting", "queued", "dialog"]);
 
 /**
  * Compact "last used" age for the list columns (matches the menu's timeAgo).
@@ -257,6 +304,10 @@ if (!tmuxAvailable()) {
 if (process.argv[2] === "status") {
   const rest = process.argv.slice(3);
   let full = false;
+  // `--urls` opts into the backend round-trip that resolves the session's linked
+  // PR / work item. Off by default: `status` is the command orchestrators poll,
+  // and a model load costs network + backend auth on every call.
+  let withUrls = false;
   let token: string | undefined;
   // The scope selectors don't pick the session (an id still does) — they narrow
   // the set the id is resolved against, so an orchestrator polling one repo can
@@ -269,6 +320,7 @@ if (process.argv[2] === "status") {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--full" || a === "-F") full = true;
+    else if (a === "--urls" || a === "--links") withUrls = true;
     else if (a === "--path") pathArg = requireValue("status", a, rest[++i]);
     else if (a === "--repo") repoArg = requireValue("status", a, rest[++i]);
     else if (a === "--stalled-after") stalledAfterMs = requireDuration("status", "--stalled-after", rest[++i]);
@@ -283,7 +335,53 @@ if (process.argv[2] === "status") {
       process.exit(1);
     } else if (token === undefined) token = a;
   }
-  await runStatus(token, full, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()), stalledAfterMs);
+  await runStatus(
+    token,
+    full,
+    makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()),
+    withUrls,
+    stalledAfterMs,
+  );
+  process.exit(0);
+}
+
+// `open <id>`: open the PR / work item a session links to in the browser — the
+// CLI mirror of the menu's `o` action, resolved through the same model reverse
+// index (`sessionLinks`). The URLs are always printed, so the command is useful
+// as a "give me the link" even on a headless host with no browser to launch.
+if (process.argv[2] === "open") {
+  let token: string | undefined;
+  let want: "pr" | "item" | undefined;
+  let printOnly = false;
+  // Same scope selectors as `status`, for the same reason: `open` resolves a
+  // short id too, and launching a browser at the wrong repo's PR is a worse
+  // outcome than printing the wrong status.
+  let pathArg: string | undefined;
+  let repoArg: string | undefined;
+  const rest = process.argv.slice(3);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    const sel = a === "--pr" ? "pr" : a === "--issue" || a === "--work-item" || a === "--workitem" ? "item" : null;
+    if (sel) {
+      // Two conflicting selectors is a mistake, not a silent last-one-wins.
+      if (want && want !== sel) {
+        console.error(`open: use only one of --pr / --work-item`);
+        process.exit(1);
+      }
+      want = sel;
+    } else if (a === "--print" || a === "-p") printOnly = true;
+    else if (a === "--path") pathArg = requireValue("open", a, rest[++i]);
+    else if (a === "--repo") repoArg = requireValue("open", a, rest[++i]);
+    else if (a.startsWith("-")) {
+      console.error(`open: unknown argument "${a}"`);
+      process.exit(1);
+    } else if (token === undefined) token = a;
+    else {
+      console.error(`open: unexpected argument "${a}"`);
+      process.exit(1);
+    }
+  }
+  await runOpen(token, want, printOnly, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()));
   process.exit(0);
 }
 
@@ -570,6 +668,33 @@ if (process.argv[2] === "resume") {
   process.exit(0);
 }
 
+// `close <id>` (aliases `kill`, `stop`): end a running session by killing the
+// tmux window it lives in, and nothing else. The aliases exist because an agent
+// that guesses the wrong verb and gets "no such command" falls back to raw
+// `tmux kill-window` — the exact hand-rolled tmux this subcommand exists to
+// remove. Everything the session produced (worktree, branch, commits) stays on
+// disk, so `resume` can bring it back.
+if (process.argv[2] === "close" || process.argv[2] === "kill" || process.argv[2] === "stop") {
+  const verb = process.argv[2];
+  let id: string | undefined;
+  let force = false;
+  for (const a of process.argv.slice(3)) {
+    if (a === "--force" || a === "-f") force = true;
+    // A command that kills things parses strictly: an unknown flag or a stray
+    // extra positional is a mistake, never something to silently ignore.
+    else if (a.startsWith("-")) {
+      console.error(`${verb}: unknown flag "${a}" (only --force/-f)`);
+      process.exit(1);
+    } else if (id === undefined) id = a;
+    else {
+      console.error(`${verb}: unexpected argument "${a}" — close takes exactly one session id`);
+      process.exit(1);
+    }
+  }
+  await runClose(id, force, verb);
+  process.exit(0);
+}
+
 // `unblock <id>`: nudge a session sitting at its usage limit to continue — sends
 // <esc>continue<enter>. Distinct from `resume` (which relaunches an idle session
 // in a fresh window); this pokes a live, limited pane. Refuses unless the pane is
@@ -655,15 +780,21 @@ if (!process.argv.includes("--no-tmux")) {
  * (the same summary the menu surfaces). A just-launched session may not have
  * written its log yet — if so we still report it as running from its live tmux
  * window. `token` may be a full session id, a short id, or a `cl-…-<id>` name.
+ *
+ * `withUrls` additionally resolves the session's linked PR / work item from the
+ * backend and prints their full URLs (see `resolveSessionLink`).
  */
 async function runStatus(
   token: string | undefined,
   full: boolean,
   scope: SessionScope | null,
+  withUrls = false,
   stalledAfterMs?: number,
 ): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id> [--full] [--path <dir>] [--repo <name>] [--stalled-after <dur>]`);
+    console.error(
+      `usage: ${SELF_CMD} status <id> [--full] [--urls] [--path <dir>] [--repo <name>] [--stalled-after <dur>]`,
+    );
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
@@ -726,6 +857,26 @@ async function runStatus(
   // process, no fetch — see src/gitrefs.ts). Silent when it can't be determined.
   const sync = branchSync(s.cwd);
   if (sync) console.log(`  work:   ${describeSync(sync)}`);
+  // Full, clickable links for whatever this session is working on. Vertical
+  // output, so a long URL costs nothing here (unlike the `list` table).
+  if (withUrls) {
+    const resolved = await resolveSessionLink(s, "status");
+    const V = linkVocab(resolved.provider);
+    // As in runOpen: a link with no resolvable URL reads as absent, never as a
+    // partial link a human might paste.
+    const pr = resolved.link?.pr?.url ? resolved.link.pr : undefined;
+    const workItem = resolved.link?.workItem?.url ? resolved.link.workItem : undefined;
+    if (resolved.error) {
+      console.log(`  links:  (unavailable — ${resolved.error})`);
+    } else if (!pr && !workItem) {
+      console.log(`  links:  (no linked PR or ${V.noun})`);
+    } else {
+      if (pr) console.log(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
+      if (workItem) console.log(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
+    }
+  }
+  // The pane was captured once, up front (the stall qualifier above needed it),
+  // so this reuses that snapshot rather than re-reading the same pane.
   if (pane) {
     const { raw } = pane;
     console.log(`  ready:  ${readiness}`);
@@ -823,6 +974,114 @@ function indent(text: string): string {
     .split("\n")
     .map((l) => `    ${l}`)
     .join("\n");
+}
+
+/**
+ * The PR / work item a session links to, resolved through the model's reverse
+ * index (`sessionLinks`) — the same association the menu's `o` action opens, so
+ * the CLI and the TUI can't drift. Loading the model costs a backend round-trip,
+ * hence the opt-in callers. A failed load is returned as `error` rather than
+ * thrown, so `status --urls` degrades to a note instead of dying.
+ */
+async function resolveSessionLink(
+  s: AgentSession,
+  /** Command name for any reported-and-ignored load warnings (see flushWarnings). */
+  prefix: string,
+): Promise<{ link?: SessionLink; provider: ProviderName; error?: string }> {
+  const opts = currentModelOptions();
+  try {
+    const model = await loadModel(opts);
+    return { link: model.sessionLinks.get(`${s.source}:${s.id}`), provider: model.provider };
+  } catch (e) {
+    return { provider: opts.provider, error: (e as Error)?.message ?? String(e) };
+  } finally {
+    // Whether or not the load succeeded: a corrupt state.json silently drops the
+    // persisted backend, which would otherwise resolve links against the wrong
+    // one with no hint why. stderr, so `--print` output stays pipeable.
+    flushWarnings(prefix);
+  }
+}
+
+/**
+ * Open a session's linked PR / work item in the browser — the CLI mirror of the
+ * menu's `o` action, down to the shared `openUrl` path. `want` picks the entity
+ * when the session has both (the menu asks p/i; the CLI defaults to the PR).
+ *
+ * Every URL we resolved is printed BEFORE anything is launched, because the link
+ * itself is the deliverable: a headless host with no opener, or `--print`, still
+ * leaves the caller with a full clickable URL rather than an error. A missing
+ * link is a clean message, never a stack trace.
+ */
+async function runOpen(
+  token: string | undefined,
+  want: "pr" | "item" | undefined,
+  printOnly: boolean,
+  scope: SessionScope | null,
+): Promise<void> {
+  if (!token) {
+    console.error(
+      `usage: ${SELF_CMD} open <id> [--pr | --work-item] [--print] [--path <dir>] [--repo <name>]`,
+    );
+    process.exit(1);
+  }
+  const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
+  const index = await SessionIndex.build();
+  const inScope = scopeFilter(scope);
+  const s = index.all.find((x) => (x.id === token || shortId(x.id) === sid) && inScope(x));
+  if (!s) {
+    // No live-window fallback here (unlike `status`): a session too young to have
+    // a transcript has no links to open anyway.
+    console.error(`No session found for "${token}"${scopeNote(scope)}.`);
+    process.exit(1);
+  }
+  const resolved = await resolveSessionLink(s, "open");
+  const V = linkVocab(resolved.provider);
+  if (resolved.error) {
+    console.error(`open: could not resolve associations from the backend: ${resolved.error}`);
+    process.exit(1);
+  }
+  // A link the backend couldn't give a URL for (a payload missing the repo scope
+  // its link needs) counts as absent: better to say "nothing to open" than to
+  // launch — or hand a human — a partial URL.
+  const pr = resolved.link?.pr?.url ? resolved.link.pr : undefined;
+  const workItem = resolved.link?.workItem?.url ? resolved.link.workItem : undefined;
+  if (!pr && !workItem) {
+    console.error(
+      `Session ${shortId(s.id)} has no linked pull request or ${V.noun} to open.\n` +
+        `  (links resolve against the backend's OPEN PRs / ${V.noun}s for the current identity — ` +
+        `a merged or out-of-scope one won't be found.)`,
+    );
+    process.exit(1);
+  }
+  // An explicit selector that can't be honoured names what IS available, so the
+  // caller can retry with the other flag instead of guessing.
+  if (want === "pr" && !pr) {
+    console.error(`Session ${shortId(s.id)} has no linked pull request (only ${V.noun} #${workItem!.id}).`);
+    process.exit(1);
+  }
+  if (want === "item" && !workItem) {
+    console.error(`Session ${shortId(s.id)} has no linked ${V.noun} (only PR ${V.prPrefix}${pr!.id}).`);
+    process.exit(1);
+  }
+
+  // Awaited writes: this text is what the caller came for, and the dispatch
+  // exits the moment we return (see printLine).
+  if (pr) await printLine(linkLine("pr", `${V.prPrefix}${pr.id}`, pr.url));
+  if (workItem) await printLine(linkLine(V.abbrev, `#${workItem.id}`, workItem.url));
+  if (printOnly) return;
+
+  // Default to the PR when both exist: it's the artifact you act on, and the
+  // work item is one line above if that's what you wanted.
+  const target = want === "item" ? workItem! : want === "pr" ? pr! : pr ?? workItem!;
+  const label = target === pr ? `PR ${V.prPrefix}${target.id}` : `${V.noun} #${target.id}`;
+  try {
+    await openUrlAsync(target.url);
+    await printLine(`▸ opened ${label} in your browser`);
+  } catch (e) {
+    // No opener on this host (headless, container, stripped image). The URL is
+    // already on stdout, so this is a warning, not a failure.
+    console.error(`Couldn't launch a browser (${(e as Error)?.message ?? e}) — the URL above is still valid.`);
+  }
 }
 
 /**
@@ -1048,6 +1307,14 @@ interface ListRow {
   pr: { id: number; url: string } | null;
   /** Linked work item / issue, resolved through the model's reverse index. */
   workItem: { id: number; url: string } | null;
+  /**
+   * The same two links flattened to top-level fields — null when unlinked, never
+   * a partially-built URL. Agents consume this JSON to hand a human a clickable
+   * link; a first-class field beats making them reach into a nested object (or,
+   * worse, reconstruct the URL from an id and guess the host shape).
+   */
+  prUrl: string | null;
+  workItemUrl: string | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
 }
@@ -1205,6 +1472,10 @@ async function runList(opts: ListOptions): Promise<void> {
     }
     const l = linkOf(s);
     const idle = idleSeconds(s.lastUsed);
+    // A link whose URL couldn't be built reads as absent — applied once here so
+    // the nested object and the flattened *Url field can never disagree.
+    const prLink = l?.pr?.url ? l.pr : null;
+    const itemLink = l?.workItem?.url ? l.workItem : null;
     return {
       id: s.id,
       shortId: shortId(s.id),
@@ -1232,8 +1503,12 @@ async function runList(opts: ListOptions): Promise<void> {
       // table below doesn't render it, and `--all` can enumerate every session
       // on disk.
       git: opts.json ? branchSync(s.cwd) : null,
-      pr: l?.pr ?? null,
-      workItem: l?.workItem ?? null,
+      // Siblings of the fields above, not nested under them: a consumer reads
+      // `stalled` and `prUrl` off the same row object.
+      pr: prLink,
+      workItem: itemLink,
+      prUrl: prLink?.url ?? null,
+      workItemUrl: itemLink?.url ?? null,
       workflows: (s.workflows ?? []).map((w) => ({
         runId: w.runId,
         name: w.name,
@@ -1424,7 +1699,9 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
     branch: pr.branch,
     repositoryId: pr.repositoryId,
     repositoryName: pr.repositoryName ?? null,
-    url: pr.url,
+    // null rather than the "" a backend payload without repo scope yields, so a
+    // consumer never pastes a half-built link (see PullRequest.url).
+    url: pr.url || null,
     sessions: assocSessions(pr.sessions, model.liveTmux),
   }));
 
@@ -1488,7 +1765,7 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
     type: it.type,
     title: it.title.replace(/\s+/g, " ").trim(),
     state: it.state,
-    url: it.url,
+    url: it.url || null,
     sessions: assocSessions(it.sessions, model.liveTmux),
   }));
 
@@ -1568,6 +1845,195 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
 }
 
 /**
+ * End a running session: kill the tmux target it lives in — a window in a host
+ * session, or the whole session when the agent was launched outside tmux — and
+ * nothing else.
+ *
+ * WHAT IT DOES NOT TOUCH — this is a guarantee of the command, not a hope. The
+ * only writes are the tmux kill itself and, when the window was a launcher tab,
+ * dropping that one tab from the launcher's restore snapshot. Nothing under a
+ * worktree is read, moved or removed: the worktree, its branch and every commit
+ * in it survive, and the session's transcript stays on disk so `agendo resume
+ * <id>` restarts it.
+ *
+ * The guards, in order, because a mistargeted kill in this environment can take
+ * out someone's live agent — including the launcher itself:
+ *  1. RESOLUTION. The id resolves exactly as it does for `status`/`send`/`resume`
+ *     (full id, short id, or a `cl-…-<id>` tmux name), then the session's live
+ *     window comes from `refreshLiveTmux` — the same reconciliation the menu and
+ *     `wait` use — so a session running under a `cl-wi-…`/`cl-pr-…` window is
+ *     found rather than missed. A session too new to have a transcript falls back
+ *     to its id-bearing window (as `runStatus` does), since `agendo launch`
+ *     prints an id well before the agent writes its log — otherwise the flow this
+ *     command exists for (launch → it goes wrong → close) couldn't close it.
+ *     An id that resolves to neither kills nothing.
+ *  2. MANAGED-ONLY. The target must be a managed `cl-…` name (`managedKind`).
+ *     That already holds by construction — `liveWindows` is built only from
+ *     managed windows — so the check is defense in depth: if that ever stops
+ *     holding, a typo must abort rather than kill the user's own shell or the
+ *     launcher window.
+ *  3. UNAMBIGUOUS ATTRIBUTION. A `cl-wi-…`/`cl-pr-…` window embeds an ITEM id,
+ *     not a session id, so it is attributed to the most-recently-used session in
+ *     its working directory. That heuristic is fine for reading a pane; for a
+ *     kill it is not, because when two sessions share a directory the newest wins
+ *     the attribution while the OTHER may be the agent actually running there.
+ *     So an id-less window with rival sessions in its dir needs `--force`.
+ *  4. WORK IN FLIGHT. A pane mid-turn (or compacting, or holding queued text /
+ *     an open question) is refused unless `force` — killing an agent mid-write
+ *     is how work gets lost. See UNSAFE_CLOSE_STATES. A pane that could not be
+ *     READ is refused too: readiness classifies a blank screen as "unknown",
+ *     which this guard lets through, so a failed read would pass for an idle
+ *     session (see `readPaneState`).
+ *
+ * Both the readiness READ and the kill address a window through its
+ * `session:index` location rather than by name (see `killManagedTarget`): a bare
+ * window name resolves only inside the caller's current session, so from outside
+ * tmux the read would come back empty — classifying "unknown", which guard 4
+ * treats as closeable — while the kill quietly hit nothing. Two further checks
+ * bound what a location can mean: more than one live window may carry the same
+ * name (two launchers, one session), which is refused rather than guessed; and
+ * the name at the location is re-read immediately before the kill, since tmux
+ * renumbers windows when one closes. Finally, because every tmux write here is
+ * fire-and-forget, the target is confirmed gone before success is reported.
+ *
+ * A dormant restore placeholder (an idle bash tab that was never opened) is
+ * closeable too, and skips the readiness read: there's no agent in it to lose.
+ */
+async function runClose(token: string | undefined, force: boolean, verb = "close"): Promise<void> {
+  if (!token) {
+    console.error(`usage: ${SELF_CMD} ${verb} <id> [--force]`);
+    process.exit(1);
+  }
+  const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
+  const index = await SessionIndex.build();
+  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  // For a known session: its canonical name, and whatever window it's live in.
+  // For one too new to be indexed: the live id-bearing window named after this
+  // very short id — which is only ever that session's own window, so it's as
+  // safe a target as the canonical name.
+  const canon = s ? sessionName(s) : liveTargetForShortId(sid);
+  if (!canon) {
+    console.error(`No session found for "${token}" — refusing to close anything.`);
+    process.exit(1);
+  }
+  const liveWindow = s ? liveWindows.get(canon) : canon;
+  // A placeholder squats the canonical name with no agent behind it; close it by
+  // that name (it's a real tmux window) when no live window vouches for the session.
+  const placeholder = !liveWindow && livePlaceholders.has(canon);
+  const target = liveWindow ?? (placeholder ? canon : undefined);
+  const label = s ? shortId(s.id) : sid;
+  if (!target) {
+    // Already closed / never started. The desired end state holds, so this is a
+    // success — `close` is idempotent for the scripts and agents driving it.
+    console.log(`○ session ${label} is not running — nothing to close.`);
+    return;
+  }
+  if (!managedKind(target)) {
+    console.error(`Refusing to close "${target}": not a managed agendo window.`);
+    process.exit(1);
+  }
+  // Guard 3: an id-less window is attributed by working directory, so it only
+  // names one session unambiguously when it's the only session in that dir.
+  if (!idBearingName(target) && !force) {
+    const cwd = liveManagedPaths().find((p) => p.name === target)?.cwd;
+    const rivals = cwd ? index.all.filter((x) => normalizeCwd(x.cwd) === normalizeCwd(cwd)) : [];
+    if (rivals.length > 1) {
+      console.error(
+        `Not closing: window ${target} carries no session id, and ${rivals.length} sessions share ` +
+          `its directory (${cwd}) — the one running in it may not be ${label}. Candidates: ` +
+          `${rivals.map((x) => shortId(x.id)).join(", ")}. Pass --force to close that window anyway.`,
+      );
+      process.exit(2);
+    }
+  }
+  // Where the window actually lives, used for BOTH the pane read and the kill so
+  // neither falls back to tmux's current-session lookup. No location means the
+  // target is a tmux session of its own (an agent launched outside tmux).
+  //
+  // tmux allows duplicate window names and this launcher produces them — a global
+  // and a path-scoped launcher can each hold a tab for the same session — so more
+  // than one location means we cannot tell which window the caller meant. Reading
+  // the wrong one is harmless; killing it is not.
+  const locations = windowLocations(target);
+  if (locations.length > 1 && !force) {
+    console.error(
+      `Not closing: ${locations.length} live windows are named ${target} (${locations.join(", ")}) — ` +
+        `agendo can't tell which one is ${label}. Close the one you mean from its launcher, or pass --force.`,
+    );
+    process.exit(2);
+  }
+  const location = locations[0] ?? null;
+  const readTarget = exactTarget(location ?? target);
+  // One pane read serves both the verdict and, if we refuse, the screen tail that
+  // explains it — the same shape `send` uses when it declines.
+  const pane = placeholder ? null : readPaneState(readTarget);
+  // A read that FAILED is not evidence of an idle session. `paneReadiness` turns
+  // an empty screen into "unknown", which guard 4 lets through — so a tmux read
+  // that never landed (busy server, pane gone between the listing and here) would
+  // silently disarm the only check standing between `close` and a mid-turn agent.
+  // `wait` distrusts a single missed read for the same reason (EXIT_CONFIRM_TICKS);
+  // this command is the destructive one, so it refuses outright.
+  if (!placeholder && !pane && !force) {
+    console.error(
+      `Not closing: tmux could not read ${target}'s pane (${readTarget}), so agendo can't tell whether ` +
+        `work is in flight. Re-run to try again, or pass --force to close it unread.`,
+    );
+    process.exit(2);
+  }
+  const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
+  if (pane && readiness && UNSAFE_CLOSE_STATES.has(readiness) && !force) {
+    console.error(`Not closing: session looks "${readiness}" — work is in flight. Pass --force to close it anyway.`);
+    console.error(`\n  current screen (tail):`);
+    for (const l of stripAnsi(pane.raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
+    process.exit(2);
+  }
+  // `how === "none"` means tmux listed the target a moment ago but can now place
+  // it in neither a window nor a session — so nothing was killed, whatever the
+  // (vacuously true) `gone` check says. Report the failure rather than the
+  // reassuring lie; the caller can look and re-run.
+  const { how, gone } = killManagedTarget(target, location);
+  if (!gone || how === "none") {
+    console.error(
+      how === "moved"
+        ? `Not closing ${target}: the window at ${location} is no longer it (tmux renumbered while we looked). Nothing was killed — re-run to pick it up at its new index.`
+        : `Could not close ${target}: tmux ${how === "none" ? "can no longer place it in any session" : "still reports it live"}. Nothing else was changed.`,
+    );
+    process.exit(1);
+  }
+  // The host session the window we just killed lived in. A standalone agent
+  // session (launched outside tmux) was never a tab in one.
+  const host = location?.split(":")[0];
+  // A dormant placeholder can carry the canonical name alongside the real window
+  // we just killed — reconcileLive drops it from `livePlaceholders` in exactly
+  // that case (a real window vouched for the name), so ask tmux directly rather
+  // than trust the reconciled set. Without this the closed session is still
+  // sitting in the tab strip as an unopened tab.
+  //
+  // Scoped to that one host session, and flag-checked inside it: the same
+  // canonical name can be tabbed in a SECOND launcher (which is why
+  // `isPlaceholderWindow` reads the flag per host), and that launcher's strip is
+  // none of this command's business — we don't edit its restore snapshot either,
+  // so killing its tab would only make it reappear there on its next start.
+  if (!placeholder && host && isPlaceholderWindow(host, canon)) {
+    const leftover = windowLocations(canon).find((l) => l.startsWith(`${host}:`));
+    if (leftover) killManagedTarget(canon, leftover);
+  }
+  // Drop the tab from the restore snapshot of the host session that held the
+  // window we just killed — and only that one, so a parallel path-scoped
+  // launcher's tabs are untouched.
+  if (host) forgetRestoreTab(canon, host);
+  console.log(
+    `▸ closed ${target}${placeholder ? " (unopened restore tab)" : readiness && readiness !== "ready" ? ` (was "${readiness}")` : ""}`,
+  );
+  console.log(`  kept:    worktree, branch and commits are untouched${s ? ` in ${s.cwd}` : ""}`);
+  // Only an indexed session can be resumed by id — one whose transcript hasn't
+  // landed yet has nothing for `resume` to find (that's why it took the
+  // window-name path to get here in the first place).
+  if (s) console.log(`  resume:  ${SELF_CMD} resume ${label}`);
+}
+
+/**
  * The exiting form of `scopeFlagValue`, for the subcommands parsed here (`wait`
  * uses the returning form directly — it turns its whole argv tail into an exit
  * code rather than exiting mid-parse). One guard, so a missing `--repo` can't be
@@ -1584,6 +2050,7 @@ function duplicatePathScope(): never {
   console.error(`list: the path scope was given twice — [dir] and --path <dir> name the same slot`);
   process.exit(1);
 }
+
 // Quit if our input stream goes away — e.g. the controlling terminal/PTY closed
 // because a parent process died, orphaning us. Without this, Ink keeps the
 // hung-up stdin fd registered and the event loop busy-spins at 100% CPU forever
