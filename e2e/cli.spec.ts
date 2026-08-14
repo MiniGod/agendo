@@ -56,6 +56,60 @@ function agendoAsync(env: Record<string, string>, ...args: string[]) {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Resolve once the child's stderr matches — so a test can synchronise on what the
+ * process has ACTUALLY observed rather than on a sleep guessed to be longer than
+ * its startup.
+ *
+ * `wait` prints one `pending: <id>=<state>` line per unsettled poll, which makes
+ * its polls externally observable. A fixed head start instead makes the test mean
+ * different things on different machines: whether the first poll saw the session
+ * alive decides how many polls the run needs, and a slower boot silently shifts
+ * that — turning a correct wait into a red build. Syncing here also lands the
+ * test's state change in the child's sleep between polls rather than inside a
+ * poll's multi-command tmux read, where it could tear.
+ *
+ * Pass a non-global regex: the whole accumulated buffer is re-tested per chunk
+ * (so a match split across chunks still lands), and `/g` would carry `lastIndex`
+ * between those tests.
+ */
+function whenStderrMatches(child: ReturnType<typeof spawn>, re: RegExp, timeoutMs = 20_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let seen = "";
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stderr!.off("data", onData);
+      child.off("close", onClose);
+    };
+    const fail = (why: string) => {
+      cleanup();
+      // Don't leave a `wait` polling for its full timeout behind a failed sync —
+      // with retries that would stack several orphans against the same fixture.
+      child.kill();
+      reject(new Error(`${why}; stderr so far: ${stripAnsiText(seen) || "(empty)"}`));
+    };
+    const timer = setTimeout(() => fail(`stderr never matched ${re} within ${timeoutMs}ms`), timeoutMs);
+    const onData = (d: Buffer) => {
+      seen += d.toString();
+      if (!re.test(stripAnsiText(seen))) return;
+      cleanup();
+      resolve();
+    };
+    // Exiting without ever matching is a setup failure (an unknown id, nothing
+    // running). Report THAT rather than idling out the timeout above and blaming
+    // the sync for a process that was never going to print the line.
+    const onClose = () => fail(`process exited before stderr matched ${re}`);
+    child.stderr!.on("data", onData);
+    child.on("close", onClose);
+  });
+}
+
+/** The `pending: <id>=<state>` states `wait` reported, in order — its polls, as
+ *  the process itself saw them. */
+function pendingStates(stderr: string): string[] {
+  return [...stripAnsiText(stderr).matchAll(/pending: \w+=(\w+)/g)].map((m) => m[1]);
+}
+
 test("agendo --help prints usage under the new name", async ({ mock }) => {
   const r = agendo(mock.env, "--help");
   expect(r.status).toBe(0);
@@ -1114,8 +1168,11 @@ function wakePayload(stdout: string) {
 
 test("agendo wait --json reports the busy → ready transition it woke on", async ({ mock }) => {
   await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
-  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "200ms", "--timeout", "20s");
-  await sleep(1200);
+  const { child, done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "200ms", "--timeout", "20s");
+  // `from` is whatever the FIRST poll saw, so flip to ready only once the process
+  // has reported seeing it busy. A fixed sleep would silently decide this
+  // assertion's meaning by how fast the CLI booted.
+  await whenStderrMatches(child, /pending: \w+=busy/);
   await mock.setTmuxState(tmuxState); // → ready
 
   const r = await done;
@@ -1203,17 +1260,37 @@ test("agendo wait needs two consecutive missed sightings before declaring a sess
   // `exited` is terminal, nothing later could correct it. So an absence must
   // repeat before it's believed.
   await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
-  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "800ms", "--timeout", "30s");
-  await sleep(400); // first poll has already seen it alive and busy
+  const { child, done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "400ms", "--timeout", "30s");
+  // Take the window away only once the process has REPORTED a live sighting, so
+  // every poll after this point is genuinely a miss.
+  //
+  // A fixed head start instead raced the child's FIRST POLL. One poll is four
+  // separate fake-tmux process spawns, and `liveWindows` is built solely from the
+  // `list-panes` pass — so a wipe landing after the startup liveness read but
+  // before that pass makes poll #1 a miss. The run then needs two polls, not
+  // three, and the >1400ms floor this used to assert could not be met, going red
+  // for a wait that had behaved exactly as designed. (A wipe landing even
+  // earlier, before `runWait`'s own pre-loop liveness read, fails differently:
+  // "not running (no live window)" — so the window that produced the red build
+  // was specifically inside poll #1's read burst.)
+  await whenStderrMatches(child, /pending: \w+=busy/);
   await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
 
   const r = await done;
   expect(r.code).toBe(0);
   const out = wakePayload(r.stdout);
   expect(out.sessions[0].state).toBe("exited");
-  // Two polls at 800ms apart had to miss it. A single-miss verdict would have
-  // woken around the first one, well under this bound.
-  expect(out.elapsedMs).toBeGreaterThan(1_400);
+  // The rule itself, COUNTED rather than timed: the run reported at least one
+  // `unknown` poll — a miss it declined to believe — before the `exited` verdict.
+  // Zero is precisely what a single-miss bug produces: the first absence would
+  // satisfy the predicate and return, so no `unknown` line is ever printed (the
+  // earlier `busy` ones still are). A duration could never tell those apart,
+  // because how long the run takes depends on how fast it booted and how many
+  // live sightings preceded the wipe, not on how many misses it required.
+  const states = pendingStates(r.stderr);
+  expect(states.filter((s) => s === "unknown").length).toBeGreaterThanOrEqual(1);
+  expect(states.at(-1)).toBe("unknown");
+  expect(states).toContain("busy"); // …and the sighting before the misses was live
 });
 
 test("agendo wait gives up early on a --state an exited session can never reach", async ({ mock }) => {
