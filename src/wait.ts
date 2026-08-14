@@ -317,6 +317,15 @@ export async function runWait(o: WaitOptions): Promise<number> {
     console.error(USAGE);
     return 1;
   }
+  // At most ONE entry per session. `misses` below is keyed by session id, so a
+  // session listed twice gets its counter bumped twice by a single tick and hits
+  // EXIT_CONFIRM_TICKS on the FIRST missed sighting — the exact false `exited`
+  // that rule exists to prevent, and terminal once reported. Repeating an id is
+  // easy to do from a script (`wait $A $B` where both resolve to the same
+  // session, or a full id alongside its short form), so dedupe here rather than
+  // trusting the caller. It also stops the wake payload listing one session
+  // twice with contradictory states.
+  sessions = [...new Map(sessions.map((s) => [s.id, s])).values()];
 
   // Only running sessions have a pane to poll. Resolve each session's live
   // window via the same reconciliation the menu uses (`refreshLiveTmux`), NOT
