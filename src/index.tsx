@@ -12,7 +12,7 @@ import {
   capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
   type SessionKind, type Readiness, type PaneSnapshot,
 } from "./tmux.ts";
-import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
+import { formatResetTime, paneResetAt } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { durationLabel, idleSeconds, isStalled, resolveStalledAfterMs, shortAge } from "./idle.ts";
@@ -46,8 +46,28 @@ Usage:
       --attach, -a              Switch/attach to it immediately (default: detached)
       --name, -n <slug>         Name the worktree/branch (else derived from prompt)
       --no-worktree             Run in the current checkout instead of a new worktree
+      --worktree                Force a new worktree (only useful with --orchestrator,
+                                which otherwise runs in the main checkout)
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
+      --orchestrator, -O        Run the session in ORCHESTRATOR MODE: it writes no
+                                project code itself — it splits the goal into units,
+                                launches one background session per unit (each with a
+                                sub-agent dev→review loop), monitors them via
+                                list/status/send, and squash-merges each finished
+                                branch into the main branch. Claude only. Runs in the
+                                repo's MAIN checkout (not a worktree) — git allows the
+                                main branch in only one working tree, which is where
+                                the merges have to happen. --worktree overrides, and
+                                then names the branch "orchestrator" (-2, -3, … if
+                                taken) unless --name says otherwise. Unlike other
+                                background launches it keeps its approval prompts,
+                                since it acts on your main checkout; --unattended
+                                waives them.
+      --unattended              Only with --orchestrator: run it auto-approving, like
+                                an ordinary background session. It merges into your
+                                main checkout and spawns further sessions, so this
+                                hands all of that over unreviewed.
       --model <name>            Model for the new session, passed to the agent
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
@@ -56,11 +76,14 @@ Usage:
                                 (readiness, kind, id, age, dir, title). "age" is
                                 how long since the session last did anything; a
                                 live, non-busy session idle past the stall
-                                threshold is marked ⚠stalled. With a dir, only
-                                sessions whose cwd is under it are shown.
+                                threshold is marked ⚠stalled. A session at its
+                                usage limit reads "limited <time>" when the pane
+                                says when it resets — waiting on a quota, so
+                                never ⚠stalled. With a dir, only sessions whose
+                                cwd is under it are shown.
       --json                    Emit machine-readable JSON (with branch + linked
-                                PR + work-item/issue + idleSeconds/stalled and
-                                unpushed-work state per session).
+                                PR + work-item/issue + idleSeconds/stalled +
+                                ISO limitResetAt + unpushed-work state per session).
       --stalled-after <dur>     Idle time after which a live, non-busy session is
                                 flagged stalled (default 4h; persist your own via
                                 "stalledAfterMinutes" in ~/.agendo/config.json).
@@ -85,22 +108,29 @@ Usage:
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status.
       --attach, -a              Switch/attach to it immediately (default: detached)
-  agendo wait [id...]          Block until the target session(s) settle to a
-                                non-busy state, then exit 0; exit non-zero on
-                                timeout. Run it in the background and use its exit
-                                as a notification instead of re-polling status.
+  agendo wait [id...]          Block until the target session(s) settle, then exit
+                                0; exit non-zero if they don't (timeout, exited,
+                                usage-limited). Run it in the background and use
+                                its exit as a notification, not re-polling status.
                                 With no ids, select with --all / --prefix, and
                                 scope any of those with --repo / --path.
                                 A session whose window closes reads "exited": it
                                 satisfies the default wait, and short-circuits a
-                                --state it can no longer reach.
+                                --state it can no longer reach. One at its usage
+                                limit does NOT — it's paused, not done: the wait
+                                wakes on it promptly but exits non-zero
+                                ("blocked"). An explicit --state/--not is never
+                                pre-empted that way, so --state limited wakes on
+                                the cap as a success and --not limited waits it out.
       --any                     Wake on the FIRST session to satisfy, not all of
                                 them (so one stuck session can't mask the rest)
       --json                    Emit a wake payload on stdout: why it woke, and
                                 each session's from → state, changed, satisfied,
-                                plus resumeDialog (parked on claude's resume
-                                dialog: it reads ready, but nothing has run yet)
-      --state <ready|busy|…>    Wait for exactly this state (default: non-busy).
+                                limitResetAt, plus resumeDialog (parked on
+                                claude's resume dialog: it reads ready, but
+                                nothing has run yet)
+      --state <ready|busy|…>    Wait for exactly this state (default: settled —
+                                not busy, limited or unknown).
                                 One of ready, busy, compacting, queued, dialog,
                                 limited, unknown, exited. "dialog" means a question
                                 for you — claude's own resume dialog reads ready,
@@ -268,8 +298,11 @@ if (process.argv[2] === "status") {
 // swallowed into the prompt, so a typo'd flag can't quietly change the task.
 if (process.argv[2] === "launch") {
   let name: string | undefined;
-  let worktree = true;
+  // undefined = "not specified", so the default can depend on --orchestrator below.
+  let worktree: boolean | undefined;
   let attach = false;
+  let orchestrator = false;
+  let unattended = false;
   let agent: AgentSource = "claude";
   // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
   const forwardArgv: string[] = [];
@@ -285,7 +318,24 @@ if (process.argv[2] === "launch") {
     const flag = inline ? a.slice(0, eq) : a;
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
+    else if (a === "--worktree") worktree = true;
     else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
+    // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
+    // would be rejected outright and `-O` would fall through into the prompt —
+    // launching an ordinary session that looks like it was asked to orchestrate.
+    else if (flag === "--orchestrator" || a === "-O" || a.startsWith("-O=")) {
+      // A boolean flag: `--orchestrator=false` reads as "off" to a human but
+      // would enable it here, so an inline value is refused, never guessed.
+      // `-O=…` is checked separately because `inline` only recognises the `--`
+      // form, and single-dash args fall through to the prompt rather than to the
+      // unknown-flag guard — so without this it would silently become prompt text.
+      if (inline || a.startsWith("-O=")) {
+        console.error(`launch failed: --orchestrator takes no value (got "${a}")`);
+        process.exit(1);
+      }
+      orchestrator = true;
+    }
+    else if (a === "--unattended") unattended = true;
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
     else if (flag === "--agent") {
@@ -325,8 +375,38 @@ if (process.argv[2] === "launch") {
       process.exit(1);
     }
   }
+  // Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
+  // equivalent for, so a Copilot orchestrator would run with none of the
+  // coordinate-don't-implement instructions. Refuse loudly rather than degrade.
+  // `agent` defaults to claude, so "copilot" here can only mean a flag asked for
+  // it — no need to track explicitness separately.
+  if (orchestrator && agent === "copilot") {
+    console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
+    process.exit(1);
+  }
+  // `--unattended` only ever loosens an ORCHESTRATOR's approvals — a plain
+  // background session is already unattended. Accepting it elsewhere would read
+  // as "this made a difference" when it changed nothing at all.
+  if (unattended && !orchestrator) {
+    console.error(`launch failed: --unattended only applies with --orchestrator (background sessions already run unattended)`);
+    process.exit(1);
+  }
+  // An orchestrator squash-merges into the main branch, and git allows the main
+  // branch in only ONE working tree — the primary checkout. A worktree would give
+  // it an empty branch it never commits to while forcing every merge to reach out
+  // to the repo root, so orchestrators run in the main checkout unless asked
+  // otherwise. Ordinary background sessions keep their isolation.
+  const useWorktree = worktree ?? !orchestrator;
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent, forwardArgv });
+  const { plan, id, cwd, error } = launchTask(process.cwd(), {
+    prompt,
+    name,
+    worktree: useWorktree,
+    agent,
+    orchestrator,
+    unattended,
+    forwardArgv,
+  });
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -342,7 +422,7 @@ if (process.argv[2] === "launch") {
       {
         id,
         cwd,
-        title: prompt || "background session",
+        title: prompt || (orchestrator ? "orchestrator session" : "background session"),
         source: agent,
         // Claude is profile-scoped via CLAUDE_CONFIG_DIR; Copilot keeps all state
         // under ~/.copilot, so it carries no config dir.
@@ -359,7 +439,7 @@ if (process.argv[2] === "launch") {
     spawnSync(cmd, args, { stdio: "inherit" });
   } else {
     // Print machine-readable next steps for the agent/human that launched it.
-    console.log(`▸ launched background session ${id}`);
+    console.log(`▸ launched ${orchestrator ? "orchestrator" : "background"} session ${id}`);
     console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
     console.log(`  status:  ${SELF_CMD} status ${id}`);
     console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);
@@ -619,10 +699,17 @@ async function runStatus(
   const idle = idleSeconds(s.lastUsed);
   const thresholdMs = resolveStalledAfterMs(stalledAfterMs);
   const stalled = isStalled({ running, readiness, resumeDialog, idleSeconds: idle }, thresholdMs);
-  // Resolving the threshold reads config.json, so a malformed one is discovered
-  // HERE. Drain now rather than leave it to the resume-dialog branch below: a
-  // corrupt config would otherwise silently fall back to the default threshold
-  // and print a stall verdict the user can't explain.
+  // Both config-derived values are resolved BEFORE the single drain below: the
+  // stall threshold here, and the resume choice the dialog line prints further
+  // down. A malformed config.json queues its complaint once per read, and
+  // `takeWarnings` dedupes only against the not-yet-drained batch — so draining
+  // between the two reads would print the identical line twice. One read each,
+  // one drain, one message.
+  const resumeChoice = resumeDialogChoice();
+  // …and the drain has to happen here rather than inside the resume-dialog branch
+  // (where it used to live): a corrupt config falls back to the default threshold
+  // on EVERY status, and would otherwise print a stall verdict — or withhold one —
+  // that the user has no way to explain.
   flushWarnings("status");
   console.log(`${running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
   console.log(`  id:     ${s.id}`);
@@ -646,13 +733,22 @@ async function runStatus(
     // pane is parked on claude's own resume dialog — say so, since `send` will
     // answer it rather than paste into it.
     if (resumeDialog) {
-      console.log(`  resume: claude's resume dialog is open — \`${SELF_CMD} send\` answers it (${resumeDialogChoice()}) before delivering`);
-      flushWarnings("status"); // the choice it just printed may have come from a config it had to ignore
+      // The choice may have come from a config agendo had to ignore; that was
+      // already reported by the single drain above, which is why there is no
+      // second flush here.
+      console.log(`  resume: claude's resume dialog is open — \`${SELF_CMD} send\` answers it (${resumeChoice}) before delivering`);
     }
     if (readiness === "limited") {
-      const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
+      const resetAt = paneResetAt(stripAnsi(raw));
       console.log(
-        `  limit:  usage limit reached${resetAt !== null ? ` — resets at ${new Date(resetAt).toISOString()}` : " — no reset time parsed (cannot auto-resume)"}`,
+        // Both forms: the ISO instant for a machine reading `status` output, and
+        // the same local clock `list` and the menu show, so a human doesn't have
+        // to convert UTC in their head to match up the two commands.
+        `  limit:  usage limit reached${
+          resetAt !== null
+            ? ` — resets at ${new Date(resetAt).toISOString()} (${formatResetTime(resetAt)})`
+            : " — no reset time parsed (cannot auto-resume)"
+        }`,
       );
     }
     const shells = paneShells(raw);
@@ -874,7 +970,7 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
     process.exit(2);
   }
   sendResume(target);
-  const resetAt = readiness === "limited" ? parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS) : null;
+  const resetAt = readiness === "limited" ? paneResetAt(stripAnsi(raw)) : null;
   console.log(
     `▸ unblocked ${target}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
   );
@@ -911,6 +1007,17 @@ interface ListRow {
    * it a consumer would have to re-infer that from the pane itself.
    */
   resumeDialog: boolean;
+  /**
+   * When the usage limit resets, as an ISO 8601 instant — set only for a
+   * "limited" row whose pane states a time (the numbered limit dialog hides it,
+   * and we never press a key to reveal it), null otherwise. Machine-readable on
+   * purpose: the human list renders the same instant in the local locale.
+   *
+   * The other reason a consumer wants it: a `limited` row is never `stalled`
+   * however old it is (see src/idle.ts), and this is what says when it stops
+   * being someone else's problem.
+   */
+  limitResetAt: string | null;
   /** Background shells the running pane reports (0 when idle/unknown). */
   shells: number;
   /** How it was launched, when running (from the live-tmux reconciliation). */
@@ -943,6 +1050,39 @@ interface ListRow {
   workItem: { id: number; url: string } | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
+}
+
+/**
+ * The reset instant for a limited row, or null. Read-only: we parse whatever the
+ * pane already shows and never send a keystroke to uncover it, so a session
+ * parked in the numbered limit dialog — which hides the time until Escape —
+ * legitimately yields null. Shares `paneResetAt` with `wait` and the TUI so the
+ * three read the same screen the same way.
+ */
+function rowResetAt(readiness: Readiness | null, raw: string): number | null {
+  return readiness === "limited" ? paneResetAt(stripAnsi(raw)) : null;
+}
+
+/**
+ * The readiness column's text: the bare state word, plus the locale-formatted
+ * reset time when a limited pane told us one ("limited 14:00"). No placeholder
+ * when it didn't — a plain "limited" is the honest answer. The time is printed
+ * as stated even when it has already passed (the pane's own claim, and a clock
+ * time the reader can compare to now); the TUI, which has room, additionally
+ * distinguishes that case as "reset passed".
+ */
+function readyCell(readiness: Readiness | null, resetAt: number | null): string {
+  const word = readiness ?? "-";
+  return resetAt === null ? word : `${word} ${formatResetTime(resetAt)}`;
+}
+
+/**
+ * Width of the readiness column: the usual 10 (fits every state word), widened
+ * only as far as the longest `limited <time>` on screen so the columns after it
+ * stay aligned whatever the locale's time format is.
+ */
+function readyWidth(cells: string[]): number {
+  return Math.max(10, ...cells.map((c) => c.length));
 }
 
 /**
@@ -1055,11 +1195,13 @@ async function runList(opts: ListOptions): Promise<void> {
     // Parked on claude's own resume dialog: reads `ready`, but nothing has run
     // yet, so its idle age is the previous run's and it is never stalled.
     let resumeDialog = false;
+    let resetAt: number | null = null;
     if (running && window) {
       const { raw, cursor } = capturePaneState(window);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
       resumeDialog = paneResumeDialogActive(raw);
+      resetAt = rowResetAt(readiness, raw);
     }
     const l = linkOf(s);
     const idle = idleSeconds(s.lastUsed);
@@ -1070,6 +1212,7 @@ async function runList(opts: ListOptions): Promise<void> {
       running,
       readiness,
       resumeDialog,
+      limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
       shells,
       kind: running ? liveKinds.get(canon) ?? null : null,
       branch: s.branch ?? null,
@@ -1116,15 +1259,17 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   const itemLabel = model?.provider === "github" ? "issue" : "wi";
+  const ready = rows.map((r) => readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt)));
+  const rw = readyWidth(ready);
   console.log(
-    ["", "ready".padEnd(10), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+    ["", "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
-  for (const r of rows) {
+  for (const [i, r] of rows.entries()) {
     const wfRunning = r.workflows.filter((w) => w.status === "running").length;
     console.log(
       [
         r.running ? "●" : "○",
-        (r.readiness ?? "-").padEnd(10),
+        ready[i].padEnd(rw),
         (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
         r.shortId.padEnd(12),
         timeAgo(new Date(r.lastUsed)).padEnd(8),
@@ -1157,7 +1302,9 @@ function runPlainList(
   thresholdMs: number,
 ): void {
   const seen = new Set<string>();
-  const rows: string[] = [];
+  // Cells, not finished lines: the readiness column's width isn't known until
+  // every row is in (a `limited <time>` cell is wider than the state words).
+  const rows: string[][] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
@@ -1181,27 +1328,32 @@ function runPlainList(
     const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
     // …and so is the liveness the stall qualifier requires. A pane on claude's
     // own resume dialog is excluded there: it reads `ready` but hasn't run yet.
+    // A `limited` one is excluded too, by the shared settled test — the readiness
+    // cell beside this already says when its cap lifts, so the two never both
+    // describe the same pause.
     const stalled = isStalled(
       { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), idleSeconds: idleSeconds(s.lastUsed) },
       thresholdMs,
     );
-    rows.push(
-      [
-        "●",
-        readiness.padEnd(10),
-        KIND_LABEL[kind].padEnd(3),
-        shortId(s.id),
-        timeAgo(s.lastUsed).padEnd(8),
-        (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
-        s.title.replace(/\s+/g, " ").slice(0, 44),
-        [stalled ? STALLED_MARK : "", shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""]
-          .filter(Boolean)
-          .join(" "),
-      ].join("  ").trimEnd(),
-    );
+    rows.push([
+      "●",
+      readyCell(readiness, rowResetAt(readiness, raw)),
+      KIND_LABEL[kind].padEnd(3),
+      shortId(s.id),
+      timeAgo(s.lastUsed).padEnd(8),
+      (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
+      s.title.replace(/\s+/g, " ").slice(0, 44),
+      [stalled ? STALLED_MARK : "", shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""]
+        .filter(Boolean)
+        .join(" "),
+    ]);
   }
-  if (rows.length === 0) console.log("No running sessions.");
-  else rows.forEach((r) => console.log(r));
+  if (rows.length === 0) {
+    console.log("No running sessions.");
+    return;
+  }
+  const rw = readyWidth(rows.map((r) => r[1]));
+  for (const [dot, ready, ...rest] of rows) console.log([dot, ready.padEnd(rw), ...rest].join("  ").trimEnd());
 }
 
 /** A session working a PR / issue's branch, as reported by the resource lists. */

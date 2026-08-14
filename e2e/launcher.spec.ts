@@ -720,6 +720,127 @@ test("fresh-session flow creates a worktree and launches claude in tmux", async 
   });
 });
 
+// ── orchestrator mode from the TUI (`O` in the Sessions view) ─────────────────
+// The one-keypress entry point. It must be advertised, reuse the existing
+// repo → worktree → name flow (including the scoped-repo behaviour), and end up
+// spawning a claude that actually carries the orchestrator instructions.
+test("O in the Sessions view launches an orchestrator through the normal worktree flow", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3"); // Sessions view
+  let screen = await wt.waitForText("Running now");
+  // The action is discoverable, alongside the existing `n new`.
+  expect(screen).toContain("O orchestrator");
+
+  wt.write("O");
+  // Straight to the repo picker — no agent step, since the mode is Claude-only.
+  screen = await wt.waitForText("Orchestrator session — pick a repo");
+  expect(screen).toContain("writes no code itself");
+  expect(screen).not.toContain("Which agent should run this session?");
+  // Same repo list the plain new-session flow offers (scoped-repo behaviour reused).
+  expect(screen).toContain("appweb");
+
+  await wt.press(KEY.enter); // top repo (appweb) → worktree-vs-main choice
+  screen = await wt.waitForText("choose where to run");
+  expect(screen).toContain("Orchestrator session in appweb");
+  // The choice explains itself, and the cursor already sits on the main checkout —
+  // git keeps the main branch in one working tree, and merging is the whole job.
+  expect(screen).toContain("git keeps that");
+  expect(screen).toMatch(/❯\s+Main repo checkout/);
+
+  // Accepting that default launches immediately: there's no branch to name, so no
+  // prompt whose value would just be discarded.
+  await wt.press(KEY.enter);
+
+  // It runs in the repo ROOT, not a worktree, under a `cl-new-…` target, carrying
+  // the orchestrator instructions.
+  const expectedCwd = join(mock.home, "repos", "appweb");
+  await waitUntil(async () => {
+    const spawned = (await mock.tmuxLog()).find(
+      (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude"),
+    );
+    if (!spawned) return false;
+    const appended = spawned[spawned.indexOf("--append-system-prompt") + 1] ?? "";
+    return (
+      spawned.some((a) => a.startsWith("cl-new-")) &&
+      appended.includes("ORCHESTRATOR MODE") &&
+      appended.includes("Never write project code yourself") &&
+      appended.includes("do not open a pull request") &&
+      // The launcher's own pointer must still ride along in the same value.
+      appended.includes("You are running inside agendo")
+    );
+  });
+  // No worktree was created for it.
+  expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
+});
+
+// The isolation escape hatch is still reachable in the TUI: pick "New git worktree"
+// and the role-slug branch prompt appears as before.
+test("the orchestrator flow can still opt into its own worktree", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  await wt.waitForText("Running now");
+  wt.write("O");
+  await wt.waitForText("Orchestrator session — pick a repo");
+  await wt.press(KEY.enter); // appweb → wtchoice (cursor on "Main repo checkout")
+  await wt.waitForText("choose where to run");
+  await wt.press(KEY.up); // move up to "New git worktree"
+  await wt.press(KEY.enter);
+
+  // Now the branch prompt appears, prefilled with the ROLE slug. Assert on the
+  // labelled field, not a bare "orchestrator" substring — the same screen renders
+  // "→ claude (orchestrator mode)", which would satisfy that even if empty.
+  const screen = await wt.waitForText("New branch off origin/HEAD");
+  expect(screen).toMatch(/branch:\s*orchestrator/);
+  expect(screen).toContain("(orchestrator mode)");
+
+  await wt.press(KEY.enter);
+  const expectedCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "orchestrator");
+  await waitUntil(async () =>
+    (await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree") && l.includes(expectedCwd)),
+  );
+});
+
+test("n in the Sessions view still launches a plain session (no orchestrator prompt)", async ({ launch, mock }) => {
+  // The inverse guard: adding `O` must not have turned every manual session into
+  // an orchestrator, and `n` must still offer the agent picker it always did.
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  await wt.waitForText("Running now");
+
+  wt.write("n");
+  await wt.waitForText("Which agent should run this session?"); // agent step is intact
+  await wt.press(KEY.enter); // Claude
+  await wt.waitForText("New session — pick a repo");
+  await wt.press(KEY.enter); // appweb
+  await wt.waitForText("choose where to run");
+  await wt.press(KEY.enter); // new worktree
+  await wt.waitForText("New session in appweb");
+  // A plain free session has no prefilled name — type one.
+  wt.write("scratch");
+  await wt.waitForText("scratch");
+  await wt.press(KEY.enter);
+
+  const expectedCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "scratch");
+  await waitUntil(async () =>
+    (await mock.tmuxLog()).some((argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude")),
+  );
+  const spawned = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude"),
+  )!;
+  const appended = spawned[spawned.indexOf("--append-system-prompt") + 1] ?? "";
+  expect(appended).toContain("You are running inside agendo");
+  expect(appended).not.toContain("ORCHESTRATOR MODE");
+});
+
 test("renders identically with the running session flipped off", async ({ launch, mock }) => {
   // Flip fake-tmux to have no live sessions before launch: badge goes gray.
   await mock.setTmuxState({ sessions: [], windows: [], panes: [] });

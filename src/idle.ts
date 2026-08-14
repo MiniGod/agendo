@@ -81,9 +81,12 @@ export interface StallInput {
  *  • The settled test is `isSettledReadiness`, the SAME predicate `agendo wait`
  *    uses for "has this session stopped working" (tmux.ts) — not a second
  *    lookalike rule. So a busy/compacting session is never stalled however old
- *    its transcript looks, and neither is one reading `unknown`: a blank or
- *    not-yet-drawn pane is absence of evidence, and `wait` refuses to call that
- *    "done" for exactly the same reason.
+ *    its transcript looks; neither is one reading `unknown`, because a blank or
+ *    not-yet-drawn pane is absence of evidence and `wait` refuses to call that
+ *    "done" for exactly the same reason; and neither is a `limited` one, which
+ *    has stopped but is waiting on a quota reset it will come back from on its
+ *    own — the list row prints when. Calling that hung would contradict `wait`,
+ *    which wakes on a capped target with `woke: "blocked"` rather than success.
  *  • A pane parked on claude's own resume dialog is excluded outright. It reads
  *    as `ready` (the dialog is answerable, so `send` treats it as reachable) and
  *    its transcript mtime is arbitrarily old, because the session it belongs to

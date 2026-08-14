@@ -74,8 +74,12 @@ large task out across many worktrees and coordinate them, instead of hand-rollin
 tmux and `git worktree`. The sessions it starts inherit the same ability.
 
 To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
-a watched session stops working — settles to a non-busy state, or its window closes —
-so it can be run in the background with its **exit** as the notification:
+a watched session settles — a non-busy state, or its window closing — so it can be run
+in the background with its **exit** as the notification. A session parked at its usage
+cap is the one thing that stops without being _done_: the wait wakes on it promptly,
+but exits non-zero with `woke: "blocked"` and the session's `limitResetAt`, so a capped
+session is never mistaken for finished work (an explicit `--state`/`--not` is never
+pre-empted that way, so you can still wait _through_ a cap):
 
 ```sh
 agendo wait --repo myapp --any --json --timeout 30m
@@ -108,7 +112,32 @@ uses, so the two agree by construction: `wait` tells you a session settled, and 
 stall marker tells you one settled a long time ago and nobody came back. A session
 parked on the resume dialog is the one exception: it reads `ready` and its recorded
 activity is hours old, but it hasn't run yet, so it is never marked stalled — `--json`
-carries `resumeDialog: true` to say why.
+carries `resumeDialog: true` to say why. A session parked at its usage cap is excluded
+for the same reason: `limited` means waiting on a quota reset (the row shows when it
+lifts), not hung, so it is never marked stalled either.
+
+### Orchestrator mode, one keypress away
+
+Press `O` in the Sessions view — or run `agendo launch --orchestrator "<goal>"` — to
+start a session that is _only_ a coordinator. It gets the orchestrator instructions
+injected into its system prompt: write no project code, split the goal into units,
+launch one background session per unit (each running an implement → sub-agent review →
+fix loop until a review pass comes back clean), keep a live task list, parallelize
+independent units, monitor via `list`/`status` and steer via `send`, then squash-merge
+each finished branch into the main branch — no PRs. The framing is re-injected on
+resume, so a restored orchestrator doesn't quietly turn back into an implementer.
+
+Unlike every other launch, an orchestrator runs in the repo's **main checkout** rather
+than a worktree: git allows the main branch in only one working tree, and that's where
+its merges have to land. It writes no project code, so it needs no isolation of its own
+— pass `--worktree` (or pick "New git worktree") if you want it anyway.
+
+Because it acts on your main checkout and spawns further sessions, an orchestrator also
+**keeps its approval prompts** — it's the one background launch that isn't auto-approved.
+Add `--unattended` to waive them once you're happy to let it run on its own. For the same
+reason `--orchestrator` is documented here and in `--help`, but deliberately left out of
+`agendo --llm`: that guide is injected into every launched session, and a worktree-sandboxed
+agent shouldn't be able to read its way into starting an orchestrator in your main checkout.
 
 ### Fresh sessions in isolated worktrees
 
