@@ -10,6 +10,7 @@
 import { homedir } from "os";
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { parseJsonFileOr } from "./errors.ts";
 import type { ProviderName } from "./types.ts";
 import type { ResumeDialogChoice } from "./tmux.ts";
 
@@ -84,21 +85,30 @@ function firstExisting(paths: string[]): string {
 /**
  * A fresh copy of the shipped defaults, arrays included. DEFAULT_CONFIG is
  * exported, so handing it (or its `closedStates` array) out by identity would let
- * one caller's edit leak into every later load.
+ * one caller's edit leak into every later load. Every return path below hands out
+ * a call of this, never the shared object.
  */
 function defaults(): Config {
   return { ...DEFAULT_CONFIG, closedStates: [...DEFAULT_CONFIG.closedStates] };
 }
 
+// A malformed config/state file falls back to defaults and records a warning
+// naming the path (surfaced by the UI) rather than throwing: both files are
+// preferences whose every value is re-derivable, so bricking the launcher over
+// one — with a message that doesn't even say which file — is strictly worse.
 export function loadConfig(): Config {
   const path = firstExisting([CONFIG_PATH, PREV_CONFIG_PATH, OLD_CONFIG_PATH]);
   if (!existsSync(path)) return defaults();
+  let text: string;
   try {
-    const override = JSON.parse(readFileSync(path, "utf-8"));
-    return { ...defaults(), ...override };
+    text = readFileSync(path, "utf-8");
   } catch {
-    return defaults();
+    return defaults(); // unreadable (permissions, races) — nothing to diagnose
   }
+  const override = parseJsonFileOr<Partial<Config>>(text, path, {});
+  // `JSON.parse('"oops"')`/`42` succeed but aren't records; spreading a string
+  // would inject its character indices as config keys (same guard as loadState).
+  return { ...defaults(), ...(override && typeof override === "object" ? override : {}) };
 }
 
 /**
@@ -135,11 +145,16 @@ export interface LauncherState {
 export function loadState(): LauncherState {
   const path = firstExisting([STATE_PATH, PREV_STATE_PATH, OLD_STATE_PATH]);
   if (!existsSync(path)) return {};
+  let text: string;
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as LauncherState;
+    text = readFileSync(path, "utf-8");
   } catch {
     return {};
   }
+  const state = parseJsonFileOr<LauncherState>(text, path, {});
+  // `JSON.parse("42")`/`"null"` succeed but aren't records; a non-object state
+  // would break every `state.x` read below it.
+  return state && typeof state === "object" ? state : {};
 }
 
 export function saveState(state: LauncherState): void {

@@ -20,6 +20,7 @@ import { resolveContext, isUnderRoot } from "./context.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState, resumeDialogChoice } from "./config.ts";
+import { takeWarnings } from "./errors.ts";
 import { printJson } from "./output.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
@@ -517,6 +518,7 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
     // answer it rather than paste into it.
     if (paneResumeDialogActive(raw)) {
       console.log(`  resume: claude's resume dialog is open — \`${SELF_CMD} send\` answers it (${resumeDialogChoice()}) before delivering`);
+      flushWarnings("status"); // the choice it just printed may have come from a config it had to ignore
     }
     if (readiness === "limited") {
       const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
@@ -636,6 +638,11 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   let readiness = paneReadiness(raw, cursor);
   if (paneResumeDialogActive(raw)) {
     const choice = resumeDialogChoice();
+    // Reading the config can report-and-ignore a malformed config.json, and this
+    // is the one command that ACTS on that file's value. Silently falling back to
+    // the default while pressing a key into a live session is exactly the case
+    // that warning exists for, so drain it here as `list` does for its own loads.
+    flushWarnings("send");
     const option = resumeDialogOption(raw, choice);
     if (!option) {
       console.error(`Not sending: claude's resume dialog is open but no "${choice}" option was found — answer it yourself, then retry.`);
@@ -771,6 +778,17 @@ interface ListRow {
  * identity, if any. Used by the association-resolving `list` modes so their
  * gh/az fetch set matches what the menu would show.
  */
+/**
+ * Print (and clear) anything the load reported-and-ignored. The TUI surfaces
+ * these as a notice; the CLI has no such chrome, so they go to stderr — leaving
+ * stdout clean for `--json`. Without this a corrupt `~/.agendo/state.json` would
+ * silently drop the persisted backend and identity, and the command would query
+ * the wrong backend with no hint as to why.
+ */
+function flushWarnings(prefix: string): void {
+  for (const w of takeWarnings()) console.error(`${prefix}: ${w}`);
+}
+
 function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProvider>; identity: Identity | null } {
   const st = loadState();
   const provider = resolveInitialProvider(st.provider);
@@ -809,6 +827,7 @@ async function runList(opts: ListOptions): Promise<void> {
     }
     console.error(`list: continuing without PR/work-item associations (${msg})`);
   }
+  flushWarnings("list");
 
   const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
   const linkOf = (s: AgentSession) => model?.sessionLinks.get(`${s.source}:${s.id}`);
@@ -996,10 +1015,12 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
   try {
     model = await loadModel(currentModelOptions());
   } catch (e) {
+    flushWarnings("list pr");
     console.error(`list pr: could not load pull requests from the backend: ${(e as Error)?.message ?? e}`);
     process.exit(1);
     return;
   }
+  flushWarnings("list pr");
   // PRs I created: linked-to-a-work-item + orphans. Dedupe by repo:id — GitHub PR
   // numbers are per-repo, so id alone can collide across repos.
   const seen = new Set<string>();
@@ -1067,10 +1088,12 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
   try {
     model = await loadModel(currentModelOptions());
   } catch (e) {
+    flushWarnings("list issues");
     console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);
     process.exit(1);
     return;
   }
+  flushWarnings("list issues");
   const label = model.provider === "github" ? "issue" : "work item";
   const seen = new Set<number>();
   const items: WorkItem[] = [];

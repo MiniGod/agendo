@@ -509,6 +509,23 @@ test("agendo send refuses to paste when the input box never comes back", async (
   expect(log.some((argv) => argv[0] === "set-buffer")).toBe(false);
 });
 
+test("agendo send says so when a corrupt config.json cost it the resume choice", async ({ mock }) => {
+  // `send` is the one command that ACTS on config.json's value — by pressing keys
+  // into a live session. A corrupt file falls back to the default silently, which
+  // is precisely the "say what failed to parse" case: the fallback still answers
+  // the dialog (so the send goes through), but stderr names the file.
+  writeFileSync(join(mock.home, ".claude-launcher", "config.json"), "{ not json");
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const r = agendo(mock.env, "send", "--timeout", "5s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stderr).toContain("send:");
+  expect(r.stderr).toContain("config.json");
+  // …and it fell back to the recommended option rather than refusing to answer.
+  expect(r.stdout).toContain("Resume from summary");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
 test("agendo send rejects a malformed --timeout, and delivers nothing", async ({ mock }) => {
   // `send` parses its own duration flag (sharing `wait`'s parseDuration but not
   // its argv parser, which is wait-specific), so the rejection needs its own pin:
