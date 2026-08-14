@@ -36,7 +36,7 @@ import { readFileSync } from "fs";
 import { readdir, readFile } from "fs/promises";
 import { createConnection } from "net";
 import { join } from "path";
-import { claudeConfigDirs } from "./sessions.ts";
+import { discoverProfiles } from "./profiles.ts";
 
 /** A live Claude Code session reachable over its messaging socket. */
 export interface PeerSession {
@@ -120,15 +120,28 @@ function procStartTime(pid: number): string | null {
 }
 
 /**
- * Every live session registered under any `~/.claude*` config dir. Registry
- * files outlive their process, so entries whose pid is gone are skipped — a
- * stale `<pid>.json` from a crashed session would otherwise shadow a real one.
+ * Every live session registered under any `~/.claude*` profile. Registry files
+ * outlive their process, so entries whose pid is gone are skipped — a stale
+ * `<pid>.json` from a crashed session would otherwise shadow a real one.
+ *
+ * Profiles come from profiles.ts UNDEDUPED, unlike the transcript scan. That
+ * dedupe collapses profiles sharing a `projects/` store, which says nothing
+ * about their `sessions/` dirs — an alias that symlinks only `projects/` keeps
+ * its own registry, and dropping it would lose those peers. Scanning every
+ * profile and deduping the RESULT by pid is correct either way: a pid names a
+ * process, so the same session reached through two names collapses to one entry
+ * and two genuinely distinct sessions never do.
+ *
+ * Inherited from that discovery: a `~/.claude*` dir is only a profile once it
+ * has a `projects/` store. A session writes its transcript there as it starts,
+ * so a live session's profile qualifies — but a registry sitting in a dir that
+ * has never held one is invisible here, and its session takes the tmux path.
  */
 export async function livePeers(): Promise<PeerSession[]> {
-  const dirs = await claudeConfigDirs();
+  const profiles = await discoverProfiles();
   const out: PeerSession[] = [];
   await Promise.all(
-    dirs.map(async (configDir) => {
+    profiles.map(async ({ configDir }) => {
       const dir = join(configDir, "sessions");
       const files = await readdir(dir).catch(() => [] as string[]);
       await Promise.all(
@@ -142,6 +155,12 @@ export async function livePeers(): Promise<PeerSession[]> {
           } catch {
             return;
           }
+          // A truncated write can leave a file holding literal `null`, which
+          // parses fine and then throws on the first property read — the one
+          // corrupt shape the parse guard above doesn't already absorb. Every
+          // other scalar (`1`, `"s"`, `[]`) is harmless: the field reads below
+          // just come back undefined and the entry is skipped.
+          if (!r || typeof r !== "object") return;
           const pid = typeof r.pid === "number" ? r.pid : NaN;
           const sessionId = typeof r.sessionId === "string" ? r.sessionId : "";
           const socketPath = typeof r.messagingSocketPath === "string" ? r.messagingSocketPath : "";
@@ -169,10 +188,13 @@ export async function livePeers(): Promise<PeerSession[]> {
       );
     }),
   );
-  // Concurrent reads finish in arbitrary order; sort so that two entries
-  // claiming the same session (a crash leaving a stale file behind a recycled
-  // pid) always resolve the same way — newest pid wins.
-  return out.sort((a, b) => b.pid - a.pid);
+  // Concurrent reads finish in arbitrary order, and one process can be reached
+  // through two profile names (see above). Collapse by pid — the process
+  // identity — then sort, so the list is the same on every call regardless of
+  // which read won. Descending pid is an arbitrary but stable order; it is NOT a
+  // recency claim (pids wrap), and it isn't load-bearing: a stale entry behind a
+  // recycled pid is already excluded by pidAlive's procStart check.
+  return [...new Map(out.map((p) => [p.pid, p])).values()].sort((a, b) => b.pid - a.pid);
 }
 
 /**
