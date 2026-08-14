@@ -114,9 +114,18 @@ export function checkAuth(): Promise<boolean> {
 }
 
 // ── Low-level fetch ───────────────────────────────────────────────────────────
-async function adoGet(path: string): Promise<any> {
+/**
+ * GET an ADO endpoint as JSON. `path` may be an absolute URL (the VSSPS/Graph
+ * hosts) or a path appended to BASE.
+ *
+ * `allow404` lets a call site treat "not found" as an absent resource,
+ * resolving to `null` instead of throwing. It's opt-in per call: on most
+ * endpoints a 404 means a bad project/team/id and must surface as an error.
+ */
+async function adoGet(path: string, opts: { allow404?: boolean } = {}): Promise<any> {
   const url = path.startsWith("http") ? path : `${BASE}/${path}`;
   const r = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
+  if (r.status === 404 && opts.allow404) return null;
   if (!r.ok) throw new Error(`ADO GET ${url} -> ${r.status} ${r.statusText}`);
   return r.json();
 }
@@ -136,12 +145,17 @@ async function adoPost(path: string, body: unknown): Promise<any> {
 }
 
 // ── Current iteration for the configured team ─────────────────────────────────
+// A team that has never configured any sprints 404s here instead of returning an
+// empty `value` — both mean "no current iteration", so a 404 is tolerated. Left
+// as an error it would fail the whole model load and strand the interactive
+// launcher on its "press r to retry" screen, which never recovers (the same 404
+// comes back every time).
 export async function getCurrentIterationPath(): Promise<string | null> {
   const path =
     `${encodeURIComponent(cfg.project)}/${encodeURIComponent(cfg.team)}` +
     `/_apis/work/teamsettings/iterations?$timeframe=current&${API}`;
-  const data = await adoGet(path);
-  return data.value?.[0]?.path ?? null;
+  const data = await adoGet(path, { allow404: true });
+  return data?.value?.[0]?.path ?? null;
 }
 
 // ── Work items assigned to a person, not closed ───────────────────────────────

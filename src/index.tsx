@@ -19,7 +19,8 @@ import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "
 import { resolveInitialProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
 import { loadState } from "./config.ts";
-import { repoRootForCwd } from "./repos.ts";
+import { printJson, printLine } from "./output.ts";
+import { runWaitCli } from "./wait.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
@@ -67,11 +68,22 @@ Usage:
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status.
       --attach, -a              Switch/attach to it immediately (default: detached)
-  agendo wait [id...]          Poll until the target session(s) settle to a non-busy
-                                state, then exit 0; exit non-zero on timeout. With
-                                no ids, select with --all / --prefix / --repo.
-      --state <ready|busy|…>    Wait for exactly this readiness (default: non-busy)
-      --not <state>             Wait until readiness is anything but this
+  agendo wait [id...]          Block until the target session(s) settle to a
+                                non-busy state, then exit 0; exit non-zero on
+                                timeout. Run it in the background and use its exit
+                                as a notification instead of re-polling status.
+                                With no ids, select with --all / --prefix / --repo.
+                                A session whose window closes reads "exited": it
+                                satisfies the default wait, and short-circuits a
+                                --state it can no longer reach.
+      --any                     Wake on the FIRST session to satisfy, not all of
+                                them (so one stuck session can't mask the rest)
+      --json                    Emit a wake payload on stdout: why it woke, and
+                                each session's from → state, changed, satisfied
+      --state <ready|busy|…>    Wait for exactly this state (default: non-busy).
+                                One of ready, busy, compacting, queued, dialog,
+                                limited, unknown, exited.
+      --not <state>             Wait until the state is anything but this
       --timeout <dur>           Give up after this long (default 120s)
       --interval <dur>          Poll cadence (default 2s). Durations: 500ms, 2s, 5m…
       --all                     All running sessions
@@ -132,45 +144,6 @@ const KIND_LABEL: Record<SessionKind, string> = {
   pr: "pr",
   resumed: "—",
 };
-
-/**
- * Readiness states that mean the session is actively working (not settled) — the
- * default "still busy" set `agendo wait` polls against. Declared here, before the
- * subcommand dispatch runs, so the hoisted `waitSatisfied` never reads it in the
- * temporal dead zone during an early `wait` invocation.
- */
-const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
-
-/**
- * Print a JSON payload and await the write. The subcommand dispatch calls
- * `process.exit(0)` right after its runner returns, and Bun drops stdout still
- * buffered at exit — a `console.log` of a large payload into a pipe truncates
- * at ~64KB (the pipe buffer), silently corrupting `--json` output for the
- * scripts consuming it. Awaiting the write callback guarantees the payload is
- * flushed before the dispatch can exit.
- */
-function printJson(value: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    process.stdout.write(JSON.stringify(value, null, 2) + "\n", (err) => (err ? reject(err) : resolve()));
-  });
-}
-
-/**
- * Print one line and await the write — same reason as printJson: the subcommand
- * dispatch calls `process.exit(0)` as soon as the runner returns, and a pipe
- * write still buffered at that point is dropped. Used where the printed text IS
- * the deliverable (`agendo open`'s URLs, which agents consume over a pipe).
- *
- * Best-effort by design: it never rejects. A write error means the reader is
- * gone — `agendo open <id> --print | head -1` closes the pipe after the first
- * line — and turning that routine EPIPE into an unhandled rejection would crash
- * the command where a plain `console.log` would have exited cleanly.
- */
-function printLine(text: string): Promise<void> {
-  return new Promise((resolve) => {
-    process.stdout.write(text + "\n", () => resolve());
-  });
-}
 
 /** Compact "last used" age for the list columns (matches the menu's timeAgo). */
 function timeAgo(d: Date): string {
@@ -459,54 +432,13 @@ if (process.argv[2] === "unblock") {
   process.exit(0);
 }
 
-// `wait [id...]`: block until the selected session(s) reach a desired non-busy
-// state (like `gh run watch`), then exit 0; exit non-zero on timeout. Progress
-// goes to stderr, the final per-session state to stdout, so it composes in
-// scripts. Targets: explicit ids, or --all / --prefix / --repo selectors.
+// `wait [id...]`: block until the selected session(s) reach a desired state (like
+// `gh run watch`), then exit 0; exit non-zero on timeout. It's the notification
+// primitive for an orchestrator watching background sessions — run it in the
+// background and let its EXIT be the wake-up, instead of re-polling `status` on a
+// guessed cadence. See wait.ts for the poll contract and its cost.
 if (process.argv[2] === "wait") {
-  let all = false;
-  let prefix: string | undefined;
-  let repo: string | undefined;
-  let state: string | undefined;
-  let not: string | undefined;
-  let timeoutMs = 120_000;
-  let intervalMs = 2_000;
-  const ids: string[] = [];
-  const rest = process.argv.slice(3);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--all") all = true;
-    else if (a === "--prefix") prefix = rest[++i];
-    else if (a === "--repo") repo = rest[++i];
-    else if (a === "--state") state = rest[++i];
-    else if (a === "--not") not = rest[++i];
-    else if (a === "--timeout") timeoutMs = requireDuration("--timeout", rest[++i]);
-    else if (a === "--interval") intervalMs = requireDuration("--interval", rest[++i]);
-    else if (a === "--") { ids.push(...rest.slice(i + 1)); break; }
-    else ids.push(a);
-  }
-  const valid: Readiness[] = ["ready", "busy", "compacting", "queued", "dialog", "unknown"];
-  for (const [flag, v] of [["--state", state], ["--not", not]] as const) {
-    if (v !== undefined && !valid.includes(v as Readiness)) {
-      console.error(`wait: ${flag} must be one of ${valid.join("|")}, got "${v}"`);
-      process.exit(1);
-    }
-  }
-  if (state !== undefined && not !== undefined) {
-    console.error(`wait: use only one of --state / --not`);
-    process.exit(1);
-  }
-  await runWait({
-    ids,
-    all,
-    prefix,
-    repo,
-    state: state as Readiness | undefined,
-    not: not as Readiness | undefined,
-    timeoutMs,
-    intervalMs,
-  });
-  process.exit(0);
+  process.exit(await runWaitCli(process.argv.slice(3)));
 }
 
 // By default agendo runs inside a single canonical tmux host session — `agendo`
@@ -1303,150 +1235,6 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   console.log(`▸ resumed session ${shortId(s.id)}${plan.alreadyRunning ? " (was already running)" : ""}`);
   console.log(`  window:  ${plan.tmuxName}   (in ${s.cwd})`);
   console.log(`  status:  ${SELF_CMD} status ${shortId(s.id)}`);
-}
-
-interface WaitOptions {
-  ids: string[];
-  all: boolean;
-  prefix?: string;
-  repo?: string;
-  /** Desired readiness (exact match). Overrides the default non-busy predicate. */
-  state?: Readiness;
-  /** Wait until readiness is anything but this. */
-  not?: Readiness;
-  timeoutMs: number;
-  intervalMs: number;
-}
-
-/** Whether a pane's readiness satisfies the wait predicate. The default (no
- *  `--state`/`--not`) waits for a *known, settled* non-busy state — "unknown" is
- *  excluded so a blank, not-yet-drawn, or closed pane doesn't count as "done"
- *  and report a false success. */
-function waitSatisfied(r: Readiness, o: WaitOptions): boolean {
-  if (o.state) return r === o.state;
-  if (o.not) return r !== o.not;
-  return !BUSY_STATES.has(r) && r !== "unknown";
-}
-
-/** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
- *  if the string is missing or malformed, so the caller can reject it loudly
- *  rather than silently fall back to a default the user didn't ask for. */
-function parseDuration(s: string | undefined): number | null {
-  if (!s) return null;
-  const m = s.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i);
-  if (!m) return null;
-  const n = Number(m[1]);
-  switch ((m[2] ?? "s").toLowerCase()) {
-    case "ms": return n;
-    case "s": return n * 1_000;
-    case "m": return n * 60_000;
-    case "h": return n * 3_600_000;
-    default: return null;
-  }
-}
-
-/** Parse a required duration flag, exiting with a clear error on bad/missing input. */
-function requireDuration(flag: string, s: string | undefined): number {
-  const ms = parseDuration(s);
-  if (ms === null) {
-    console.error(`wait: ${flag} needs a duration like 500ms, 2s, 5m, 1h (got "${s ?? ""}")`);
-    process.exit(1);
-  }
-  return ms;
-}
-
-/**
- * Poll the selected session(s) until they all satisfy the wait predicate, then
- * exit 0; exit non-zero on timeout. Only running sessions can be waited on (an
- * idle session has no pane to read), so selectors filter to live targets;
- * explicit ids that aren't running are an error. Progress lines go to stderr and
- * the final per-session `<id>\t<state>` to stdout, so it composes in scripts.
- */
-async function runWait(o: WaitOptions): Promise<void> {
-  const index = await SessionIndex.build();
-  let sessions: AgentSession[];
-  if (o.ids.length) {
-    sessions = [];
-    const missing: string[] = [];
-    for (const tok of o.ids) {
-      const sid = tok.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(tok);
-      const s = index.all.find((x) => x.id === tok || shortId(x.id) === sid);
-      if (s) sessions.push(s);
-      else missing.push(tok);
-    }
-    if (missing.length) {
-      console.error(`wait: no session found for ${missing.join(", ")}`);
-      process.exit(1);
-    }
-  } else if (o.all) {
-    sessions = [...index.all];
-  } else if (o.prefix !== undefined || o.repo !== undefined) {
-    sessions = index.all.filter((s) => {
-      if (o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
-      if (o.repo !== undefined && basename(repoRootForCwd(s.cwd)) !== o.repo) return false;
-      return true;
-    });
-  } else {
-    console.error(
-      `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> ` +
-        `[--state <s>] [--not <s>] [--timeout <dur>] [--interval <dur>]`,
-    );
-    process.exit(1);
-  }
-
-  // Only running sessions have a pane to poll. Resolve each session's live
-  // window via the same reconciliation the menu uses (`refreshLiveTmux`), NOT
-  // `liveTargetForShortId`: that only matches id-bearing names, so a session
-  // running under a work-item / PR window (`cl-wi-…`/`cl-pr-…`, attributed by
-  // cwd) would be wrongly seen as not-running. `liveWindows` also excludes
-  // restored-but-unopened placeholders (idle bash), so we never "wait" on those.
-  // For explicit ids a non-running target can never settle, so it's an error;
-  // selectors just skip idle ones.
-  const { liveWindows } = refreshLiveTmux(index.all);
-  const targets: { s: AgentSession; target: string }[] = [];
-  const notRunning: AgentSession[] = [];
-  for (const s of sessions) {
-    const target = liveWindows.get(sessionName(s));
-    if (target) targets.push({ s, target });
-    else notRunning.push(s);
-  }
-  if (o.ids.length && notRunning.length) {
-    console.error(`wait: not running (no live window): ${notRunning.map((s) => shortId(s.id)).join(", ")}`);
-    process.exit(1);
-  }
-  if (targets.length === 0) {
-    console.error("wait: no running sessions matched — nothing to wait on.");
-    process.exit(1);
-  }
-
-  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : "non-busy";
-  console.error(`waiting for ${targets.length} session(s) to be ${desc} (timeout ${Math.round(o.timeoutMs / 1000)}s)…`);
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  // Floor the poll interval so a `--interval 0` can't spin a hot capture loop.
-  const interval = Math.max(100, o.intervalMs);
-  const deadline = Date.now() + o.timeoutMs;
-  while (true) {
-    const states = targets.map((t) => {
-      const { raw, cursor } = capturePaneState(t.target);
-      return { ...t, r: paneReadiness(raw, cursor) };
-    });
-    const pending = states.filter((x) => !waitSatisfied(x.r, o));
-    if (pending.length === 0) {
-      for (const x of states) console.log(`${shortId(x.s.id)}\t${x.r}`);
-      process.exit(0);
-    }
-    if (Date.now() >= deadline) {
-      console.error(
-        `wait: timed out after ${Math.round(o.timeoutMs / 1000)}s; still pending: ` +
-          pending.map((x) => `${shortId(x.s.id)}(${x.r})`).join(", "),
-      );
-      process.exit(1);
-    }
-    console.error(`  pending: ${pending.map((x) => `${shortId(x.s.id)}=${x.r}`).join(", ")}`);
-    // Never sleep past the deadline: bounds the timeout overrun to ~0 even when
-    // the interval is large relative to the remaining time.
-    await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
-  }
 }
 // Quit if our input stream goes away — e.g. the controlling terminal/PTY closed
 // because a parent process died, orphaning us. Without this, Ink keeps the
