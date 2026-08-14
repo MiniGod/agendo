@@ -19,7 +19,7 @@ import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
-import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
@@ -1376,6 +1376,22 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(hour).toBe("15"); // the notice's 3pm, not the git line's 10:00
   });
 
+  test("REGRESSION: the anchor never reads a time off the NEXT line", () => {
+    // The limit DIALOG has no reset time (it hides it), yet its own option line
+    // ends in "…wait for limit to reset". If the anchor could cross the newline,
+    // any clock time on the following line would be reported as the reset — and
+    // `agendo list` would print that fabricated time next to "limited".
+    const now = new Date("2026-06-15T12:00:00Z");
+    const dialog = [
+      "❯ 1. Stop and wait for limit to reset",
+      "  2. Add funds at 4:30pm to continue with usage credits",
+    ].join("\n");
+    expect(parseResetTime(dialog, now)).toBeNull();
+    // Same for ordinary scrollback: a bare `git reset` ending its line, with an
+    // unrelated log timestamp beneath it (the old anchor returned 14:05 here).
+    expect(parseResetTime("$ git reset\n[14:05] rebuilt in 3s", now)).toBeNull();
+  });
+
   test("a weekday token inside the timezone name is not read as a weekday", () => {
     // "(America/Monterrey)" contains "Mon" — must NOT become "next Monday".
     const now = new Date(2026, 5, 15, 14, 0); // Mon Jun 15 2026, 2pm local
@@ -1430,6 +1446,41 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(d.getDate()).toBe(15); // today (already reopened)
     expect(d.getHours()).toBe(1);
     expect(at!).toBeLessThan(now.getTime());
+  });
+});
+
+// How a parsed reset instant is SHOWN. Bun's default Intl locale is a hardcoded
+// en-US whatever the environment says, so the display locale is resolved from the
+// POSIX locale vars instead — otherwise a 24-hour user would always be handed
+// 12-hour times. The env is passed in explicitly here (no process.env mutation),
+// which is also how the CLI e2e pins its expected output.
+test.describe("envLocale / formatResetTime: the reset clock a human sees", () => {
+  const at = new Date("2026-06-15T15:00:00Z").getTime();
+
+  test("POSIX locale vars map to BCP-47, most specific first", () => {
+    expect(envLocale({ LANG: "en_GB.UTF-8" })).toBe("en-GB");
+    expect(envLocale({ LC_ALL: "de_DE.UTF-8@euro", LC_TIME: "fr_FR.UTF-8", LANG: "en_US.UTF-8" })).toBe("de-DE");
+    expect(envLocale({ LC_TIME: "nb_NO.UTF-8", LANG: "en_US.UTF-8" })).toBe("nb-NO");
+  });
+
+  test("no usable locale → undefined (caller falls back to the runtime default)", () => {
+    expect(envLocale({})).toBeUndefined();
+    expect(envLocale({ LANG: "C" })).toBeUndefined();
+    expect(envLocale({ LC_ALL: "POSIX" })).toBeUndefined();
+    expect(envLocale({ LANG: "xx_YY.UTF-8" })).toBeUndefined(); // well-formed, unknown to ICU
+    expect(envLocale({ LANG: "en--GB" })).toBeUndefined(); // malformed: must not throw
+  });
+
+  test("the locale — not hand-rolled am/pm — decides 24h vs 12h", () => {
+    const gb = formatResetTime(at, { LC_ALL: "en_GB.UTF-8" });
+    const us = formatResetTime(at, { LC_ALL: "en_US.UTF-8" });
+    expect(gb).not.toMatch(/[AP]M/i); // 24-hour locale: no meridiem at all
+    expect(us).toMatch(/[AP]M/i);
+    // Time only, both ways — no date, so it fits beside a readiness word.
+    for (const s of [gb, us]) {
+      expect(s).toMatch(/\d{1,2}:\d{2}/);
+      expect(s).not.toMatch(/2026|Jun/i);
+    }
   });
 });
 

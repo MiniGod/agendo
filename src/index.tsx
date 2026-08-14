@@ -12,7 +12,7 @@ import {
   capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
   type SessionKind, type Readiness, type PaneSnapshot,
 } from "./tmux.ts";
-import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
+import { formatResetTime, paneResetAt } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
@@ -71,10 +71,12 @@ Usage:
                                 Any other dashed argument is an error; put prompt
                                 text that starts with -- after a bare --.
   agendo list, ls [dir]        List the sessions running right now, one per line
-                                (readiness, kind, id, dir, title). With a dir,
-                                only sessions whose cwd is under it are shown.
+                                (readiness, kind, id, dir, title). A session at its
+                                usage limit reads "limited <time>" when the pane
+                                says when it resets. With a dir, only sessions
+                                whose cwd is under it are shown.
       --json                    Emit machine-readable JSON (with branch + linked
-                                PR + work-item/issue per session).
+                                PR + work-item/issue + ISO limitResetAt per session).
       --all, --include-idle     Also list idle (not-running) sessions, each marked
                                 running vs idle.
       --pr <n>                  Only sessions linked to PR #n (resolved via the
@@ -94,22 +96,29 @@ Usage:
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status.
       --attach, -a              Switch/attach to it immediately (default: detached)
-  agendo wait [id...]          Block until the target session(s) settle to a
-                                non-busy state, then exit 0; exit non-zero on
-                                timeout. Run it in the background and use its exit
-                                as a notification instead of re-polling status.
+  agendo wait [id...]          Block until the target session(s) settle, then exit
+                                0; exit non-zero if they don't (timeout, exited,
+                                usage-limited). Run it in the background and use
+                                its exit as a notification, not re-polling status.
                                 With no ids, select with --all / --prefix, and
                                 scope any of those with --repo / --path.
                                 A session whose window closes reads "exited": it
                                 satisfies the default wait, and short-circuits a
-                                --state it can no longer reach.
+                                --state it can no longer reach. One at its usage
+                                limit does NOT — it's paused, not done: the wait
+                                wakes on it promptly but exits non-zero
+                                ("blocked"). An explicit --state/--not is never
+                                pre-empted that way, so --state limited wakes on
+                                the cap as a success and --not limited waits it out.
       --any                     Wake on the FIRST session to satisfy, not all of
                                 them (so one stuck session can't mask the rest)
       --json                    Emit a wake payload on stdout: why it woke, and
                                 each session's from → state, changed, satisfied,
-                                plus resumeDialog (parked on claude's resume
-                                dialog: it reads ready, but nothing has run yet)
-      --state <ready|busy|…>    Wait for exactly this state (default: non-busy).
+                                limitResetAt, plus resumeDialog (parked on
+                                claude's resume dialog: it reads ready, but
+                                nothing has run yet)
+      --state <ready|busy|…>    Wait for exactly this state (default: settled —
+                                not busy, limited or unknown).
                                 One of ready, busy, compacting, queued, dialog,
                                 limited, unknown, exited. "dialog" means a question
                                 for you — claude's own resume dialog reads ready,
@@ -637,9 +646,16 @@ async function runStatus(token: string | undefined, full: boolean, scope: Sessio
       flushWarnings("status"); // the choice it just printed may have come from a config it had to ignore
     }
     if (readiness === "limited") {
-      const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
+      const resetAt = paneResetAt(stripAnsi(raw));
       console.log(
-        `  limit:  usage limit reached${resetAt !== null ? ` — resets at ${new Date(resetAt).toISOString()}` : " — no reset time parsed (cannot auto-resume)"}`,
+        // Both forms: the ISO instant for a machine reading `status` output, and
+        // the same local clock `list` and the menu show, so a human doesn't have
+        // to convert UTC in their head to match up the two commands.
+        `  limit:  usage limit reached${
+          resetAt !== null
+            ? ` — resets at ${new Date(resetAt).toISOString()} (${formatResetTime(resetAt)})`
+            : " — no reset time parsed (cannot auto-resume)"
+        }`,
       );
     }
     const shells = paneShells(raw);
@@ -843,7 +859,7 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
     process.exit(2);
   }
   sendResume(target);
-  const resetAt = readiness === "limited" ? parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS) : null;
+  const resetAt = readiness === "limited" ? paneResetAt(stripAnsi(raw)) : null;
   console.log(
     `▸ unblocked ${target}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
   );
@@ -870,6 +886,13 @@ interface ListRow {
   running: boolean;
   /** Input readiness from the live pane, or null when idle (no pane to read). */
   readiness: Readiness | null;
+  /**
+   * When the usage limit resets, as an ISO 8601 instant — set only for a
+   * "limited" row whose pane states a time (the numbered limit dialog hides it,
+   * and we never press a key to reveal it), null otherwise. Machine-readable on
+   * purpose: the human list renders the same instant in the local locale.
+   */
+  limitResetAt: string | null;
   /** Background shells the running pane reports (0 when idle/unknown). */
   shells: number;
   /** How it was launched, when running (from the live-tmux reconciliation). */
@@ -886,6 +909,39 @@ interface ListRow {
   workItem: { id: number; url: string } | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
+}
+
+/**
+ * The reset instant for a limited row, or null. Read-only: we parse whatever the
+ * pane already shows and never send a keystroke to uncover it, so a session
+ * parked in the numbered limit dialog — which hides the time until Escape —
+ * legitimately yields null. Shares `paneResetAt` with `wait` and the TUI so the
+ * three read the same screen the same way.
+ */
+function rowResetAt(readiness: Readiness | null, raw: string): number | null {
+  return readiness === "limited" ? paneResetAt(stripAnsi(raw)) : null;
+}
+
+/**
+ * The readiness column's text: the bare state word, plus the locale-formatted
+ * reset time when a limited pane told us one ("limited 14:00"). No placeholder
+ * when it didn't — a plain "limited" is the honest answer. The time is printed
+ * as stated even when it has already passed (the pane's own claim, and a clock
+ * time the reader can compare to now); the TUI, which has room, additionally
+ * distinguishes that case as "reset passed".
+ */
+function readyCell(readiness: Readiness | null, resetAt: number | null): string {
+  const word = readiness ?? "-";
+  return resetAt === null ? word : `${word} ${formatResetTime(resetAt)}`;
+}
+
+/**
+ * Width of the readiness column: the usual 10 (fits every state word), widened
+ * only as far as the longest `limited <time>` on screen so the columns after it
+ * stay aligned whatever the locale's time format is.
+ */
+function readyWidth(cells: string[]): number {
+  return Math.max(10, ...cells.map((c) => c.length));
 }
 
 /**
@@ -983,10 +1039,12 @@ async function runList(opts: ListOptions): Promise<void> {
     const window = liveWindows.get(canon);
     let readiness: Readiness | null = null;
     let shells = 0;
+    let resetAt: number | null = null;
     if (running && window) {
       const { raw, cursor } = capturePaneState(window);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
+      resetAt = rowResetAt(readiness, raw);
     }
     const l = linkOf(s);
     return {
@@ -995,6 +1053,7 @@ async function runList(opts: ListOptions): Promise<void> {
       source: s.source,
       running,
       readiness,
+      limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
       shells,
       kind: running ? liveKinds.get(canon) ?? null : null,
       branch: s.branch ?? null,
@@ -1029,15 +1088,17 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   const itemLabel = model?.provider === "github" ? "issue" : "wi";
+  const ready = rows.map((r) => readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt)));
+  const rw = readyWidth(ready);
   console.log(
-    ["", "ready".padEnd(10), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+    ["", "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
-  for (const r of rows) {
+  for (const [i, r] of rows.entries()) {
     const wfRunning = r.workflows.filter((w) => w.status === "running").length;
     console.log(
       [
         r.running ? "●" : "○",
-        (r.readiness ?? "-").padEnd(10),
+        ready[i].padEnd(rw),
         (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
         r.shortId.padEnd(12),
         timeAgo(new Date(r.lastUsed)).padEnd(8),
@@ -1061,7 +1122,9 @@ async function runList(opts: ListOptions): Promise<void> {
  */
 function runPlainList(index: SessionIndex, inScope: (s: AgentSession) => boolean): void {
   const seen = new Set<string>();
-  const rows: string[] = [];
+  // Cells, not finished lines: the readiness column's width isn't known until
+  // every row is in (a `limited <time>` cell is wider than the state words).
+  const rows: string[][] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
@@ -1080,23 +1143,26 @@ function runPlainList(index: SessionIndex, inScope: (s: AgentSession) => boolean
     seen.add(key);
     const { raw, cursor } = capturePaneState(name);
     const shells = paneShells(raw);
+    const readiness = paneReadiness(raw, cursor);
     // Running-workflow marker (◆N): the session is live here by construction.
     const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
-    rows.push(
-      [
-        "●",
-        paneReadiness(raw, cursor).padEnd(10),
-        KIND_LABEL[kind].padEnd(3),
-        shortId(s.id),
-        timeAgo(s.lastUsed).padEnd(8),
-        (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
-        s.title.replace(/\s+/g, " ").slice(0, 44),
-        [shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""].filter(Boolean).join(" "),
-      ].join("  ").trimEnd(),
-    );
+    rows.push([
+      "●",
+      readyCell(readiness, rowResetAt(readiness, raw)),
+      KIND_LABEL[kind].padEnd(3),
+      shortId(s.id),
+      timeAgo(s.lastUsed).padEnd(8),
+      (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
+      s.title.replace(/\s+/g, " ").slice(0, 44),
+      [shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""].filter(Boolean).join(" "),
+    ]);
   }
-  if (rows.length === 0) console.log("No running sessions.");
-  else rows.forEach((r) => console.log(r));
+  if (rows.length === 0) {
+    console.log("No running sessions.");
+    return;
+  }
+  const rw = readyWidth(rows.map((r) => r[1]));
+  for (const [dot, ready, ...rest] of rows) console.log([dot, ready.padEnd(rw), ...rest].join("  ").trimEnd());
 }
 
 /** A session working a PR / issue's branch, as reported by the resource lists. */

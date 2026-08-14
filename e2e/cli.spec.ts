@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { stripAnsi } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
 import { BUSY_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
@@ -913,6 +914,93 @@ test("agendo list/status report a usage-limited session", async ({ mock }) => {
   expect(status.stdout).toContain("resets at"); // reset time was parsed
 });
 
+// REAL captured limit panes (provenance in e2e/detection.spec.ts): raw
+// `capture-pane -p -e` output from a live limited Claude Code session, SGR
+// escapes intact, so `list` classifies and parses exactly what tmux would feed
+// it. Both forms matter here:
+//   - the esc-revealed TEXT notice, which states "resets 5pm (Atlantic/Reykjavik)";
+//   - the numbered DIALOG with that notice scrolled off, which states no time at
+//     all — and `list` must never press Escape to uncover it.
+const fixturePane = (name: string) => readFileSync(join(REPO_ROOT, "e2e", "fixtures", name), "utf-8");
+const REAL_LIMIT_PANE_WITH_TIME = fixturePane("limit-esc-revealed.ansi");
+const REAL_LIMIT_PANE_NO_TIME = fixturePane("limit-dialog-menu.ansi")
+  .split("\n")
+  .filter((l) => !/hit your session limit/i.test(stripAnsi(l)))
+  .join("\n");
+
+/**
+ * CLI env with the clock pinned, so the assertions don't depend on the CI box:
+ * TZ=UTC (Atlantic/Reykjavik is UTC+0 year-round, so the fixture's "5pm" is
+ * 17:00 UTC), and an explicit POSIX locale to choose 24h vs 12h.
+ */
+const withClock = (env: Record<string, string>, locale: string) => ({ ...env, TZ: "UTC", LC_ALL: locale });
+
+test("agendo list shows when a limited session's limit resets (locale-formatted + ISO in --json)", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: REAL_LIMIT_PANE_WITH_TIME } });
+
+  // 24-hour locale: the reset time rides next to the readiness word, and the
+  // column is widened to fit it (two spaces before the kind cell, as elsewhere).
+  const gb = agendo(withClock(mock.env, "en_GB.UTF-8"), "list");
+  expect(gb.status).toBe(0);
+  expect(gb.stdout).toMatch(/limited 17:00 {2}\S/);
+
+  // Same instant, 12-hour locale — Intl picks the format, we never hand-roll it.
+  const us = agendo(withClock(mock.env, "en_US.UTF-8"), "list");
+  expect(us.status).toBe(0);
+  expect(us.stdout).toMatch(/limited 5:00[\s ]PM {2}\S/);
+
+  // --json carries the machine-readable instant instead: ISO 8601, UTC, no
+  // localized text anywhere (other agents consume this).
+  const r = await agendoAsync(withClock(mock.env, "en_US.UTF-8"), "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("limited");
+  expect(login.limitResetAt).toMatch(/^\d{4}-\d{2}-\d{2}T17:00:00\.000Z$/);
+  expect(Number.isNaN(Date.parse(login.limitResetAt))).toBe(false);
+  expect(r.stdout).not.toMatch(/\d:\d{2}[\s ](AM|PM)/); // no localized clock in JSON
+  // A session that isn't limited reports null, not a stale/placeholder value.
+  const crash = rows.find((x) => x.shortId === CRASH_SHORT_ID);
+  expect(crash.limitResetAt).toBeNull();
+});
+
+test("agendo list renders a limited session with no parseable reset time as plain 'limited'", async ({ mock }) => {
+  // The numbered dialog hides the reset time behind an Escape. `list` is strictly
+  // read-only, so it reports what's on screen: "limited", no placeholder, no crash.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: REAL_LIMIT_PANE_NO_TIME } });
+
+  const list = agendo(withClock(mock.env, "en_GB.UTF-8"), "list");
+  expect(list.status).toBe(0);
+  expect(list.stdout).toContain("limited");
+  // Nothing but column padding follows the word — no time, no dash, no "unknown".
+  expect(list.stdout).not.toMatch(/limited \S/);
+
+  const r = await agendoAsync(withClock(mock.env, "en_GB.UTF-8"), "list", "--json").done;
+  expect(r.code).toBe(0);
+  const login = (JSON.parse(r.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("limited");
+  expect(login.limitResetAt).toBeNull();
+
+  // Strictly read-only: no keystroke was sent to reveal the timestamp.
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "send-keys")).toBe(false);
+});
+
+test("agendo list leaves a session that isn't limited untouched", async ({ mock }) => {
+  // Default fixture pane: idle/ready. The readiness column keeps its plain word
+  // and its usual width — the reset-time suffix is limited-only.
+  const r = agendo(withClock(mock.env, "en_GB.UTF-8"), "list");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toMatch(/ready {7}\S/); // "ready" padded to the standard 10, + the 2-space gap
+  expect(r.stdout).not.toContain("limited");
+
+  const j = await agendoAsync(withClock(mock.env, "en_GB.UTF-8"), "list", "--json").done;
+  expect(j.code).toBe(0);
+  const login = (JSON.parse(j.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("ready");
+  expect(login.limitResetAt).toBeNull();
+});
+
 test("agendo unblock sends <esc>continue<enter> to a limited session", async ({ mock }) => {
   await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
 
@@ -1107,7 +1195,7 @@ function wakePayload(stdout: string) {
     elapsedMs: number;
     sessions: {
       shortId: string; state: string; from: string; changed: boolean; satisfied: boolean; title: string;
-      resumeDialog: boolean;
+      limitResetAt: string | null; resumeDialog: boolean;
     }[];
   };
 }
@@ -1176,6 +1264,128 @@ test("agendo wait accepts --state limited", async ({ mock }) => {
   const r = agendo(mock.env, "wait", SHORT_ID, "--state", "limited", "--interval", "150ms", "--timeout", "5s");
   expect(r.status).toBe(0);
   expect(r.stdout).toContain("limited");
+});
+
+test("agendo wait does NOT call a usage-limited session settled", async ({ mock }) => {
+  // A capped session has stopped, but it is not DONE — it comes back when the
+  // window reopens (auto-resume) or when someone unblocks it. Exit 0 here would
+  // tell an orchestrator the work finished, while `agendo list` shows that very
+  // session as "limited 17:00", i.e. back later. The two must not disagree.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  // A generous timeout: waking must come from the cap being seen, not from the
+  // deadline — a wait that just times out leaves the caller blind for the whole
+  // 30m an orchestrator typically asks for.
+  const r = agendo(withClock(mock.env, "en_GB.UTF-8"), "wait", SHORT_ID, "--json", "--interval", "150ms", "--timeout", "10s");
+  expect(r.status).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("blocked");
+  // Woke on the state, not the deadline — two confirming ticks at 150ms, nowhere
+  // near the 10s timeout. (A wait that just times out is the blindness this
+  // whole branch exists to avoid, so the margin is the assertion.)
+  expect(out.elapsedMs).toBeLessThan(3_000);
+  expect(out.condition).toBe("settled (not busy, limited or unknown)");
+  const [s] = out.sessions;
+  expect(s.state).toBe("limited");
+  expect(s.satisfied).toBe(false);
+  // The reset instant rides along, so the caller can back off until then without
+  // a second command — the same instant `list --json` reports for that session.
+  expect(s.limitResetAt).toMatch(/^\d{4}-\d{2}-\d{2}T19:20:00\.000Z$/);
+  expect(r.stderr).toContain("at usage limit");
+  expect(r.stderr).toContain("19:20");
+});
+
+test("agendo wait needs two consecutive limited sightings before reporting blocked", async ({ mock }) => {
+  // `blocked` is terminal, and `limited` has a real transient: the Escape the TUI
+  // sends to reveal the reset notice uncovers a pane that reads `limited` for a
+  // tick or two while the session is being un-capped. Waking off ONE sighting
+  // would report a session as blocked at the moment it recovered — the same
+  // reasoning as EXIT_CONFIRM_TICKS. Sequenced off the tmux call log rather than
+  // a timer, so exactly one poll sees the limit notice.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "1500ms", "--timeout", "20s");
+  const log = mock.env.FAKE_TMUX_LOG!;
+  for (let i = 0; i < 600; i++) {
+    try {
+      if (readFileSync(log, "utf-8").includes('"capture-pane"')) break;
+    } catch {}
+    await sleep(20);
+  }
+  await mock.setTmuxState(tmuxState); // → ready, before the second tick lands
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  expect(wakePayload(r.stdout).woke).toBe("satisfied");
+});
+
+test("agendo wait: an explicit --state is never pre-empted by the cap", async ({ mock }) => {
+  // "--state exited: tell me when it is completely FINISHED" must keep polling
+  // through a usage cap — the session comes back when the window reopens, and
+  // waking it with `blocked` would answer a question the caller didn't ask.
+  // Same for `--not limited`, which literally means "wake me when the cap clears".
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+
+  const exited = agendo(mock.env, "wait", SHORT_ID, "--state", "exited", "--json", "--interval", "150ms", "--timeout", "1200ms");
+  expect(exited.status).not.toBe(0);
+  const outExited = wakePayload(exited.stdout);
+  expect(outExited.woke).toBe("timeout"); // waited it out, NOT "blocked"
+  expect(outExited.sessions[0].state).toBe("limited");
+
+  const notLimited = agendo(mock.env, "wait", SHORT_ID, "--not", "limited", "--json", "--interval", "150ms", "--timeout", "1200ms");
+  expect(notLimited.status).not.toBe(0);
+  expect(wakePayload(notLimited.stdout).woke).toBe("timeout");
+});
+
+test("agendo wait --any does not report blocked while another target can still settle", async ({ mock }) => {
+  // The mode rule, mirroring `unsatisfiable`: --any needs only ONE target, so a
+  // capped one is no reason to wake while a live one is still working. The
+  // default mode is the opposite — a single capped straggler blocks the set.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: LIMIT_PANE, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  // --any: login is capped, crash is busy → must NOT wake; it settles only when
+  // crash goes ready.
+  const { done } = agendoAsync(mock.env, "wait", "--all", "--any", "--json", "--interval", "200ms", "--timeout", "25s");
+  await sleep(1200);
+  await mock.setTmuxState({ ...twoLive, captures: { [RUNNING_TARGET]: LIMIT_PANE, [CRASH_TARGET]: tmuxState.captures[RUNNING_TARGET] } });
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("ready");
+  expect(out.sessions.find((s) => s.shortId === SHORT_ID)?.state).toBe("limited");
+
+  // Default mode over the same pair: ALL must settle, so the capped one blocks —
+  // and the wake names it (with its reset time), not the busy one.
+  const all = agendo(withClock(mock.env, "en_GB.UTF-8"), "wait", "--all", "--json", "--interval", "200ms", "--timeout", "10s");
+  expect(all.status).not.toBe(0);
+  const outAll = wakePayload(all.stdout);
+  expect(outAll.woke).toBe("blocked");
+  expect(outAll.elapsedMs).toBeLessThan(5_000);
+  const line = all.stderr.split("\n").find((l) => l.includes("at usage limit"));
+  expect(line).toContain(SHORT_ID);
+  expect(line).not.toContain(CRASH_SHORT_ID);
+});
+
+test("agendo wait --not busy counts a capped session as satisfied", async ({ mock }) => {
+  // Only the DEFAULT predicate rejects `limited`. An explicit predicate is
+  // honoured verbatim — `--state limited` (above) and `--not busy` both mean the
+  // caller has said what success is, so the cap satisfies it and exits 0.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const r = agendo(mock.env, "wait", SHORT_ID, "--not", "busy", "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(r.status).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.condition).toBe("≠ busy");
+  expect(out.sessions[0].satisfied).toBe(true);
 });
 
 test("agendo wait wakes when a session's window closes, instead of timing out", async ({ mock }) => {
