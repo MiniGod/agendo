@@ -13,6 +13,7 @@ import {
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
+import { findPeer, sendPeerMessage } from "./peer.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
@@ -81,9 +82,12 @@ Usage:
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
       --full, -F                Don't truncate the prompt / activity details
-  agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
-                                its input is idle/ready (not mid-turn, no open
-                                question, nothing already typed).
+  agendo send <id> <prompt>    Send a prompt to a running session. Claude sessions
+                                that expose a messaging socket take it there, which
+                                queues it even mid-turn; everything else (Copilot,
+                                older claude builds) gets it typed into the pane,
+                                and that refuses unless the input is idle/ready.
+                                Either way, refuses a session at its usage limit.
       --force, -f               Send even if the input doesn't look ready
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
@@ -524,14 +528,26 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
     console.error(`No session found for "${token}".`);
     process.exit(1);
   }
-  const target = liveTargetForShortId(shortId(s.id));
-  const running = !!target || liveTargets().has(sessionName(s));
+  // Resolve the window through the full reconciliation, NOT liveTargetForShortId
+  // alone: a session launched from a work item / PR runs in a `cl-wi-…`/`cl-pr-…`
+  // window, which that helper doesn't match. Getting this wrong would report a
+  // perfectly attachable session as "running outside agendo".
+  const target = refreshLiveTmux(index.all).liveWindows.get(sessionName(s)) ?? liveTargetForShortId(shortId(s.id));
+  // A claude running outside agendo has no window here but is very much alive;
+  // report it as running (◆) rather than idle, and say why it can't be attached.
+  const peer = s.source === "claude" ? await findPeer((id) => id === s.id) : null;
+  const external = !target && !!peer;
+  const running = !!target || liveTargets().has(sessionName(s)) || external;
   const act = await loadActivity(s, { full });
-  console.log(`${running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
+  console.log(`${external ? "◆ running" : running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
   console.log(`  id:     ${s.id}`);
   console.log(`  dir:    ${s.cwd}`);
   if (s.branch) console.log(`  branch: ${s.branch}`);
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
+  if (external && peer) {
+    console.log(`  state:  ${peer.status ?? "running"}${peer.waitingFor ? ` (${peer.waitingFor})` : ""}`);
+    console.log(`  where:  pid ${peer.pid}, no agendo window — \`${SELF_CMD} send\` reaches it, attach does not`);
+  }
   if (target) {
     const { raw, cursor } = capturePaneState(target);
     const readiness = paneReadiness(raw, cursor);
@@ -599,10 +615,23 @@ function indent(text: string): string {
 }
 
 /**
- * Send a prompt into a running session's input box. Refuses unless the TUI is
- * "ready" (idle, empty input) so we never clobber an open question, a generating
- * turn, or text already queued — pass `force` to override. Resolves the session
- * by id or tmux name.
+ * Send a prompt into a running session. Resolves the session by id or tmux name
+ * and prefers its cross-session messaging socket (peer.ts), falling back to
+ * typing into the tmux pane for sessions that expose no socket — Copilot, and
+ * claude builds older than the peer protocol.
+ *
+ * Most of the readiness gate applies to the FALLBACK path only, and that
+ * asymmetry is the point: a pane paste lands in whatever is on screen, so it
+ * must first prove the TUI is idle (`--force` overrides) or it clobbers a
+ * half-typed line. A socket frame is queued by the receiver and delivered when
+ * it next reads input, so "busy" and "queued" are not hazards over the socket —
+ * there is nothing to refuse. The pane state is still captured and reported, so
+ * the caller sees what it walked into.
+ *
+ * `limited` is the exception that still refuses on BOTH paths: a session sitting
+ * at its usage cap will not read a queued frame until the cap resets, so
+ * reporting success would be a lie, and orchestrators key on the exit-2 signal
+ * to know to wait or call `unblock`.
  */
 async function runSend(token: string | undefined, prompt: string, force: boolean): Promise<void> {
   if (!token || !prompt) {
@@ -611,19 +640,51 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const target = liveTargetForShortId(sid);
-  if (!target) {
-    console.error(`Session ${token} is not running (no live tmux window to send to).`);
+  const peer = await findPeer((id) => shortId(id) === sid);
+  // A session reachable over its socket needs no window: it may be running
+  // outside agendo entirely (a plain terminal, an editor). Requiring a tmux
+  // target first would make `send` the one thing you cannot do to a session
+  // that `status` reports as running.
+  if (!target && !peer) {
+    console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
     process.exit(1);
   }
-  const { raw, cursor } = capturePaneState(target);
-  const readiness = paneReadiness(raw, cursor);
+  // Pane state is advisory here and only exists when there IS a pane.
+  const { raw, cursor } = target ? capturePaneState(target) : { raw: "", cursor: null };
+  const readiness = target ? paneReadiness(raw, cursor) : null;
+  if (readiness === "limited" && !force) {
+    console.error(`Not sending: session is at its usage limit. Wait for the reset, \`${SELF_CMD} unblock ${token}\`, or pass --force.`);
+    process.exit(2);
+  }
+  if (peer) {
+    const where = target ?? `pid ${peer.pid}`;
+    // Each path names the state in its own vocabulary — the pane classifier's
+    // ("ready", "compacting") when there is a pane, the receiver's own
+    // ("idle", "busy", "waiting") when there is not. Both spell idle-ness
+    // differently, so both spellings count as "no need to warn".
+    const state = readiness ?? peer.status ?? "running";
+    const idle = state === "ready" || state === "idle";
+    try {
+      await sendPeerMessage(peer, prompt);
+      console.log(`▸ queued to ${where} via session socket${idle ? "" : ` (session is "${state}"; it will be delivered when it next reads input)`}`);
+      return;
+    } catch (e) {
+      // The socket was advertised but unusable — the session died between
+      // discovery and send, or something else holds the path.
+      if (!target) {
+        console.error(`Failed to reach the session socket (${(e as Error).message}), and it has no tmux window to type into.`);
+        process.exit(1);
+      }
+      console.error(`▸ session socket unusable (${(e as Error).message}); falling back to the tmux pane.`);
+    }
+  }
   if (readiness !== "ready" && !force) {
     console.error(`Not sending: session looks "${readiness}", not ready. Re-check with \`${SELF_CMD} status ${token}\`, or pass --force.`);
     console.error(`\n  current screen (tail):`);
     for (const l of stripAnsi(raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
     process.exit(2);
   }
-  sendToPane(target, prompt);
+  sendToPane(target!, prompt); // non-null: reaching here means the peer path didn't return
   console.log(`▸ sent to ${target}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
 }
 
@@ -1075,6 +1136,17 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
   const canon = sessionName(s);
   const liveWindow = liveWindows.get(canon);
+  // The session may already be running outside agendo, where there's no window
+  // for us to find. Resuming would put a SECOND live claude on one transcript,
+  // both appending — so refuse and point at the thing that does work.
+  if (!liveWindow) {
+    const peer = s.source === "claude" ? await findPeer((id) => id === s.id) : null;
+    if (peer) {
+      console.error(`Session ${shortId(s.id)} is already running outside agendo (pid ${peer.pid}, ${peer.status ?? "running"}).`);
+      console.error(`Resuming would run two agents on one transcript. Use \`${SELF_CMD} send ${shortId(s.id)} "<prompt>"\` to message it instead.`);
+      process.exit(2);
+    }
+  }
   // A dormant placeholder holds the canonical name but no live agent; drop it so
   // the resume actually starts one instead of no-op'ing onto the idle bash pane.
   if (!liveWindow && livePlaceholders.has(canon)) killWindow(canon);

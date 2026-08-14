@@ -4,10 +4,12 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, STANDALONE_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
@@ -213,6 +215,231 @@ test("agendo send refuses a compacting session unless forced", async ({ mock }) 
   const forced = agendo(mock.env, "send", "-f", SHORT_ID, "run the tests");
   expect(forced.status).toBe(0);
   expect(forced.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+});
+
+/**
+ * Stand up what a live claude session exposes: a real unix socket, plus the
+ * `~/.claude/sessions/<pid>.json` registry entry that advertises it. The pid is
+ * THIS process's so peer.ts's liveness probe passes. Returns the frames the
+ * socket received and a closer.
+ *
+ * NB these tests must use `agendoAsync`, not `agendo`: the server runs
+ * in-process, and a blocking spawnSync would freeze the event loop so the
+ * connection is never accepted (same hazard as the mock ADO server).
+ */
+async function fakePeer(
+  mock: { tmpDir: string; home: string },
+  name: string,
+  status: string,
+  sessionId: string = LOGIN_SESSION_ID,
+) {
+  const sockPath = join(mock.tmpDir, `${name}.sock`);
+  const frames: string[] = [];
+  const server = createServer((c) => c.on("data", (d) => frames.push(d.toString())));
+  await new Promise<void>((r) => server.listen(sockPath, r));
+  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".claude", "sessions", `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      sessionId,
+      cwd: "/run/login",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: sockPath,
+      status,
+    }),
+  );
+  return { frames, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+test("agendo send prefers the session's messaging socket over the tmux pane", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("via session socket");
+
+    // Exactly the documented injection frame, addressed by session id so the
+    // receiver can drop it if this pid ever gets recycled.
+    expect(peer.frames.join("")).toBe(
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: "run the tests" },
+        session_id: LOGIN_SESSION_ID,
+      }) + "\n",
+    );
+
+    // …and nothing was typed into the pane.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send over the socket queues into a busy session instead of refusing", async ({ mock }) => {
+  // The pane-paste path must refuse a compacting session (it would clobber the
+  // screen). The socket path has no such hazard — the receiver queues the frame
+  // and reads it when the turn ends — so it goes through and says so.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: ["✻ Compacting conversation… (esc to interrupt)", "  ▰▰▰▱▱▱ 42%"].join("\n") },
+  });
+  const peer = await fakePeer(mock, "peer-busy", "busy");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0); // NOT refused, unlike the paste path
+    expect(r.stdout).toContain("compacting"); // but it reports what it walked into
+    expect(peer.frames.join("")).toContain('"content":"run the tests"');
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send reaches a session that has a socket but NO tmux window", async ({ mock }) => {
+  // A session running outside agendo (plain terminal, editor) has no `cl-…`
+  // window. `status` reports it as ◆ running and tells you to `send` to it, so
+  // send must not require a window it can never have. The standalone fixture
+  // session is idle in tmux terms; give it a socket and it becomes reachable.
+  const peer = await fakePeer(mock, "peer-windowless", "idle", STANDALONE_SESSION_ID);
+  try {
+    const r = await agendoAsync(mock.env, "send", shortIdOf(STANDALONE_SESSION_ID), "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("via session socket");
+    expect(peer.frames.join("")).toContain('"content":"run the tests"');
+    // Nothing was typed anywhere — there is no pane for this session.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo status reports a session running outside agendo as ◆ running", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer-status", "busy", STANDALONE_SESSION_ID);
+  try {
+    const r = await agendoAsync(mock.env, "status", shortIdOf(STANDALONE_SESSION_ID)).done;
+    expect(r.code).toBe(0);
+    // Not "○ idle": the transcript is stale but the process is alive.
+    expect(r.stdout).toContain("◆ running");
+    expect(r.stdout).toContain(`pid ${process.pid}`);
+    expect(r.stdout).toContain("attach does not");
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo resume refuses a session already running outside agendo", async ({ mock }) => {
+  // Resuming it would put a second live claude on one transcript.
+  const peer = await fakePeer(mock, "peer-resume", "busy", STANDALONE_SESSION_ID);
+  try {
+    const r = await agendoAsync(mock.env, "resume", shortIdOf(STANDALONE_SESSION_ID)).done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("already running outside agendo");
+    // No window was created for it.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "new-window" || argv[0] === "new-session")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send falls back to the tmux pane when the advertised socket is dead", async ({ mock }) => {
+  // The nastier stale case: the pid IS live (it's ours) but the socket it
+  // advertises is gone — the session died between discovery and send. Failing
+  // here would strand a prompt even though the tmux window is still usable, so
+  // the send must fall through to the pane.
+  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".claude", "sessions", `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      sessionId: LOGIN_SESSION_ID,
+      cwd: "/run/login",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: join(mock.tmpDir, "never-bound.sock"),
+      status: "idle",
+    }),
+  );
+
+  const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+  expect(r.code).toBe(0);
+  expect(r.stderr).toContain("falling back to the tmux pane");
+  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send refuses a usage-limited session even over the socket", async ({ mock }) => {
+  // Queuing is safe for "busy", but not for "limited": nothing will read the
+  // frame until the cap resets, so claiming success would mislead an
+  // orchestrator that keys on the exit code.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const peer = await fakePeer(mock, "peer-limited", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("usage limit");
+    expect(peer.frames).toEqual([]); // nothing was queued
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send falls back to the tmux pane when the registry entry is stale", async ({ mock }) => {
+  // A registry file outlives its process. Point one at a dead pid (and a socket
+  // that does not exist) — the liveness probe must reject it and the send must
+  // still land, via the pane, rather than erroring on a vanished socket.
+  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".claude", "sessions", "999999999.json"),
+    JSON.stringify({
+      pid: 999_999_999, // above /proc/sys/kernel/pid_max — cannot be live
+      sessionId: LOGIN_SESSION_ID,
+      cwd: "/run/login",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: join(mock.tmpDir, "gone.sock"),
+      status: "idle",
+    }),
+  );
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  expect(r.stdout).not.toContain("via session socket");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send ignores a peer advertising an unknown protocol version", async ({ mock }) => {
+  // The wire format is internal and undocumented. A session speaking a version
+  // we don't know must read as "no peer" — writing frames it may not parse is
+  // worse than typing into the pane, which always works.
+  const peer = await fakePeer(mock, "peer-future", "idle");
+  await writeFile(
+    join(mock.home, ".claude", "sessions", `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      sessionId: LOGIN_SESSION_ID,
+      cwd: "/run/login",
+      peerProtocol: 99,
+      kind: "interactive",
+      messagingSocketPath: join(mock.tmpDir, "peer-future.sock"),
+      status: "idle",
+    }),
+  );
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+    expect(r.stdout).not.toContain("via session socket");
+    expect(peer.frames).toEqual([]); // the socket was never written to
+  } finally {
+    await peer.close();
+  }
 });
 
 // A pane whose input box holds claude's greyed-out autocomplete SUGGESTION —
