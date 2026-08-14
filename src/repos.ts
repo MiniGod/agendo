@@ -14,6 +14,7 @@ export interface RepoInfo {
   total: number;
   claude: number;
   copilot: number;
+  codex: number;
 }
 
 // Worktrees created by Claude Code / this launcher live at
@@ -55,12 +56,11 @@ export function discoverRepos(sessions: AgentSession[]): RepoInfo[] {
     const root = repoRootForCwd(s.cwd);
     let info = byRoot.get(root);
     if (!info) {
-      info = { root, name: basename(root), total: 0, claude: 0, copilot: 0 };
+      info = { root, name: basename(root), total: 0, claude: 0, copilot: 0, codex: 0 };
       byRoot.set(root, info);
     }
     info.total++;
-    if (s.source === "claude") info.claude++;
-    else if (s.source === "copilot") info.copilot++;
+    info[s.source]++;
   }
   return [...byRoot.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
 }
@@ -84,7 +84,7 @@ export function isGitCheckout(dir: string): boolean {
  * — `agendo /` would otherwise render a blank name cell in the picker.
  */
 function synthRepo(root: string): RepoInfo {
-  return { root, name: basename(root) || root, total: 0, claude: 0, copilot: 0 };
+  return { root, name: basename(root) || root, total: 0, claude: 0, copilot: 0, codex: 0 };
 }
 
 /**

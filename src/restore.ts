@@ -3,8 +3,8 @@
 // We persist which agent tabs (windows) are open in the canonical
 // `agendo` tmux session, and on a fresh startup recreate them as *lazy*
 // placeholder windows: each tab is present in the tab strip but unloaded — it
-// only runs its resume command (`claude --resume <id>` / `copilot --resume=<id>`)
-// when you switch to it and press a key. Same
+// only runs its resume command (`claude --resume <id>` / `copilot --resume=<id>`
+// / `codex resume <id>`) when you switch to it and press a key. Same
 // idea as a web browser restoring your tabs without loading every page upfront,
 // so startup stays cheap (no fleet of resumed agents) until you actually open a
 // tab.
@@ -17,7 +17,7 @@
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { STATE_DIR, PREV_STATE_DIR, OLD_STATE_DIR } from "./config.ts";
-import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
+import { ID_BEARING_NAME, LAUNCHER_SESSION, PLACEHOLDER_OPTION, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
 import { tmuxSafeName, normalizeCwd } from "./context.ts";
 import { resumeArgv } from "./launch.ts";
 import type { SessionIndex } from "./sessions.ts";
@@ -121,16 +121,21 @@ export function bestSessionForCwd(sessions: AgentSession[], cwd: string): AgentS
   return best;
 }
 
-/** Managed names that embed a session short id (vs. a work-item / PR id). */
-const ID_BEARING = /^cl-(?:claude|copilot|bg|new)-(.+)$/;
+/**
+ * Managed names that embed a session short id (vs. a work-item / PR id, or an
+ * agent that can't be told its id up front). Single source of truth in tmux.ts,
+ * alongside the `kindName` that mints these names.
+ */
+const ID_BEARING = ID_BEARING_NAME;
 
 /**
  * Resolve which on-disk session a live launcher window is running.
  *
- * Id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-bg-`/`cl-new-`) embed the
- * session's short id, so we match that exact session — unambiguous, and right
- * even when two sessions share a cwd. Only the id-less names (`cl-wi-…`,
- * `cl-pr-…`, `cl-free-…`) carry no session id, so for those we fall back to the
+ * Id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-codex-`/`cl-bg-`/`cl-new-`)
+ * embed the session's short id, so we match that exact session — unambiguous,
+ * and right even when two sessions share a cwd. The id-less names (`cl-wi-…`,
+ * `cl-pr-…`, `cl-free-…`, and the `cl-bg-codex-…` fresh launches of an agent
+ * that assigns its own id) carry no session id, so for those we fall back to the
  * cwd+lastUsed heuristic. Mirrors the attribution in model.ts `reconcileLive`.
  */
 export function resolveWindowSession(

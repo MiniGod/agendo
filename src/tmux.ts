@@ -61,12 +61,32 @@ export function sessionName(s: Pick<AgentSession, "source" | "id">): string {
  */
 export type SessionKind = "background" | "new" | "workitem" | "pr" | "resumed";
 
-/** Name prefixes for the two id-bearing launcher flows. */
+/** Name prefixes for the two kind-tagged launcher flows. */
 const KIND_PREFIX = { background: "cl-bg-", new: "cl-new-" } as const;
 
-/** tmux target name for a background (agent-spawned) or manual new session. */
-export function kindName(kind: "background" | "new", id: string): string {
-  return KIND_PREFIX[kind] + shortId(id);
+/**
+ * Managed names that carry a session short id.
+ *
+ * The suffix must be short-id SHAPED — `shortId` strips every non-alphanumeric
+ * character and caps at 12, so a real id can only ever be `[a-zA-Z0-9]{1,12}`.
+ * Anchoring on that is what lets `kindName` mint a deliberately ID-LESS fresh
+ * name (see its `tag` parameter): the extra `<tag>-` segment contains a dash, so
+ * the name falls out of this pattern and attribution takes the cwd route that
+ * `cl-wi-…`/`cl-pr-…` already use. Shared with restore.ts's ID_BEARING.
+ */
+export const ID_BEARING_NAME = /^cl-(?:claude|copilot|codex|bg|new)-([a-zA-Z0-9]{1,12})$/;
+
+/**
+ * tmux target name for a background (agent-spawned) or manual new session.
+ *
+ * `tag`, when given, inserts a `<tag>-` segment before the id and thereby makes
+ * the name id-LESS as far as `ID_BEARING_NAME` is concerned. That's for agents
+ * whose CLI can't be told a session id up front (Codex): the id we mint is only
+ * a uniquifier for the window, and must not be mistaken for a resumable session
+ * id — the real one is discovered from disk and matched by cwd instead.
+ */
+export function kindName(kind: "background" | "new", id: string, tag?: string): string {
+  return KIND_PREFIX[kind] + (tag ? `${tag}-` : "") + shortId(id);
 }
 
 /** Classify a managed (`cl-…`) target name by its prefix, or null if unknown. */
@@ -75,20 +95,21 @@ export function managedKind(name: string): SessionKind | null {
   if (name.startsWith(KIND_PREFIX.new) || name.startsWith("cl-free-")) return "new";
   if (name.startsWith("cl-wi-")) return "workitem";
   if (name.startsWith("cl-pr-")) return "pr";
-  if (name.startsWith("cl-claude-") || name.startsWith("cl-copilot-")) return "resumed";
+  if (name.startsWith("cl-claude-") || name.startsWith("cl-copilot-") || name.startsWith("cl-codex-")) return "resumed";
   return null;
 }
 
 /**
  * A live managed target whose name embeds this session short id under any
- * id-bearing kind prefix (`cl-claude-`, `cl-copilot-`, `cl-bg-`, `cl-new-`) — so
- * attach can navigate to the *actual* window a session runs in, whatever name it
- * was launched under, instead of creating a duplicate. Work-item / PR targets
- * embed an item id rather than a session id, so they're intentionally excluded.
+ * id-bearing kind prefix (`cl-claude-`, `cl-copilot-`, `cl-codex-`, `cl-bg-`,
+ * `cl-new-`) — so attach can navigate to the *actual* window a session runs in,
+ * whatever name it was launched under, instead of creating a duplicate.
+ * Work-item / PR targets embed an item id rather than a session id, and tagged
+ * id-less fresh names carry no session id at all, so both are excluded.
  */
 export function liveTargetForShortId(sid: string): string | null {
   for (const name of liveTargets()) {
-    const m = name.match(/^cl-(?:claude|copilot|bg|new)-(.+)$/);
+    const m = name.match(ID_BEARING_NAME);
     if (m && m[1] === sid) return name;
   }
   return null;
@@ -233,18 +254,23 @@ export function sendDialogReveal(target: string): void {
   for (const argv of dialogRevealKeystrokes(target)) tmuxQuiet(argv);
 }
 
-/** Whether a captured claude TUI pane can accept a freshly-sent prompt. */
+/** Whether a captured agent TUI pane can accept a freshly-sent prompt. */
 export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "limited" | "unknown";
 
+/** The glyph each agent's TUI draws in front of its input line. */
+const CLAUDE_PROMPT = "❯";
+const CODEX_PROMPT = "›"; // U+203A — also codex's list cursor, see codexInputBox
+
 /**
- * Real (user-typed) text on the claude input line, ignoring the `❯` marker and
- * any gray/dim *suggestion* placeholder. The TUI renders a suggestion in faint
- * (`\e[2m`) / gray, and real text in the default color — so we count only
- * non-faint, non-gray glyphs. Expects the raw line *with* SGR escapes; returns
- * "" when the input is effectively empty (blank or only a suggestion).
+ * Real (user-typed) text on an input line, ignoring the prompt `marker` and any
+ * gray/dim *placeholder*. Both TUIs render their placeholder faint (`\e[2m`) or
+ * gray and real text in the default color — claude an autocomplete suggestion,
+ * codex a rotating example prompt — so we count only non-faint, non-gray
+ * glyphs. Expects the raw line *with* SGR escapes; returns "" when the input is
+ * effectively empty (blank or only a placeholder).
  */
-function inputRealText(line: string): string {
-  const after = line.split("❯")[1] ?? "";
+function inputRealText(line: string, marker: string = CLAUDE_PROMPT): string {
+  const after = line.split(marker)[1] ?? "";
   let faint = false;
   let gray = false;
   let out = "";
@@ -286,8 +312,11 @@ function inputRealText(line: string): string {
 }
 
 /**
- * Classify a captured claude TUI pane to decide whether it's safe to send a
- * prompt. Conservative: only "ready" is auto-sendable; everything else (a turn
+ * Classify a captured agent TUI pane to decide whether it's safe to send a
+ * prompt. Codex panes are recognised and handed to `codexReadiness`; the rest
+ * of this function is the claude classifier.
+ *
+ * Conservative: only "ready" is auto-sendable; everything else (a turn
  * generating → "busy", conversation being compacted → "compacting", unsent text
  * already in the box → "queued", an open question/menu → "dialog", or an
  * unrecognized screen → "unknown") is left for the caller to handle. Calibrated
@@ -311,6 +340,12 @@ function inputRealText(line: string): string {
  * busy check requires — so an idle post-turn pane isn't mistaken for a live one.
  */
 export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readiness {
+  // Codex first: its TUI is recognised from the pane's own content (see
+  // codexPane) and classified separately. It must come before the claude checks
+  // because it shares one of their markers — codex also prints "esc to
+  // interrupt" — while sharing none of the structure they'd then rely on.
+  const codex = codexPane(raw);
+  if (codex) return codexReadiness(raw, codex, cursor);
   const plain = stripAnsi(raw);
   // Compacting the conversation — a distinct, blocking state. Must be checked
   // *before* the input-box read below: compaction shows no token counter and no
@@ -460,8 +495,8 @@ function inputBox(raw: string): InputBox | null {
  * a box whose other rows are blank, so a multi-row draft (whose caret was moved
  * back up to the prompt row) is never overruled.
  */
-function inputEmpty(box: InputBox, cursor?: PaneCursor | null): boolean {
-  if (inputRealText(box.text) === "") return true;
+function inputEmpty(box: InputBox, cursor?: PaneCursor | null, marker: string = CLAUDE_PROMPT): boolean {
+  if (inputRealText(box.text, marker) === "") return true;
   return (
     !!cursor && cursor.y === box.promptRow && cursor.x === box.inputCol && onlyPromptRow(box)
   );
@@ -478,6 +513,166 @@ function onlyPromptRow(box: InputBox): boolean {
   return box.text
     .split("\n")
     .every((l, i) => i === box.promptOffset || stripAnsi(l).trim() === "");
+}
+
+// ── Codex CLI panes ──────────────────────────────────────────────────────────
+// Codex's TUI shares no structure with claude's, so it gets its own classifier
+// (`codexReadiness`) that `paneReadiness` dispatches to. Calibrated against real
+// captures of a 67-second turn (see e2e/fixtures/codex-*.ansi). The differences
+// that matter:
+//   • The input box has NO border rules — it's a background-colour band — so
+//     claude's "between the last two `─{20,}` rules" anchor finds nothing.
+//   • Its prompt glyph is `›`, not `❯`.
+//   • The caret NEVER moves: it sat at the prompt column for all 289 samples of
+//     a busy turn, so it says nothing about busy-ness (it still says plenty
+//     about whether the box holds a draft).
+//   • The box keeps showing its dim example placeholder while the model works,
+//     and codex accepts typing mid-turn (it queues), so an empty-looking box is
+//     NOT permission to send.
+// What's left is the status bar, and one status line above the input.
+//
+// Why scrape at all, when claude gets read over its control socket: codex has no
+// per-process socket to connect to. It does have a local control plane — an
+// [experimental] `codex app-server daemon`, WebSocket JSON-RPC over
+// `$CODEX_HOME/app-server-control/app-server-control.sock`, whose `thread/read`
+// reports a richer status than anything here (idle vs active vs
+// waitingOnApproval vs waitingOnUserInput). But a thread is only reachable
+// there if its TUI was started as `codex --remote unix://`, i.e. as a client of
+// that daemon; a plain `codex`/`codex resume` is invisible to it (it shows up in
+// `thread/list` from the on-disk rollouts, but always `notLoaded`, never
+// controllable). So it can never cover sessions the user launched themselves,
+// and adopting it means changing how agendo launches codex — worth revisiting
+// once the protocol settles, not a drop-in for this.
+
+/**
+ * Codex's run-state word, read from its footer status bar. The bar is a ` · `
+ * separated list whose fields are user-configurable (`/statusline`), so the
+ * word is matched as a WHOLE field at any position rather than by offset — and
+ * matching a whole field is also what stops the word "Working" in transcript
+ * prose from counting. `Thinking` is documented by the `/statusline` dialog
+ * ("Compact session run-state text (Ready, Working, Thinking)") alongside the
+ * two we captured live.
+ */
+const CODEX_RUN_STATES = { Ready: "ready", Working: "busy", Thinking: "busy" } as const;
+
+/**
+ * Codex's mid-turn status line, rendered directly above the input box:
+ * `• Working (25s • esc to interrupt)`. Independent of the footer, so it still
+ * works when `/statusline` has the run-state field switched off; across a
+ * captured 67-second turn it was present in every one of the 154 busy frames.
+ *
+ * The VERB varies and must not be matched on — `--approve-for-me` swaps it for
+ * `• Reviewing approval request (6s • esc to interrupt)` while its automatic
+ * review runs, and other sub-steps may use others again. What's invariant is
+ * the shape: a `•` bullet, a parenthesised elapsed counter, and the interrupt
+ * hint. Requiring the counter is what keeps finished-turn prose out — the
+ * completion marker is `─ Worked for 1m 06s ───…`, which carries no hint.
+ *
+ * The counter restarts at each sub-step (it ran 0→33s, reset, ran again), so it
+ * is not a turn timer and nothing should read it as one.
+ */
+const CODEX_BUSY_LINE = /^[ \t]*•[^\n]*\(\s*\d+s\b[^\n]*\besc to interrupt\b/im;
+
+/** What a codex pane's footer says, when we can find and read one. */
+interface CodexFooter {
+  /** Index of the status-bar line in the capture. */
+  row: number;
+  /** The run-state field, or null when `/statusline` has it switched off. */
+  state: Readiness | null;
+}
+
+/**
+ * Locate codex's footer status bar — the last non-empty line — and read its
+ * run-state field. Returns null when the line doesn't look like a status bar at
+ * all (too few ` · ` fields), which is how a non-codex pane is rejected.
+ */
+function codexFooter(lines: string[]): CodexFooter | null {
+  let row = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (stripAnsi(lines[i]).trim()) {
+      row = i;
+      break;
+    }
+  }
+  if (row === -1) return null;
+  const fields = stripAnsi(lines[row]).split(" · ").map((f) => f.trim());
+  // A single field is any old line of prose; the bar always carries at least
+  // the model and the cwd, so two is the floor for calling this a status bar.
+  if (fields.length < 2) return null;
+  for (const [word, state] of Object.entries(CODEX_RUN_STATES)) {
+    if (fields.includes(word)) return { row, state };
+  }
+  return { row, state: null };
+}
+
+/**
+ * Codex's input box: the `›` prompt line just above the footer, plus the blank
+ * padding row between them. There are no rules to anchor on, so we scan a short
+ * way up from the footer — which also keeps a `›` appearing in transcript prose
+ * out of reach, and (more importantly) the `›` codex uses as the SELECTION
+ * CURSOR inside its dialogs, which is the same glyph.
+ *
+ * A draft long enough to wrap past the search window yields null → "unknown",
+ * which is the safe direction: `agendo send` refuses rather than overwriting it.
+ */
+const CODEX_BOX_SEARCH_ROWS = 4;
+
+function codexInputBox(lines: string[], footerRow: number): InputBox | null {
+  for (let i = footerRow - 1; i >= 0 && i >= footerRow - CODEX_BOX_SEARCH_ROWS; i--) {
+    if (!lines[i].includes(CODEX_PROMPT)) continue;
+    return {
+      text: lines.slice(i, footerRow).join("\n"),
+      promptRow: i,
+      promptOffset: 0,
+      // `› ` — the marker plus the single space separating it from the input.
+      inputCol: stripAnsi(lines[i]).indexOf(CODEX_PROMPT) + 2,
+    };
+  }
+  return null;
+}
+
+/**
+ * Classify a codex pane. Conservative in one specific direction: it only ever
+ * answers "ready" on the POSITIVE evidence of the footer saying `Ready`.
+ *
+ * That matters because the run-state field is optional — `/statusline` can
+ * switch it off. With it off, the busy line still catches most of a turn, and
+ * everything else degrades to "unknown" (send refuses, and the user can be told
+ * why) instead of to a confident, wrong "ready" that would inject a prompt into
+ * a working session. So run-state is a soft requirement for `send`/`wait`
+ * rather than something we silently guess around.
+ */
+function codexReadiness(raw: string, footer: CodexFooter, cursor?: PaneCursor | null): Readiness {
+  // An open dialog replaces the input box; codex's own confirmation footer
+  // ("enter to confirm and close; esc to close") matches the shared signature.
+  // Checked first: a dialog can coexist with a footer still reading `Ready`.
+  if (isDialog(raw)) return "dialog";
+  if (footer.state === "busy" || CODEX_BUSY_LINE.test(stripAnsi(raw))) return "busy";
+  // No positive `Ready` → we genuinely don't know (see the doc comment above).
+  if (footer.state !== "ready") return "unknown";
+  const lines = raw.replace(/\r/g, "").split("\n");
+  const box = codexInputBox(lines, footer.row);
+  if (box === null) return "unknown";
+  return inputEmpty(box, cursor, CODEX_PROMPT) ? "ready" : "queued";
+}
+
+/**
+ * Whether this capture is a codex TUI, and its footer if so. Sniffed from the
+ * pane CONTENT rather than the tmux window name: the name only carries the
+ * agent for codex's own windows (`cl-codex-…`, `cl-bg-codex-…`), never for a
+ * `cl-wi-…`/`cl-pr-…` one, and `paneReadiness`'s callers have only the text.
+ *
+ * Requires either the run-state field or the busy line — the two markers no
+ * other TUI produces. A codex pane with run-state switched off and no turn
+ * running is therefore not recognised, and falls through to the claude path,
+ * which finds no input box and answers "unknown". Same safe verdict, reached
+ * the long way round.
+ */
+function codexPane(raw: string): CodexFooter | null {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  const footer = codexFooter(lines);
+  if (footer?.state) return footer;
+  return footer && CODEX_BUSY_LINE.test(stripAnsi(raw)) ? footer : null;
 }
 
 /**

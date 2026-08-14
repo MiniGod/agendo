@@ -19,6 +19,7 @@ import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState } from "./config.ts";
 import { repoRootForCwd } from "./repos.ts";
+import { AGENTS } from "./types.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
@@ -39,8 +40,12 @@ Usage:
       --attach, -a              Switch/attach to it immediately (default: detached)
       --name, -n <slug>         Name the worktree/branch (else derived from prompt)
       --no-worktree             Run in the current checkout instead of a new worktree
-      --agent <claude|copilot>  Which agent to launch (default: claude)
-      --copilot / --claude      Shorthand for --agent copilot / --agent claude
+      --agent <claude|copilot|codex>
+                                Which agent to launch (default: claude). Codex
+                                assigns its own session id, so no id is printed;
+                                find it with "agendo list" once it has started.
+      --copilot / --claude / --codex
+                                Shorthand for the matching --agent
       --model <name>            Model for the new session, passed to the agent
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
@@ -79,7 +84,7 @@ Usage:
                                 (Workflow-tool runs with agent progress), recent
                                 activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
-                                name (cl-bg-…, cl-claude-…).
+                                name (cl-bg-…, cl-claude-…, cl-codex-…).
       --full, -F                Don't truncate the prompt / activity details
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
                                 its input is idle/ready (not mid-turn, no open
@@ -181,8 +186,8 @@ if (process.argv[2] === "status") {
 
 // `launch [flags] <prompt>`: spin up a managed session without the menu. The
 // launcher creates an isolated worktree (unless `--no-worktree`) and a
-// `cl-bg-…` agent window it can attach to later (Claude by default, or Copilot
-// via `--agent copilot`/`--copilot`). Used both by humans and by a running agent
+// `cl-bg-…` agent window it can attach to later (Claude by default, or Copilot /
+// Codex via `--agent <name>` and its shorthand). Used both by humans and by a running agent
 // the user asked to start a background session. Detached by default; `--attach`
 // switches/attaches to it immediately. A small allowlist of agent flags
 // (`FORWARDABLE_LAUNCH_FLAGS`, e.g. `--model`) is passed through to the new
@@ -210,13 +215,14 @@ if (process.argv[2] === "launch") {
     else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
+    else if (a === "--codex") agent = "codex";
     else if (flag === "--agent") {
       const v = inline ? a.slice(eq + 1) : rest[++i];
-      if (v !== "claude" && v !== "copilot") {
-        console.error(`launch failed: --agent must be "claude" or "copilot", got "${v ?? ""}"`);
+      if (!AGENTS.includes(v as AgentSource)) {
+        console.error(`launch failed: --agent must be one of ${AGENTS.join(", ")}, got "${v ?? ""}"`);
         process.exit(1);
       }
-      agent = v;
+      agent = v as AgentSource;
     } else if (Object.hasOwn(FORWARDABLE_LAUNCH_FLAGS, flag)) {
       // Value flags: take the inline `=value`, else the next token verbatim. A
       // missing value (empty, or end of argv) or — in the two-token form, where
@@ -259,6 +265,10 @@ if (process.argv[2] === "launch") {
   // has no on-disk log yet to attribute by, only the short id in its tmux name.
   // Recording it here (with the full id we just minted) makes the tab survive a
   // relaunch immediately; no-op if the window didn't land in the canonical session.
+  //
+  // Skipped for Codex, which mints its own id: there's nothing to resume by yet.
+  // Its window is attributed by cwd instead, so the menu's next reload picks the
+  // session up and `captureRestore` snapshots it from there.
   if (id) {
     recordLaunchedSession(
       {
@@ -281,9 +291,11 @@ if (process.argv[2] === "launch") {
     spawnSync(cmd, args, { stdio: "inherit" });
   } else {
     // Print machine-readable next steps for the agent/human that launched it.
-    console.log(`▸ launched background session ${id}`);
+    // `status` is keyed by session id; codex assigns its own only once the
+    // session starts, so send the caller to `list` to pick it up from there.
+    console.log(`▸ launched background session ${id ?? `— ${agent} assigns its own id`}`);
     console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
-    console.log(`  status:  ${SELF_CMD} status ${id}`);
+    console.log(id ? `  status:  ${SELF_CMD} status ${id}` : `  id:      ${SELF_CMD} list   (then: ${SELF_CMD} status <id>)`);
     console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);
   }
   process.exit(0);
@@ -843,8 +855,9 @@ async function runList(opts: ListOptions): Promise<void> {
 /**
  * The default, unchanged `list`: the managed sessions running right now, one per
  * line. We walk the live `cl-…` tmux targets and resolve each back to its
- * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by
- * embedded short id, work-item / PR names by working directory (as in model.ts)
+ * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`/
+ * `cl-codex-`) by embedded short id, work-item / PR / agent-assigns-its-own-id
+ * names by working directory (as in model.ts)
  * — then report readiness, kind, id, location and title. Running-only and
  * model-free by design. An optional `filterRoot` scopes to sessions under it.
  */

@@ -1,6 +1,6 @@
 # agendo
 
-Terminal UI (bun + Ink) to launch/resume Claude and Copilot agent sessions as attachable tmux windows, keyed off Azure DevOps work items.
+Terminal UI (bun + Ink) to launch/resume Claude, Copilot and Codex agent sessions as attachable tmux windows, keyed off Azure DevOps work items.
 
 ## Commits & releases
 

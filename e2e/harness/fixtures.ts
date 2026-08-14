@@ -1,8 +1,8 @@
 // Deterministic fixtures for the e2e harness.
 //
 // `materializeHome` writes a fake $HOME containing exactly the on-disk session
-// state the launcher discovers (Claude JSONL logs + a Copilot session dir) and
-// a config.json, so `src/sessions.ts` / `src/config.ts` read fixtures instead
+// state the launcher discovers (Claude JSONL logs, a Copilot session dir, a
+// Codex rollout) and a config.json, so `src/sessions.ts` / `src/config.ts` read fixtures instead
 // of the real machine. `ADO` + the `resolve*` helpers below model the REST
 // surface the mock server serves. `tmuxState` is the initial fake-tmux state
 // (which `cl-…` targets are "live", and what their panes show).
@@ -15,6 +15,8 @@
 //   • WI 103 (older sprint)   → lands under "Everything else assigned"
 //   • WI 201 (Grace's)        → only shows when viewing as Grace
 //   • PR 6001                 → orphan PR (no work item) + a Copilot session
+//   • a Codex session in appweb (no PR/work item) — covers the third agent's
+//     on-disk format, and its sub-agent thread that must stay unlisted
 //   • PR 7001 / 7002          → Grace's PRs where Ada is a reviewer ("Awaiting
 //                               your review"), with running / passing CI
 import { mkdir, writeFile, utimes } from "node:fs/promises";
@@ -33,6 +35,9 @@ export const LOGIN_SESSION_ID = "login-session";
 export const CRASH_SESSION_ID = "crash-session";
 export const STANDALONE_SESSION_ID = "standalone-session";
 export const COPILOT_SESSION_ID = "cop-exp-01";
+// Codex ids are real UUIDs — `codex resume` takes the uuid, and it's also the
+// suffix of the rollout filename, so the fixture uses a well-formed one.
+export const CODEX_SESSION_ID = "019cde00-1111-7000-8000-00000000cde0";
 
 /** The canonical tmux target for the running login session. */
 export const RUNNING_TARGET = sessionName("claude", LOGIN_SESSION_ID);
@@ -51,6 +56,10 @@ function paths(home: string) {
     loginCwd: join(appweb, ".claude", "worktrees", "login"),
     crashCwd: join(appweb, ".claude", "worktrees", "fix-crash-102"),
     expCwd: join(applib, ".claude", "worktrees", "experiment"),
+    // In appweb (already the top-ranked repo) on purpose: a third session there
+    // keeps the repo picker's ranking exactly as it was, so the codex fixture
+    // doesn't quietly reorder the tests that pin it.
+    codexCwd: join(appweb, ".claude", "worktrees", "codex-tidy"),
   };
 }
 
@@ -251,12 +260,46 @@ export async function materializeHome(home: string): Promise<void> {
     ]),
   );
 
+  // 5) codex session — one rollout JSONL under the date tree codex writes,
+  // sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl. It exercises the parts
+  // of the format the index depends on:
+  //   • `session_meta` on the FIRST line carries id / cwd / git.branch and the
+  //     origin URL (reduced to an owner/repo slug for repo scoping),
+  //   • codex records no title, so the first real user turn stands in — and it's
+  //     preceded here by the injected `<environment_context>` turn that must be
+  //     skipped, and by the VS Code preamble whose "My request" tail is kept,
+  //   • a `subagent` thread in the same directory that must NOT be listed.
+  const codexDay = join(home, ".codex", "sessions", "2026", "06", "18");
+  await mkdir(codexDay, { recursive: true });
+  const codexLog = join(codexDay, `rollout-2026-06-18T08-00-00-${CODEX_SESSION_ID}.jsonl`);
+  await writeFile(
+    codexLog,
+    jsonl([
+      { type: "session_meta", timestamp: "2026-06-18T08:00:00.000Z", payload: { id: CODEX_SESSION_ID, timestamp: "2026-06-18T08:00:00.000Z", cwd: p.codexCwd, originator: "codex-tui", source: "cli", thread_source: "user", git: { commit_hash: "abc123", branch: "draft/codex-tidy", repository_url: "https://github.com/acme/appweb.git" } } },
+      { type: "response_item", timestamp: "2026-06-18T08:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>" }] } },
+      { type: "response_item", timestamp: "2026-06-18T08:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Context from my IDE setup:\n\n## Active file: src/util.ts\n\n## My request for Codex:\nTidy up the util helpers" }] } },
+      { type: "response_item", timestamp: "2026-06-18T08:00:05.000Z", payload: { type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["bash", "-lc", "bun test util"] }) } },
+      { type: "response_item", timestamp: "2026-06-18T08:00:07.000Z", payload: { type: "function_call", name: "update_plan", arguments: JSON.stringify({ plan: [{ step: "Read the util helpers", status: "completed" }, { step: "Simplify the duplicated branches", status: "in_progress" }] }) } },
+      { type: "response_item", timestamp: "2026-06-18T08:00:09.000Z", payload: { type: "custom_tool_call", name: "apply_patch", input: "*** Begin Patch\n*** Update File: src/util.ts\n@@\n-old\n+new\n*** End Patch" } },
+      { type: "response_item", timestamp: "2026-06-18T08:00:12.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Tidied the helpers." }] } },
+    ]),
+  );
+  // A sub-agent thread codex spawned for itself: same directory, same shape, but
+  // `thread_source: subagent` — it must never be offered as a resumable session.
+  await writeFile(
+    join(codexDay, "rollout-2026-06-18T08-30-00-019cde00-2222-7000-8000-00000000cde1.jsonl"),
+    jsonl([
+      { type: "session_meta", timestamp: "2026-06-18T08:30:00.000Z", payload: { id: "019cde00-2222-7000-8000-00000000cde1", timestamp: "2026-06-18T08:30:00.000Z", cwd: p.codexCwd, thread_source: "subagent", source: { subagent: { other: "guardian" } }, parent_thread_id: CODEX_SESSION_ID } },
+    ]),
+  );
+
   // Set mtimes (== lastUsed) so ordering is deterministic: login newest.
   const now = Date.now();
   const min = 60_000;
   await utimes(join(loginDir, `${LOGIN_SESSION_ID}.jsonl`), now / 1000, (now - 5 * min) / 1000);
   await utimes(join(crashDir, `${CRASH_SESSION_ID}.jsonl`), now / 1000, (now - 60 * min) / 1000);
   await utimes(copDir, now / 1000, (now - 120 * min) / 1000);
+  await utimes(codexLog, now / 1000, (now - 180 * min) / 1000);
   await utimes(join(standaloneDir, `${STANDALONE_SESSION_ID}.jsonl`), now / 1000, (now - 300 * min) / 1000);
 }
 

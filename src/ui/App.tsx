@@ -14,6 +14,7 @@ import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
+import { AGENTS } from "../types.ts";
 import type {
   ActionLine,
   AgentSession,
@@ -128,6 +129,7 @@ function verbStyle(verb: string): { color: string } {
       return { color: "cyan" };
     case "Claude":
     case "Copilot":
+    case "Codex":
       return { color: "white" };
     case "Thinking":
       return { color: "magenta" };
@@ -215,6 +217,13 @@ function sessionRepo(s: AgentSession): string {
   return basename(repoRootForCwd(s.cwd));
 }
 
+// Per-agent session counts for the repo picker ("12 claude, 3 codex"). Agents
+// with no sessions in the repo are omitted, so the line stays short as more
+// agents are supported rather than padding out zeros for all of them.
+function repoBreakdown(r: RepoInfo): string {
+  return AGENTS.filter((a) => r[a] > 0).map((a) => `${r[a]} ${a}`).join(", ");
+}
+
 // Subsequence fuzzy match: every (non-space) character of the query must appear
 // in `text`, in order, but not necessarily contiguously. Case-insensitive.
 function fuzzyMatch(query: string, text: string): boolean {
@@ -265,13 +274,21 @@ function sessionMeta(s: AgentSession): Array<[string, string]> {
   ];
   if (s.branch) out.push(["branch", s.branch]);
   if (s.source === "claude" && s.configDir) out.push(["profile", basename(s.configDir)]);
-  out.push(["continue", `press c → convert & resume in ${otherAgent(s.source)}`]);
+  const dest = convertTarget(s.source);
+  if (dest) out.push(["continue", `press c → convert & resume in ${dest}`]);
   return out;
 }
 
-/** The agent a session would be converted to (the one it isn't). */
-function otherAgent(source: AgentSource): AgentSource {
-  return source === "claude" ? "copilot" : "claude";
+/**
+ * The agent a session can be CONVERTED to, or null when there's nowhere to go.
+ * The external converter (see CONVERT_GIST) only speaks Claude↔Copilot, so a
+ * Codex session has no destination — better to hide the action than to offer a
+ * conversion that would fail.
+ */
+function convertTarget(source: AgentSource): AgentSource | null {
+  if (source === "claude") return "copilot";
+  if (source === "copilot") return "claude";
+  return null;
 }
 
 type Activity = SessionActivity | "loading" | "error";
@@ -1023,6 +1040,7 @@ type Mode =
 const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
   { source: "claude", label: "Claude", desc: "claude --session-id …" },
   { source: "copilot", label: "Copilot", desc: "copilot --session-id …" },
+  { source: "codex", label: "Codex", desc: "codex … (assigns its own session id)" },
 ];
 
 // ── main app ──────────────────────────────────────────────────────────────────
@@ -1731,7 +1749,11 @@ export default function App({
   // the default ~/.claude config dir (where the converter writes), so no
   // configDir override is needed for resume.
   const continueInOtherAgent = async (s: AgentSession) => {
-    const dest = otherAgent(s.source);
+    const dest = convertTarget(s.source);
+    if (!dest) {
+      setNotice(`No cross-agent convert for ${s.source} sessions (the converter only speaks Claude↔Copilot).`);
+      return;
+    }
     const direction = s.source === "claude" ? "claude-to-copilot" : "copilot-to-claude";
     setNotice(null);
     setBusy(`Converting session to ${dest} (npx converter)…`);
@@ -2217,7 +2239,7 @@ export default function App({
                 ) : (
                   <>
                     <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
-                    <Text color={sel ? "black" : "gray"}>{` (${r.claude} claude, ${r.copilot} copilot)`}</Text>
+                    <Text color={sel ? "black" : "gray"}>{` (${repoBreakdown(r)})`}</Text>
                   </>
                 )}
                 <Text dimColor={!sel}>{`  ${r.root}`}</Text>

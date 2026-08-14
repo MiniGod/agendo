@@ -80,7 +80,7 @@ fixtures `mock` + `launch`):
 
 | Boundary | Real dependency | How it's mocked |
 | --- | --- | --- |
-| Sessions + config | `~/.claude*/projects`, `~/.copilot`, `~/.claude-launcher` | `HOME` → a fixture home tree (`fixtures.ts` → `materializeHome`). `os.homedir()` honors `$HOME`. |
+| Sessions + config | `~/.claude*/projects`, `~/.copilot`, `~/.codex/sessions`, `~/.claude-launcher` | `HOME` → a fixture home tree (`fixtures.ts` → `materializeHome`). `os.homedir()` honors `$HOME`. |
 | Azure DevOps REST | `dev.azure.com`, `app.vssps.visualstudio.com` | A local mock HTTP server (`adoServer.ts`); the app points at it via the `ADO_BASE_URL` / `ADO_VSSPS_URL` env seams added to `src/ado.ts`. |
 | `az` token | `az account get-access-token` | Fake `az` shim returns a static token. |
 | `tmux` | the user's tmux server | Fake `tmux` shim — answers `list-*`/`has-session` from a JSON state file and logs every call; **starts nothing**. Live "running" state is just fixture data. |
@@ -102,6 +102,8 @@ Shaped to exercise every branch of the view model:
   embedded in its branch name.
 - **WI 103** → an older sprint, so it lands under "Everything else assigned".
 - **PR 6001** → an orphan draft PR (no work item) with a Copilot session.
+- **a Codex session in appweb** (no PR/work item), beside a codex sub-agent thread
+  that must never be listed as resumable.
 - a standalone Claude session in a plain checkout (exercises the repo-root walk-up).
 
 ## Files
@@ -116,6 +118,13 @@ e2e/
     fixtures.ts    fake HOME tree + ADO payloads + initial tmux state
     test.ts        Playwright fixtures (`mock`, `launch`)
   fakebin/         fake az / tmux / git / claude / xdg-open executables
+  fixtures/        verbatim `tmux capture-pane -p -e` panes (+ their cursor
+                   readouts) from real Claude and Codex sessions, used by
+                   detection.spec.ts to pin the readiness classifiers against
+                   screens no synthesized string reproduces — usage limits, a
+                   greyed-out autocomplete suggestion, and the codex-* set
+                   (idle / draft / mid-turn / approval review / finished /
+                   `/statusline` dialog). Only anonymized, never reformatted.
   launcher.spec.ts behavioral tests (navigation, flows, side effects)
   screenshots.spec.ts          styled-grid snapshot tests for every view
   screenshots.spec.ts-snapshots/  committed snapshot baselines

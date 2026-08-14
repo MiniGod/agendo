@@ -85,10 +85,13 @@ export function llmGuide(): string {
     "  window, runs unattended (auto/autopilot mode), and prints its session id.",
     "  Flags: --name <slug> (name the worktree/branch) · --no-worktree (use the current",
     "         checkout) · --attach (switch to it now instead of leaving it detached) ·",
-    "         --agent <claude|copilot> / --copilot (which agent to run; default claude) ·",
-    "         --model <name> (model for the new session; both agents) · --fallback-model",
-    "         <name> (claude only). Only these agent flags are forwarded — anything else",
-    "         dashed is an error, so put prompt text that starts with -- after a bare --.",
+    "         --agent <claude|copilot|codex> / --copilot / --codex (which agent to run;",
+    "         default claude) · --model <name> (model for the new session; all agents) ·",
+    "         --fallback-model <name> (claude only). Only these agent flags are forwarded",
+    "         — anything else dashed is an error, so put prompt text that starts with --",
+    "         after a bare --.",
+    "  Codex assigns its own session id, so `--agent codex` prints no id up front — find",
+    "  it with `list` once the session has started.",
     "",
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
@@ -144,6 +147,33 @@ const AUTONOMY_ARGV = [
 const COPILOT_AUTONOMY_ARGV = ["--autopilot", "--allow-all-tools"];
 
 /**
+ * Codex equivalent of AUTONOMY_ARGV, and the closest analogue of Claude's
+ * `--permission-mode auto` that codex has: `--approve-for-me` routes each
+ * approval request through codex's own automatic review instead of stopping to
+ * ask, and runs it under the workspace-write sandbox (the flag implies the
+ * sandbox, so `--sandbox` is not also passed). Same shape as Claude's auto mode
+ * — a classifier approves what looks safe — rather than a blanket yes.
+ *
+ * Deliberately NOT `--ask-for-approval never`, which disables the review rather
+ * than automating it, and NOT `--dangerously-bypass-approvals-and-sandbox`:
+ * unattended is not the same as unsandboxed. Scoped to launcher-spawned
+ * background sessions; interactive sessions keep the user's own approval mode.
+ */
+const CODEX_AUTONOMY_ARGV = ["--approve-for-me"];
+
+/**
+ * Whether an agent's CLI accepts a caller-chosen session id for a BRAND-NEW
+ * session (`--session-id <uuid>`). Claude and Copilot do, so their fresh windows
+ * embed the id we minted and every later attach/status finds the exact session.
+ * Codex does not — it assigns its own thread id and only exposes it after the
+ * fact (in `~/.codex/sessions/…/rollout-…-<id>.jsonl`), so a codex session is
+ * attributed to its window by working directory instead. See `kindName`'s `tag`.
+ */
+export function preassignsSessionId(agent: AgentSource): boolean {
+  return agent !== "codex";
+}
+
+/**
  * Agent CLI flags `agendo launch` may forward verbatim into a BRAND-NEW
  * session's argv. Deliberately a small allowlist rather than a `--` catch-all:
  * every forwarded token is one we know the target agent accepts, so a typo fails
@@ -151,15 +181,15 @@ const COPILOT_AUTONOMY_ARGV = ["--autopilot", "--allow-all-tools"];
  *
  * Each entry lists the agents that take the flag with this exact
  * `<flag> <value>` syntax — the flags are NOT symmetric across agents:
- *  - `--model <name>`: both Claude and Copilot, same syntax and meaning, so it
- *    forwards straight through with no per-agent translation.
- *  - `--fallback-model <name>`: Claude only; Copilot has no equivalent, so
- *    `agendo launch --copilot --fallback-model …` is rejected rather than
- *    passed to a binary that would choke on it.
+ *  - `--model <name>`: all three agents, same syntax and meaning, so it forwards
+ *    straight through with no per-agent translation.
+ *  - `--fallback-model <name>`: Claude only; neither Copilot nor Codex has an
+ *    equivalent, so `agendo launch --copilot --fallback-model …` is rejected
+ *    rather than passed to a binary that would choke on it.
  * Forwarding applies to new sessions only — `resumeArgv` never sees these.
  */
 export const FORWARDABLE_LAUNCH_FLAGS: Record<string, { agents: readonly AgentSource[] }> = {
-  "--model": { agents: ["claude", "copilot"] },
+  "--model": { agents: ["claude", "copilot", "codex"] },
   "--fallback-model": { agents: ["claude"] },
 };
 
@@ -182,6 +212,14 @@ export function resumeArgv(s: AgentSession): string[] {
       // Copilot equivalent of claude's `--append-system-prompt`, so the launcher
       // system prompt is intentionally omitted for Copilot resumes.
       return ["copilot", `--resume=${s.id}`];
+    case "codex":
+      // `codex resume <SESSION_ID>` takes the thread UUID as a positional; the
+      // bare `codex resume` would open its interactive picker instead. Codex
+      // keeps all state under $CODEX_HOME (default ~/.codex) and we scan exactly
+      // that home, so the child inherits the right one with no env wiring. Like
+      // Copilot, codex has no `--append-system-prompt`, so the launcher system
+      // prompt is intentionally omitted.
+      return ["codex", "resume", s.id];
   }
 }
 
@@ -203,32 +241,47 @@ interface FreshArgvOptions {
 }
 
 /**
- * Build the argv to start a BRAND-NEW session for `agent` in a tmux window.
- * Both agents support pre-assigning the session UUID (so the `cl-…-<id>` window
- * name can embed it) and an initial interactive prompt:
+ * Build the argv to start a BRAND-NEW session for `agent` in a tmux window, each
+ * with its initial interactive prompt and unattended-autonomy flags:
  *  - Claude: `--session-id <id>`, positional prompt, `AUTONOMY_ARGV`, plus the
  *    launcher system prompt appended so background-session coordination works.
  *  - Copilot: `--session-id <id>`, `--interactive <prompt>`,
  *    `COPILOT_AUTONOMY_ARGV`. Copilot has no `--append-system-prompt`, so the
  *    launcher prompt is omitted (background coordination is Claude-only today).
+ *  - Codex: positional prompt, `CODEX_AUTONOMY_ARGV`. Codex has no
+ *    `--session-id` (see `preassignsSessionId`) — `opts.sessionId` is ignored
+ *    rather than forced in — and no `--append-system-prompt`.
  * Any `forwardArgv` (allowlisted flags from `agendo launch`) goes last among the
  * flags, so an explicit `--model` wins over anything the defaults might set.
  */
 function freshArgv(agent: AgentSource, opts: FreshArgvOptions = {}): string[] {
-  if (agent === "copilot") {
-    const argv = ["copilot"];
-    if (opts.sessionId) argv.push("--session-id", opts.sessionId);
-    if (opts.autonomy) argv.push(...COPILOT_AUTONOMY_ARGV);
-    if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
-    if (opts.prompt) argv.push("--interactive", opts.prompt);
-    return argv;
+  switch (agent) {
+    case "copilot": {
+      const argv = ["copilot"];
+      if (opts.sessionId) argv.push("--session-id", opts.sessionId);
+      if (opts.autonomy) argv.push(...COPILOT_AUTONOMY_ARGV);
+      if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
+      if (opts.prompt) argv.push("--interactive", opts.prompt);
+      return argv;
+    }
+    case "codex": {
+      const argv = ["codex"];
+      if (opts.autonomy) argv.push(...CODEX_AUTONOMY_ARGV);
+      if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
+      // Codex's prompt is a bare positional, so it must come after every flag
+      // (a `[PROMPT]` before one would be read as that flag's value).
+      if (opts.prompt) argv.push(opts.prompt);
+      return argv;
+    }
+    case "claude": {
+      const argv = ["claude"];
+      if (opts.sessionId) argv.push("--session-id", opts.sessionId);
+      if (opts.autonomy) argv.push(...AUTONOMY_ARGV);
+      if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
+      if (opts.prompt) argv.push(opts.prompt);
+      return withLauncherPrompt(argv);
+    }
   }
-  const argv = ["claude"];
-  if (opts.sessionId) argv.push("--session-id", opts.sessionId);
-  if (opts.autonomy) argv.push(...AUTONOMY_ARGV);
-  if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
-  if (opts.prompt) argv.push(opts.prompt);
-  return withLauncherPrompt(argv);
 }
 
 export interface OpenPlan {
@@ -329,13 +382,23 @@ export function launchFresh(cwd: string, name: string, agent: AgentSource = "cla
 }
 
 /**
- * Open a kind-prefixed managed session for `agent` in `cwd`. We assign the
- * session id up front (`--session-id`) so the tmux window name embeds it — that
- * lets `openSession` find this exact window on a later attach (no duplicate),
- * and the `cl-bg-`/`cl-new-` prefix tells the human (and the UI badge) how it
- * started. Background sessions also get the autonomy flags so they run unattended.
- * `forwardArgv` carries the allowlisted agent flags `agendo launch` accepted; the
- * TUI's own launch paths pass none.
+ * Open a kind-prefixed managed session for `agent` in `cwd`. The `cl-bg-`/
+ * `cl-new-` prefix tells the human (and the UI badge) how it started. Background
+ * sessions also get the autonomy flags so they run unattended. `forwardArgv`
+ * carries the allowlisted agent flags `agendo launch` accepted; the TUI's own
+ * launch paths pass none.
+ *
+ * For agents that take a caller-chosen id we assign it up front (`--session-id`)
+ * so the window name embeds it — that lets `openSession` find this exact window
+ * on a later attach instead of spawning a duplicate, and the returned `id` is
+ * the real, resumable session id.
+ *
+ * Codex assigns its own id, so there is nothing to embed: the window gets an
+ * id-LESS tagged name (`cl-bg-codex-…`, see `kindName`) and is attributed to its
+ * session by working directory — the same route `cl-wi-…`/`cl-pr-…` take, and it
+ * yields the genuine codex id once the session's rollout file lands on disk.
+ * `id` is undefined in that case; callers must not present the uniquifier as a
+ * session id.
  */
 function launchManaged(
   cwd: string,
@@ -343,11 +406,13 @@ function launchManaged(
   agent: AgentSource,
   prompt?: string,
   forwardArgv?: string[],
-): { plan: OpenPlan; id: string } {
-  const id = randomUUID();
-  const tmuxName = kindName(kind, id);
-  const argv = freshArgv(agent, { sessionId: id, prompt, autonomy: kind === "background", forwardArgv });
-  return { plan: openTarget(tmuxName, cwd, argv), id };
+): { plan: OpenPlan; id?: string } {
+  const preassigned = preassignsSessionId(agent);
+  const uniquifier = randomUUID();
+  const tmuxName = kindName(kind, uniquifier, preassigned ? undefined : agent);
+  const sessionId = preassigned ? uniquifier : undefined;
+  const argv = freshArgv(agent, { sessionId, prompt, autonomy: kind === "background", forwardArgv });
+  return { plan: openTarget(tmuxName, cwd, argv), id: sessionId };
 }
 
 /** Open a manual ("new session") flow session in an already-resolved `cwd`. */
@@ -389,10 +454,14 @@ export interface LaunchResult {
  * Creates an isolated worktree (unless disabled), then opens a `cl-bg-<id>` tmux
  * target running the chosen agent with the task prompt and (for Claude) the
  * launcher system prompt injected, so the convention propagates to whatever that
- * session spawns next. Defaults to Claude. Copilot is supported too, but has no
- * `--append-system-prompt` equivalent, so a Copilot background session won't
- * carry the launcher prompt — it runs the task under `--autopilot` but won't
- * autonomously spawn its own nested background sessions.
+ * session spawns next. Defaults to Claude. Copilot and Codex are supported too,
+ * but neither has an `--append-system-prompt` equivalent, so their background
+ * sessions won't carry the launcher prompt — they run the task unattended but
+ * won't autonomously spawn their own nested background sessions.
+ *
+ * `id` is absent for Codex, which assigns its own session id (see
+ * `launchManaged`); the session still appears in `agendo list` once its rollout
+ * file lands, and `plan.tmuxName` identifies the window meanwhile.
  */
 export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
   const slug = slugify(opts.name || opts.prompt || "") || "session";

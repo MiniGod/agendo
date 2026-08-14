@@ -1,7 +1,7 @@
 {
   "name": "agendo",
   "version": "0.1.1",
-  "description": "Terminal UI to launch/resume Claude and Copilot agent sessions for Azure DevOps work items",
+  "description": "Terminal UI to launch/resume Claude, Copilot and Codex agent sessions for Azure DevOps work items",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MiniGod/agendo.git"
@@ -18,6 +18,7 @@
   "keywords": [
     "claude",
     "copilot",
+    "codex",
     "azure-devops",
     "tmux",
     "agent",

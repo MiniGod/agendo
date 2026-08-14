@@ -6,7 +6,7 @@
 // what the browser-rendered TUI actually shows, or on what the launcher spawned.
 import { join } from "node:path";
 import { test, expect, KEY } from "./harness/test.ts";
-import { sessionName, RUNNING_TARGET, LOGIN_SESSION_ID, CRASH_SESSION_ID, COPILOT_SESSION_ID } from "./harness/fixtures.ts";
+import { sessionName, RUNNING_TARGET, LOGIN_SESSION_ID, CRASH_SESSION_ID, COPILOT_SESSION_ID, CODEX_SESSION_ID } from "./harness/fixtures.ts";
 
 // Poll an async predicate until true or fail (for effects that land in the
 // fake-bin logs slightly after a keystroke).
@@ -206,6 +206,38 @@ test("resuming a Copilot session launches copilot (native support)", async ({ la
         argv.includes("copilot") &&
         argv.some((a) => a === `--resume=${COPILOT_SESSION_ID}`),
     );
+  });
+});
+
+test("resuming a Codex session launches `codex resume <id>`", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  // The codex session's title comes from the first real user turn — the injected
+  // environment block and the IDE preamble around it are stripped — so searching
+  // for it also proves the title extraction.
+  await wt.press("/");
+  await wt.press("Tidy up the util", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press(KEY.enter);
+
+  const codexTarget = sessionName("codex", CODEX_SESSION_ID);
+  await waitUntil(async () => {
+    const log = await mock.tmuxLog();
+    return log.some((argv) => {
+      const sep = argv.indexOf("--", 1);
+      const agent = sep >= 0 ? argv.slice(sep + 1) : [];
+      return (
+        argv[0] === "new-session" &&
+        argv.includes(codexTarget) &&
+        // `resume` is a subcommand and the id a positional — not `--resume=<id>`.
+        agent.join(" ") === `codex resume ${CODEX_SESSION_ID}`
+      );
+    });
   });
 });
 

@@ -5,7 +5,7 @@ agendo ⟨bold⟩[Azure DevOps]  ⟨cyan⟩ 1 Work items ⟨dim⟩  2 PRs ⟨dim
 ▌ Running now⟨blue,bold⟩  (1) — enter to attach⟨bold,dim⟩
     ▸ ⟨gray⟩● ⟨green⟩[claude] ⟨dim⟩Implement login form  !5001 → WI 101⟨magenta⟩  <ago>⟨dim⟩  (ready → attach)⟨green⟩
 
-▸ appweb (2)⟨blue,bold⟩  <ago>⟨gray,bold⟩
+▸ appweb (3)⟨blue,bold⟩  <ago>⟨gray,bold⟩
 
 ▸ applib (1)⟨blue,bold⟩  <ago>⟨gray,bold⟩
 

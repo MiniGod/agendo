@@ -1,10 +1,10 @@
 # agendo
 
-`agendo` — a little console for launching and wrangling your Claude (and Copilot) agent sessions. (_agenda_ + _do_; also the Latin root of _agent_.)
+`agendo` — a little console for launching and wrangling your Claude, Copilot and Codex agent sessions. (_agenda_ + _do_; also the Latin root of _agent_.)
 
 ![agendo](docs/screenshot.png)
 
-`agendo` manages your Claude and Copilot agent sessions as tabs in one tmux session,
+`agendo` manages your Claude, Copilot and Codex agent sessions as tabs in one tmux session,
 organized around your Azure DevOps work items or GitHub issues. It automatically
 finds every session you've ever started and matches each to the PRs and issues it
 belongs to — by branch name, PR/issue number, and the like — so you see what's
@@ -79,11 +79,34 @@ Pick "start a fresh session", choose the agent and repo, and agendo creates a `g
 worktree` off the repo's default branch and launches the agent there — so new work
 never disturbs your current checkout.
 
+### Three agents, one list
+
+Claude Code, Copilot CLI and Codex CLI sessions are all discovered from disk and
+resumed natively (`claude --resume`, `copilot --resume=<id>`, `codex resume <id>`);
+the agent picker offers all three for a fresh session. Codex assigns its own session
+id rather than accepting one, so a codex session appears in the list once it has
+started, and `agendo launch --codex` prints no id up front. Autonomous codex sessions
+run under `--approve-for-me` — the analogue of Claude's auto mode, where each approval
+is decided by codex's own classifier instead of being asked, still inside the
+workspace-write sandbox.
+
+Readiness (what `agendo status` reports and what `send`/`wait` gate on) is read from
+each pane's own TUI, and codex's looks nothing like Claude's, so it gets its own
+classifier. One thing to know: codex's footer is configurable via `/statusline`, and
+the **run-state** field (`Ready` / `Working` / `Thinking`) is the only positive
+evidence a codex session is idle. Leave it enabled. With it switched off a running
+turn is still detected — the `• … (25s • esc to interrupt)` line above the box gives
+it away — but an idle pane reads `unknown` rather than `ready`, and `send` refuses
+instead of guessing. That's deliberate: codex accepts typing mid-turn (it queues it)
+and parks a dim example prompt in the box, so an empty-looking box is never on its own
+permission to send.
+
 ### Cross-agent continue (Claude ↔ Copilot)
 
 Hover a session and press `c` to continue it in the _other_ agent: agendo converts the
 transcript to that agent's on-disk format and resumes it, so a conversation can move
-between Claude and Copilot without losing context.
+between Claude and Copilot without losing context. (Claude and Copilot only — the
+converter has no Codex format.)
 
 ## Config
 

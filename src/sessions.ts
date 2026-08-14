@@ -1,12 +1,13 @@
 // Discovers resumable agent sessions on disk and indexes them by branch so the
 // UI can answer "what sessions exist for this work item's PR branch?".
 //
-// Two providers today (Claude Code, Copilot CLI) behind a small interface so
-// more agent types can be added later. Both index their on-disk sessions and
-// both resume natively (Claude via `claude --resume`, Copilot via
-// `copilot --resume=<id>`); see launch.ts:resumeArgv.
+// Three providers today (Claude Code, Copilot CLI, Codex CLI) behind a small
+// interface so more agent types can be added later. Each indexes its own
+// on-disk sessions and each resumes natively (Claude via `claude --resume`,
+// Copilot via `copilot --resume=<id>`, Codex via `codex resume <id>`); see
+// launch.ts:resumeArgv.
 import { existsSync } from "fs";
-import { readdir, readFile, stat } from "fs/promises";
+import { open, readdir, readFile, stat } from "fs/promises";
 import { spawnSync } from "child_process";
 import { basename, join } from "path";
 import { homedir } from "os";
@@ -126,18 +127,52 @@ async function parseClaudeMeta(
   return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt, workflows: workflows.finish() };
 }
 
-// Per-transcript parse cache, keyed by absolute .jsonl path. Parsing a Claude
-// transcript means reading + JSON-parsing every line of a possibly huge file;
-// with the index rebuilt on a short timer that dominated a CPU core across
-// hundreds of MB of transcripts. Since a transcript only gains records by being
-// appended to (mtime AND size move together on any change), reusing the built
-// AgentSession while both match is pure memoization — build() output stays
-// byte-for-byte identical for a given on-disk state. The one actively-appending
-// transcript (the foreground session's own log) still re-parses every build
-// because its mtime/size change each tick; that's one file, not the whole
-// corpus. Incremental tail-by-offset reading of that growing file is a possible
-// future follow-up, not done here.
-const claudeParseCache = new Map<string, { mtimeMs: number; size: number; session: AgentSession }>();
+// Per-transcript parse cache, keyed by absolute .jsonl path. Parsing a
+// transcript means reading + JSON-parsing a possibly huge file; with the index
+// rebuilt on a short timer that dominated a CPU core across hundreds of MB of
+// transcripts. Since a transcript only gains records by being appended to
+// (mtime AND size move together on any change), reusing the built AgentSession
+// while both match is pure memoization — build() output stays byte-for-byte
+// identical for a given on-disk state. The one actively-appending transcript
+// (the foreground session's own log) still re-parses every build because its
+// mtime/size change each tick; that's one file, not the whole corpus.
+// Incremental tail-by-offset reading of that growing file is a possible future
+// follow-up, not done here.
+//
+// Files that turn out NOT to be sessions are cached too, as null: codex writes a
+// sub-agent rollout beside every real one, and without a negative entry each
+// rebuild would re-read all of them forever.
+//
+// One instance per provider, so a provider's prune (which deletes every key not
+// seen this scan) can only ever touch its own transcripts.
+class TranscriptCache {
+  private map = new Map<string, { mtimeMs: number; size: number; session: AgentSession | null }>();
+
+  /**
+   * The cached result for this file, if it hasn't changed since we parsed it:
+   * the built session, `null` for a file we've already judged not to be one, or
+   * `undefined` for a genuine miss the caller must parse.
+   */
+  hit(path: string, st: { mtimeMs: number; size: number }): AgentSession | null | undefined {
+    const c = this.map.get(path);
+    return c && c.mtimeMs === st.mtimeMs && c.size === st.size ? c.session : undefined;
+  }
+
+  store(path: string, st: { mtimeMs: number; size: number }, session: AgentSession | null): void {
+    this.map.set(path, { mtimeMs: st.mtimeMs, size: st.size, session });
+  }
+
+  /** Drop entries for transcripts that no longer exist (`seen` = this scan's files). */
+  prune(seen: Set<string>): void {
+    for (const path of this.map.keys()) if (!seen.has(path)) this.map.delete(path);
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+}
+
+const claudeParseCache = new TranscriptCache();
 
 // Test-only instrumentation: counts how many transcripts were actually read +
 // parsed (cache MISSES) during index builds, so tests can prove the mtime/size
@@ -149,7 +184,7 @@ export function __claudeParseCount(): number {
 export function __resetClaudeParseCount(): void {
   claudeParseCount = 0;
 }
-/** Test-only: current number of cached transcript entries (to prove pruning). */
+/** Test-only: current number of cached Claude transcript entries (to prove pruning). */
 export function __claudeCacheSize(): number {
   return claudeParseCache.size;
 }
@@ -193,14 +228,17 @@ const claudeProvider: SessionProvider = {
                 const st = await stat(filePath).catch(() => null);
                 if (!st) return;
                 seen.add(filePath);
-                const cached = claudeParseCache.get(filePath);
-                if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
-                  sessions.push(cached.session);
+                const cached = claudeParseCache.hit(filePath, st);
+                if (cached !== undefined) {
+                  if (cached) sessions.push(cached);
                   return;
                 }
                 claudeParseCount++; // cache miss: this file is actually read+parsed
                 const meta = await parseClaudeMeta(filePath);
-                if (!meta?.cwd) return;
+                if (!meta?.cwd) {
+                  claudeParseCache.store(filePath, st, null); // not a session; don't re-read it
+                  return;
+                }
                 const id = file.replace(/\.jsonl$/, "");
                 const session: AgentSession = {
                   id,
@@ -214,7 +252,7 @@ const claudeProvider: SessionProvider = {
                   logPath: filePath,
                   workflows: meta.workflows,
                 };
-                claudeParseCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, session });
+                claudeParseCache.store(filePath, st, session);
                 sessions.push(session);
               }),
             );
@@ -226,9 +264,7 @@ const claudeProvider: SessionProvider = {
     // exactly the Claude files enumerated this scan, so this only ever touches
     // Claude transcript keys, and it runs after every per-file task above has
     // finished recording its path.
-    for (const path of claudeParseCache.keys()) {
-      if (!seen.has(path)) claudeParseCache.delete(path);
-    }
+    claudeParseCache.prune(seen);
     return sessions;
   },
 };
@@ -286,7 +322,249 @@ const copilotProvider: SessionProvider = {
   },
 };
 
-const PROVIDERS = [claudeProvider, copilotProvider];
+// ── Codex CLI ─────────────────────────────────────────────────────────────────
+// Sessions ("threads") are JSONL rollout files under
+// $CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl. The uuid in
+// the filename is the thread id `codex resume <id>` takes.
+//
+// The FIRST line is a `session_meta` record carrying everything the index needs
+// — id, cwd, start timestamp, and a `git` block with the branch and origin URL —
+// so unlike Claude we never have to walk the whole transcript to build a row.
+// We do read a bounded head of the file (CODEX_HEAD_BYTES) to find a title,
+// since codex records none: the first genuine user message stands in.
+
+const CODEX_HOME = process.env.CODEX_HOME || join(homedir(), ".codex");
+const CODEX_SESSIONS = join(CODEX_HOME, "sessions");
+
+// How much of a rollout to read when indexing. The session_meta line alone can
+// run to tens of KB (it embeds the full base instructions), and the first user
+// message follows within a few records, so this comfortably covers both while
+// keeping the scan bounded on multi-MB transcripts.
+const CODEX_HEAD_BYTES = 256 * 1024;
+
+/** Read at most `max` bytes from the head of a file (utf-8, may split a line). */
+async function readHead(path: string, max: number): Promise<string | null> {
+  let fh;
+  try {
+    fh = await open(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(max);
+    const { bytesRead } = await fh.read(buf, 0, max, 0);
+    return buf.subarray(0, bytesRead).toString("utf-8");
+  } catch {
+    return null;
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
+ * The VS Code extension wraps the typed prompt in a context preamble (active
+ * file, open tabs, …) and puts the real request under this header. We keep what
+ * follows it and drop the machine-generated part above.
+ */
+const CODEX_IDE_REQUEST = /^# Context from my IDE setup:[\s\S]*?## My request for Codex:\s*/;
+
+/**
+ * Reduce a "user" turn to what the user actually typed, or "" when the whole
+ * turn was injected by codex.
+ *
+ * Codex opens a thread with several such turns — `<environment_context>`,
+ * `<user_instructions>`, `<recommended_plugins>`, the AGENTS.md dump — and more
+ * keep appearing across versions, so we drop them by the two SHAPES they take
+ * (an XML-ish block, or a markdown-header preamble) rather than enumerating
+ * each one. The IDE preamble is the exception: it *contains* the real prompt.
+ */
+function stripCodexPreamble(msg: string): string {
+  const ide = msg.replace(CODEX_IDE_REQUEST, "");
+  if (ide !== msg) return ide.trim();
+  return msg.startsWith("<") || /^# AGENTS\.md instructions/.test(msg) ? "" : msg;
+}
+
+/**
+ * The user-typed text of a codex transcript record, or undefined if it isn't a
+ * user turn (or is one codex injected).
+ *
+ * Reads only `response_item` records: those are the model-facing conversation
+ * and are present in every codex version we've seen, whereas the parallel
+ * `event_msg`/`user_message` stream is absent from newer top-level threads. It
+ * also means a message can't be counted twice from the two streams.
+ */
+function codexUserText(e: Record<string, any>, p: Record<string, any>): string | undefined {
+  if (e.type !== "response_item" || p.type !== "message" || p.role !== "user") return undefined;
+  if (!Array.isArray(p.content)) return undefined;
+  const raw = p.content
+    .filter((c: any) => c?.type === "input_text" && typeof c.text === "string")
+    .map((c: any) => c.text)
+    .join(" ");
+  return clean(stripCodexPreamble(raw)) || undefined;
+}
+
+/**
+ * Reduce a git remote URL to the identity domain `sessionInScope` compares in:
+ * an `owner/repo` slug when it's a GitHub remote, else the bare repo name. Codex
+ * records the raw URL (`git@ssh.dev.azure.com:v3/org/proj/repo`,
+ * `https://github.com/o/r.git`), which matches neither domain as-is.
+ */
+function repoIdFromRemote(url: string): string | undefined {
+  const gh = parseGithubRemote(url);
+  if (gh) return `${gh.owner}/${gh.repo}`;
+  const bare = url.trim().replace(/\.git$/, "").split(/[/:]/).pop();
+  return bare || undefined;
+}
+
+interface CodexMeta {
+  id?: string;
+  cwd?: string;
+  branch?: string;
+  repository?: string;
+  title?: string;
+  createdAt?: Date;
+  /** A sub-agent / non-interactive thread, which must not be listed as resumable. */
+  skip?: boolean;
+}
+
+function parseCodexHead(head: string): CodexMeta | null {
+  let meta: CodexMeta | null = null;
+  for (const line of head.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let e: Record<string, any>;
+    try {
+      e = JSON.parse(t);
+    } catch {
+      // The last line of a bounded head read is usually truncated mid-JSON.
+      continue;
+    }
+    if (!e || typeof e !== "object") continue;
+    const p = e.payload;
+    if (!p || typeof p !== "object") continue;
+    if (e.type === "session_meta") {
+      // Threads codex spawned for itself, and `codex exec` runs, are not
+      // sessions the user can pick up interactively — `codex resume` hides them
+      // behind --include-non-interactive — so they must not be listed. A
+      // sub-agent is marked by `thread_source`, by a `{subagent: …}` source
+      // object, or by having a parent thread. A user's own `codex fork` records
+      // `forked_from_id` instead of `parent_thread_id`, so it stays listed.
+      const subagent = p.thread_source === "subagent" || (typeof p.source === "object" && p.source?.subagent);
+      const skip = !!subagent || p.source === "exec" || !!p.parent_thread_id;
+      const created = p.timestamp ? new Date(p.timestamp) : undefined;
+      meta = {
+        id: typeof p.id === "string" ? p.id : undefined,
+        cwd: typeof p.cwd === "string" ? p.cwd : undefined,
+        branch: typeof p.git?.branch === "string" ? p.git.branch : undefined,
+        repository: typeof p.git?.repository_url === "string" ? repoIdFromRemote(p.git.repository_url) : undefined,
+        createdAt: created && !isNaN(created.getTime()) ? created : undefined,
+        skip,
+      };
+      if (skip) return meta; // nothing else to learn about a thread we won't list
+      continue;
+    }
+    // Title: codex records none, so the first genuine user message stands in.
+    if (meta && !meta.title) {
+      const msg = codexUserText(e, p);
+      if (msg) {
+        meta.title = msg.slice(0, 120);
+        return meta; // the meta line always precedes this, so we have everything
+      }
+    }
+  }
+  return meta;
+}
+
+/** The thread uuid trailing a `rollout-<timestamp>-<uuid>.jsonl` filename. */
+const CODEX_FILE_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+
+const codexParseCache = new TranscriptCache();
+
+const codexProvider: SessionProvider = {
+  source: "codex",
+  async index() {
+    // sessions/<YYYY>/<MM>/<DD>/*.jsonl — walk the date tree rather than glob,
+    // so an unexpected extra level can't blow the scan up.
+    const dayDirs = await codexDayDirs();
+    const sessions: AgentSession[] = [];
+    const seen = new Set<string>();
+    await Promise.all(
+      dayDirs.map(async (dir) => {
+        let files: string[];
+        try {
+          files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
+        } catch {
+          return;
+        }
+        await Promise.all(
+          files.map(async (file) => {
+            const filePath = join(dir, file);
+            const st = await stat(filePath).catch(() => null);
+            if (!st) return;
+            seen.add(filePath);
+            const cached = codexParseCache.hit(filePath, st);
+            if (cached !== undefined) {
+              if (cached) sessions.push(cached);
+              return;
+            }
+            const head = await readHead(filePath, CODEX_HEAD_BYTES);
+            if (!head) return;
+            const meta = parseCodexHead(head);
+            // Sub-agent threads and malformed rollouts are cached as "not a
+            // session" — codex writes one sub-agent rollout per real one, so
+            // re-reading their heads every rebuild would dominate the scan.
+            if (!meta || meta.skip || !meta.cwd) {
+              codexParseCache.store(filePath, st, null);
+              return;
+            }
+            // Fall back to the trailing uuid in the filename when the record has
+            // no id — it's the same value, and it's what `codex resume` matches
+            // on. (The name is `rollout-<timestamp>-<uuid>.jsonl`, and the
+            // timestamp is dash-separated too, so anchor on the uuid shape.)
+            const id = meta.id ?? file.match(CODEX_FILE_ID)?.[1];
+            if (!id) {
+              codexParseCache.store(filePath, st, null);
+              return;
+            }
+            const session: AgentSession = {
+              id,
+              source: "codex",
+              cwd: meta.cwd,
+              branch: meta.branch,
+              repository: meta.repository,
+              title: meta.title || id.slice(0, 8),
+              lastUsed: st.mtime,
+              createdAt: meta.createdAt,
+              logPath: filePath,
+            };
+            codexParseCache.store(filePath, st, session);
+            sessions.push(session);
+          }),
+        );
+      }),
+    );
+    codexParseCache.prune(seen);
+    return sessions;
+  },
+};
+
+/** Every `sessions/<YYYY>/<MM>/<DD>` directory under the codex home. */
+async function codexDayDirs(): Promise<string[]> {
+  const level = async (base: string): Promise<string[]> => {
+    let entries;
+    try {
+      entries = await readdir(base, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    return entries.filter((e) => e.isDirectory()).map((e) => join(base, e.name));
+  };
+  const years = await level(CODEX_SESSIONS);
+  const months = (await Promise.all(years.map(level))).flat();
+  return (await Promise.all(months.map(level))).flat();
+}
+
+const PROVIDERS = [claudeProvider, copilotProvider, codexProvider];
 
 /** An index of all discovered sessions, queryable by branch. */
 export class SessionIndex {
@@ -416,8 +694,8 @@ function repoSlugForRoot(root: string): string | null {
   return slug;
 }
 
-// One candidate identity (the session's checkout, or Copilot's recorded
-// `repository`) against the wanted scope: full slugs when BOTH sides have one,
+// One candidate identity (the session's checkout, or the recorded `repository`
+// of a Copilot/Codex session) against the wanted scope: full slugs when BOTH sides have one,
 // bare names otherwise. Comparing slugs is what rejects same-named forks;
 // falling back to bare names is what keeps non-GitHub, remote-less, and
 // no-longer-on-disk checkouts matching at all.
@@ -434,9 +712,9 @@ function sessionInScope(s: AgentSession, scope: RepoScope): boolean {
   // answer and the git call would be pure waste.
   const rootSlug = scope.slug ? repoSlugForRoot(root) : null;
   if (identityMatches(scope, rootSlug, basename(root).toLowerCase())) return true;
-  // Copilot records the remote repo it was launched against, which is already in
-  // the remote domain — no git call needed, and it's the only signal for a
-  // Copilot session whose cwd no longer exists.
+  // Copilot and Codex record the remote repo they were launched against, already
+  // reduced to the remote domain — no git call needed, and it's the only signal
+  // for such a session whose cwd no longer exists.
   if (s.repository) {
     const recorded = s.repository.trim().toLowerCase();
     const slug = recorded.includes("/") ? recorded : null;
@@ -796,6 +1074,128 @@ function finalizeActivity(
   };
 }
 
+// Codex tool calls come in two record shapes, both under `response_item`:
+// `function_call` (JSON-string `arguments`) and `custom_tool_call` (raw-string
+// `input`). Names are stable across both: `shell`/`shell_command` run commands,
+// `apply_patch` edits files, `update_plan` carries the whole task checklist.
+function codexAction(name: string, args: any, raw: string, ts: Date, full = false): ActionLine | null {
+  // update_plan is surfaced as the task checklist (see loadCodexActivity), not
+  // as an action line — its payload is the whole plan, useless as a one-liner.
+  if (name === "update_plan") return null;
+  switch (name) {
+    case "shell":
+    case "shell_command": {
+      // `shell` passes an argv array (["bash","-lc",…]); `shell_command` a string.
+      const c = args?.command ?? args?.cmd;
+      const cmd = clean(Array.isArray(c) ? c.join(" ") : (c ?? raw));
+      return { timestamp: ts, verb: "Bash", detail: full ? cmd : cmd.slice(0, 120) };
+    }
+    case "exec": {
+      // Codex's sandboxed tool-runner: `input` is a JS program driving
+      // `tools.exec_command(…)`, not a command line — so show the script itself
+      // rather than mislabelling it as a shell invocation.
+      const script = clean(raw);
+      return { timestamp: ts, verb: "Exec", detail: full ? script : script.slice(0, 120) };
+    }
+    case "apply_patch": {
+      // The patch body is `*** Update File: <path>` blocks; name the files touched.
+      const files = [...raw.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)].map((m) => shortPath(m[1]));
+      return { timestamp: ts, verb: "Edit", detail: files.length ? files.join(", ") : "(patch)" };
+    }
+    case "view_image":
+      return { timestamp: ts, verb: "Read", detail: shortPath(args?.path ?? "") };
+    case "spawn_agent":
+      return { timestamp: ts, verb: "Agent", detail: clean(args?.task_name ?? args?.name ?? "") };
+    default: {
+      const d = clean(args && typeof args === "object" ? Object.values(args).slice(0, 1).map(String).join("") : raw);
+      return { timestamp: ts, verb: name, detail: full ? d : d.slice(0, 80) };
+    }
+  }
+}
+
+/**
+ * Codex's `update_plan` steps use the same three-state vocabulary as Claude's
+ * TodoWrite (pending / in_progress / completed), so they map straight onto the
+ * task checklist. The latest call in the log is authoritative.
+ */
+function codexPlanToTasks(args: any): TaskItem[] | null {
+  const plan = args?.plan;
+  if (!Array.isArray(plan)) return null;
+  const tasks: TaskItem[] = [];
+  for (const p of plan) {
+    const label = clean(p?.step ?? p?.content);
+    if (label) tasks.push({ label, status: normalizeTaskStatus(p?.status) });
+  }
+  return tasks;
+}
+
+async function loadCodexActivity(path?: string, full = false): Promise<SessionActivity> {
+  if (!path) return { actions: [] };
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf-8");
+  } catch {
+    return { actions: [] };
+  }
+  const actions: ActionLine[] = [];
+  let lastPrompt: string | undefined;
+  let finalResponse: string | undefined;
+  let latestPlan: TaskItem[] | null = null;
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let e: Record<string, any>;
+    try {
+      e = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    if (!e || typeof e !== "object") continue;
+    const p = e.payload;
+    if (!p || typeof p !== "object") continue;
+    if (e.type !== "response_item") continue;
+    const ts = e.timestamp ? new Date(e.timestamp) : new Date(0);
+    const prompt = codexUserText(e, p);
+    if (prompt) {
+      lastPrompt = full ? prompt : prompt.slice(0, 200);
+      finalResponse = undefined; // a new prompt starts a fresh turn
+    } else if (p.type === "message" && p.role === "assistant" && Array.isArray(p.content)) {
+      const msg = clean(
+        p.content
+          .filter((c: any) => c?.type === "output_text" && typeof c.text === "string")
+          .map((c: any) => c.text)
+          .join(" "),
+      );
+      if (msg) {
+        finalResponse = msg;
+        actions.push({ timestamp: ts, verb: "Codex", detail: full ? msg : msg.slice(0, 200) });
+      }
+    } else if (p.type === "reasoning" && Array.isArray(p.summary)) {
+      // `summary` is the visible reasoning; `encrypted_content` (the bulk) is
+      // opaque, so a summary-less record has nothing to report.
+      const txt = p.summary.map((sm: any) => (typeof sm?.text === "string" ? sm.text : "")).join(" ").trim();
+      if (txt) actions.push({ timestamp: ts, verb: "Thinking", detail: `~${Math.round(txt.length / 4)} tokens` });
+    } else if (p.type === "function_call" || p.type === "custom_tool_call") {
+      const name = String(p.name ?? "?");
+      const rawArgs = String(p.arguments ?? p.input ?? "");
+      let args: any = null;
+      try {
+        args = JSON.parse(rawArgs);
+      } catch {
+        // custom_tool_call `input` is a raw string (a patch body, a script) —
+        // not JSON, and codexAction falls back to it.
+      }
+      if (name === "update_plan") {
+        const parsed = codexPlanToTasks(args);
+        if (parsed && parsed.length) latestPlan = parsed;
+      }
+      const a = codexAction(name, args, rawArgs, ts, full);
+      if (a) actions.push(a);
+    }
+  }
+  return finalizeActivity(lastPrompt, actions, { tasks: latestPlan ?? undefined, finalResponse });
+}
+
 /** Options for on-demand activity loading. `full` skips display truncation. */
 export interface LoadActivityOpts {
   /** When true, don't truncate the last prompt or action details (for `agendo status --full`). */
@@ -804,7 +1204,12 @@ export interface LoadActivityOpts {
 
 /** Parse a session's recent activity on demand (called when its row expands). */
 export function loadActivity(s: AgentSession, opts: LoadActivityOpts = {}): Promise<SessionActivity> {
-  return s.source === "claude"
-    ? loadClaudeActivity(s.logPath, opts.full)
-    : loadCopilotActivity(s.logPath, opts.full);
+  switch (s.source) {
+    case "claude":
+      return loadClaudeActivity(s.logPath, opts.full);
+    case "copilot":
+      return loadCopilotActivity(s.logPath, opts.full);
+    case "codex":
+      return loadCodexActivity(s.logPath, opts.full);
+  }
 }

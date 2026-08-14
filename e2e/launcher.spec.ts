@@ -63,7 +63,7 @@ test("path scope: a running session in a dotted-basename repo is detected as run
 
 // A path-scoped launcher (`agendo <path>`) filters the TUI to sessions under the
 // path, and `a` toggles back to the global view. The fixture home has sessions
-// under three repos (appweb ×2, applib ×1, standalone ×1); scoping to appweb
+// under three repos (appweb ×3, applib ×1, standalone ×1); scoping to appweb
 // hides the other two until the toggle reveals them again.
 test("path scope: agendo <path> filters sessions; 'a' toggles global", async ({ launch, mock }) => {
   // appweb has an ADO origin here, so the path context does NOT force GitHub — it
@@ -73,7 +73,7 @@ test("path scope: agendo <path> filters sessions; 'a' toggles global", async ({ 
   const wt = await launch({ args: [appweb], cols: 140, rows: 40 });
   await wt.waitForText("Current sprint", 20000);
   wt.write("3"); // Sessions view
-  let screen = await wt.waitForText("appweb (2)");
+  let screen = await wt.waitForText("appweb (3)");
 
   // Scoped: the scope line names the agendo-namespaced host session + advertises
   // the toggle; only the appweb repo is present — applib / standalone filtered out.
@@ -190,7 +190,7 @@ test("new-session picker: scoped to an existing repo with sessions lists it once
   const picker = await openRepoPicker(wt);
   // Present exactly once (no synthesized duplicate), keeping its real count, and
   // ranked first as the scoped folder.
-  expect(picker).toMatch(/❯[^\n]*appweb[^\n]*2 sessions/);
+  expect(picker).toMatch(/❯[^\n]*appweb[^\n]*3 sessions/);
   // Exactly one repo row (no synthesized duplicate) — one "N sessions" cell.
   expect(picker.match(/\d+ sessions/g)?.length).toBe(1);
   expect(picker).not.toContain("(no sessions yet)"); // it has sessions
@@ -239,7 +239,7 @@ test("new-session picker: scoped to a non-repo PARENT offers the parent itself a
   expect(picker).toMatch(/❯\s+repos\b[^\n]*\(no sessions yet\)/);
   // Its children are all still listed below it, keeping their real counts —
   // being outranked is not being hidden.
-  expect(picker).toMatch(/\n[^\n]*\bappweb\b[^\n]*2 sessions/);
+  expect(picker).toMatch(/\n[^\n]*\bappweb\b[^\n]*3 sessions/);
   expect(picker).toMatch(/\n[^\n]*\bapplib\b[^\n]*1 sessions/);
   expect(picker).toMatch(/\n[^\n]*\bstandalone\b[^\n]*1 sessions/);
   // …and none of them stole the cursor from the parent.
@@ -303,7 +303,7 @@ test("fresh-session picker (work item): a non-repo scoped parent is demoted belo
   const picker = await wt.waitForText("Pick a repo to create the worktree in");
 
   // A repo that can actually host a worktree holds the cursor…
-  expect(picker).toMatch(/❯[^\n]*\bappweb\b[^\n]*2 sessions/);
+  expect(picker).toMatch(/❯[^\n]*\bappweb\b[^\n]*3 sessions/);
   // …while the scoped parent is still offered, just never the default…
   expect(picker).toContain("(no sessions yet)");
   expect(picker).not.toMatch(/❯[^\n]*\(no sessions yet\)/);
@@ -352,7 +352,7 @@ test("fresh-session picker (work item): a non-repo scoped parent stays demoted o
   // ~/repos now carries a session count, so it renders as a normal row — but it
   // still can't host a worktree, so appweb keeps the cursor and the parent sits
   // last. A `total`-based "is this synthesized" shortcut fails right here.
-  expect(picker).toMatch(/❯[^\n]*\bappweb\b[^\n]*2 sessions/);
+  expect(picker).toMatch(/❯[^\n]*\bappweb\b[^\n]*3 sessions/);
   expect(picker).toMatch(/\brepos\b[^\n]*1 sessions/); // present, with its real count
   expect(picker).not.toMatch(/❯[^\n]*\brepos\s{2}/); // but not holding the cursor
   expect(pickerRepoOrder(picker)).toEqual(["appweb", "applib", "standalone", "repos"]);
@@ -369,12 +369,12 @@ test("fresh-session picker (work item): a session-rich plain folder mid-list nev
   const scratch = join(parent, "scratch"); // plain folder, no `.git`, never a checkout
   await mkdir(scratch, { recursive: true });
 
-  // Three sessions in scratch, so it out-counts appweb (2) and sorts to the top
+  // Four sessions in scratch, so it out-counts appweb (3) and sorts to the top
   // of the discovered list — above every real repo. Digit-free branches, so none
   // of them links to a work item and perturbs WI 101's expanded rows.
   const logDir = join(mock.home, ".claude", "projects", "scratch");
   await mkdir(logDir, { recursive: true });
-  for (const slug of ["notes", "spike", "triage"]) {
+  for (const slug of ["notes", "spike", "triage", "sweep"]) {
     await writeFile(
       join(logDir, `scratch-${slug}.jsonl`),
       JSON.stringify({ type: "summary", cwd: scratch, gitBranch: slug, timestamp: "2026-06-21T10:00:00.000Z" }) +
@@ -400,12 +400,12 @@ test("fresh-session picker (work item): a session-rich plain folder mid-list nev
   // scratch is listed with its winning session count, but a real checkout holds
   // the cursor — the partition ranks ALL hostable repos above ALL unhostable
   // ones, so neither the scoped parent nor scratch can take the default.
-  expect(picker).toMatch(/\bscratch\b[^\n]*3 sessions/);
-  expect(picker).toMatch(/❯[^\n]*\bappweb\b[^\n]*2 sessions/);
+  expect(picker).toMatch(/\bscratch\b[^\n]*4 sessions/);
+  expect(picker).toMatch(/❯[^\n]*\bappweb\b[^\n]*3 sessions/);
   expect(picker).not.toMatch(/❯[^\n]*\bscratch\b/);
   // Every hostable repo above every unhostable one, each group keeping its own
   // session-count ranking — the exact contract of the stable partition. scratch
-  // (3) outranks appweb (2) in the raw list and still lands below it here.
+  // (4) outranks appweb (3) in the raw list and still lands below it here.
   expect(pickerRepoOrder(picker)).toEqual(["appweb", "applib", "standalone", "repos", "scratch"]);
 });
 
@@ -415,12 +415,12 @@ test("new-session picker: UNSCOPED lists all session-derived repos, unchanged ra
   await wt.waitForText("Current sprint", 20000);
 
   const picker = await openRepoPicker(wt);
-  // All three session-derived repos show, ranked by session count: appweb (2)
+  // All three session-derived repos show, ranked by session count: appweb (3)
   // first, then applib / standalone. No synthesized zero-count entry appears.
   expect(picker).toContain("appweb");
   expect(picker).toContain("applib");
   expect(picker).toContain("standalone");
-  expect(picker).toMatch(/❯[^\n]*appweb[^\n]*2 sessions/);
+  expect(picker).toMatch(/❯[^\n]*appweb[^\n]*3 sessions/);
   expect(picker).not.toContain("(no sessions yet)");
 });
 
@@ -495,7 +495,7 @@ test("sessions view: Running now section plus per-repo groups", async ({ launch 
   expect(screen).toContain("Implement login form");
   expect(screen).toContain("(ready → attach)");
   // Repos grouped, ranked by session count: appweb(2), applib(1), standalone(1).
-  expect(screen).toContain("appweb (2)");
+  expect(screen).toContain("appweb (3)");
   expect(screen).toContain("applib (1)");
   expect(screen).toContain("standalone (1)");
 });
