@@ -1,0 +1,69 @@
+  codex yet. Also left alone: the cross-agent c convert flow, which stays Claude↔Copilot (the external converter has no codex format) and is now hidden rather than silently failing on codex rows.
+
+  Typecheck clean, all 244 e2e tests pass. New coverage: codex indexing + sub-agent exclusion, codex resume argv, the --codex launch argv and flag rejections, and the id-less window attribution. Two snapshots regenerated, and the appweb fixture count
+  assertions moved 2→3 (I placed the codex fixture in appweb specifically so repo ranking stayed put).
+
+✻ Sautéed for 30m 10s · 147 messages hidden (/focus to show)
+
+※ recap: Goal was adding Codex CLI support to agendo; launching and listing are done, typechecked, with all 244 e2e tests passing. Next action is yours: review the changes, then decide whether to commit or move on to codex pane/status detection. (disable
+  recaps in /config)
+
+❯ I have tmux pane agendo:26 now open in codex. It has an active session. Idle. Try to type something, and when pressing enter, capture its pane to try to figure out what it looks like when its active. Use a sonnet sub agent for this work.
+
+  Edited 3 files +22, made 1 scratchpad edit +18, read 1 file, captured codex pane states, ran 44 shell commands
+
+  /remote-control is active · Continue here, on your phone, or at https://claude.ai/code/session_00000000000000000000000
+
+● Verified the captures myself. Here's what we actually have — and one important gap.
+
+  Confirmed: idle and typed
+
+  Codex's TUI is structurally different from Claude's, so none of agendo's existing pane heuristics will transfer:
+
+  ┌──────────────┬────────────────────────────────────────────┬────────────────────────────────────────────────────────────────┐
+  │              │                Claude Code                 │                             Codex                              │
+  ├──────────────┼────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┤
+  │ prompt glyph │ ❯                                          │ › (U+203A, bold)                                               │
+  ├──────────────┼────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┤
+  │ input box    │ between the last two ─{20,} rules          │ no rules at all — a background-color band, \x1b[48;2;56;64;67m │
+  ├──────────────┼────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┤
+  │ status       │ inferred (esc to interrupt, token counter) │ an explicit footer word: Ready                                 │
+  └──────────────┴────────────────────────────────────────────┴────────────────────────────────────────────────────────────────┘
+
+  The idle footer, verbatim:
+
+  gpt-5.6-sol high · ~/git/voice-orchestrator · Ready · Approve for me · weekly 99% left
+
+  Ready sits in its own color slot (38;2;200;169;238), separated by ·.
+
+  The placeholder trap is real, and it's the same one you already fixed for Claude in 0eea318. The idle box isn't empty — it shows a greyed example prompt:
+
+  idle:   ␛[1m›␛[0m␛[48;2;56;64;67m ␛[2mSummarize recent commits␛[0m     cursor 2,91
+  typed:  ␛[1m›␛[0m␛[48;2;56;64;67m Briefly, in one sentence: what…      cursor 57,91
+
+  Plain text alone can't tell those apart — "Summarize recent commits" reads exactly like a real draft. Two signals do: the placeholder is wrapped in ␛[2m (dim) and the caret sits at column 2. That's the same faint-vs-real discrimination inputRealText
+  already implements, so it should port.
+
+  Not captured: the busy state
+
+  The one-sentence question came back in under 1.5 s, so all 20 post-Enter frames landed after completion — every one already reading Ready. The two frames that hash differently differ only because the pane was resized 383→255 columns mid-run, reflowing
+  the text; it isn't a busy indicator. So we have zero evidence of what codex shows mid-turn: no spinner frame, no interrupt hint, no elapsed timer. I'd rather say that plainly than guess at a string to match on.
+
+  The agent's attempt at a slower follow-up was blocked by the sandbox classifier, so it couldn't retry.
+
+  Two things needing you
+
+  1. There's an unsubmitted 168-character draft sitting in agendo:26's input box (cursor at 170,66) — the agent typed it, couldn't submit, and its backspace cleanup was also blocked. Nothing was sent, but you'll want to clear it. I can send the backspaces
+  from here if you'd like.
+  2. A real busy capture still needs one deliberately slow turn. The cleanest way is a prompt that forces a tool call — something like "run bun test and summarise" — held for 15–20 s while sampling every ~500 ms (1.5 s was too coarse even for the fast
+  case). Say the word and I'll run that pass; I'd rather have you approve the prompt than pick one myself for your live session.
+
+  Everything is under …/scratchpad/codexpane/. Nothing about the codex launch/list work changed — this was pure reconnaissance for the detection layer we deferred.
+
+✻ Churned for 11m 13s · 4 messages hidden (/focus to show)
+                                                                                                                                                                                                                        new task? /clear to save 292.8k tokens
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ clear the draft and run a slow prompt to capture busy
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  16:40:26 | 29% ctx | 5h: 9% (3h 9m) | 7d: 63% (81h 19m) | Opus 5 | worktree-codex-support [!] | /home/user/git/agendo/.claude/worktrees/codex-support                                                                                 /rc active · focus
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
