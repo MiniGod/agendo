@@ -85,6 +85,17 @@ Hover a session and press `c` to continue it in the _other_ agent: agendo conver
 transcript to that agent's on-disk format and resumes it, so a conversation can move
 between Claude and Copilot without losing context.
 
+### Move a session between Claude profiles
+
+If you run more than one Claude login — `~/.claude`, `~/.claude-work`, anything
+matching `~/.claude*` with a `projects/` folder — a session sometimes lands in the
+wrong one. Hover it and press `m` to pick another profile; agendo relocates the
+transcript, its sidecar dir (tool results, sub-agents, workflow runs) and the
+session's `session-env/` + `tasks/` state, so `--resume` finds it under the right
+subscription. It refuses rather than clobber anything already at the destination,
+falls back to copy-then-delete across filesystems, and won't touch a session that is
+currently running — exit it first.
+
 ## Config
 
 Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `project`,

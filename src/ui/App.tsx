@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
-import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
+import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
+import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
+import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
@@ -256,15 +258,18 @@ function homeShort(p: string): string {
 }
 
 // Labeled context lines shown under an expanded session — one [label, value]
-// pair per line, so they read cleanly instead of crowding a single row. The
-// final line advertises the cross-agent "continue" action (press `c`).
+// pair per line, so they read cleanly instead of crowding a single row. Two of
+// them double as action hints: the profile line advertises the move action
+// (press `m`, Claude only — Copilot has no profile), and the final line the
+// cross-agent "continue" action (press `c`).
 function sessionMeta(s: AgentSession): Array<[string, string]> {
   const out: Array<[string, string]> = [
     ["dir", homeShort(s.cwd)],
     ["repo", sessionRepo(s)],
   ];
   if (s.branch) out.push(["branch", s.branch]);
-  if (s.source === "claude" && s.configDir) out.push(["profile", basename(s.configDir)]);
+  if (s.source === "claude" && s.configDir)
+    out.push(["profile", `${basename(s.configDir)}  ·  press m → move to another profile`]);
   out.push(["continue", `press c → convert & resume in ${otherAgent(s.source)}`]);
   return out;
 }
@@ -1017,6 +1022,11 @@ type Mode =
   | { kind: "repo"; target: FreshTarget; agent: AgentSource; cursor: number }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
   | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
+  // "move this session to another Claude profile". `choices` is every discovered
+  // profile with the session's own flagged (see profileChoices) — shown for
+  // orientation but skipped by the cursor, since moving somewhere you already are
+  // is not a choice.
+  | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
   | { kind: "open"; targets: OpenTargets; title: string };
 
 /** Agents offered by the fresh-session picker, in display order. */
@@ -1784,6 +1794,106 @@ export default function App({
     }
   };
 
+  // ── move a session to another Claude profile ────────────────────────────────
+  // Open the picker for the hovered session. Every guard that can be answered
+  // without touching disk is answered here, so the picker only ever appears when
+  // a move is actually possible.
+  //
+  // A RUNNING session is refused rather than moved. agendo can tell that a
+  // session is live (window→session attribution), and `paneReadiness` can even
+  // say its input box looks idle — but that read is a documented best-effort
+  // screen scrape (it returns "unknown" for any screen it doesn't recognize, and
+  // says nothing about background bash, in-flight sub-agents or background
+  // tasks), and there is no graceful-exit primitive to hand the agent anyway:
+  // killWindow is a hard kill. Moving files out from under a live `claude` is not
+  // worth guessing at, so the safe refusal is the whole behaviour.
+  const enterProfilePicker = async (s: AgentSession) => {
+    setNotice(null);
+    if (s.source !== "claude") {
+      setNotice(`${s.source} sessions have no profile — only Claude sessions live in a ~/.claude* dir.`);
+      return;
+    }
+    if (!s.configDir || !s.logPath) {
+      setNotice("This session has no on-disk transcript to move.");
+      return;
+    }
+    if (isRunning(s, model?.liveTmux ?? new Set())) {
+      setNotice(`${s.title} is running — exit it (or close its tmux window) before moving it to another profile.`);
+      return;
+    }
+    setBusy("Scanning Claude profiles…");
+    const choices = profileChoices(await discoverProfiles(), s);
+    setBusy(null);
+    const firstTarget = choices.findIndex((c) => !c.current);
+    if (firstTarget < 0) {
+      setNotice("No other Claude profile found — create a second ~/.claude* dir with a projects/ folder first.");
+      return;
+    }
+    setMode({ kind: "profile", session: s, choices, cursor: firstTarget });
+  };
+
+  // Perform the move, then refresh: the session index is keyed by transcript
+  // path, so a reload is what re-files it under the target profile (and re-reads
+  // its activity from the new location).
+  //
+  // Two guards stand between a keystroke and the filesystem:
+  //  • `moveInFlight` — `busy` swaps the RENDER but doesn't gate `useInput`, and
+  //    `mode` only leaves "profile" once the await resolves, so a key-repeat on
+  //    enter would otherwise start a second move racing the first over the same
+  //    four renames. The loser hits ENOENT and rolls back the entries it won,
+  //    tearing the session in half across the two profiles — exactly the state
+  //    this feature must never produce. The mode is also dropped up front, so a
+  //    stray enter has no picker left to act on.
+  //  • a FRESH liveness read — the running-session refusal is the entire safety
+  //    story for a live agent, and the picker can sit open indefinitely. A session
+  //    resumed in the meantime (a keypress in its restore-placeholder tab from
+  //    another tmux client, a second agendo) must not have its files pulled out
+  //    from under it, so the check is re-run against tmux at commit time rather
+  //    than trusted from picker-entry.
+  const moveInFlight = useRef(false);
+  const moveToProfile = async (s: AgentSession, target: ClaudeProfile) => {
+    if (moveInFlight.current) return;
+    moveInFlight.current = true;
+    setNotice(null);
+    setMode({ kind: "list" });
+    setBusy(`Moving “${s.title}” to ${target.name}…`);
+    try {
+      await runMove(s, target);
+    } finally {
+      moveInFlight.current = false;
+      setBusy(null);
+    }
+  };
+
+  const runMove = async (s: AgentSession, target: ClaudeProfile) => {
+    const sessions = (modelRef.current?.sessionGroups ?? []).flatMap((g) => g.sessions);
+    if (isRunning(s, refreshLiveTmux(sessions).live)) {
+      setNotice(`${s.title} started running — exit it (or close its tmux window) before moving it to another profile.`);
+      return;
+    }
+    const res = await moveSessionToProfile(s, target);
+    if (res.error) {
+      setNotice(`Move failed: ${res.error}`);
+      return;
+    }
+    if (res.noop) {
+      setNotice(`${target.name} is the same directory on disk as this session's profile — nothing to move.`);
+      return;
+    }
+    // The restore snapshot bakes CLAUDE_CONFIG_DIR into each tab's argv, so a
+    // moved session's saved tab has to be repointed — and an already-visible
+    // placeholder tab rebuilt — or it would resume against the profile it just left.
+    const tab = retargetRestoreProfile(s, target.configDir, hostSession);
+    setActivity(new Map()); // its log lives elsewhere now — drop the cached parse
+    requested.current.clear();
+    reload();
+    const extras = [
+      res.warning,
+      tab.placeholderRefreshed ? "restored tab repointed" : null,
+    ].filter(Boolean);
+    setNotice(`Moved “${s.title}” → ${target.name}${extras.length ? ` (${extras.join("; ")})` : ""}`);
+  };
+
   useInput((input, key) => {
     // ── open-in-browser dialog (p = PR, i = issue, esc/q = cancel) ──
     if (mode.kind === "open") {
@@ -2034,6 +2144,30 @@ export default function App({
       return;
     }
 
+    // ── Claude profile picker (move a session between ~/.claude* dirs) ──
+    if (mode.kind === "profile") {
+      if (key.escape) return setMode({ kind: "list" });
+      // Only the profiles the session ISN'T in are selectable; its own is on
+      // screen for orientation, so the cursor steps over it in both directions.
+      const targets = mode.choices.flatMap((c, i) => (c.current ? [] : [i]));
+      if (targets.length === 0) return;
+      const step = (dir: number) =>
+        setMode((p) => {
+          if (p.kind !== "profile") return p;
+          const at = targets.indexOf(p.cursor);
+          const next = at < 0 ? targets[0] : targets[(at + dir + targets.length) % targets.length];
+          return { ...p, cursor: next };
+        });
+      if (key.upArrow || input === "k") return step(-1);
+      if (key.downArrow || input === "j") return step(1);
+      if (key.return) {
+        const picked = mode.choices[mode.cursor];
+        if (picked && !picked.current) moveToProfile(mode.session, picked.profile);
+        return;
+      }
+      return;
+    }
+
     // ── list mode ──
     // view switching (Tab forward, Shift-Tab back)
     if (key.tab) {
@@ -2102,6 +2236,18 @@ export default function App({
         return;
       }
       continueInOtherAgent(row.session);
+      return;
+    }
+
+    // move the hovered session to another Claude profile (~/.claude*). Works on
+    // a session row in any view, like `c`.
+    if (input === "m" && !key.ctrl && !key.meta) {
+      const row = rows[cursor];
+      if (!row || row.kind !== "session") {
+        setNotice("Select a session row first to move it to another profile.");
+        return;
+      }
+      enterProfilePicker(row.session);
       return;
     }
 
@@ -2431,6 +2577,31 @@ export default function App({
     );
   }
 
+  if (mode.kind === "profile") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{`Move to another Claude profile — ${mode.session.title.slice(0, 44)}`}</Text>
+        <Text dimColor>
+          {"Relocates the transcript + its sidecar files  ·  ↑/↓ move · enter move · esc cancel"}
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          {mode.choices.map((c, i) => {
+            const sel = i === mode.cursor;
+            return (
+              <Text key={c.profile.configDir} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
+                {sel ? "❯ " : "  "}
+                <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
+                <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{c.profile.name.padEnd(18).slice(0, 18)}</Text>
+                <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
+                <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
+              </Text>
+            );
+          })}
+        </Box>
+      </Box>
+    );
+  }
+
   if (mode.kind === "open") {
     const { pr, workItem } = mode.targets;
     return (
@@ -2494,7 +2665,7 @@ export default function App({
             : searchFocus === "list"
               ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
               : view === "sessions"
-                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
+                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}
