@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { materializeHome, tmuxState as initialTmuxState } from "./fixtures.ts";
-import { startAdoServer, type AdoServer } from "./adoServer.ts";
+import { startAdoServer, type AdoServer, type RawFault } from "./adoServer.ts";
 import { trackDir, untrackDir } from "./reaper.ts";
 
 const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +38,10 @@ export interface MockEnv {
    *  an empty collection). In-process like setAdoPr, so it takes effect on the
    *  launcher's very next request and can be changed between reloads. */
   setAdoResponse(match: RegExp, response: { status?: number; body?: unknown }): void;
+  /** Like setAdoResponse but the body is sent VERBATIM — for a response that
+   *  deliberately isn't JSON (an HTML sign-in page), or that needs `times` /
+   *  `delayMs` to let an automatic retry succeed or stay observable. */
+  setAdoRaw(match: RegExp, response: RawFault): void;
   /** Argv arrays of every fake-tmux invocation, in order. */
   tmuxLog(): Promise<string[][]>;
   /** Raw lines of the shared call log (az/gh/git/claude/xdg-open invocations). */
@@ -99,6 +103,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     setProvider: (name) => writeFile(join(home, ".agendo", "state.json"), JSON.stringify({ provider: name }, null, 2)),
     setAdoPr: (id, patch) => ado.setPr(id, patch),
     setAdoResponse: (match, response) => ado.setResponse(match, response),
+    setAdoRaw: (match, response) => ado.setRaw(match, response),
     tmuxLog: async () => (await parseLog(tmuxLogPath)).map((l) => JSON.parse(l) as string[]),
     callLog: () => parseLog(callLogPath),
     async cleanup() {

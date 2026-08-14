@@ -4,11 +4,13 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
 import { BUSY_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
@@ -281,6 +283,285 @@ test("agendo send still refuses when the caret sits at the END of the same text 
   expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
 });
 
+// The claude CLI's OWN resume dialog, verbatim from a real blocked session (the
+// same fixture detection.spec.ts pins). There is NO input box behind it: `send`
+// is keystroke injection, so a message pasted here would be typed into a
+// numbered menu and Enter would pick whatever landed selected.
+const RESUME_DIALOG_PANE = readFileSync(join(import.meta.dirname, "fixtures", "resume-dialog.ansi"), "utf-8");
+// What the pane looks like once the session has actually reloaded.
+const RESUMED_BOX_PANE = [
+  "  ● Resumed from summary — picking the work back up.",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+  "  ? for shortcuts",
+].join("\n");
+
+/** Every `send-keys … <key>` invocation's position in the log, in order. */
+const keyIndexes = (log: string[][], key: string) =>
+  log.flatMap((argv, i) => (argv[0] === "send-keys" && argv[3] === key ? [i] : []));
+/** The keys sent to the running pane, in order — the whole keystroke story. */
+const keysSent = (log: string[][]) =>
+  log.filter((argv) => argv[0] === "send-keys" && argv[2] === RUNNING_TARGET).map((argv) => argv.slice(3).join(" "));
+
+/**
+ * Fake-tmux state whose pane serves `queue` one capture per read, then `rest`
+ * for every read after that — so a test can script the pane CHANGING between
+ * reads (dialog → dialog → box) deterministically, instead of racing a timer
+ * against the CLI's own polling. See `captureQueue` in e2e/fakebin/tmux.
+ */
+const scriptedPane = (queue: string[], rest: string) => ({
+  ...tmuxState,
+  captureQueue: { [RUNNING_TARGET]: queue },
+  captures: { [RUNNING_TARGET]: rest },
+});
+/**
+ * The same dialog with the `❯` cursor moved down onto option 2 (as-is) — what the
+ * pane looks like after one Down. Built by moving the marker between lines (the
+ * capture paints the cursor and the number in different colours, so the two are
+ * not adjacent in the raw text).
+ */
+const RESUME_DIALOG_ON_AS_IS = RESUME_DIALOG_PANE.split("\n")
+  .map((line) => {
+    if (/^\s*❯\s*1\./.test(stripAnsiText(line))) return line.replace("❯", " ");
+    if (/^\s{4}2\./.test(stripAnsiText(line))) return line.replace(/^ {4}/, "  ❯ ");
+    return line;
+  })
+  .join("\n");
+
+test("agendo send answers claude's resume dialog FIRST, then pastes the message", async ({ mock }) => {
+  // The whole point: before this, the session sat on the dialog forever
+  // (readiness "dialog" ⇒ send refuses). Now `send` confirms the configured
+  // option, waits for a real input box, and only then delivers.
+  //
+  // Three dialog reads: runSend's own readiness read, then the two matching
+  // looks that settle the selection. The cursor already sits on option 1, so the
+  // answer is a bare Enter.
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  // Default config ⇒ the option claude marks (recommended).
+  expect(r.stdout).toContain("answering claude's resume dialog (summary): 1. Resume from summary (recommended)");
+  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+
+  const log = await mock.tmuxLog();
+  const setBuffer = log.findIndex((argv) => argv[0] === "set-buffer");
+  const paste = log.findIndex((argv) => argv[0] === "paste-buffer");
+  const enters = keyIndexes(log, "Enter");
+  // THE ORDER IS THE SAFETY PROPERTY: the menu is confirmed before the message
+  // is ever staged, let alone pasted.
+  expect(enters).toHaveLength(2); // the dialog's confirm, then the message's submit
+  expect(setBuffer).toBeGreaterThan(enters[0]);
+  expect(paste).toBeGreaterThan(setBuffer);
+  expect(enters[1]).toBeGreaterThan(paste);
+  expect(log[setBuffer]).toEqual(["set-buffer", "-b", "cl-send", "--", "run the tests"]);
+  // Nothing but those two Enters ever reached the pane — in particular no digit,
+  // which could ACTIVATE an option on some CLI versions and merely select it on
+  // others, leaving no safe meaning for the Enter that follows.
+  expect(keysSent(log)).toEqual(["Enter", "Enter"]);
+});
+
+test("agendo send walks the selection to the configured option before confirming", async ({ mock }) => {
+  // 'as-is' is option 2 while the cursor starts on 1: one Down, then a re-read
+  // that SEES the cursor land on 2, and only then Enter. Nothing is confirmed on
+  // an assumption about where the selection ended up.
+  const cfgPath = join(mock.home, ".claude-launcher", "config.json");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, resumeDialogChoice: "as-is" }, null, 2));
+
+  // Frames 4 and 5 are STALE — the pane hasn't repainted yet when it's read after
+  // the Down. However many such frames arrive, they must not provoke a second
+  // Down: one past the target is "Don't ask me again", which permanently changes
+  // the user's global claude CLI behaviour. (Two of them defeat a rule that only
+  // asks for "the same selection twice running" — a display running N frames
+  // behind is perfectly stable frame to frame.)
+  await mock.setTmuxState(
+    scriptedPane(
+      [...Array(5).fill(RESUME_DIALOG_PANE), ...Array(2).fill(RESUME_DIALOG_ON_AS_IS)],
+      RESUMED_BOX_PANE,
+    ),
+  );
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("answering claude's resume dialog (as-is): 2. Resume full session as-is");
+
+  const log = await mock.tmuxLog();
+  expect(keysSent(log)).toEqual(["Down", "Enter", "Enter"]); // move · confirm · submit
+  expect(keyIndexes(log, "Down")[0]).toBeLessThan(log.findIndex((argv) => argv[0] === "set-buffer"));
+});
+
+/** A synthetic resume menu: `cursorOn` is the highlighted option's number. */
+const resumeMenu = (cursorOn: number, labels: string[]) =>
+  [
+    "  This session is 1h 14m old and 249.4k tokens.",
+    "",
+    ...labels.map((l, i) => `  ${cursorOn === i + 1 ? "❯" : " "} ${i + 1}. ${l}`),
+    "",
+    "  Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+test("agendo send tracks its option by LABEL when the menu renumbers itself", async ({ mock }) => {
+  // If a CLI version reorders the options — or adds one — between frames, the
+  // number agendo first resolved belongs to something else. Aiming at it would,
+  // in this arrangement, confirm "Don't ask me again": a permanent change to the
+  // user's global claude CLI behaviour that agendo must never make.
+  const cfgPath = join(mock.home, ".claude-launcher", "config.json");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, resumeDialogChoice: "as-is" }, null, 2));
+
+  const AS_IS = "Resume full session as-is";
+  const before = ["Resume from summary (recommended)", AS_IS, "Don't ask me again"];
+  const after = ["Resume from summary (recommended)", "Don't ask me again", AS_IS];
+  await mock.setTmuxState(
+    scriptedPane(
+      [
+        ...Array(3).fill(resumeMenu(1, before)), // as-is is #2 here…
+        ...Array(2).fill(resumeMenu(2, after)), // …but #2 is now "Don't ask me again"
+        ...Array(2).fill(resumeMenu(3, after)), // as-is moved to #3
+      ],
+      RESUMED_BOX_PANE,
+    ),
+  );
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  const log = await mock.tmuxLog();
+  // It kept walking to the label instead of confirming #2 the moment the cursor
+  // reached that number.
+  expect(keysSent(log)).toEqual(["Down", "Down", "Enter", "Enter"]);
+});
+
+test("agendo send refuses when the dialog's selection won't move", async ({ mock }) => {
+  // The pane keeps showing the cursor on option 1, so the wanted option is never
+  // selected: give up rather than confirm the wrong one, and never paste. And
+  // exactly ONE arrow goes out — a pane that never shows the move must not have
+  // the highlight walked down onto "Don't ask me again" and abandoned there.
+  const cfgPath = join(mock.home, ".claude-launcher", "config.json");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, resumeDialogChoice: "as-is" }, null, 2));
+
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "send", "--timeout", "1s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("couldn't select");
+  const log = await mock.tmuxLog();
+  expect(keysSent(log)).toEqual(["Down"]); // it tried once, then stopped — no Enter
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+});
+
+test("agendo send: a message containing digits never leaks into the menu", async ({ mock }) => {
+  // The live footgun this feature has to avoid: pasting "2" + Enter into the
+  // resume menu selects "Resume full session as-is" instead of sending anything.
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const message = "2 or 3 tests still fail — check option 3 first";
+  const r = agendo(mock.env, "send", SHORT_ID, message);
+  expect(r.status).toBe(0);
+
+  const log = await mock.tmuxLog();
+  // No literal text was typed at the pane at all — the message travelled as a
+  // bracketed paste, in full, and only after the dialog was confirmed.
+  expect(log.some((argv) => argv[0] === "send-keys" && argv.includes("-l"))).toBe(false);
+  const setBuffer = log.findIndex((argv) => argv[0] === "set-buffer");
+  expect(log[setBuffer]).toEqual(["set-buffer", "-b", "cl-send", "--", message]);
+  expect(setBuffer).toBeGreaterThan(keyIndexes(log, "Enter")[0]);
+});
+
+test("agendo send --force still won't paste into a menu that only LOOKS like the dialog", async ({ mock }) => {
+  // A wrapped label (narrow pane) makes the detector miss — deliberately, it
+  // fails safe — so readiness is "dialog" and the normal refusal applies. The
+  // hazard is the documented escape hatch: --force would paste the message into
+  // the menu, where its digits pick options.
+  const wrapped = RESUME_DIALOG_PANE.replace("Resume full session as-is", "Resume full session\n     as-is");
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: wrapped } });
+  const r = agendo(mock.env, "send", "--force", SHORT_ID, "2 tests fail");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("resume menu");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  expect(keysSent(log)).toEqual([]);
+});
+
+test("agendo unblock refuses on the resume dialog — Escape would cancel it", async ({ mock }) => {
+  // `unblock` sends <esc>continue<enter>. On this dialog the Escape IS its "Esc
+  // to cancel", so it would abandon the resume. Refused even with --force.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "unblock", "--force", SHORT_ID);
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("resume dialog");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "send-keys" && argv.includes("Escape"))).toBe(false);
+  expect(log.some((argv) => argv[0] === "send-keys" && argv.includes("continue"))).toBe(false);
+});
+
+test("agendo send won't paste on a single glimpse of the input box", async ({ mock }) => {
+  // A reloading TUI paints its box before it has finished restoring, and a paste
+  // into that half-drawn screen can be discarded by the next repaint. So the box
+  // has to still be there a poll later: here it flickers into view once and the
+  // dialog comes back, and nothing is sent.
+  await mock.setTmuxState(scriptedPane([...Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE], RESUME_DIALOG_PANE));
+  const r = agendo(mock.env, "send", "--timeout", "1s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("no input box appeared");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+});
+
+test("agendo send refuses to paste when the input box never comes back", async ({ mock }) => {
+  // Never assume the answer worked: if the box doesn't reappear, the message is
+  // NOT pasted — a paste into a still-open menu is the exact hazard. Not even
+  // --force overrides that, since forcing a paste into a menu is the footgun.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "send", "--force", "--timeout", "1s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("no input box appeared");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  expect(log.some((argv) => argv[0] === "set-buffer")).toBe(false);
+});
+
+test("agendo send says so when a corrupt config.json cost it the resume choice", async ({ mock }) => {
+  // `send` is the one command that ACTS on config.json's value — by pressing keys
+  // into a live session. A corrupt file falls back to the default silently, which
+  // is precisely the "say what failed to parse" case: the fallback still answers
+  // the dialog (so the send goes through), but stderr names the file.
+  writeFileSync(join(mock.home, ".claude-launcher", "config.json"), "{ not json");
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const r = agendo(mock.env, "send", "--timeout", "5s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stderr).toContain("send:");
+  expect(r.stderr).toContain("config.json");
+  // …and it fell back to the recommended option rather than refusing to answer.
+  expect(r.stdout).toContain("Resume from summary");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send rejects a malformed --timeout, and delivers nothing", async ({ mock }) => {
+  // `send` parses its own duration flag (sharing `wait`'s parseDuration but not
+  // its argv parser, which is wait-specific), so the rejection needs its own pin:
+  // a bad duration must fail LOUDLY under the send name rather than silently fall
+  // back to the default ceiling — and must not deliver the message on the way out.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "send", "--timeout", "5min", SHORT_ID, "run the tests");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("send: --timeout needs a duration");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  expect(log.some((argv) => argv[0] === "send-keys")).toBe(false);
+});
+
+test("agendo status/list report the resume dialog as ready, not blocked", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const status = agendo(mock.env, "status", SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stdout).toContain("ready:  ready");
+  expect(status.stdout).not.toContain("ready:  dialog");
+  // …while still saying what the pane is actually showing.
+  expect(status.stdout).toContain("resume: claude's resume dialog is open");
+  const list = agendo(mock.env, "list");
+  expect(list.stdout).toContain("ready");
+  expect(list.stdout).not.toContain("dialog");
+});
+
 test("agendo list [dir] scopes the listing to sessions under the dir", async ({ mock }) => {
   // Two running managed windows under two different repo roots: the login claude
   // session (appweb) and the experiment copilot session (applib). `agendo list`
@@ -425,6 +706,76 @@ test("a session whose pane can't be read is never stalled (no evidence, no verdi
   expect(login.stalled).toBe(false);
 });
 
+test("a session parked on claude's resume dialog is never stalled, however old it looks", async ({ mock }) => {
+  // The one case where a big idle age means the OPPOSITE of stalled. The pane
+  // reads `ready` (send answers the dialog rather than pasting into it) and the
+  // transcript mtime is the PREVIOUS run's, because this run hasn't started — it
+  // is waiting on an answer, which `send` can now give it automatically. Marking
+  // it stalled would point an orchestrator at the one session that needs no
+  // rescue. The signal is `wait --json`'s own `resumeDialog`, not a second guess.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+
+  const r = agendo(mock.env, "status", SHORT_ID, "--stalled-after", "1ms");
+  expect(r.status).toBe(0);
+  expect(r.stdout).not.toContain("⚠ stalled");
+  expect(r.stdout).toContain("resume: claude's resume dialog is open"); // says why instead
+  expect(r.stdout).toContain("ready:  ready"); // readiness itself is untouched
+
+  const plain = agendo(mock.env, "list", "--stalled-after", "1ms");
+  expect(plain.status).toBe(0);
+  expect(rowFor(plain.stdout, SHORT_ID)).not.toContain("⚠stalled");
+
+  const j = await agendoAsync(mock.env, "list", "--all", "--json", "--stalled-after", "1ms").done;
+  expect(j.code).toBe(0);
+  const login = (JSON.parse(j.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.resumeDialog).toBe(true); // carried, so a consumer needn't re-infer it
+  expect(login.stalled).toBe(false);
+  expect(login.idleSeconds).toBeGreaterThan(1); // …despite being far past the threshold
+});
+
+// Claude's feedback survey, reconstructed (not a verbatim capture — no SGR
+// escapes, unlike e2e/fixtures/*.ansi): numbered options directly above a LIVE
+// input box. Today this classifies as `ready` and nothing in `isDialog` comes
+// close to matching it — its signatures are a confirm/cancel footer or a `❯ 1.`
+// selection cursor, and this menu has neither. That is the point of keeping it:
+// the obvious way to teach agendo about surveys is to widen the numbered-menu
+// match to `N:` forms, and that change would silently reclassify this pane as
+// `dialog` — blocking `send`, and (via the settled-state rule `wait` and the
+// stall qualifier share) changing what counts as stalled. A forward guard, then,
+// on a real screen shape — not a claim that anything mishandles it now.
+// (The already-dismissed `❯ 1.`-above-an-input-box case is master's, covered in
+// e2e/detection.spec.ts.)
+const SURVEY_PANE = [
+  "● Done — all 402 tests pass.",
+  "",
+  "  How is Claude Code going?",
+  "",
+  "  1: Bad    2: Fine    3: Good    0: Dismiss",
+  "",
+  "───────────────────────────────────────────────",
+  "❯ ",
+  "───────────────────────────────────────────────",
+  "  ⏵⏵ auto mode on",
+].join("\n");
+
+test("the feedback survey above a live input box is ready — not a dialog, and stallable", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: SURVEY_PANE } });
+
+  const r = agendo(mock.env, "status", SHORT_ID, "--stalled-after", "1ms");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("ready:  ready");
+  expect(r.stdout).not.toContain("resume:"); // not claude's resume dialog either
+  // …and because it IS settled, the qualifier applies normally: a survey left up
+  // for hours is exactly a session nobody came back to.
+  expect(r.stdout).toContain("⚠ stalled");
+
+  const j = await agendoAsync(mock.env, "list", "--all", "--json", "--stalled-after", "1ms").done;
+  expect(j.code).toBe(0);
+  const login = (JSON.parse(j.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("ready");
+  expect(login.resumeDialog).toBe(false);
+});
+
 test("the stall threshold is configurable in config.json, and the flag still wins", async ({ mock }) => {
   // Same fixture config (org/project/team must survive — the ADO paths need it)
   // plus a one-minute threshold, so the 5-minute-idle login session trips it with
@@ -441,6 +792,65 @@ test("the stall threshold is configurable in config.json, and the flag still win
   const flagged = agendo(mock.env, "list", "--stalled-after", "6h");
   expect(flagged.status).toBe(0);
   expect(flagged.stdout).not.toContain("⚠stalled");
+});
+
+test("scoping picks WHICH sessions are listed, never what their idle/stall verdict says", async ({ mock }) => {
+  // The two features meet in `list`: --path/--repo choose the rows, --stalled-after
+  // judges them. The failure mode is computing one against the wrong set — e.g.
+  // resolving the threshold per scope, or judging before filtering and printing a
+  // verdict for a row that was then dropped. A scoped row must be byte-identical
+  // to the same row unscoped.
+  // Plain path. (Only one session is live in the fixture, so this pins the
+  // VERDICT surviving a scope, not the filtering — master's own plain-path scope
+  // test covers which rows survive.)
+  const unscoped = agendo(mock.env, "list", "--stalled-after", "1m");
+  expect(unscoped.status).toBe(0);
+  const scoped = agendo(mock.env, "list", "--repo", "appweb", "--stalled-after", "1m");
+  expect(scoped.status).toBe(0);
+  expect(rowFor(scoped.stdout, SHORT_ID)).toBe(rowFor(unscoped.stdout, SHORT_ID));
+  expect(rowFor(scoped.stdout, SHORT_ID)).toContain("⚠stalled");
+
+  // Same in --json, and the threshold each row was judged against travels with it
+  // unchanged by the scope. Run SEQUENTIALLY: idleSeconds is floored whole
+  // seconds off a live clock, so two concurrent runs can straddle a second
+  // boundary in either order.
+  const all = await agendoAsync(mock.env, "list", "--all", "--json", "--stalled-after", "1m").done;
+  const one = await agendoAsync(mock.env, "list", "--all", "--json", "--repo", "appweb", "--stalled-after", "1m").done;
+  const pick = (out: string) => (JSON.parse(out) as any[]).find((x) => x.shortId === SHORT_ID);
+  const a = pick(all.stdout);
+  const b = pick(one.stdout);
+  expect(b.stalled).toBe(a.stalled);
+  expect(b.idleSeconds).toBeGreaterThanOrEqual(a.idleSeconds); // the scoped run read later
+  expect(b.stalledAfterSeconds).toBe(60);
+  expect(b.stalledAfterSeconds).toBe(a.stalledAfterSeconds);
+  // …and the scope really did drop the other repo's sessions, so the comparison
+  // above isn't vacuously between two identical listings.
+  expect((JSON.parse(one.stdout) as any[]).some((x) => x.shortId === COP_SHORT_ID)).toBe(false);
+  expect((JSON.parse(all.stdout) as any[]).some((x) => x.shortId === COP_SHORT_ID)).toBe(true);
+
+  // …and `status` under a scope still reports both, rather than dropping the
+  // qualifier on the scoped path.
+  const st = agendo(mock.env, "status", SHORT_ID, "--repo", "appweb", "--stalled-after", "1m");
+  expect(st.status).toBe(0);
+  expect(st.stdout).toMatch(/idle:\s+\d+[smhd] /);
+  expect(st.stdout).toContain("⚠ stalled");
+});
+
+test("a corrupt config.json is reported, not silently swapped for the default threshold", async ({ mock }) => {
+  // `stalledAfterMinutes` lives in config.json, so a file that won't parse means
+  // the printed verdict was judged against 4h rather than whatever the user set —
+  // and the marker's absence (or presence) then looks like a bug in the feature.
+  // Both no-model paths must say so: the plain list returns before the enriched
+  // path's flush, and status reads config outside its resume-dialog branch.
+  writeFileSync(join(mock.home, ".claude-launcher", "config.json"), "{ not json");
+
+  const list = agendo(mock.env, "list");
+  expect(list.status).toBe(0);
+  expect(list.stderr).toContain("config.json");
+
+  const status = agendo(mock.env, "status", SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stderr).toContain("config.json");
 });
 
 test("agendo status reports idle age and, past the threshold, the stall verdict", async ({ mock }) => {
@@ -474,7 +884,7 @@ test("agendo status rejects an unknown dashed argument instead of reading it as 
   // name itself as the problem.
   const r = agendo(mock.env, "status", "--stalled-after=1h", SHORT_ID);
   expect(r.status).not.toBe(0);
-  expect(r.stderr).toContain(`unknown flag "--stalled-after=1h"`);
+  expect(r.stderr).toContain(`unknown argument "--stalled-after=1h"`);
   expect(r.stderr).not.toContain("No session found");
 });
 
@@ -637,6 +1047,291 @@ test("a session outside any repo stays silent, even when $HOME itself is a check
   const j = await agendoAsync(mock.env, "list", "--all", "--json").done;
   expect(j.code).toBe(0);
   expect((JSON.parse(j.stdout) as any[]).find((x) => x.shortId === shortIdOf("loose-session")).git).toBeNull();
+});
+
+// ── `--path` / `--repo` scope selectors (list / status / wait) ───────────────
+// `agendo list` reports every session on the machine, which forces an
+// orchestrator watching one repo to post-filter the JSON itself. These selectors
+// do it in the CLI instead. The fixture home has two repo roots holding sessions
+// (appweb: login + crash, applib: the copilot experiment); the tests below seed a
+// THIRD whose name has `appweb` as a strict string prefix — the boundary case a
+// naive startsWith gets wrong in both directions.
+
+const LEGACY_SESSION_ID = "9f3c1a7e-2b44-4d61-9c8f-5e7a0d1b6c22";
+const LEGACY_SHORT_ID = shortIdOf(LEGACY_SESSION_ID);
+
+/**
+ * Write an extra idle Claude transcript into the fixture home, so a scope test
+ * can place a session at an arbitrary cwd without touching the shared fixtures
+ * (whose session set several other specs assert on exactly).
+ */
+async function seedSession(home: string, id: string, cwd: string, title: string): Promise<void> {
+  const dir = join(home, ".claude", "projects", `scope-${id}`);
+  await mkdir(dir, { recursive: true });
+  const lines = [
+    { type: "summary", cwd, gitBranch: "feature/legacy", timestamp: "2026-06-20T09:00:00.000Z" },
+    { type: "ai-title", aiTitle: title, timestamp: "2026-06-20T09:00:01.000Z" },
+    { type: "user", message: { role: "user", content: "port the old form" }, cwd, gitBranch: "feature/legacy", timestamp: "2026-06-20T09:00:05.000Z" },
+  ];
+  await writeFile(join(dir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+}
+
+/** Seed the `appweb-legacy` neighbour repo and return the two roots' paths. */
+async function seedLegacyNeighbour(home: string) {
+  const appweb = join(home, "repos", "appweb");
+  const legacy = join(home, "repos", "appweb-legacy");
+  await mkdir(join(legacy, ".git"), { recursive: true });
+  await seedSession(home, LEGACY_SESSION_ID, join(legacy, ".claude", "worktrees", "port"), "Port the legacy form");
+  return { appweb, legacy };
+}
+
+/** Short ids of `agendo list --all --json …`, the scoped listing under test. */
+async function scopedIds(env: Record<string, string>, ...args: string[]): Promise<string[]> {
+  const r = await agendoAsync(env, "list", "--all", "--json", ...args).done;
+  expect(r.code).toBe(0);
+  return (JSON.parse(r.stdout) as { shortId: string }[]).map((x) => x.shortId);
+}
+
+test("agendo list --path scopes by cwd, and /repo never matches /repo-other", async ({ mock }) => {
+  const { appweb, legacy } = await seedLegacyNeighbour(mock.home);
+
+  // No selector → the sessions of all three repo roots, unfiltered.
+  const everything = await scopedIds(mock.env);
+  expect(everything).toEqual(expect.arrayContaining([SHORT_ID, CRASH_SHORT_ID, COP_SHORT_ID, LEGACY_SHORT_ID]));
+
+  // --path appweb → its own sessions only. appweb-legacy is excluded even though
+  // its path starts with appweb's: the match is segment-aware, not a prefix.
+  const ids = await scopedIds(mock.env, "--path", appweb);
+  expect(ids).toContain(SHORT_ID);
+  expect(ids).toContain(CRASH_SHORT_ID);
+  expect(ids).not.toContain(LEGACY_SHORT_ID); // the boundary case
+  expect(ids).not.toContain(COP_SHORT_ID); // applib
+
+  // …and the other direction: the neighbour scopes to itself alone.
+  expect(await scopedIds(mock.env, "--path", legacy)).toEqual([LEGACY_SHORT_ID]);
+
+  // Scoping is a pure narrowing — nothing appears that the unscoped list lacked.
+  expect(everything).toEqual(expect.arrayContaining(ids));
+
+  // A trailing slash and a `..` detour name the same scope (paths are
+  // normalized). Built by concatenation, not path.join — join() would collapse
+  // the `..` here in the test process and never send it to the CLI at all.
+  const drifted = await scopedIds(mock.env, "--path", `${appweb}/../appweb//`);
+  expect(drifted.sort()).toEqual([...ids].sort());
+});
+
+test("agendo list --repo attributes worktree sessions to their parent repo", async ({ mock }) => {
+  await seedLegacyNeighbour(mock.home);
+
+  // The login and crash sessions live in `<appweb>/.claude/worktrees/…`, never in
+  // appweb itself — `repoRootForCwd` resolves a worktree back up to the repo it
+  // belongs to, so --repo must find them there.
+  const ids = await scopedIds(mock.env, "--repo", "appweb");
+  expect(ids).toContain(SHORT_ID);
+  expect(ids).toContain(CRASH_SHORT_ID);
+  expect(ids).not.toContain(LEGACY_SHORT_ID); // same boundary, on the repo axis
+  expect(ids).not.toContain(COP_SHORT_ID);
+
+  // The neighbour is reachable by its own name, worktree session and all.
+  expect(await scopedIds(mock.env, "--repo", "appweb-legacy")).toEqual([LEGACY_SHORT_ID]);
+
+  // Copilot sessions scope like any other — this fixture matches through its
+  // checkout. (The other half of the matcher, Copilot's recorded `repository`
+  // remote standing in for a checkout that isn't there, is pinned on the shared
+  // `sessionInScope` in detection.spec.ts's forWorkItem suite.)
+  expect(await scopedIds(mock.env, "--repo", "applib")).toContain(COP_SHORT_ID);
+
+  // Both axes together AND: appweb sessions that are also under the crash worktree.
+  const crashWt = join(mock.home, "repos", "appweb", ".claude", "worktrees", "fix-crash-102");
+  expect(await scopedIds(mock.env, "--repo", "appweb", "--path", crashWt)).toEqual([CRASH_SHORT_ID]);
+});
+
+test("agendo list --path/--repo scope the default running list too", async ({ mock }) => {
+  // Same two-running-sessions setup as the `[dir]` positional test, proving the
+  // flags reach the plain (model-free, running-only) listing as well as --json.
+  const appweb = join(mock.home, "repos", "appweb");
+  const applib = join(mock.home, "repos", "applib");
+  const loginTarget = sessionName("claude", LOGIN_SESSION_ID);
+  const expTarget = sessionName("copilot", COPILOT_SESSION_ID);
+  const ready = ["  ─────────────", "  ❯ ", "  ─────────────"].join("\n");
+  await mock.setTmuxState({
+    sessions: [loginTarget, expTarget],
+    windows: [],
+    panes: [
+      { session: loginTarget, window: loginTarget, cwd: join(appweb, ".claude", "worktrees", "login"), placeholder: false },
+      { session: expTarget, window: expTarget, cwd: join(applib, ".claude", "worktrees", "experiment"), placeholder: false },
+    ],
+    captures: { [loginTarget]: ready, [expTarget]: ready },
+  });
+
+  const byPath = agendo(mock.env, "list", "--path", appweb);
+  expect(byPath.status).toBe(0);
+  expect(byPath.stdout).toContain("Implement login form");
+  expect(byPath.stdout).not.toContain("Experiment spike");
+
+  const byRepo = agendo(mock.env, "list", "--repo", "applib");
+  expect(byRepo.status).toBe(0);
+  expect(byRepo.stdout).toContain("Experiment spike");
+  expect(byRepo.stdout).not.toContain("Implement login form");
+});
+
+test("agendo status resolves the id only inside the requested scope", async ({ mock }) => {
+  const appweb = join(mock.home, "repos", "appweb");
+
+  // In scope → the normal status report (flags in any position around the id).
+  const ok = agendo(mock.env, "status", "--repo", "appweb", SHORT_ID, "--full");
+  expect(ok.status).toBe(0);
+  expect(ok.stdout).toContain("Implement login form");
+
+  const byPath = agendo(mock.env, "status", SHORT_ID, "--path", appweb);
+  expect(byPath.status).toBe(0);
+  expect(byPath.stdout).toContain("Implement login form");
+
+  // Out of scope → refused, and the message names the scope that excluded it,
+  // so a wrong --repo doesn't read as "that session is gone".
+  const wrong = agendo(mock.env, "status", SHORT_ID, "--repo", "applib");
+  expect(wrong.status).toBe(1);
+  expect(wrong.stderr).toContain("No session found");
+  expect(wrong.stderr).toContain("--repo applib");
+});
+
+test("agendo wait selects its targets by --path / --repo", async ({ mock }) => {
+  // The default fixture has exactly one running session (login, under appweb).
+  const inScope = agendo(mock.env, "wait", "--path", join(mock.home, "repos", "appweb"), "--timeout", "5s");
+  expect(inScope.status).toBe(0);
+  expect(inScope.stdout).toContain(SHORT_ID);
+  expect(inScope.stdout).toContain("ready");
+
+  // A repo whose sessions are all idle selects nothing to wait on, rather than
+  // silently falling back to every session on the machine.
+  const empty = agendo(mock.env, "wait", "--repo", "applib", "--timeout", "5s");
+  expect(empty.status).not.toBe(0);
+  expect(empty.stderr).toContain("no running sessions matched");
+  expect(empty.stderr).toContain("--repo applib"); // the scope that emptied it
+});
+
+test("agendo wait applies the scope to --all and to explicit ids too", async ({ mock }) => {
+  // The whole point of a scoping flag is that nothing quietly overrides it. Both
+  // of these would silently wait on the wrong (larger) set if a selector took
+  // precedence over the scope instead of narrowing within it.
+  const allOutOfScope = agendo(mock.env, "wait", "--all", "--repo", "applib", "--timeout", "5s");
+  expect(allOutOfScope.status).not.toBe(0);
+  expect(allOutOfScope.stderr).toContain("no running sessions matched");
+
+  const allInScope = agendo(mock.env, "wait", "--all", "--repo", "appweb", "--timeout", "5s");
+  expect(allInScope.status).toBe(0);
+  expect(allInScope.stdout).toContain(SHORT_ID);
+
+  // An explicit id outside the scope is refused, matching `status`'s contract.
+  const wrongId = agendo(mock.env, "wait", SHORT_ID, "--repo", "applib", "--timeout", "5s");
+  expect(wrongId.status).not.toBe(0);
+  expect(wrongId.stderr).toContain("no session found");
+  expect(wrongId.stderr).toContain("--repo applib");
+
+  // …and the pre-existing precedence between the OTHER two selectors is
+  // untouched by folding them into one branch: --all still overrides --prefix.
+  const allBeatsPrefix = agendo(mock.env, "wait", "--all", "--prefix", "nothing-matches-this", "--timeout", "5s");
+  expect(allBeatsPrefix.status).toBe(0);
+  expect(allBeatsPrefix.stdout).toContain(SHORT_ID);
+});
+
+test("the wait scope composes with --any and the --json wake payload", async ({ mock }) => {
+  // `wait` owns its argv tail in wait.ts, so the scope has to compose with the
+  // notification surface that lives there rather than sitting beside it: the
+  // payload must describe the SCOPED target set, not every session on the box.
+  const r = agendo(mock.env, "wait", "--all", "--any", "--json", "--repo", "appweb", "--timeout", "5s");
+  expect(r.status).toBe(0);
+  const payload = JSON.parse(r.stdout) as { woke: string; mode: string; sessions: { shortId: string }[] };
+  expect(payload.woke).toBe("satisfied");
+  expect(payload.mode).toBe("any");
+  expect(payload.sessions.map((s) => s.shortId)).toEqual([SHORT_ID]);
+
+  // Out of scope there is nothing to wait on, and a setup failure prints NO
+  // payload even under --json — the contract #25 defined, kept under a scope.
+  const empty = agendo(mock.env, "wait", "--all", "--any", "--json", "--repo", "applib", "--timeout", "5s");
+  expect(empty.status).not.toBe(0);
+  expect(empty.stdout.trim()).toBe("");
+  expect(empty.stderr).toContain("--repo applib");
+});
+
+test("agendo list --pr/--issue queries are scoped too", async ({ mock }) => {
+  // The query modes resolve sessions through the backend's associations rather
+  // than the session index, so they take a separate code path — the scope has to
+  // reach it as well, or `--pr N --repo X` would answer for the wrong repo.
+  const inScope = await agendoAsync(mock.env, "list", "--pr", "5001", "--json", "--repo", "appweb").done;
+  expect(inScope.code).toBe(0);
+  expect((JSON.parse(inScope.stdout) as { shortId: string }[]).map((r) => r.shortId)).toEqual([SHORT_ID]);
+
+  const outOfScope = await agendoAsync(mock.env, "list", "--pr", "5001", "--json", "--repo", "applib").done;
+  expect(outOfScope.code).toBe(0);
+  expect(JSON.parse(outOfScope.stdout)).toEqual([]);
+});
+
+test("agendo status under a scope declines the no-transcript-yet fallback", async ({ mock }) => {
+  // A just-launched session has a live window but no transcript, and `status`
+  // answers for it from the window alone. That window carries no cwd we can hold
+  // against a scope, so under one we must decline rather than report on a
+  // session that may well belong to another repo.
+  const orphan = "cl-bg-abc123def456";
+  await mock.setTmuxState({ ...tmuxState, sessions: [...tmuxState.sessions, orphan] });
+
+  const unscoped = agendo(mock.env, "status", "abc123def456");
+  expect(unscoped.status).toBe(0);
+  expect(unscoped.stdout).toContain("may still be starting");
+
+  const scoped = agendo(mock.env, "status", "abc123def456", "--repo", "appweb");
+  expect(scoped.status).toBe(1);
+  expect(scoped.stderr).toContain("No session found");
+});
+
+test("status/wait reject a mistyped scope flag instead of acting unscoped", async ({ mock }) => {
+  // `--repo=appweb` and `--rep` are the realistic typos. Taking either as the id
+  // (status) or as a bogus id (wait) would report unscoped, or blame the user for
+  // a session that doesn't exist, instead of naming the actual mistake.
+  for (const bad of ["--repo=appweb", "--rep"]) {
+    const st = agendo(mock.env, "status", SHORT_ID, bad);
+    expect(st.status).toBe(1);
+    expect(st.stderr).toContain(`unknown argument "${bad}"`);
+
+    const wt = agendo(mock.env, "wait", "--all", bad, "--timeout", "5s");
+    expect(wt.status).toBe(1);
+    expect(wt.stderr).toContain(`unknown argument "${bad}"`);
+  }
+});
+
+test("agendo list refuses a [dir] positional and --path that disagree", async ({ mock }) => {
+  const appweb = join(mock.home, "repos", "appweb");
+  const applib = join(mock.home, "repos", "applib");
+  // Both orders must fail, and with the SAME message — the mistake is naming the
+  // path scope twice, not where in the argv the second one landed.
+  for (const argv of [[appweb, "--path", applib], ["--path", applib, appweb]]) {
+    const r = agendo(mock.env, "list", ...argv);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("path scope was given twice");
+  }
+});
+
+test("an empty scoped listing says WHAT emptied it", async ({ mock }) => {
+  // "No sessions." on its own reads as "nothing is running"; under a mistyped
+  // --repo the truth is "nothing matched", and only the scope tells them apart.
+  const r = await agendoAsync(mock.env, "list", "--all", "--repo", "no-such-repo").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("No sessions in scope (--repo no-such-repo)");
+});
+
+test("a whitespace-only scope value is rejected, not treated as no scope", async ({ mock }) => {
+  // `--repo "$UNSET_VAR "` must not quietly widen back to every session.
+  const r = agendo(mock.env, "list", "--all", "--repo", "   ");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("needs a value");
+});
+
+test("a scope flag with no value is an error, not a silent unfiltered listing", async ({ mock }) => {
+  for (const argv of [["list", "--repo"], ["list", "--path", "--json"], ["wait", "--path"], ["status", SHORT_ID, "--repo"]]) {
+    const r = agendo(mock.env, ...argv);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("needs a value");
+  }
 });
 
 // The usage-limit notice a throttled Claude Code pane shows — VERBATIM wording
@@ -878,7 +1573,10 @@ function wakePayload(stdout: string) {
     condition: string;
     mode: string;
     elapsedMs: number;
-    sessions: { shortId: string; state: string; from: string; changed: boolean; satisfied: boolean; title: string }[];
+    sessions: {
+      shortId: string; state: string; from: string; changed: boolean; satisfied: boolean; title: string;
+      resumeDialog: boolean;
+    }[];
   };
 }
 
@@ -903,6 +1601,27 @@ test("agendo wait --json reports the busy → ready transition it woke on", asyn
   expect(s.changed).toBe(true);
   expect(s.satisfied).toBe(true);
   expect(s.title).toBe("Implement login form");
+});
+
+test("agendo wait --json distinguishes a resume-dialog wake from a finished turn", async ({ mock }) => {
+  // Both report state "ready" — that's the point of the feature — so without a
+  // flag saying which, an orchestrator woken here reads back the PREVIOUS run's
+  // final answer and believes the work is done. `--state dialog` doesn't cover
+  // this either: the resume dialog deliberately isn't a question for a human.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const parked = agendo(mock.env, "wait", SHORT_ID, "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(parked.status).toBe(0); // it IS available — waking is right
+  const [p] = wakePayload(parked.stdout).sessions;
+  expect(p.state).toBe("ready");
+  expect(p.resumeDialog).toBe(true);
+
+  // …and a genuinely idle session is not mislabelled by the same field.
+  await mock.setTmuxState(tmuxState);
+  const idle = agendo(mock.env, "wait", SHORT_ID, "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(idle.status).toBe(0);
+  const [i] = wakePayload(idle.stdout).sessions;
+  expect(i.state).toBe("ready");
+  expect(i.resumeDialog).toBe(false);
 });
 
 test("agendo wait does not fire while nothing changes", async ({ mock }) => {

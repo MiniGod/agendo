@@ -57,6 +57,13 @@ export interface StallInput {
   running: boolean;
   /** Readiness read from that window's pane, or null when none could be read. */
   readiness: Readiness | null;
+  /**
+   * Whether the pane is sitting on claude's OWN resume dialog — the same signal
+   * `wait --json` reports as `resumeDialog`, read from `paneResumeDialogActive`
+   * rather than re-derived here, so the two can't disagree about what a paused
+   * session looks like.
+   */
+  resumeDialog: boolean;
   /** Seconds since the session's last recorded activity. */
   idleSeconds: number;
 }
@@ -77,6 +84,13 @@ export interface StallInput {
  *    its transcript looks, and neither is one reading `unknown`: a blank or
  *    not-yet-drawn pane is absence of evidence, and `wait` refuses to call that
  *    "done" for exactly the same reason.
+ *  • A pane parked on claude's own resume dialog is excluded outright. It reads
+ *    as `ready` (the dialog is answerable, so `send` treats it as reachable) and
+ *    its transcript mtime is arbitrarily old, because the session it belongs to
+ *    HASN'T RUN YET — the age is the previous run's. Calling that stalled would
+ *    invert the meaning: it isn't a session that stopped, it's one that never
+ *    started, waiting on an answer `send` can now give it automatically. The
+ *    signal is `wait`'s own `resumeDialog`, not a second guess at the same pane.
  *  • An unreadable pane (`readiness === null` while nominally running — a live
  *    window we couldn't capture) is the same case one step earlier: no evidence,
  *    so no verdict. Restored-but-unopened placeholder tabs never even reach this
@@ -86,6 +100,7 @@ export interface StallInput {
  */
 export function isStalled(o: StallInput, thresholdMs: number): boolean {
   if (!o.running || o.readiness === null) return false;
+  if (o.resumeDialog) return false;
   if (!isSettledReadiness(o.readiness)) return false;
   return o.idleSeconds * 1000 >= thresholdMs;
 }

@@ -87,6 +87,11 @@ so the wake needs no follow-up `list`. `--state <s>` waits for one exact state �
 `--state limited` to hear the moment a session hits its usage cap. The alternative —
 re-running `status` on a guessed cadence — either fires too often or finds out too late.
 
+`--state dialog` means a question awaiting *your* decision; the Claude CLI's own resume
+dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads **ready**),
+so it won't wake that wait. When a wake does find a session parked there, `--json` says
+so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
+
 ### Telling a finished session from a stalled one
 
 A session that fell over mid-task 22 hours ago and one that answered cleanly 20
@@ -100,7 +105,10 @@ commits the remote doesn't — read straight from its `.git` refs, never by shel
 to `git` — which is usually enough for an orchestrator to spot a parked session
 without reading its transcript. It is the same "has it stopped working?" test `wait`
 uses, so the two agree by construction: `wait` tells you a session settled, and the
-stall marker tells you one settled a long time ago and nobody came back.
+stall marker tells you one settled a long time ago and nobody came back. A session
+parked on the resume dialog is the one exception: it reads `ready` and its recorded
+activity is hours old, but it hasn't run yet, so it is never marked stalled — `--json`
+carries `resumeDialog: true` to say why.
 
 ### Fresh sessions in isolated worktrees
 
@@ -134,6 +142,23 @@ via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com 
 found across your local sessions. The stall threshold (`stalledAfterMinutes`, default
 240) lives in the same file. Your selected backend is remembered in
 `~/.agendo/state.json`.
+
+### `resumeDialogChoice`
+
+Resuming a large session, the Claude CLI first asks how to reload it (_"Resume from
+summary (recommended)"_ / _"Resume full session as-is"_). agendo reports a session
+parked there as **ready**, not blocked, and answers the dialog itself the next time
+you `send` to it — then waits for the input box to actually come back before
+delivering your message.
+
+```jsonc
+// ~/.agendo/config.json
+{ "resumeDialogChoice": "summary" }  // default: whatever Claude marks (recommended)
+{ "resumeDialogChoice": "as-is" }    // resume the full session, at full token cost
+```
+
+The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
+it changes your global Claude CLI behaviour permanently, which is your call to make.
 
 ## Testing
 
