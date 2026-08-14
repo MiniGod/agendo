@@ -709,10 +709,17 @@ export function paneAcceptsPaste(raw: string, cursor?: PaneCursor | null): boole
 }
 
 /**
- * How long to wait for the input box after answering the resume dialog. Generous
- * on purpose: the dialog only appears for BIG sessions (the captured one was
- * 249.4k tokens), and "resume from summary" makes the CLI build and load that
- * summary before it draws a box — the pane reads busy, or unknown, throughout.
+ * CEILING on the wait for the input box after answering the resume dialog — an
+ * error deadline, NOT a latency anyone pays. waitForInputBox polls every
+ * RESUME_DIALOG_POLL_MS and returns the moment it gets two consecutive good
+ * reads, so the ordinary cost is about half a second; the full 120s elapses only
+ * when the box never comes back at all, i.e. the session is already broken.
+ *
+ * Generous on purpose, and lowering it buys nothing but a faster failure on that
+ * broken session: the dialog only appears for BIG sessions (the captured one was
+ * 249.4k tokens), and "resume from summary" — the shipped default — makes the
+ * CLI build and load that summary before it draws a box, reading busy or unknown
+ * throughout. A tighter deadline would abort those legitimate loads.
  * Overridable per call with `send --timeout`.
  */
 export const RESUME_DIALOG_WAIT_MS = 120_000;

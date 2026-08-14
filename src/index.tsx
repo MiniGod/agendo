@@ -90,8 +90,9 @@ Usage:
                                 resumeDialogChoice) and waits for the input box.
       --force, -f               Send even if the input doesn't look ready (but
                                 never into claude's resume menu, see above)
-      --timeout <dur>           How long to wait for the input box after answering
-                                that resume dialog (default 120s)
+      --timeout <dur>           Deadline for the input box to appear after that
+                                dialog is answered — a ceiling, not a wait: it
+                                proceeds as soon as the box is there (default 120s)
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
                                 pane is still showing the usage-limit notice.
