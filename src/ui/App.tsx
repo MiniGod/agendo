@@ -1,19 +1,34 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
-import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
+import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
+import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
+import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
-import { isUnderRoot } from "../context.ts";
+import { repoRootForCwd, bootstrapRepoRoot, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
+import {
+  parseRepoUrl,
+  repoUrlLabel,
+  cloneDirName,
+  enclosingCheckout,
+  findMatchingCheckout,
+  freeCloneDest,
+  startClone,
+  type CloneOutcome,
+  type CloneRun,
+  type RepoUrl,
+} from "../clone.ts";
+import { isUnderRoot, normalizeCwd } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
+import { homedir } from "os";
 import type {
   ActionLine,
   AgentSession,
@@ -255,16 +270,45 @@ function homeShort(p: string): string {
   return p.replace(/^\/home\/[^/]+\//, "~/").replace(/^\/Users\/[^/]+\//, "~/");
 }
 
+// Why a clone failed, phrased for someone who can act on it. agendo never
+// handles credentials itself, so an auth failure is always "your git couldn't do
+// this" — say that, then quote git verbatim underneath. Two lines rather than
+// one long one: git's own words are the half that identifies the actual problem,
+// and they must not be the half a terminal truncates.
+const CLONE_HINTS: Record<string, string> = {
+  // A consequence of agendo's own BatchMode — ssh would normally *ask*. Says
+  // what to do rather than what went wrong, because the fix is one command.
+  hostkey:
+    "Unknown SSH host — agendo runs git non-interactively, so it can't accept a new " +
+    "host key for you. Run `ssh -T <host>` once, accept it, then try again.",
+  auth:
+    "Authentication — agendo uses your existing git credentials; check your SSH agent, " +
+    "or `gh auth setup-git` / `az repos` for HTTPS.",
+  // Never phrased as "check your credentials" alone: a 404 is what GitHub also
+  // returns for a private repo you can't see, so both readings stay on screen.
+  missing:
+    "Not found — check the URL, or (if it's private) that your git has access to it.",
+};
+
+function cloneError(res: CloneOutcome): string[] {
+  const detail = res.error ?? "git clone failed";
+  const hint = res.failure ? CLONE_HINTS[res.failure] : undefined;
+  return hint ? [hint, detail] : [detail];
+}
+
 // Labeled context lines shown under an expanded session — one [label, value]
-// pair per line, so they read cleanly instead of crowding a single row. The
-// final line advertises the cross-agent "continue" action (press `c`).
+// pair per line, so they read cleanly instead of crowding a single row. Two of
+// them double as action hints: the profile line advertises the move action
+// (press `m`, Claude only — Copilot has no profile), and the final line the
+// cross-agent "continue" action (press `c`).
 function sessionMeta(s: AgentSession): Array<[string, string]> {
   const out: Array<[string, string]> = [
     ["dir", homeShort(s.cwd)],
     ["repo", sessionRepo(s)],
   ];
   if (s.branch) out.push(["branch", s.branch]);
-  if (s.source === "claude" && s.configDir) out.push(["profile", basename(s.configDir)]);
+  if (s.source === "claude" && s.configDir)
+    out.push(["profile", `${basename(s.configDir)}  ·  press m → move to another profile`]);
   out.push(["continue", `press c → convert & resume in ${otherAgent(s.source)}`]);
   return out;
 }
@@ -1015,9 +1059,44 @@ type Mode =
   | { kind: "identity"; cursor: number; fromSettings?: boolean }
   | { kind: "agent"; target: FreshTarget; cursor: number }
   | { kind: "repo"; target: FreshTarget; agent: AgentSource; cursor: number }
+  // Clone flow — only reachable from a scoped launcher (see `canClone`). `clone`
+  // is the URL prompt; `cloning` is the live `git clone`, cancellable with esc.
+  | { kind: "clone"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string[] }
+  | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
   | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
+  // "move this session to another Claude profile". `choices` is every discovered
+  // profile with the session's own flagged (see profileChoices) — shown for
+  // orientation but skipped by the cursor, since moving somewhere you already are
+  // is not a choice.
+  | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
   | { kind: "open"; targets: OpenTargets; title: string };
+
+/**
+ * Modes where `q` / ctrl-c must NOT quit the app.
+ *
+ * `branch` and `clone` are text inputs — `q` is an ordinary character in a
+ * branch name, and in a repo URL it's unavoidable (`github.com/qmk/qmk_firmware`,
+ * anything with "quarkus", "requests", "sequelize" in it). Quitting on it would
+ * make those repos literally untypeable.
+ *
+ * `cloning` is in this set for a different reason: a `git clone` is mid-write,
+ * so `q` should not walk away from it — esc cancels, which cleans up.
+ *
+ * Note this only holds `q`. Ink handles ctrl-c itself (`exitOnCtrlC` defaults
+ * on) and never forwards it here, so ctrl-c still quits from every mode — the
+ * `key.ctrl` half below is unreachable, kept only to mirror the `branch`
+ * prompt's long-standing shape. What makes that safe is the unmount cleanup,
+ * which kills the clone and removes the partial directory on the way out.
+ */
+const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
+
+/**
+ * Cursor value for the repo picker's "＋ Clone from URL…" row. A sentinel rather
+ * than `repos.length`, so a background rescan that grows the repo list can't
+ * slide the cursor off it onto a real repo.
+ */
+const CLONE_ROW = -1;
 
 /** Agents offered by the fresh-session picker, in display order. */
 const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
@@ -1051,6 +1130,21 @@ export default function App({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
+  // Repos cloned during this run, merged into the picker until a reload
+  // discovers them for real (see `scopedRepos`).
+  const [cloned, setCloned] = useState<RepoInfo[]>([]);
+  // What the clone step did, carried into the screens that follow it. `notice`
+  // is a list-view banner, and a clone hands off directly to the next dialog —
+  // without this, "reused the checkout you already had" would be invisible until
+  // the user found their way back to the list. Cleared when a fresh flow starts.
+  const [cloneNote, setCloneNote] = useState<string | null>(null);
+  // The same value, readable synchronously. A PR target routes clone → checkout
+  // → launch inside one keystroke, and `open()` overwrites the notice on the way
+  // out; without a ref the note set moments earlier would still be the stale
+  // render value there, so the PR flow would never report what it cloned.
+  const cloneNoteRef = useRef<string | null>(null);
+  // The in-flight `git clone`, so esc can cancel it and unmount can't orphan it.
+  const cloneRun = useRef<CloneRun | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [grouped, setGrouped] = useState(true); // Sessions view: group by repo
   // Path-scope toggle: when a filterRoot exists, `a` flips between the scoped
@@ -1215,11 +1309,39 @@ export default function App({
   // Repos offered by the fresh-session picker, scoped the same way: a repo is in
   // scope if its root is under the filter root (parent-folder case) or the filter
   // root is under it (inside-a-repo case).
+  // Repos cloned this run are offered immediately. A reload only discovers a
+  // repo once a session has actually run in it, so without this, backing out of
+  // the post-clone flow with esc would hide the clone the user just waited for.
+  // Applied in BOTH views: toggling `a` to global must not make a fresh clone
+  // disappear either.
+  const withCloned = (repos: RepoInfo[]) => [
+    ...repos,
+    ...cloned.filter((c) => !repos.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
+  ];
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
-    if (!scoped) return model.repos;
-    const inScopeRepos = model.repos.filter(
-      (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
+    if (!scoped) {
+      if (model.repos.length > 0) return withCloned(model.repos);
+      // Bootstrap: the unscoped list is derived ENTIRELY from where past sessions
+      // ran, so a fresh install (no sessions anywhere — a new machine, or a first
+      // WSL setup whose Claude history lives on the Windows side) has nothing to
+      // offer and the picker dead-ends. That locks the user out for good: the only
+      // way a repo enters the list is by already having a session in it.
+      // Fall back to where the launcher was started — its enclosing checkout, or
+      // the directory itself when it isn't one — which is the one place we know
+      // the user is standing in. `filterRoot` wins when there is one (only
+      // reachable with `a` toggled to the global view, where the scoped folder is
+      // still the better guess than an unrelated cwd), and goes through
+      // `repoRootForCwd` directly: an explicit path IS intent, so its walk-up
+      // needs none of `bootstrapRepoRoot`'s guard against climbing into $HOME.
+      // Deliberately ONLY when the list is empty: an install with sessions keeps
+      // its session-count ranking exactly as before.
+      return withCloned(
+        ensureRepoAtTop([], filterRoot ? repoRootForCwd(filterRoot) : bootstrapRepoRoot(process.cwd())),
+      );
+    }
+    const inScopeRepos = withCloned(
+      model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root)),
     );
     // Always offer the scoped folder itself, ranked FIRST — above child repos
     // that already have sessions. Scoping to a folder is a statement that the
@@ -1233,7 +1355,7 @@ export default function App({
     // Resolved through repoRootForCwd so scoping INSIDE a checkout still offers
     // the repo root, and worktrees land at the root rather than a subdir.
     return ensureRepoAtTop(inScopeRepos, repoRootForCwd(filterRoot!));
-  }, [model, scoped, filterRoot]);
+  }, [model, scoped, filterRoot, cloned]);
 
   // The same list, reordered for targets that MUST create a worktree. Work-item
   // ("new") and PR flows structurally cannot run in place — `pr` goes straight
@@ -1270,6 +1392,63 @@ export default function App({
   /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
   const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
     kind === "free" ? scopedRepos : worktreeRepos;
+  // Whether ANY offered repo can host a worktree — what the work-item / PR
+  // picker warns about when none can. Memoized on the list it asks about
+  // (`worktreeRepos` is exactly `reposForTarget`'s non-free answer): every
+  // `isGitCheckout` is an `existsSync`, and the picker re-renders on each cursor
+  // keystroke, so asking per render would stat the whole list per keypress.
+  const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
+
+  // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
+  // chatty once it's transferring, but silent while it resolves DNS, completes
+  // the TLS handshake and waits for the server to enumerate objects — on a large
+  // repo that's long enough to read as a frozen UI. A second-hand that always
+  // moves is the cheapest possible proof that it hasn't.
+  const cloning = mode.kind === "cloning";
+  useEffect(() => {
+    if (!cloning) return;
+    const t = setInterval(() => {
+      setMode((p) => (p.kind === "cloning" ? { ...p, elapsed: p.elapsed + 1 } : p));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [cloning]);
+
+  // Never leave a `git clone` (and its half-written directory) behind on
+  // unmount. `immediate` because the child's exit will never be observed here.
+  useEffect(() => () => cloneRun.current?.cancel({ immediate: true }), []);
+
+  // What the typed URL means. Two halves, split by cost: parsing is pure string
+  // work and belongs in render, but resolving *where it would land* reads the
+  // filesystem — an `origin` per sibling checkout (spawned git), a stat per
+  // candidate directory. In a folder holding dozens of checkouts that is long
+  // enough to see, so it runs in an effect and lands as state: the identity
+  // appears the instant you type, the destination a beat later, and the render
+  // path never blocks.
+  const cloneValue = mode.kind === "clone" ? mode.value : null;
+  const cloneUrl = useMemo(
+    () => (cloneValue?.trim() ? parseRepoUrl(cloneValue) : null),
+    [cloneValue],
+  );
+  const [cloneDest, setCloneDest] = useState<{ key: string; match: string | null; dest: string | null } | null>(null);
+  useEffect(() => {
+    // Clearing on the way out matters: leaving the resolution behind would let a
+    // later visit to the prompt match it by key and show a pre-clone answer
+    // ("clones into …" for a repo that is now on disk) until the effect caught up.
+    if (!cloneUrl || !filterRoot) {
+      setCloneDest(null);
+      return;
+    }
+    const match = findMatchingCheckout(filterRoot, cloneUrl.key);
+    setCloneDest({
+      key: cloneUrl.key,
+      match,
+      dest: match ? null : freeCloneDest(filterRoot, cloneDirName(cloneUrl.repo)),
+    });
+  }, [cloneUrl, filterRoot]);
+  // Only trust a resolution that belongs to the URL currently on screen — the
+  // previous one is about a different repo, and a stale destination is worse
+  // than none.
+  const resolved = cloneUrl && cloneDest?.key === cloneUrl.key ? cloneDest : null;
 
   const rows = useMemo(() => {
     if (!model) return [];
@@ -1629,23 +1808,32 @@ export default function App({
   // picked, `proceedFresh` runs the original repo/branch/checkout routing.
   const enterFresh = (target: FreshTarget) => {
     setNotice(null);
+    setCloneNote(null);
+    cloneNoteRef.current = null;
     setMode({ kind: "agent", target, cursor: 0 });
   };
 
   const enterNewSession = () => {
     setNotice(null);
-    // A scoped picker is never empty — `scopedRepos` always keeps at least the
-    // scoped folder itself when nothing else is in scope — so the only ways to
-    // land here are the model not being loaded yet, or an unscoped launcher on a
-    // machine where no session has ever run in any repo. Those need different
-    // advice: one is "wait", the other is "go start a session somewhere". No
-    // "press a to widen" hint in either case — widening isn't what's missing.
+    setCloneNote(null);
+    cloneNoteRef.current = null;
+    // `scopedRepos` is never empty once the model is loaded: scoped keeps the
+    // scoped folder, unscoped falls back to the launcher's cwd. So the only real
+    // way to land here is the model not being loaded yet — the length guard below
+    // is belt-and-braces, kept so a future change to that list can't silently
+    // resurrect the empty picker instead of saying something.
     if (!model) {
       setNotice("Still loading — try again in a moment.");
       return;
     }
     if (scopedRepos.length === 0) {
-      setNotice("No known repos yet — open or resume a session in a repo first.");
+      // Leads with `agendo <dir>` on purpose: a plain "cd there and rerun" is
+      // wrong in the default tmux mode, where rerunning re-attaches to the
+      // ALREADY-RUNNING launcher (enterLauncherSession only spawns a new one
+      // when the launcher window is dead), so the process keeps its original cwd
+      // and nothing changes. A path arg resolves to its own host session, so it
+      // always takes effect — and quitting first is the other way out.
+      setNotice("No repo to start in — run `agendo <dir>` pointing at a git checkout (or quit with q, cd there, rerun).");
       return;
     }
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
@@ -1673,7 +1861,12 @@ export default function App({
       return;
     }
     runInline(plan);
-    setNotice(`▸ ${plan.alreadyRunning ? "switched to" : "opened"} ${plan.tmuxName} — switch back to this window for more`);
+    // A clone that fed straight into this launch (the PR flow does it in one
+    // keystroke) reports itself here — otherwise "where did it clone to?" would
+    // have no screen left to appear on.
+    const cloned = cloneNoteRef.current ? `${cloneNoteRef.current} · ` : "";
+    cloneNoteRef.current = null;
+    setNotice(`${cloned}▸ ${plan.alreadyRunning ? "switched to" : "opened"} ${plan.tmuxName} — switch back to this window for more`);
     reload();
   };
 
@@ -1690,6 +1883,9 @@ export default function App({
       if (res.error) {
         setBusy(null);
         setMode({ kind: "list" });
+        // Nothing launched, so no launch notice will consume the clone note —
+        // drop it here or it would attach itself to some later, unrelated one.
+        cloneNoteRef.current = null;
         setNotice(`Worktree failed: ${res.error}`);
         return;
       }
@@ -1716,12 +1912,116 @@ export default function App({
     if (res.error) {
       setBusy(null);
       setMode({ kind: "list" });
+      cloneNoteRef.current = null; // see startFresh — nothing launched to carry it
       setNotice(`Worktree failed: ${res.error}`);
       return;
     }
     setBusy(null);
     setMode({ kind: "list" });
     open(launchFresh(res.path, target.tmuxName, agent));
+  };
+
+  // A repo has been chosen — from the picker, or as the result of a clone. Every
+  // downstream route (PR checkout / branch prompt / worktree-vs-main) hangs off
+  // this one function, so a cloned repo takes the exact same path as one that was
+  // already on disk; there is no second session-creation flow.
+  const chooseRepo = (target: FreshTarget, repo: RepoInfo, agent: AgentSource) => {
+    if (target.kind === "pr") return startCheckout(target, repo, agent);
+    // Default to "New git worktree" (cursor 0) only where one can exist: in a
+    // non-repo folder (`agendo ~/git` → the scoped parent itself) `git worktree
+    // add` can only ever print "fatal: not a git repository", so defaulting to
+    // it makes the enter-enter-enter happy path dead-end. Point those at "Main
+    // repo checkout" (cursor 1) instead; both options stay on screen.
+    // INTERIM: the non-repo case really wants its own pair of options (run
+    // here / clone-or-init something), not a worktree-vs-checkout question —
+    // this just stops the default from being the one that cannot work.
+    if (target.kind === "free")
+      return setMode({ kind: "wtchoice", target, agent, repo, cursor: isGitCheckout(repo.root) ? 0 : 1 });
+    return setMode({
+      kind: "branch",
+      target,
+      agent,
+      repo,
+      value: target.defaultBranch,
+      cursor: target.defaultBranch.length,
+      worktree: true,
+    });
+  };
+
+  // ── clone a repo that isn't on disk yet ──
+  // Gated on `canClone`: agendo must have been given a target directory, since
+  // that directory is the only place it may write. See docs/cloning.md.
+  //
+  // …and that directory must not be inside a git checkout. The clone lands as a
+  // direct child of it, so scoping to a repo (`agendo .`, `agendo ~/git/myrepo`,
+  // or any path under one — all of which the scoping logic supports) would drop
+  // a nested repository into that repo's working tree, where it sits as
+  // untracked clutter forever. Cloning belongs in a folder OF checkouts, not in
+  // one. `enclosingCheckout` walks up, but stops below $HOME — see there for why.
+  const canClone = scoped && !!filterRoot && !enclosingCheckout(filterRoot, homedir());
+
+  /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
+  const clonedRepo = (root: string): RepoInfo => ({
+    root,
+    name: basename(root) || root,
+    total: 0,
+    claude: 0,
+    copilot: 0,
+  });
+
+  /** Remember the checkout and continue into the ordinary session flow. */
+  const useClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
+    const repo = clonedRepo(root);
+    setCloned((prev) =>
+      prev.some((r) => normalizeCwd(r.root) === normalizeCwd(root)) ? prev : [...prev, repo],
+    );
+    setNotice(note);
+    setCloneNote(note);
+    cloneNoteRef.current = note;
+    chooseRepo(target, repo, agent);
+  };
+
+  /**
+   * Enter on the URL prompt. Resolves where the repo should live before touching
+   * the network: an existing checkout of the same repo anywhere in the target
+   * directory wins outright (never a second copy), otherwise a free directory
+   * name is chosen and the clone starts.
+   */
+  const beginClone = (target: FreshTarget, agent: AgentSource, raw: string) => {
+    const url = parseRepoUrl(raw);
+    const fail = (...error: string[]) =>
+      setMode({ kind: "clone", target, agent, value: raw, cursor: raw.length, error });
+    if (!url) return fail("Not a recognizable GitHub or Azure DevOps repo URL.");
+
+    const existing = findMatchingCheckout(filterRoot!, url.key);
+    if (existing) {
+      return useClonedRepo(target, agent, existing, `already cloned — using ${homeShort(existing)}`);
+    }
+
+    const dest = freeCloneDest(filterRoot!, cloneDirName(url.repo));
+    if (!dest) return fail(`No free directory name for "${url.repo}" in ${homeShort(filterRoot!)}.`);
+
+    setMode({ kind: "cloning", target, agent, url, dest, progress: "starting…", elapsed: 0 });
+    const run = startClone(url.remote, dest, (line) =>
+      setMode((p) => (p.kind === "cloning" ? { ...p, progress: line } : p)),
+    );
+    cloneRun.current = run;
+    run.done.then((res) => {
+      if (cloneRun.current !== run) return; // superseded by a newer attempt
+      cloneRun.current = null;
+      if (res.canceled) {
+        setNotice("Clone cancelled.");
+        return setMode({ kind: "repo", target, agent, cursor: 0 });
+      }
+      if (!res.ok) return fail(...cloneError(res));
+      const landed = basename(dest) === cloneDirName(url.repo) ? "" : ` as ${basename(dest)}`;
+      useClonedRepo(target, agent, dest, `cloned ${repoUrlLabel(url)}${landed} into ${homeShort(dest)}`);
+    });
+  };
+
+  /** Cancel an in-flight clone (esc) — kills git and removes the partial dir. */
+  const cancelClone = () => {
+    cloneRun.current?.cancel();
   };
 
   // Convert a session's transcript into the other agent's format (via the
@@ -1754,6 +2054,106 @@ export default function App({
       setMode({ kind: "list" });
       setNotice(`Convert to ${dest} failed: ${e?.message ?? e}`);
     }
+  };
+
+  // ── move a session to another Claude profile ────────────────────────────────
+  // Open the picker for the hovered session. Every guard that can be answered
+  // without touching disk is answered here, so the picker only ever appears when
+  // a move is actually possible.
+  //
+  // A RUNNING session is refused rather than moved. agendo can tell that a
+  // session is live (window→session attribution), and `paneReadiness` can even
+  // say its input box looks idle — but that read is a documented best-effort
+  // screen scrape (it returns "unknown" for any screen it doesn't recognize, and
+  // says nothing about background bash, in-flight sub-agents or background
+  // tasks), and there is no graceful-exit primitive to hand the agent anyway:
+  // killWindow is a hard kill. Moving files out from under a live `claude` is not
+  // worth guessing at, so the safe refusal is the whole behaviour.
+  const enterProfilePicker = async (s: AgentSession) => {
+    setNotice(null);
+    if (s.source !== "claude") {
+      setNotice(`${s.source} sessions have no profile — only Claude sessions live in a ~/.claude* dir.`);
+      return;
+    }
+    if (!s.configDir || !s.logPath) {
+      setNotice("This session has no on-disk transcript to move.");
+      return;
+    }
+    if (isRunning(s, model?.liveTmux ?? new Set())) {
+      setNotice(`${s.title} is running — exit it (or close its tmux window) before moving it to another profile.`);
+      return;
+    }
+    setBusy("Scanning Claude profiles…");
+    const choices = profileChoices(await discoverProfiles(), s);
+    setBusy(null);
+    const firstTarget = choices.findIndex((c) => !c.current);
+    if (firstTarget < 0) {
+      setNotice("No other Claude profile found — create a second ~/.claude* dir with a projects/ folder first.");
+      return;
+    }
+    setMode({ kind: "profile", session: s, choices, cursor: firstTarget });
+  };
+
+  // Perform the move, then refresh: the session index is keyed by transcript
+  // path, so a reload is what re-files it under the target profile (and re-reads
+  // its activity from the new location).
+  //
+  // Two guards stand between a keystroke and the filesystem:
+  //  • `moveInFlight` — `busy` swaps the RENDER but doesn't gate `useInput`, and
+  //    `mode` only leaves "profile" once the await resolves, so a key-repeat on
+  //    enter would otherwise start a second move racing the first over the same
+  //    four renames. The loser hits ENOENT and rolls back the entries it won,
+  //    tearing the session in half across the two profiles — exactly the state
+  //    this feature must never produce. The mode is also dropped up front, so a
+  //    stray enter has no picker left to act on.
+  //  • a FRESH liveness read — the running-session refusal is the entire safety
+  //    story for a live agent, and the picker can sit open indefinitely. A session
+  //    resumed in the meantime (a keypress in its restore-placeholder tab from
+  //    another tmux client, a second agendo) must not have its files pulled out
+  //    from under it, so the check is re-run against tmux at commit time rather
+  //    than trusted from picker-entry.
+  const moveInFlight = useRef(false);
+  const moveToProfile = async (s: AgentSession, target: ClaudeProfile) => {
+    if (moveInFlight.current) return;
+    moveInFlight.current = true;
+    setNotice(null);
+    setMode({ kind: "list" });
+    setBusy(`Moving “${s.title}” to ${target.name}…`);
+    try {
+      await runMove(s, target);
+    } finally {
+      moveInFlight.current = false;
+      setBusy(null);
+    }
+  };
+
+  const runMove = async (s: AgentSession, target: ClaudeProfile) => {
+    const sessions = (modelRef.current?.sessionGroups ?? []).flatMap((g) => g.sessions);
+    if (isRunning(s, refreshLiveTmux(sessions).live)) {
+      setNotice(`${s.title} started running — exit it (or close its tmux window) before moving it to another profile.`);
+      return;
+    }
+    const res = await moveSessionToProfile(s, target);
+    if (res.error) {
+      setNotice(`Move failed: ${res.error}`);
+      return;
+    }
+    if (res.noop) {
+      setNotice(`${target.name} is the same directory on disk as this session's profile — nothing to move.`);
+      return;
+    }
+    // The restore snapshot bakes CLAUDE_CONFIG_DIR into each tab's argv, so a
+    // moved session's saved tab has to be repointed — and an already-visible
+    // placeholder tab rebuilt — or it would resume against the profile it just left.
+    const tab = retargetRestoreProfile(s, target.configDir, hostSession);
+    setActivity(new Map()); // its log lives elsewhere now — drop the cached parse
+    requested.current.clear();
+    reload();
+    const extras = [
+      res.warning,
+      tab.placeholderRefreshed ? "restored tab repointed" : null,
+    ].filter(Boolean);
+    setNotice(`Moved “${s.title}” → ${target.name}${extras.length ? ` (${extras.join("; ")})` : ""}`);
   };
 
   useInput((input, key) => {
@@ -1832,7 +2232,7 @@ export default function App({
       if ((key.upArrow || input === "k") && cursor === selectableIdx[0]) { setSearchFocus("input"); return; }
     }
 
-    if (mode.kind !== "branch" && (input === "q" || (key.ctrl && input === "c"))) {
+    if (!HOLDS_QUIT_KEYS.has(mode.kind) && (input === "q" || (key.ctrl && input === "c"))) {
       exit();
       return;
     }
@@ -1844,7 +2244,15 @@ export default function App({
     // ── agent picker (first step of every fresh flow) ──
     if (mode.kind === "agent") {
       const len = AGENT_CHOICES.length;
-      if (key.escape) return setMode({ kind: "list" });
+      if (key.escape) {
+        // Last exit from the fresh flow, so it's where an unconsumed clone note
+        // dies. Escaping all the way out (wtchoice → repo → agent → list) and
+        // then resuming some existing session would otherwise prefix that
+        // launch with "✓ cloned …", crediting it to an unrelated clone.
+        setCloneNote(null);
+        cloneNoteRef.current = null;
+        return setMode({ kind: "list" });
+      }
       if (key.upArrow || input === "k")
         return setMode((p) => (p.kind === "agent" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
       if (key.downArrow || input === "j")
@@ -1857,34 +2265,88 @@ export default function App({
     if (mode.kind === "repo") {
       const repos = reposForTarget(mode.target.kind);
       const len = repos.length || 1;
-      if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "repo" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return && repos[mode.cursor]) {
-        const repo = repos[mode.cursor];
-        if (mode.target.kind === "pr") return startCheckout(mode.target, repo, mode.agent);
-        // Default to "New git worktree" (cursor 0) only where one can exist: in a
-        // non-repo folder (`agendo ~/git` → the scoped parent itself) `git worktree
-        // add` can only ever print "fatal: not a git repository", so defaulting to
-        // it makes the enter-enter-enter happy path dead-end. Point those at "Main
-        // repo checkout" (cursor 1) instead; both options stay on screen.
-        // INTERIM: the non-repo case really wants its own pair of options (run
-        // here / clone-or-init something), not a worktree-vs-checkout question —
-        // this just stops the default from being the one that cannot work.
-        if (mode.target.kind === "free")
-          return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo, cursor: isGitCheckout(repo.root) ? 0 : 1 });
-        return setMode({
-          kind: "branch",
-          target: mode.target,
-          agent: mode.agent,
-          repo,
-          value: mode.target.defaultBranch,
-          cursor: mode.target.defaultBranch.length,
-          worktree: true,
+      const openClone = () =>
+        setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
+      // The clone row is rendered last but addressed by a SENTINEL, never by
+      // `repos.length`: the background rescan replaces `model.repos` while the
+      // picker is open (a sibling session starting in a new repo grows the list),
+      // and a positional index would slide off the clone row onto whatever repo
+      // took its place — enter would then launch a session instead of cloning.
+      const onClone = mode.cursor === CLONE_ROW;
+      // ↑/↓ treat the clone row as one past the end, wrapping through it.
+      const move = (d: 1 | -1) =>
+        setMode((p) => {
+          if (p.kind !== "repo") return p;
+          if (!canClone) return { ...p, cursor: (p.cursor + d + len) % len };
+          if (p.cursor === CLONE_ROW) return { ...p, cursor: d === 1 ? 0 : len - 1 };
+          const next = p.cursor + d;
+          return { ...p, cursor: next < 0 || next >= len ? CLONE_ROW : next };
         });
+      if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
+      if (key.upArrow || input === "k") return move(-1);
+      if (key.downArrow || input === "j") return move(1);
+      if (input === "c" && canClone) return openClone();
+      if (key.return && onClone && canClone) return openClone();
+      if (key.return && repos[mode.cursor]) {
+        // Picking a repo off the list is not the result of a clone. Without
+        // this, backing out of the post-clone flow and choosing a different repo
+        // would carry "✓ cloned ada/newthing…" onto a dialog about another one.
+        setCloneNote(null);
+        cloneNoteRef.current = null;
+        return chooseRepo(mode.target, repos[mode.cursor], mode.agent);
       }
+      return;
+    }
+
+    // ── clone: paste a repo URL ──
+    // Same editable single-line input as the branch prompt (see there for why the
+    // updates are functional).
+    if (mode.kind === "clone") {
+      if (key.escape) return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
+      if (key.return) {
+        if (mode.value.trim()) beginClone(mode.target, mode.agent, mode.value.trim());
+        return;
+      }
+      const edit = (fn: (v: string, c: number) => { value?: string; cursor: number }) =>
+        setMode((p) => {
+          if (p.kind !== "clone") return p;
+          const r = fn(p.value, p.cursor);
+          // Any edit clears a stale error — it described the *previous* value.
+          return { ...p, value: r.value ?? p.value, cursor: r.cursor, error: undefined };
+        });
+      if (key.leftArrow) return edit((v, c) => ({ cursor: Math.max(0, c - 1) }));
+      if (key.rightArrow) return edit((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
+      if (key.ctrl && input === "a") return edit(() => ({ cursor: 0 }));
+      if (key.ctrl && input === "e") return edit((v) => ({ cursor: v.length }));
+      if (key.ctrl && input === "u") return edit(() => ({ value: "", cursor: 0 }));
+      if (key.backspace || key.delete || input === "\x7f" || input === "\b")
+        return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
+      // A PASTE arrives as one chunk, and copying a URL as a whole line brings
+      // its trailing newline along. Ink doesn't read that chunk as Enter (the
+      // `\r` isn't alone), so a printable-only guard like the branch prompt's
+      // would reject the entire paste and insert nothing at all — on the one
+      // prompt whose whole instruction is "paste a URL". Strip the control
+      // characters and keep the rest. Deliberately NOT treated as submit: the
+      // destination preview exists so no clone starts unreviewed.
+      if (input && !key.ctrl && !key.meta) {
+        // Only CONTROL characters are dropped — deliberately not "everything
+        // outside printable ASCII". An ADO project name is routinely non-ASCII
+        // (`…/innovamps/Þróun/_git/hmi-framework`, and Chrome's omnibox hands
+        // that over unencoded), and stripping those letters doesn't reject the
+        // URL — it quietly turns it into a *different, still valid* one
+        // (`…/innovamps/run/_git/…`), which then previews a destination for a
+        // repo the user never named and fails at clone time as "not found".
+        const text = input.replace(/[\x00-\x1f\x7f]+/g, "");
+        if (!text) return;
+        return edit((v, c) => ({ value: v.slice(0, c) + text + v.slice(c), cursor: c + text.length }));
+      }
+      return;
+    }
+
+    // ── clone in progress ── (esc kills git and removes the partial directory;
+    // everything else is ignored so a stray keystroke can't abandon the clone)
+    if (mode.kind === "cloning") {
+      if (key.escape) cancelClone();
       return;
     }
 
@@ -2006,6 +2468,30 @@ export default function App({
       return;
     }
 
+    // ── Claude profile picker (move a session between ~/.claude* dirs) ──
+    if (mode.kind === "profile") {
+      if (key.escape) return setMode({ kind: "list" });
+      // Only the profiles the session ISN'T in are selectable; its own is on
+      // screen for orientation, so the cursor steps over it in both directions.
+      const targets = mode.choices.flatMap((c, i) => (c.current ? [] : [i]));
+      if (targets.length === 0) return;
+      const step = (dir: number) =>
+        setMode((p) => {
+          if (p.kind !== "profile") return p;
+          const at = targets.indexOf(p.cursor);
+          const next = at < 0 ? targets[0] : targets[(at + dir + targets.length) % targets.length];
+          return { ...p, cursor: next };
+        });
+      if (key.upArrow || input === "k") return step(-1);
+      if (key.downArrow || input === "j") return step(1);
+      if (key.return) {
+        const picked = mode.choices[mode.cursor];
+        if (picked && !picked.current) moveToProfile(mode.session, picked.profile);
+        return;
+      }
+      return;
+    }
+
     // ── list mode ──
     // view switching (Tab forward, Shift-Tab back)
     if (key.tab) {
@@ -2074,6 +2560,18 @@ export default function App({
         return;
       }
       continueInOtherAgent(row.session);
+      return;
+    }
+
+    // move the hovered session to another Claude profile (~/.claude*). Works on
+    // a session row in any view, like `c`.
+    if (input === "m" && !key.ctrl && !key.meta) {
+      const row = rows[cursor];
+      if (!row || row.kind !== "session") {
+        setNotice("Select a session row first to move it to another profile.");
+        return;
+      }
+      enterProfilePicker(row.session);
       return;
     }
 
@@ -2201,12 +2699,28 @@ export default function App({
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
+    const repoChoices = reposForTarget(mode.target.kind);
+    // Work-item / PR flows MUST create a worktree, so a list with no git checkout
+    // in it can only ever produce "fatal: not a git repository" — the bootstrap
+    // case, where the only offer is the launcher's own non-repo cwd. Say what
+    // would actually unblock it instead of letting enter dead-end. The free flow
+    // is exempt: running in place is a legitimate outcome there (see wtchoice).
+    const noCheckout = !isFree && !anyHostableRepo;
     return (
       <Box flexDirection="column">
         <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
-        <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
+        <Text dimColor>
+          {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
+        </Text>
+        {noCheckout ? (
+          <Text color="yellow">
+            {canClone
+              ? "No git checkout here — press c to clone one, or run `agendo <dir>` pointing at a repo."
+              : "No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
+          </Text>
+        ) : null}
         <Box marginTop={1} flexDirection="column">
-          {reposForTarget(mode.target.kind).map((r, i) => {
+          {repoChoices.map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
@@ -2224,6 +2738,73 @@ export default function App({
               </Text>
             );
           })}
+          {canClone ? (
+            <Text
+              color={mode.cursor === CLONE_ROW ? "black" : undefined}
+              backgroundColor={mode.cursor === CLONE_ROW ? "cyan" : undefined}
+            >
+              {mode.cursor === CLONE_ROW ? "❯ " : "  "}
+              <Text bold>{"＋ Clone from URL…".padEnd(21).slice(0, 21)}</Text>
+              <Text dimColor={mode.cursor !== CLONE_ROW}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
+            </Text>
+          ) : null}
+        </Box>
+      </Box>
+    );
+  }
+
+  if (mode.kind === "clone") {
+    // Live read of what's typed so far (see `cloneUrl` / `cloneDest`): the exact
+    // directory that will be created is on screen *before* enter, so no clone is
+    // ever a surprise. An existing checkout of the same repo is reported here
+    // too — the reuse then reads as expected rather than as a clone that
+    // silently didn't happen.
+    const preview: { text: string; color: string } = cloneUrl
+      ? !resolved
+        ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  …`, color: "gray" }
+        : resolved.match
+          ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  already cloned at ${homeShort(resolved.match)}`, color: "green" }
+          : resolved.dest
+            ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  clones into ${homeShort(resolved.dest)}`, color: "cyan" }
+            : { text: `→ ${repoUrlLabel(cloneUrl)}  ·  no free directory name in ${homeShort(filterRoot!)}`, color: "yellow" }
+      : mode.value.trim()
+        ? { text: "not a recognizable GitHub or Azure DevOps repo URL", color: "yellow" }
+        : { text: "e.g. https://github.com/owner/repo · https://dev.azure.com/org/proj/_git/repo", color: "gray" };
+    return (
+      <Box flexDirection="column">
+        <Text bold>{`Clone a repo into ${homeShort(filterRoot!)}`}</Text>
+        <Text dimColor>{"Paste a GitHub or Azure DevOps repo URL  ·  enter clone · esc back"}</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text>
+            {"  "}
+            <Text>{mode.value.slice(0, mode.cursor)}</Text>
+            <Text inverse>{mode.value[mode.cursor] ?? " "}</Text>
+            <Text>{mode.value.slice(mode.cursor + 1)}</Text>
+          </Text>
+          <Text color={preview.color}>{`  ${preview.text}`}</Text>
+          {(mode.error ?? []).map((line, i) => (
+            <Text key={i} color="red">{`  ${line}`}</Text>
+          ))}
+        </Box>
+      </Box>
+    );
+  }
+
+  if (mode.kind === "cloning") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>
+          <Text color="cyan">⟳</Text>
+          {` Cloning ${repoUrlLabel(mode.url)}  `}
+          <Text dimColor>{`(${mode.elapsed}s)`}</Text>
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text dimColor wrap="truncate">{`  from  ${mode.url.displayRemote}`}</Text>
+          <Text dimColor wrap="truncate">{`  into  ${homeShort(mode.dest)}`}</Text>
+          <Text wrap="truncate">{`  ${mode.progress}`}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>{"  esc cancels (the partial clone is removed)"}</Text>
         </Box>
       </Box>
     );
@@ -2349,6 +2930,7 @@ export default function App({
       <Box flexDirection="column">
         <Text bold>{`New session in ${mode.repo.name} — choose where to run`}</Text>
         <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
+        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
         <Box marginTop={1} flexDirection="column">
           {opts.map((label, i) => {
             const sel = i === mode.cursor;
@@ -2375,6 +2957,7 @@ export default function App({
       <Box flexDirection="column">
         <Text bold>{isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}</Text>
         <Text dimColor>{mode.worktree ? "New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back" : "Session name · ←/→ move · ⌃a/⌃e start/end · enter launch · esc back"}</Text>
+        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
         <Box marginTop={1}>
           <Text>{mode.worktree ? "branch: " : "name:   "}</Text>
           <Text color="cyan">{value.slice(0, cursor)}</Text>
@@ -2386,6 +2969,31 @@ export default function App({
             ? <Text dimColor>{`→ ${mode.agent} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
             : <Text dimColor>{`→ ${mode.agent} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
           }
+        </Box>
+      </Box>
+    );
+  }
+
+  if (mode.kind === "profile") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{`Move to another Claude profile — ${mode.session.title.slice(0, 44)}`}</Text>
+        <Text dimColor>
+          {"Relocates the transcript + its sidecar files  ·  ↑/↓ move · enter move · esc cancel"}
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          {mode.choices.map((c, i) => {
+            const sel = i === mode.cursor;
+            return (
+              <Text key={c.profile.configDir} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
+                {sel ? "❯ " : "  "}
+                <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
+                <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{c.profile.name.padEnd(18).slice(0, 18)}</Text>
+                <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
+                <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
+              </Text>
+            );
+          })}
         </Box>
       </Box>
     );
@@ -2454,7 +3062,7 @@ export default function App({
             : searchFocus === "list"
               ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
               : view === "sessions"
-                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
+                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}

@@ -23,7 +23,7 @@ import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, is
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
-import { ensureRepoAtTop, type RepoInfo } from "../src/repos.ts";
+import { ensureRepoAtTop, bootstrapRepoRoot, type RepoInfo } from "../src/repos.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -1730,5 +1730,65 @@ test.describe("ensureRepoAtTop: the scoped folder is offered exactly once, first
   test("the filesystem root gets a non-empty name (basename('/') is '')", () => {
     // `agendo /` is legal; a blank name cell in the picker is not.
     expect(ensureRepoAtTop([], "/")[0].name).toBe("/");
+  });
+});
+
+// The bootstrap fallback's walk-up guard. `agendo <path>` is intent and may
+// resolve anywhere; the cwd fallback is only an INFERENCE, so it must stop below
+// $HOME — otherwise a dotfiles-tracked $HOME (chezmoi / yadm) turns every
+// non-repo cwd into "your dotfiles repo", and the picker's happy path writes a
+// worktree into ~/.claude/worktrees. Real dirs under a temp HOME, since the
+// walk-up is an `existsSync(.git)` test on the actual filesystem.
+test.describe("bootstrapRepoRoot: the cwd fallback never climbs into $HOME", () => {
+  let home: string;
+  let realHome: string | undefined;
+
+  test.beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "agendo-boot-"));
+    realHome = process.env.HOME;
+    process.env.HOME = home; // os.homedir() reads $HOME on linux
+  });
+  test.afterEach(() => {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a real checkout below $HOME is still resolved by walking up", () => {
+    const repo = join(home, "git", "proj");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const sub = join(repo, "packages", "web");
+    mkdirSync(sub, { recursive: true });
+    // The guard must not cost us the normal case: a subdir still resolves to its
+    // repo root, so a worktree lands at the root.
+    expect(bootstrapRepoRoot(sub)).toBe(repo);
+  });
+
+  test("a dotfiles $HOME is NOT inferred from a non-repo cwd under it", () => {
+    mkdirSync(join(home, ".git"), { recursive: true });
+    const plain = join(home, "projects", "newthing");
+    mkdirSync(plain, { recursive: true });
+    // Without the guard this returns `home` — and the picker then offers the
+    // dotfiles repo as a worktree host.
+    expect(bootstrapRepoRoot(plain)).toBe(plain);
+  });
+
+  test("standing IN a dotfiles $HOME still resolves to it — nothing was inferred", () => {
+    mkdirSync(join(home, ".git"), { recursive: true });
+    // The cwd IS the checkout, so there is no walk-up to second-guess. The guard
+    // is about silent climbing, not about banning $HOME outright.
+    expect(bootstrapRepoRoot(home)).toBe(home);
+  });
+
+  test("a checkout ABOVE $HOME is rejected too (never just $HOME itself)", () => {
+    // $HOME nested under the repo: the walk-up would reach an ancestor of $HOME,
+    // which is even further from anything the user pointed at.
+    const nestedHome = join(home, "users", "me");
+    mkdirSync(nestedHome, { recursive: true });
+    mkdirSync(join(home, ".git"), { recursive: true });
+    process.env.HOME = nestedHome;
+    const plain = join(nestedHome, "work");
+    mkdirSync(plain, { recursive: true });
+    expect(bootstrapRepoRoot(plain)).toBe(plain);
   });
 });
