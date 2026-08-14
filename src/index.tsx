@@ -6,7 +6,7 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
+  liveManagedPaths, managedKind, capturePaneState, readPaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
   sessionRoot, currentSessionName, killWindow, killManagedTarget, windowLocations, isPlaceholderWindow, exactTarget,
   type SessionKind, type Readiness,
 } from "./tmux.ts";
@@ -104,8 +104,8 @@ Usage:
                                 <id>\` brings the session back. Only ever kills a
                                 managed cl-… target, and refuses a session with
                                 work in flight (mid-turn, compacting, text queued,
-                                or an open question) or a window it can't
-                                attribute to that session alone.
+                                or an open question), or a window it can't
+                                attribute to that session alone — or can't read.
       --force, -f               Close despite work in flight / an ambiguous window
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
@@ -1140,7 +1140,10 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
  *     So an id-less window with rival sessions in its dir needs `--force`.
  *  4. WORK IN FLIGHT. A pane mid-turn (or compacting, or holding queued text /
  *     an open question) is refused unless `force` — killing an agent mid-write
- *     is how work gets lost. See UNSAFE_CLOSE_STATES.
+ *     is how work gets lost. See UNSAFE_CLOSE_STATES. A pane that could not be
+ *     READ is refused too: readiness classifies a blank screen as "unknown",
+ *     which this guard lets through, so a failed read would pass for an idle
+ *     session (see `readPaneState`).
  *
  * Both the readiness READ and the kill address a window through its
  * `session:index` location rather than by name (see `killManagedTarget`): a bare
@@ -1224,7 +1227,20 @@ async function runClose(token: string | undefined, force: boolean, verb = "close
   const readTarget = exactTarget(location ?? target);
   // One pane read serves both the verdict and, if we refuse, the screen tail that
   // explains it — the same shape `send` uses when it declines.
-  const pane = placeholder ? null : capturePaneState(readTarget);
+  const pane = placeholder ? null : readPaneState(readTarget);
+  // A read that FAILED is not evidence of an idle session. `paneReadiness` turns
+  // an empty screen into "unknown", which guard 4 lets through — so a tmux read
+  // that never landed (busy server, pane gone between the listing and here) would
+  // silently disarm the only check standing between `close` and a mid-turn agent.
+  // `wait` distrusts a single missed read for the same reason (EXIT_CONFIRM_TICKS);
+  // this command is the destructive one, so it refuses outright.
+  if (!placeholder && !pane && !force) {
+    console.error(
+      `Not closing: tmux could not read ${target}'s pane (${readTarget}), so agendo can't tell whether ` +
+        `work is in flight. Re-run to try again, or pass --force to close it unread.`,
+    );
+    process.exit(2);
+  }
   const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
   if (pane && readiness && UNSAFE_CLOSE_STATES.has(readiness) && !force) {
     console.error(`Not closing: session looks "${readiness}" — work is in flight. Pass --force to close it anyway.`);

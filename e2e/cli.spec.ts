@@ -755,6 +755,38 @@ test("agendo close refuses a busy session unless forced", async ({ mock }) => {
   expect(killsIn(await mock.tmuxLog())).toEqual([["kill-session", "-t", `=${RUNNING_TARGET}`]]);
 });
 
+test("agendo close refuses when it cannot read the pane at all", async ({ mock }) => {
+  // The pane read is the ONLY evidence guard 4 has, and a failed read produces
+  // the same empty string a blank screen does — which classifies as "unknown"
+  // and is treated as closeable. So the mid-turn session below (its capture is
+  // BUSY, and would refuse if it were readable) must not be waved through just
+  // because tmux couldn't answer.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 3, name: RUNNING_TARGET },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+      { session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: BUSY_PANE },
+    captureFails: { "=agendo:3": true },
+  });
+
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).toBe(2); // refusal
+  expect(r.stderr).toContain("could not read");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  expect((await mock.getTmuxState()).windows).toHaveLength(2); // nothing died
+
+  // --force closes it unread, for the caller who has decided anyway.
+  const forced = agendo(mock.env, "close", SHORT_ID, "--force");
+  expect(forced.status).toBe(0);
+  expect(killsIn(await mock.tmuxLog())).toEqual([["kill-window", "-t", "=agendo:3"]]);
+});
+
 test("agendo close refuses a session holding an unsent draft", async ({ mock }) => {
   // Text typed but not submitted reads "queued" — closing would silently discard
   // it, so it's held to the same --force bar as a mid-turn session.

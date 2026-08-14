@@ -29,6 +29,13 @@ function readState() {
       // command can name something else by the next — and no static state file
       // can otherwise express a change *between* two commands.
       windowAt: s.windowAt ?? {},
+      // Targets whose `capture-pane` FAILS (exit 1, no output), keyed by the raw
+      // `-t` value (`{"=agendo:3": true}`). Real tmux fails a capture whose pane
+      // it can't reach — the pane exited between a listing and the read, or the
+      // server is too loaded to answer — and that is a different thing from a
+      // pane that is merely blank. No static screen text can express it, since
+      // the difference lives in the exit status, not the output.
+      captureFails: s.captureFails ?? {},
     };
   } catch {
     return { sessions: [], windows: [], panes: [], captures: {}, cursors: {} };
@@ -155,7 +162,11 @@ switch (cmd) {
     // `=session:index` location, which must land on the same window a bare name
     // would — a pane read that silently came back empty would read as "unknown"
     // and wave a busy session through the close guard.
-    const text = state.captures[targetName(state, flag("-t"))] ?? "";
+    const target = flag("-t");
+    // A pane tmux can't read at all: exit non-zero and print nothing, as the real
+    // thing does ("can't find pane"). Distinct from an empty capture below.
+    if (state.captureFails?.[target ?? ""]) process.exit(1);
+    const text = state.captures[targetName(state, target)] ?? "";
     process.stdout.write(text);
     process.exit(0);
   }

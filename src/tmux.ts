@@ -94,10 +94,21 @@ export function liveTargetForShortId(sid: string): string | null {
   return null;
 }
 
+/**
+ * Raw visible text of a target's active pane, or null when tmux could not read
+ * it at all (unresolvable target, a pane that exited between the listing and
+ * this call, a server too busy to answer). That is NOT the same as a pane that
+ * is simply blank, and a caller about to do something destructive has to tell
+ * the two apart — see `readPaneState`.
+ */
+function capturePaneRaw(target: string): string | null {
+  const r = spawnSync("tmux", ["capture-pane", "-p", "-e", "-t", target], { encoding: "utf-8" });
+  return r.status === 0 ? (r.stdout ?? "") : null;
+}
+
 /** Raw visible text of a target's active pane, including SGR escape codes. */
 export function capturePane(target: string): string {
-  const r = spawnSync("tmux", ["capture-pane", "-p", "-e", "-t", target], { encoding: "utf-8" });
-  return r.status === 0 ? (r.stdout ?? "") : "";
+  return capturePaneRaw(target) ?? "";
 }
 
 /**
@@ -149,6 +160,22 @@ export interface PaneSnapshot {
  */
 export function capturePaneState(target: string): PaneSnapshot {
   return { raw: capturePane(target), cursor: paneCursor(target) };
+}
+
+/**
+ * `capturePaneState`, but null when tmux could not read the pane AT ALL rather
+ * than an empty snapshot.
+ *
+ * The distinction only matters where a missing read is dangerous. Readiness is
+ * classified from the screen, and an empty screen classifies as `unknown` — fine
+ * for a caller that only reports it, wrong for one that acts on it: `agendo
+ * close` treats `unknown` as "nothing in flight", so a read that merely FAILED
+ * would silently disarm the guard and kill a session mid-turn. Callers that just
+ * display a state keep using `capturePaneState`.
+ */
+export function readPaneState(target: string): PaneSnapshot | null {
+  const raw = capturePaneRaw(target);
+  return raw === null ? null : { raw, cursor: paneCursor(target) };
 }
 
 /** Strip ANSI SGR escape sequences, for plain-text display / matching. */
