@@ -9,7 +9,7 @@ import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
+import { repoRootForCwd, bootstrapRepoRoot, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
@@ -1217,7 +1217,24 @@ export default function App({
   // root is under it (inside-a-repo case).
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
-    if (!scoped) return model.repos;
+    if (!scoped) {
+      if (model.repos.length > 0) return model.repos;
+      // Bootstrap: the unscoped list is derived ENTIRELY from where past sessions
+      // ran, so a fresh install (no sessions anywhere — a new machine, or a first
+      // WSL setup whose Claude history lives on the Windows side) has nothing to
+      // offer and the picker dead-ends. That locks the user out for good: the only
+      // way a repo enters the list is by already having a session in it.
+      // Fall back to where the launcher was started — its enclosing checkout, or
+      // the directory itself when it isn't one — which is the one place we know
+      // the user is standing in. `filterRoot` wins when there is one (only
+      // reachable with `a` toggled to the global view, where the scoped folder is
+      // still the better guess than an unrelated cwd), and goes through
+      // `repoRootForCwd` directly: an explicit path IS intent, so its walk-up
+      // needs none of `bootstrapRepoRoot`'s guard against climbing into $HOME.
+      // Deliberately ONLY when the list is empty: an install with sessions keeps
+      // its session-count ranking exactly as before.
+      return ensureRepoAtTop([], filterRoot ? repoRootForCwd(filterRoot) : bootstrapRepoRoot(process.cwd()));
+    }
     const inScopeRepos = model.repos.filter(
       (r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root),
     );
@@ -1270,6 +1287,12 @@ export default function App({
   /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
   const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
     kind === "free" ? scopedRepos : worktreeRepos;
+  // Whether ANY offered repo can host a worktree — what the work-item / PR
+  // picker warns about when none can. Memoized on the list it asks about
+  // (`worktreeRepos` is exactly `reposForTarget`'s non-free answer): every
+  // `isGitCheckout` is an `existsSync`, and the picker re-renders on each cursor
+  // keystroke, so asking per render would stat the whole list per keypress.
+  const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
 
   const rows = useMemo(() => {
     if (!model) return [];
@@ -1634,18 +1657,23 @@ export default function App({
 
   const enterNewSession = () => {
     setNotice(null);
-    // A scoped picker is never empty — `scopedRepos` always keeps at least the
-    // scoped folder itself when nothing else is in scope — so the only ways to
-    // land here are the model not being loaded yet, or an unscoped launcher on a
-    // machine where no session has ever run in any repo. Those need different
-    // advice: one is "wait", the other is "go start a session somewhere". No
-    // "press a to widen" hint in either case — widening isn't what's missing.
+    // `scopedRepos` is never empty once the model is loaded: scoped keeps the
+    // scoped folder, unscoped falls back to the launcher's cwd. So the only real
+    // way to land here is the model not being loaded yet — the length guard below
+    // is belt-and-braces, kept so a future change to that list can't silently
+    // resurrect the empty picker instead of saying something.
     if (!model) {
       setNotice("Still loading — try again in a moment.");
       return;
     }
     if (scopedRepos.length === 0) {
-      setNotice("No known repos yet — open or resume a session in a repo first.");
+      // Leads with `agendo <dir>` on purpose: a plain "cd there and rerun" is
+      // wrong in the default tmux mode, where rerunning re-attaches to the
+      // ALREADY-RUNNING launcher (enterLauncherSession only spawns a new one
+      // when the launcher window is dead), so the process keeps its original cwd
+      // and nothing changes. A path arg resolves to its own host session, so it
+      // always takes effect — and quitting first is the other way out.
+      setNotice("No repo to start in — run `agendo <dir>` pointing at a git checkout (or quit with q, cd there, rerun).");
       return;
     }
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
@@ -2201,12 +2229,24 @@ export default function App({
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
+    const repoChoices = reposForTarget(mode.target.kind);
+    // Work-item / PR flows MUST create a worktree, so a list with no git checkout
+    // in it can only ever produce "fatal: not a git repository" — the bootstrap
+    // case, where the only offer is the launcher's own non-repo cwd. Say what
+    // would actually unblock it instead of letting enter dead-end. The free flow
+    // is exempt: running in place is a legitimate outcome there (see wtchoice).
+    const noCheckout = !isFree && !anyHostableRepo;
     return (
       <Box flexDirection="column">
         <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
         <Text dimColor>{`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back`}</Text>
+        {noCheckout ? (
+          <Text color="yellow">
+            {"No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
+          </Text>
+        ) : null}
         <Box marginTop={1} flexDirection="column">
-          {reposForTarget(mode.target.kind).map((r, i) => {
+          {repoChoices.map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
