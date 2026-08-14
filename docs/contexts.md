@@ -57,15 +57,18 @@ takes a scope.
 
 Both are optional and AND-ed. On `list` they apply to every mode (plain, `--all`,
 `--json`, `--pr`/`--issue` queries); `--path` is the flag spelling of the `[dir]`
-positional.
+positional. `list` and `status` parse and apply them in the CLI entrypoint;
+`wait` owns its whole argv tail (`parseWaitArgs` in `src/wait.ts`), so it parses
+them there and carries the resolved `SessionScope` on `WaitOptions` — one shared
+`scope.ts` predicate either way.
 
 A scope **narrows every other selector rather than competing with one**, which is
 the invariant that makes it trustworthy: `wait --all --repo X` waits on the
 sessions in X, not on all of them (the precedence *among* `wait`'s own selectors
 is untouched — `--all` still overrides `--prefix`), and an explicit
-`wait <id> --repo X` /
-`status <id> --repo X` refuses an id that isn't in X instead of quietly answering
-for it. So on `status` and `wait` an `<id>` still names the session — the scope
+`wait <id> --repo X` / `status <id> --repo X` refuses an id that isn't in X
+instead of quietly answering for it. So on `status` and `wait` an `<id>` still
+names the session — the scope
 narrows the set it is resolved *against*, so an orchestrator polling one repo
 can't be handed a same-short-id session from another project, and the "no session
 found" message names the scope that excluded it. `status` additionally declines
@@ -213,5 +216,18 @@ so a launch from inside a scoped host session is restored by that same launcher.
 ## Invariants
 
 - Bare `agendo` is byte-identical to today: session `agendo`, no filter, legacy
-  restore file honored, `g` still groups.
+  restore file honored, `g` still groups. Two deliberate exceptions:
+  - **Bootstrap.** When the session-derived repo list is **empty** (a fresh
+    install — no sessions anywhere), the new-session picker falls back to the
+    launcher's cwd resolved to its enclosing checkout. Without it the picker has
+    nothing to offer and the first session can never be created, since a repo
+    only enters that list by already having a session in it. An install with any
+    session at all keeps its ranking untouched. The walk-up is bounded
+    (`bootstrapRepoRoot`): unlike a `[path]` argument, an inferred root must stop
+    below `$HOME`, or a dotfiles-tracked `$HOME` would be offered as the repo and
+    a worktree would land in `~/.claude/worktrees/`.
+  - **The no-checkout hint.** The work-item / PR repo picker warns when none of
+    its choices can host a worktree. That can also render on an established
+    unscoped install whose sessions all ran in plain folders — it is a warning,
+    never a change to what is offered or ranked.
 - Live window→session attribution is never gated by the path filter.

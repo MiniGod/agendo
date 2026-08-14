@@ -80,9 +80,10 @@ export function makeSessionScope(
 const MATCH_ALL = () => true;
 
 /**
- * The session predicate for a scope. `--repo` matching is compiled once here
- * (not per session): resolving a wanted `owner/repo` slug shells out to `git`
- * per repo root, and building the scope inside the loop would redo that work.
+ * The session predicate for a scope. The wanted repo is parsed once here rather
+ * than per session — and callers should hoist the returned predicate out of their
+ * own loop for the same reason, since a slug-form `--repo` resolves each distinct
+ * repo root through `git` (memoized by root, but still once per root).
  */
 export function scopeFilter(scope: SessionScope | null): (s: AgentSession) => boolean {
   if (!scope) return MATCH_ALL;
@@ -91,6 +92,32 @@ export function scopeFilter(scope: SessionScope | null): (s: AgentSession) => bo
     if (scope.roots.length && !scope.roots.some((r) => isUnderRoot(s.cwd, r))) return false;
     return inRepo ? inRepo(s) : true;
   };
+}
+
+/**
+ * Validate a scope flag's value, returning null (having printed why) when it is
+ * unusable. Blank counts as missing, whitespace included: `--repo "  "` trims
+ * away to "no repo wanted" and the command would then act on EVERY session at
+ * exit 0. Handing back more than was asked for is the one failure mode a scoping
+ * flag must not have, so an unusable value is an error rather than a silent
+ * absence — as is a flag at the end of argv, or one followed by another flag.
+ *
+ * Returns rather than exits so `wait`, whose whole argv tail parses to an exit
+ * code in-process (`parseWaitArgs`), can use the same guard as the subcommands
+ * that do exit; `index.tsx` wraps it in the exiting form.
+ */
+export function scopeFlagValue(cmd: string, flag: string, v: string | undefined): string | null {
+  if (v === undefined || v.trim() === "" || v.startsWith("-")) {
+    console.error(`${cmd}: ${flag} needs a value`);
+    return null;
+  }
+  return v;
+}
+
+/** ` in scope (…)` for an error message, or "" when nothing was scoped. Shared so
+ *  every "not found / nothing matched" message names the scope the same way. */
+export function scopeNote(scope: SessionScope | null): string {
+  return scope ? ` in scope (${describeScope(scope)})` : "";
 }
 
 /** The scope as the flags that would reproduce it, for error messages. */
