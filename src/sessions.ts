@@ -410,7 +410,10 @@ function bareRepoName(repo: string): string {
 // doesn't move under us during a process lifetime, so a plain unbounded Map
 // keyed by root (not by cwd — worktrees of one repo share a root) is enough.
 // NOTE: nothing on the fast paths (SessionIndex.build, loadLocalSessions) may
-// reach this; it is deliberately confined to the repo-scoped forWorkItem call.
+// reach this. The two entry points are the repo-scoped forWorkItem call and
+// `repoScopeFilter` (the CLI's `--repo` selector) — and both only get here when
+// the WANTED repo is a full `owner/repo` slug, so the common bare-name case
+// still costs no process spawn at all.
 const rootSlugCache = new Map<string, string | null>();
 
 function repoSlugForRoot(root: string): string | null {
@@ -438,6 +441,22 @@ function repoSlugForRoot(root: string): string | null {
 // no-longer-on-disk checkouts matching at all.
 function identityMatches(scope: RepoScope, slug: string | null, bare: string): boolean {
   return scope.slug && slug ? slug === scope.slug : bare === scope.bare;
+}
+
+/**
+ * The reusable form of the match below, for the CLI's `--repo` selector
+ * (`agendo list/status/wait --repo <name>`): parse the wanted repo ONCE and hand
+ * back a predicate. Sharing it with `forWorkItem` is the point — a `--repo` that
+ * disagreed with the work-item↔session join about which sessions live in a repo
+ * would be its own bug class.
+ *
+ * `repo` is a bare name or an `owner/repo` slug; the slug form makes this shell
+ * out to `git remote get-url origin` once per repo root (memoized), so prefer
+ * the bare name on hot paths.
+ */
+export function repoScopeFilter(repo: string): (s: AgentSession) => boolean {
+  const scope = repoScope(repo);
+  return (s) => sessionInScope(s, scope);
 }
 
 /** Whether a session belongs to the wanted repo, for the repo-scoped

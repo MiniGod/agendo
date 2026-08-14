@@ -17,7 +17,8 @@ import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, 
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { findPeer, sendPeerMessage } from "./peer.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
-import { resolveContext, isUnderRoot } from "./context.ts";
+import { resolveContext } from "./context.ts";
+import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState, resumeDialogChoice } from "./config.ts";
@@ -60,6 +61,10 @@ Usage:
       --pr <n>                  Only sessions linked to PR #n (resolved via the
                                 backend, so gh/az data is fetched).
       --issue, --work-item <n>  Only sessions linked to that issue / work item.
+      --path <dir>              Same as the [dir] positional: only sessions whose
+                                cwd is under dir. Combines with --repo.
+      --repo <name>             Only sessions in that repo — a bare name or an
+                                owner/repo slug. Worktrees count as their repo.
   agendo list pr, prs          List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
                                 approvals, branch, session, title). --json for full rows.
@@ -74,7 +79,8 @@ Usage:
                                 non-busy state, then exit 0; exit non-zero on
                                 timeout. Run it in the background and use its exit
                                 as a notification instead of re-polling status.
-                                With no ids, select with --all / --prefix / --repo.
+                                With no ids, select with --all / --prefix, and
+                                scope any of those with --repo / --path.
                                 A session whose window closes reads "exited": it
                                 satisfies the default wait, and short-circuits a
                                 --state it can no longer reach.
@@ -94,13 +100,18 @@ Usage:
       --interval <dur>          Poll cadence (default 2s). Durations: 500ms, 2s, 5m…
       --all                     All running sessions
       --prefix <p>              Sessions whose dir basename starts with p
-      --repo <name>             Sessions whose repo root basename is name
+      --repo <name>             Sessions in that repo (bare name or owner/repo)
+      --path <dir>              Sessions whose cwd is under dir
+                                --repo/--path narrow whichever selector chose the
+                                set — including --all and explicit <id>s.
   agendo status <id>           Show a session's state, task checklist, workflows
                                 (Workflow-tool runs with agent progress), recent
                                 activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…).
       --full, -F                Don't truncate the prompt / activity details
+      --path <dir>              Only resolve <id> among sessions under dir
+      --repo <name>             Only resolve <id> among sessions in that repo
   agendo send <id> <prompt>    Send a prompt to a running session. Claude sessions
                                 that expose a messaging socket take it there, which
                                 queues it even mid-turn; everything else (Copilot,
@@ -182,9 +193,28 @@ if (!tmuxAvailable()) {
 // menu shows, so an agent that launched a background session can poll it.
 if (process.argv[2] === "status") {
   const rest = process.argv.slice(3);
-  const full = rest.includes("--full") || rest.includes("-F");
-  const token = rest.find((a) => a !== "--full" && a !== "-F");
-  await runStatus(token, full);
+  let full = false;
+  let token: string | undefined;
+  // The scope selectors don't pick the session (an id still does) — they narrow
+  // the set the id is resolved against, so an orchestrator polling one repo can
+  // never be handed a same-short-id session from a different project.
+  let pathArg: string | undefined;
+  let repoArg: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--full" || a === "-F") full = true;
+    else if (a === "--path") pathArg = requireValue("status", a, rest[++i]);
+    else if (a === "--repo") repoArg = requireValue("status", a, rest[++i]);
+    // A dashed token can't be an id, so reject it rather than take it as one: a
+    // typo'd or `=`-joined scope flag (`--rep x`, `--repo=x`) would otherwise
+    // parse to "no scope" and print a confidently UNSCOPED report — defeating,
+    // silently, the exact guard the caller asked for.
+    else if (a.startsWith("-")) {
+      console.error(`status: unknown argument "${a}"`);
+      process.exit(1);
+    } else if (token === undefined) token = a;
+  }
+  await runStatus(token, full, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()));
   process.exit(0);
 }
 
@@ -363,9 +393,11 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   let all = false;
   let pr: number | undefined;
   let item: number | undefined;
-  // Optional `[dir]` positional scopes the listing to sessions whose cwd is under
-  // it, mirroring the TUI's path filter; resolved against the current directory.
+  // Optional `[dir]` positional (or its `--path` flag form) scopes the listing to
+  // sessions whose cwd is under it, mirroring the TUI's path filter; resolved
+  // against the current directory. `--repo` scopes by repo instead/as well.
   let dirArg: string | undefined;
+  let repoArg: string | undefined;
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -373,8 +405,18 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     else if (a === "--all" || a === "--include-idle") all = true;
     else if (a === "--pr") pr = Number(rest[++i]);
     else if (a === "--issue" || a === "--work-item" || a === "--workitem") item = Number(rest[++i]);
-    else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
-    else {
+    // `--path` and the `[dir]` positional are the SAME slot, so a second one is a
+    // mistake — silently letting the later win would scope the listing to
+    // something other than what the command line reads as. Both spellings share
+    // one guard so the error doesn't depend on which came first.
+    else if (a === "--path") {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = requireValue("list", a, rest[++i]);
+    } else if (a === "--repo") repoArg = requireValue("list", a, rest[++i]);
+    else if (!a.startsWith("-")) {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = a;
+    } else {
       console.error(`list: unknown argument "${a}"`);
       process.exit(1);
     }
@@ -383,8 +425,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     console.error(`list: --pr/--issue/--work-item need a numeric id`);
     process.exit(1);
   }
-  const filterRoot = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
-  await runList({ json, all, pr, item, filterRoot });
+  await runList({ json, all, pr, item, scope: makeSessionScope({ path: dirArg, repo: repoArg }, process.cwd()) });
   process.exit(0);
 }
 
@@ -490,21 +531,26 @@ if (!process.argv.includes("--no-tmux")) {
  * written its log yet — if so we still report it as running from its live tmux
  * window. `token` may be a full session id, a short id, or a `cl-…-<id>` name.
  */
-async function runStatus(token: string | undefined, full = false): Promise<void> {
+async function runStatus(token: string | undefined, full: boolean, scope: SessionScope | null): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id> [--full]`);
+    console.error(`usage: ${SELF_CMD} status <id> [--full] [--path <dir>] [--repo <name>]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const index = await SessionIndex.build();
-  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  const inScope = scopeFilter(scope);
+  const s = index.all.find((x) => (x.id === token || shortId(x.id) === sid) && inScope(x));
   if (!s) {
-    const live = liveTargetForShortId(sid);
+    // The live-window fallback below answers for a session too young to have a
+    // transcript — but a bare tmux target carries no cwd we can hold against the
+    // scope, so under an explicit scope we decline rather than answer for a
+    // session that may well be in another repo.
+    const live = scope ? null : liveTargetForShortId(sid);
     if (live) {
       console.log(`● running (${live}) — no activity logged yet; it may still be starting.`);
       process.exit(0);
     }
-    console.error(`No session found for "${token}".`);
+    console.error(`No session found for "${token}"${scopeNote(scope)}.`);
     process.exit(1);
   }
   // Resolve the window through the full reconciliation, NOT liveTargetForShortId
@@ -853,8 +899,8 @@ interface ListOptions {
   pr?: number;
   /** Only sessions linked to this work-item / issue id (enriched path). */
   item?: number;
-  /** Scope to sessions whose cwd is under this absolute root (TUI path filter). */
-  filterRoot: string | null;
+  /** Scope to sessions by cwd (`[dir]`/`--path`) and/or repo (`--repo`); null = all. */
+  scope: SessionScope | null;
 }
 
 /** One session as reported by the enriched (`--json` / `--all` / query) list. */
@@ -916,12 +962,14 @@ function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProv
  * `--all`/`--include-idle`, and `--pr`/`--issue`/`--work-item` query flags opt
  * into the enriched path, which loads the model so each row carries its branch
  * and linked PR / work item (via `sessionLinks`) and can include idle sessions.
- * An optional `filterRoot` scopes every mode to sessions whose cwd is under it.
+ * An optional scope narrows every mode — plain, enriched and `--json` alike — to
+ * the sessions under a path and/or in a repo.
  */
 async function runList(opts: ListOptions): Promise<void> {
   const index = await SessionIndex.build();
+  const inScope = scopeFilter(opts.scope);
   const enriched = opts.json || opts.all || opts.pr !== undefined || opts.item !== undefined;
-  if (!enriched) return runPlainList(index, opts.filterRoot);
+  if (!enriched) return runPlainList(index, inScope);
 
   const isQuery = opts.pr !== undefined || opts.item !== undefined;
   // Associations come from the model's reverse index. A query MUST have it (the
@@ -966,8 +1014,8 @@ async function runList(opts: ListOptions): Promise<void> {
   } else {
     sessions = index.all.filter((s) => live.has(sessionName(s)));
   }
-  // Path scoping (the `[dir]` positional): keep only sessions under the root.
-  if (opts.filterRoot) sessions = sessions.filter((s) => isUnderRoot(s.cwd, opts.filterRoot!));
+  // Scoping (`[dir]`/`--path`, `--repo`): keep only the sessions it selects.
+  sessions = sessions.filter(inScope);
   sessions.sort((a, b) => b.lastUsed.getTime() - a.lastUsed.getTime());
 
   const rows: ListRow[] = sessions.map((s) => {
@@ -1011,10 +1059,13 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   if (rows.length === 0) {
+    // Name the scope when there is one: an empty listing under a `--repo` typo
+    // otherwise reads as "nothing is running" rather than "nothing matched".
+    const where = scopeNote(opts.scope);
     console.log(
       isQuery
-        ? "No sessions linked to that item (query covers open PRs / work items in the current identity's scope)."
-        : "No sessions.",
+        ? `No sessions linked to that item${where} (query covers open PRs / work items in the current identity's scope).`
+        : `No sessions${where}.`,
     );
     return;
   }
@@ -1046,9 +1097,10 @@ async function runList(opts: ListOptions): Promise<void> {
  * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by
  * embedded short id, work-item / PR names by working directory (as in model.ts)
  * — then report readiness, kind, id, location and title. Running-only and
- * model-free by design. An optional `filterRoot` scopes to sessions under it.
+ * model-free by design. `inScope` is the `--path`/`--repo` filter (match-all when
+ * no selector was given).
  */
-function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
+function runPlainList(index: SessionIndex, inScope: (s: AgentSession) => boolean): void {
   const seen = new Set<string>();
   const rows: string[] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
@@ -1062,8 +1114,8 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     // path). Shared so the CLI list can't drift from the menu's running state.
     const s = resolveWindowSession(index.all, name, cwd);
     if (!s) continue;
-    // Path scoping: skip sessions whose cwd isn't under the requested dir.
-    if (filterRoot && !isUnderRoot(s.cwd, filterRoot)) continue;
+    // Scoping: skip sessions the requested path / repo filter doesn't select.
+    if (!inScope(s)) continue;
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1312,6 +1364,24 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   console.log(`▸ resumed session ${shortId(s.id)}${plan.alreadyRunning ? " (was already running)" : ""}`);
   console.log(`  window:  ${plan.tmuxName}   (in ${s.cwd})`);
   console.log(`  status:  ${SELF_CMD} status ${shortId(s.id)}`);
+}
+
+/**
+ * The exiting form of `scopeFlagValue`, for the subcommands parsed here (`wait`
+ * uses the returning form directly — it turns its whole argv tail into an exit
+ * code rather than exiting mid-parse). One guard, so a missing `--repo` can't be
+ * an error on one subcommand and a silent "no filter" on another.
+ */
+function requireValue(cmd: string, flag: string, v: string | undefined): string {
+  const value = scopeFlagValue(cmd, flag, v);
+  if (value === null) process.exit(1);
+  return value;
+}
+
+/** `list`'s path scope was named twice — as `[dir]`, as `--path`, or as both. */
+function duplicatePathScope(): never {
+  console.error(`list: the path scope was given twice — [dir] and --path <dir> name the same slot`);
+  process.exit(1);
 }
 // Quit if our input stream goes away — e.g. the controlling terminal/PTY closed
 // because a parent process died, orphaning us. Without this, Ink keeps the

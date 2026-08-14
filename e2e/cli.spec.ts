@@ -936,6 +936,291 @@ test("agendo list [dir] scopes the listing to sessions under the dir", async ({ 
   expect(inApplib.stdout).not.toContain("Implement login form");
 });
 
+// ── `--path` / `--repo` scope selectors (list / status / wait) ───────────────
+// `agendo list` reports every session on the machine, which forces an
+// orchestrator watching one repo to post-filter the JSON itself. These selectors
+// do it in the CLI instead. The fixture home has two repo roots holding sessions
+// (appweb: login + crash, applib: the copilot experiment); the tests below seed a
+// THIRD whose name has `appweb` as a strict string prefix — the boundary case a
+// naive startsWith gets wrong in both directions.
+
+const LEGACY_SESSION_ID = "9f3c1a7e-2b44-4d61-9c8f-5e7a0d1b6c22";
+const LEGACY_SHORT_ID = shortIdOf(LEGACY_SESSION_ID);
+
+/**
+ * Write an extra idle Claude transcript into the fixture home, so a scope test
+ * can place a session at an arbitrary cwd without touching the shared fixtures
+ * (whose session set several other specs assert on exactly).
+ */
+async function seedSession(home: string, id: string, cwd: string, title: string): Promise<void> {
+  const dir = join(home, ".claude", "projects", `scope-${id}`);
+  await mkdir(dir, { recursive: true });
+  const lines = [
+    { type: "summary", cwd, gitBranch: "feature/legacy", timestamp: "2026-06-20T09:00:00.000Z" },
+    { type: "ai-title", aiTitle: title, timestamp: "2026-06-20T09:00:01.000Z" },
+    { type: "user", message: { role: "user", content: "port the old form" }, cwd, gitBranch: "feature/legacy", timestamp: "2026-06-20T09:00:05.000Z" },
+  ];
+  await writeFile(join(dir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+}
+
+/** Seed the `appweb-legacy` neighbour repo and return the two roots' paths. */
+async function seedLegacyNeighbour(home: string) {
+  const appweb = join(home, "repos", "appweb");
+  const legacy = join(home, "repos", "appweb-legacy");
+  await mkdir(join(legacy, ".git"), { recursive: true });
+  await seedSession(home, LEGACY_SESSION_ID, join(legacy, ".claude", "worktrees", "port"), "Port the legacy form");
+  return { appweb, legacy };
+}
+
+/** Short ids of `agendo list --all --json …`, the scoped listing under test. */
+async function scopedIds(env: Record<string, string>, ...args: string[]): Promise<string[]> {
+  const r = await agendoAsync(env, "list", "--all", "--json", ...args).done;
+  expect(r.code).toBe(0);
+  return (JSON.parse(r.stdout) as { shortId: string }[]).map((x) => x.shortId);
+}
+
+test("agendo list --path scopes by cwd, and /repo never matches /repo-other", async ({ mock }) => {
+  const { appweb, legacy } = await seedLegacyNeighbour(mock.home);
+
+  // No selector → the sessions of all three repo roots, unfiltered.
+  const everything = await scopedIds(mock.env);
+  expect(everything).toEqual(expect.arrayContaining([SHORT_ID, CRASH_SHORT_ID, COP_SHORT_ID, LEGACY_SHORT_ID]));
+
+  // --path appweb → its own sessions only. appweb-legacy is excluded even though
+  // its path starts with appweb's: the match is segment-aware, not a prefix.
+  const ids = await scopedIds(mock.env, "--path", appweb);
+  expect(ids).toContain(SHORT_ID);
+  expect(ids).toContain(CRASH_SHORT_ID);
+  expect(ids).not.toContain(LEGACY_SHORT_ID); // the boundary case
+  expect(ids).not.toContain(COP_SHORT_ID); // applib
+
+  // …and the other direction: the neighbour scopes to itself alone.
+  expect(await scopedIds(mock.env, "--path", legacy)).toEqual([LEGACY_SHORT_ID]);
+
+  // Scoping is a pure narrowing — nothing appears that the unscoped list lacked.
+  expect(everything).toEqual(expect.arrayContaining(ids));
+
+  // A trailing slash and a `..` detour name the same scope (paths are
+  // normalized). Built by concatenation, not path.join — join() would collapse
+  // the `..` here in the test process and never send it to the CLI at all.
+  const drifted = await scopedIds(mock.env, "--path", `${appweb}/../appweb//`);
+  expect(drifted.sort()).toEqual([...ids].sort());
+});
+
+test("agendo list --repo attributes worktree sessions to their parent repo", async ({ mock }) => {
+  await seedLegacyNeighbour(mock.home);
+
+  // The login and crash sessions live in `<appweb>/.claude/worktrees/…`, never in
+  // appweb itself — `repoRootForCwd` resolves a worktree back up to the repo it
+  // belongs to, so --repo must find them there.
+  const ids = await scopedIds(mock.env, "--repo", "appweb");
+  expect(ids).toContain(SHORT_ID);
+  expect(ids).toContain(CRASH_SHORT_ID);
+  expect(ids).not.toContain(LEGACY_SHORT_ID); // same boundary, on the repo axis
+  expect(ids).not.toContain(COP_SHORT_ID);
+
+  // The neighbour is reachable by its own name, worktree session and all.
+  expect(await scopedIds(mock.env, "--repo", "appweb-legacy")).toEqual([LEGACY_SHORT_ID]);
+
+  // Copilot sessions scope like any other — this fixture matches through its
+  // checkout. (The other half of the matcher, Copilot's recorded `repository`
+  // remote standing in for a checkout that isn't there, is pinned on the shared
+  // `sessionInScope` in detection.spec.ts's forWorkItem suite.)
+  expect(await scopedIds(mock.env, "--repo", "applib")).toContain(COP_SHORT_ID);
+
+  // Both axes together AND: appweb sessions that are also under the crash worktree.
+  const crashWt = join(mock.home, "repos", "appweb", ".claude", "worktrees", "fix-crash-102");
+  expect(await scopedIds(mock.env, "--repo", "appweb", "--path", crashWt)).toEqual([CRASH_SHORT_ID]);
+});
+
+test("agendo list --path/--repo scope the default running list too", async ({ mock }) => {
+  // Same two-running-sessions setup as the `[dir]` positional test, proving the
+  // flags reach the plain (model-free, running-only) listing as well as --json.
+  const appweb = join(mock.home, "repos", "appweb");
+  const applib = join(mock.home, "repos", "applib");
+  const loginTarget = sessionName("claude", LOGIN_SESSION_ID);
+  const expTarget = sessionName("copilot", COPILOT_SESSION_ID);
+  const ready = ["  ─────────────", "  ❯ ", "  ─────────────"].join("\n");
+  await mock.setTmuxState({
+    sessions: [loginTarget, expTarget],
+    windows: [],
+    panes: [
+      { session: loginTarget, window: loginTarget, cwd: join(appweb, ".claude", "worktrees", "login"), placeholder: false },
+      { session: expTarget, window: expTarget, cwd: join(applib, ".claude", "worktrees", "experiment"), placeholder: false },
+    ],
+    captures: { [loginTarget]: ready, [expTarget]: ready },
+  });
+
+  const byPath = agendo(mock.env, "list", "--path", appweb);
+  expect(byPath.status).toBe(0);
+  expect(byPath.stdout).toContain("Implement login form");
+  expect(byPath.stdout).not.toContain("Experiment spike");
+
+  const byRepo = agendo(mock.env, "list", "--repo", "applib");
+  expect(byRepo.status).toBe(0);
+  expect(byRepo.stdout).toContain("Experiment spike");
+  expect(byRepo.stdout).not.toContain("Implement login form");
+});
+
+test("agendo status resolves the id only inside the requested scope", async ({ mock }) => {
+  const appweb = join(mock.home, "repos", "appweb");
+
+  // In scope → the normal status report (flags in any position around the id).
+  const ok = agendo(mock.env, "status", "--repo", "appweb", SHORT_ID, "--full");
+  expect(ok.status).toBe(0);
+  expect(ok.stdout).toContain("Implement login form");
+
+  const byPath = agendo(mock.env, "status", SHORT_ID, "--path", appweb);
+  expect(byPath.status).toBe(0);
+  expect(byPath.stdout).toContain("Implement login form");
+
+  // Out of scope → refused, and the message names the scope that excluded it,
+  // so a wrong --repo doesn't read as "that session is gone".
+  const wrong = agendo(mock.env, "status", SHORT_ID, "--repo", "applib");
+  expect(wrong.status).toBe(1);
+  expect(wrong.stderr).toContain("No session found");
+  expect(wrong.stderr).toContain("--repo applib");
+});
+
+test("agendo wait selects its targets by --path / --repo", async ({ mock }) => {
+  // The default fixture has exactly one running session (login, under appweb).
+  const inScope = agendo(mock.env, "wait", "--path", join(mock.home, "repos", "appweb"), "--timeout", "5s");
+  expect(inScope.status).toBe(0);
+  expect(inScope.stdout).toContain(SHORT_ID);
+  expect(inScope.stdout).toContain("ready");
+
+  // A repo whose sessions are all idle selects nothing to wait on, rather than
+  // silently falling back to every session on the machine.
+  const empty = agendo(mock.env, "wait", "--repo", "applib", "--timeout", "5s");
+  expect(empty.status).not.toBe(0);
+  expect(empty.stderr).toContain("no running sessions matched");
+  expect(empty.stderr).toContain("--repo applib"); // the scope that emptied it
+});
+
+test("agendo wait applies the scope to --all and to explicit ids too", async ({ mock }) => {
+  // The whole point of a scoping flag is that nothing quietly overrides it. Both
+  // of these would silently wait on the wrong (larger) set if a selector took
+  // precedence over the scope instead of narrowing within it.
+  const allOutOfScope = agendo(mock.env, "wait", "--all", "--repo", "applib", "--timeout", "5s");
+  expect(allOutOfScope.status).not.toBe(0);
+  expect(allOutOfScope.stderr).toContain("no running sessions matched");
+
+  const allInScope = agendo(mock.env, "wait", "--all", "--repo", "appweb", "--timeout", "5s");
+  expect(allInScope.status).toBe(0);
+  expect(allInScope.stdout).toContain(SHORT_ID);
+
+  // An explicit id outside the scope is refused, matching `status`'s contract.
+  const wrongId = agendo(mock.env, "wait", SHORT_ID, "--repo", "applib", "--timeout", "5s");
+  expect(wrongId.status).not.toBe(0);
+  expect(wrongId.stderr).toContain("no session found");
+  expect(wrongId.stderr).toContain("--repo applib");
+
+  // …and the pre-existing precedence between the OTHER two selectors is
+  // untouched by folding them into one branch: --all still overrides --prefix.
+  const allBeatsPrefix = agendo(mock.env, "wait", "--all", "--prefix", "nothing-matches-this", "--timeout", "5s");
+  expect(allBeatsPrefix.status).toBe(0);
+  expect(allBeatsPrefix.stdout).toContain(SHORT_ID);
+});
+
+test("the wait scope composes with --any and the --json wake payload", async ({ mock }) => {
+  // `wait` owns its argv tail in wait.ts, so the scope has to compose with the
+  // notification surface that lives there rather than sitting beside it: the
+  // payload must describe the SCOPED target set, not every session on the box.
+  const r = agendo(mock.env, "wait", "--all", "--any", "--json", "--repo", "appweb", "--timeout", "5s");
+  expect(r.status).toBe(0);
+  const payload = JSON.parse(r.stdout) as { woke: string; mode: string; sessions: { shortId: string }[] };
+  expect(payload.woke).toBe("satisfied");
+  expect(payload.mode).toBe("any");
+  expect(payload.sessions.map((s) => s.shortId)).toEqual([SHORT_ID]);
+
+  // Out of scope there is nothing to wait on, and a setup failure prints NO
+  // payload even under --json — the contract #25 defined, kept under a scope.
+  const empty = agendo(mock.env, "wait", "--all", "--any", "--json", "--repo", "applib", "--timeout", "5s");
+  expect(empty.status).not.toBe(0);
+  expect(empty.stdout.trim()).toBe("");
+  expect(empty.stderr).toContain("--repo applib");
+});
+
+test("agendo list --pr/--issue queries are scoped too", async ({ mock }) => {
+  // The query modes resolve sessions through the backend's associations rather
+  // than the session index, so they take a separate code path — the scope has to
+  // reach it as well, or `--pr N --repo X` would answer for the wrong repo.
+  const inScope = await agendoAsync(mock.env, "list", "--pr", "5001", "--json", "--repo", "appweb").done;
+  expect(inScope.code).toBe(0);
+  expect((JSON.parse(inScope.stdout) as { shortId: string }[]).map((r) => r.shortId)).toEqual([SHORT_ID]);
+
+  const outOfScope = await agendoAsync(mock.env, "list", "--pr", "5001", "--json", "--repo", "applib").done;
+  expect(outOfScope.code).toBe(0);
+  expect(JSON.parse(outOfScope.stdout)).toEqual([]);
+});
+
+test("agendo status under a scope declines the no-transcript-yet fallback", async ({ mock }) => {
+  // A just-launched session has a live window but no transcript, and `status`
+  // answers for it from the window alone. That window carries no cwd we can hold
+  // against a scope, so under one we must decline rather than report on a
+  // session that may well belong to another repo.
+  const orphan = "cl-bg-abc123def456";
+  await mock.setTmuxState({ ...tmuxState, sessions: [...tmuxState.sessions, orphan] });
+
+  const unscoped = agendo(mock.env, "status", "abc123def456");
+  expect(unscoped.status).toBe(0);
+  expect(unscoped.stdout).toContain("may still be starting");
+
+  const scoped = agendo(mock.env, "status", "abc123def456", "--repo", "appweb");
+  expect(scoped.status).toBe(1);
+  expect(scoped.stderr).toContain("No session found");
+});
+
+test("status/wait reject a mistyped scope flag instead of acting unscoped", async ({ mock }) => {
+  // `--repo=appweb` and `--rep` are the realistic typos. Taking either as the id
+  // (status) or as a bogus id (wait) would report unscoped, or blame the user for
+  // a session that doesn't exist, instead of naming the actual mistake.
+  for (const bad of ["--repo=appweb", "--rep"]) {
+    const st = agendo(mock.env, "status", SHORT_ID, bad);
+    expect(st.status).toBe(1);
+    expect(st.stderr).toContain(`unknown argument "${bad}"`);
+
+    const wt = agendo(mock.env, "wait", "--all", bad, "--timeout", "5s");
+    expect(wt.status).toBe(1);
+    expect(wt.stderr).toContain(`unknown argument "${bad}"`);
+  }
+});
+
+test("agendo list refuses a [dir] positional and --path that disagree", async ({ mock }) => {
+  const appweb = join(mock.home, "repos", "appweb");
+  const applib = join(mock.home, "repos", "applib");
+  // Both orders must fail, and with the SAME message — the mistake is naming the
+  // path scope twice, not where in the argv the second one landed.
+  for (const argv of [[appweb, "--path", applib], ["--path", applib, appweb]]) {
+    const r = agendo(mock.env, "list", ...argv);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("path scope was given twice");
+  }
+});
+
+test("an empty scoped listing says WHAT emptied it", async ({ mock }) => {
+  // "No sessions." on its own reads as "nothing is running"; under a mistyped
+  // --repo the truth is "nothing matched", and only the scope tells them apart.
+  const r = await agendoAsync(mock.env, "list", "--all", "--repo", "no-such-repo").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("No sessions in scope (--repo no-such-repo)");
+});
+
+test("a whitespace-only scope value is rejected, not treated as no scope", async ({ mock }) => {
+  // `--repo "$UNSET_VAR "` must not quietly widen back to every session.
+  const r = agendo(mock.env, "list", "--all", "--repo", "   ");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("needs a value");
+});
+
+test("a scope flag with no value is an error, not a silent unfiltered listing", async ({ mock }) => {
+  for (const argv of [["list", "--repo"], ["list", "--path", "--json"], ["wait", "--path"], ["status", SHORT_ID, "--repo"]]) {
+    const r = agendo(mock.env, ...argv);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("needs a value");
+  }
+});
+
 // The usage-limit notice a throttled Claude Code pane shows — VERBATIM wording
 // captured read-only from a real limited session (⎿ result block, NBSP padding,
 // "hit your session limit" + "/usage-credits"), above the still-present input box.
