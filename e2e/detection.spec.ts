@@ -10,19 +10,21 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi } from "../src/tmux.ts";
-import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect } from "../src/tmux.ts";
+import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
+import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
-import { ensureRepoAtTop, type RepoInfo } from "../src/repos.ts";
+import { ensureRepoAtTop, bootstrapRepoRoot, type RepoInfo } from "../src/repos.ts";
+import { resolveScopeRoots, makeSessionScope, describeScope, scopeFilter } from "../src/scope.ts";
 import type { AgentSession } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
@@ -890,6 +892,280 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
   });
 });
 
+// RESUME-DIALOG fixtures: verbatim `tmux capture-pane` output from a REAL session
+// blocked on the claude CLI's OWN startup prompt about how to reload itself
+// (window cl-claude-…, 2026-08-13), stored under e2e/fixtures/. Home dir, session
+// uuids and window names were sterilized; every line detection reads (the header,
+// the option labels, the `(recommended)` marker, the rule above them, the SGR
+// attributes) is byte-for-byte as captured:
+//   - resume-dialog.ansi        `-p -e`, escapes intact — what capturePane feeds.
+//   - resume-dialog-plain.txt   `-p`, the SAME screen with colours discarded.
+// The caret sat on the `❯` of the selected option, NOT in an input box (there is
+// none behind the dialog) — cursor_x=2 cursor_y=91 as captured, y=17 here.
+// The capture's ~74 lines of replayed transcript above the rule were trimmed to
+// the 9 that carry structure: a prompt echo, two `●` turn results and the blank
+// lines between them, then the `✻ Cogitated for 1m 8s` chrome line, a blank, and
+// the rule — the exact tail the block-scan heuristics (paneUsageLimited, the busy
+// counter) walk, and what the splice tests below write into. What went was one
+// unrelated in-flight feature's diff dump and notes: dead weight for detection,
+// and not something to park in this repo's history.
+const RESUME_DIALOG_PANE = fullPane("resume-dialog.ansi");
+const RESUME_DIALOG_PLAIN = fullPane("resume-dialog-plain.txt");
+const RESUME_DIALOG_CURSOR = { x: 2, y: 17 };
+
+test.describe("paneReadiness: the CLI's own resume dialog is idle, not 'dialog'", () => {
+  test("REGRESSION, REAL CAPTURE: the resume dialog reads 'ready' (with and without escapes)", () => {
+    // The blocking bug: structurally this is a dialog (numbered options under a
+    // rule, no input box), so it read "dialog" — `list`/`status` reported a
+    // blocked session and `send` refused, forever. Nothing is waiting on a human
+    // decision about the WORK, so it must present as an available session.
+    expect(paneResumeDialogActive(RESUME_DIALOG_PANE)).toBe(true);
+    expect(paneReadiness(RESUME_DIALOG_PANE, RESUME_DIALOG_CURSOR)).toBe("ready");
+    // Colour is not part of the signal: the plain capture classifies identically.
+    expect(paneResumeDialogActive(RESUME_DIALOG_PLAIN)).toBe(true);
+    expect(paneReadiness(RESUME_DIALOG_PLAIN, RESUME_DIALOG_CURSOR)).toBe("ready");
+  });
+
+  test("but it is NOT paste-able, and never resume-safe or limited", () => {
+    // "ready" here means "available", not "there's an empty box to paste into" —
+    // the dialog replaced the box. paneAcceptsPaste is the check every sender
+    // must make; and the usage-limit machinery must not be tempted by the
+    // dialog's own "…consume a substantial portion of your usage limits" prose.
+    expect(paneAcceptsPaste(RESUME_DIALOG_PANE, RESUME_DIALOG_CURSOR)).toBe(false);
+    expect(paneUsageLimited(RESUME_DIALOG_PANE)).toBe(false);
+    expect(paneLimitDialogActive(RESUME_DIALOG_PANE)).toBe(false);
+    expect(paneResumeSafe(RESUME_DIALOG_PANE, RESUME_DIALOG_CURSOR)).toBe(false);
+  });
+
+  test("REGRESSION GUARD: a genuine agent question still reads 'dialog'", () => {
+    // The detector is narrow on purpose — it must not be a loosening of isDialog,
+    // which is load-bearing for auto-resume safety. A real question, a numbered
+    // menu that merely mentions resuming, and the limit dialog all stay dialogs.
+    const question = [
+      "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
+      "  Do you want to proceed?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(paneResumeDialogActive(question)).toBe(false);
+    expect(paneReadiness(question)).toBe("dialog");
+
+    const aboutResuming = [
+      "  The session died mid-run. How should I pick it back up?",
+      "  ❯ 1. Resume from summary of what we did",
+      "    2. Start over",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n");
+    // Only ONE of the two anchors is present, so this stays a question for a human.
+    expect(paneResumeDialogActive(aboutResuming)).toBe(false);
+    expect(paneReadiness(aboutResuming)).toBe("dialog");
+  });
+
+  test("the motivating case: a limit notice in the REPLAYED transcript above it stays 'ready'", () => {
+    // The commonest reason to resume a 249k-token session is that it stopped at
+    // its usage limit — so the transcript replayed above the dialog ends in that
+    // very notice, and paneUsageLimited (which reads the block above the last
+    // rule) sees it. Judged in the usual order the pane would read "limited":
+    // `status` would print a stale reset time and `wait` would never settle —
+    // the same blocked-forever report in a different costume. Nothing there is
+    // the CURRENT state; no turn has run yet.
+    const lines = RESUME_DIALOG_PLAIN.split("\n");
+    const rule = lines.findIndex((l) => /─{20,}/.test(l));
+    // Placed in the transcript tail the block scan actually reads (it anchors two
+    // lines above the box's rule), which is where a replayed notice lands.
+    const at = rule - 3;
+    const limited = [
+      ...lines.slice(0, at),
+      "  ⎿  You've hit your session limit · resets 7:20pm (Atlantic/Reykjavik)",
+      ...lines.slice(at),
+    ].join("\n");
+    expect(paneUsageLimited(limited)).toBe(true); // the notice IS on screen…
+    expect(paneResumeDialogActive(limited)).toBe(true);
+    expect(paneReadiness(limited, RESUME_DIALOG_CURSOR)).toBe("ready"); // …but it's history
+    // And the auto-resume nudge must never fire here: it leads with Escape,
+    // which is this dialog's own "Esc to cancel".
+    expect(paneResumeSafe(limited, RESUME_DIALOG_CURSOR)).toBe(false);
+  });
+
+  test("a session BUSY behind stale scrollback still can't hide the dialog", () => {
+    // Same shape with an interrupted spinner's counter in the replayed tail.
+    const lines = RESUME_DIALOG_PLAIN.split("\n");
+    const rule = lines.findIndex((l) => /─{20,}/.test(l));
+    const busyTail = [...lines.slice(0, rule), "  ✢ Tinkering… (58s · ↓ 3.9k tokens)", ...lines.slice(rule)].join("\n");
+    expect(paneReadiness(busyTail, RESUME_DIALOG_CURSOR)).toBe("ready");
+  });
+
+  test("FALSE-POSITIVE GUARD: turn output merely QUOTING both labels is not the dialog", () => {
+    // A false positive here is fail-DANGEROUS, unlike isDialog's: it would make
+    // `send` press a digit into a live agent's box. The confirm/cancel footer —
+    // the affordance only a real open dialog draws — is what separates them.
+    const quoted = [
+      "● The CLI asked me how to reload it:",
+      "    1. Resume from summary (recommended)",
+      "    2. Resume full session as-is",
+      "● I picked the summary and carried on.",
+    ].join("\n");
+    expect(paneResumeDialogActive(quoted)).toBe(false);
+    expect(resumeDialogOption(quoted, "summary")).toBeNull();
+    // Each anchor is load-bearing on its own: quoted text that also carries a
+    // cursor still isn't the dialog without the footer, and vice versa.
+    const withCursor = quoted.replace("    1. Resume", "  ❯ 1. Resume");
+    expect(paneResumeDialogActive(withCursor)).toBe(false); // no footer
+    expect(paneResumeDialogActive([quoted, "  Enter to confirm · Esc to cancel"].join("\n"))).toBe(false); // no cursor
+    // With an input box below it (the ordinary case) it's plainly just history.
+    expect(paneReadiness([quoted, "─────────────────────────────────────────────", "❯ ", "─────────────────────────────────────────────"].join("\n"))).toBe("ready");
+  });
+
+  test("a WRAPPED option label fails safe — not the dialog, but still 'suspect'", () => {
+    // On a pane narrow enough to wrap a label the anchors stop matching, and the
+    // pane goes back to reading `dialog` (the pre-fix behaviour: send refuses).
+    // That is the safe direction — but `--force` is offered as the way past a
+    // refusal, so the weak signal has to keep a forced paste out of the menu.
+    const wrapped = RESUME_DIALOG_PLAIN.replace("Resume full session as-is", "Resume full session\n     as-is");
+    expect(paneResumeDialogActive(wrapped)).toBe(false);
+    expect(paneReadiness(wrapped)).toBe("dialog");
+    expect(paneResumeMenuSuspect(wrapped)).toBe(true);
+    // Even when BOTH labels wrap and only their heads survive on the numbered
+    // lines — the narrow-pane case the signal exists for.
+    const bothWrapped = [
+      "  ❯ 1. Resume from",
+      "     summary (recommended)",
+      "    2. Resume full",
+      "     session as-is",
+      "    3. Don't ask me again",
+      "  Enter to confirm · Esc",
+      "   to cancel",
+    ].join("\n");
+    expect(paneResumeDialogActive(bothWrapped)).toBe(false);
+    expect(paneResumeMenuSuspect(bothWrapped)).toBe(true);
+    // An ordinary question is not suspect — force keeps working everywhere else.
+    expect(paneResumeMenuSuspect("  Do you want to proceed?\n  ❯ 1. Yes\n    2. No\n  Enter to confirm")).toBe(false);
+    // Nor is a LIVE session whose own output quotes the labels: they sit ABOVE
+    // its input box, so they're not in the active-menu region at all and
+    // `--force` keeps working there exactly as before.
+    const quotingSession = [
+      "● The resume dialog offers:",
+      "    1. Resume from summary (recommended)",
+      "    2. Resume full session as-is",
+      "─────────────────────────────────────────────",
+      "❯ ",
+      "─────────────────────────────────────────────",
+    ].join("\n");
+    expect(paneResumeMenuSuspect(quotingSession)).toBe(false);
+  });
+
+  test("REGRESSION GUARD: the numbered LIMIT dialog is untouched (still limited + resume-safe)", () => {
+    for (const pane of [LIMIT_DIALOG_PANE, REAL_MENU_PANE, REAL_MENU_PANE_NOTICE_HIDDEN]) {
+      expect(paneResumeDialogActive(pane)).toBe(false);
+      expect(paneReadiness(pane)).toBe("limited");
+      expect(paneLimitDialogActive(pane)).toBe(true);
+      expect(paneResumeSafe(pane)).toBe(true);
+    }
+    // …and the text-form limit panes keep their verdicts too.
+    expect(paneReadiness(REAL_ESC_REVEALED_PANE)).toBe("limited");
+    expect(paneResumeSafe(REAL_ESC_REVEALED_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_TASK_PANEL_PANE)).toBe(true);
+    expect(paneResumeSafe(RECOVERED_PANE)).toBe(false);
+  });
+
+  test("the dialog left in SCROLLBACK above an idle box is not active", () => {
+    // Once answered, the same three options linger in history with an input box
+    // (and its `─` rule) beneath them — the structural demotion isDialog uses.
+    const answered = [
+      RESUME_DIALOG_PLAIN,
+      "● Resumed from summary. Picking the work back up.",
+      "─────────────────────────────────────────────",
+      "❯ ",
+      "─────────────────────────────────────────────",
+      "  ? for shortcuts",
+    ].join("\n");
+    expect(paneResumeDialogActive(answered)).toBe(false);
+    expect(paneReadiness(answered)).toBe("ready");
+    expect(paneAcceptsPaste(answered)).toBe(true);
+  });
+});
+
+test.describe("resume dialog: which option agendo picks, and how it presses it", () => {
+  test("the default follows claude's own (recommended) MARKER, not option index 1", () => {
+    const summary = resumeDialogOption(RESUME_DIALOG_PANE, "summary");
+    expect(summary).toEqual({ number: 1, label: "Resume from summary (recommended)", recommended: true, selected: true });
+    // Same verdict without colours — the labels are the anchor, not the SGR.
+    expect(resumeDialogOption(RESUME_DIALOG_PLAIN, "summary")?.number).toBe(1);
+
+    // Position is NOT what's matched: reorder the menu and the marker still wins.
+    const reordered = RESUME_DIALOG_PLAIN.replace("❯ 1. Resume from summary (recommended)", "❯ 1. Resume full session as-is")
+      .replace("  2. Resume full session as-is", "  2. Resume from summary (recommended)");
+    expect(resumeDialogOption(reordered, "summary")?.number).toBe(2);
+    expect(resumeDialogOption(reordered, "as-is")?.number).toBe(1);
+  });
+
+  test("the 'as-is' setting picks the full-session option", () => {
+    expect(resumeDialogOption(RESUME_DIALOG_PANE, "as-is")).toEqual({
+      number: 2,
+      label: "Resume full session as-is",
+      recommended: false,
+      selected: false, // the cursor starts on option 1 — answering has to move it
+    });
+  });
+
+  test("'Don't ask me again' is never selectable — not even if it wore the marker", () => {
+    // It permanently changes the user's global claude CLI behaviour; that's the
+    // user's call, not agendo's. Filtered out before the marker is consulted.
+    const marked = RESUME_DIALOG_PLAIN.replace("❯ 1. Resume from summary (recommended)", "❯ 1. Resume from summary")
+      .replace("3. Don't ask me again", "3. Don't ask me again (recommended)");
+    expect(resumeDialogOption(marked, "summary")?.number).toBe(1); // label fallback
+    expect(resumeDialogOption(marked, "as-is")?.number).toBe(2);
+    for (const choice of ["summary", "as-is"] as const) {
+      expect(resumeDialogOption(marked, choice)?.label).not.toMatch(/ask me again/i);
+      expect(resumeDialogOption(RESUME_DIALOG_PANE, choice)?.number).not.toBe(3);
+    }
+  });
+
+  test("a pane with no resume dialog yields no option", () => {
+    expect(resumeDialogOption("❯ 1. Yes\n  2. No\nEnter to confirm", "summary")).toBeNull();
+  });
+
+  test("answering moves the CURSOR and confirms — it never types the option's number", () => {
+    // A digit may activate an option outright on some CLI versions and merely
+    // select it on others, which leaves no safe meaning for an Enter after it.
+    // Arrows only ever move the highlight, so Enter is unambiguous.
+    expect(resumeDialogSelection(RESUME_DIALOG_PANE)?.number).toBe(1);
+    expect(resumeDialogStep("cl-claude-abc", 1, 2)).toEqual(["send-keys", "-t", "cl-claude-abc", "Down"]);
+    expect(resumeDialogStep("cl-claude-abc", 3, 2)).toEqual(["send-keys", "-t", "cl-claude-abc", "Up"]);
+    // Only once the cursor is already ON the wanted option is Enter sent.
+    expect(resumeDialogStep("cl-claude-abc", 2, 2)).toEqual(["send-keys", "-t", "cl-claude-abc", "Enter"]);
+  });
+
+  test("a menu with no visible cursor is not answerable (and not the dialog)", () => {
+    // Without a `❯` there is no way to know where a move would land, so the
+    // detector doesn't claim the pane at all.
+    const noCursor = RESUME_DIALOG_PLAIN.replace("❯ 1.", "  1.");
+    expect(resumeDialogSelection(noCursor)).toBeNull();
+    expect(paneResumeDialogActive(noCursor)).toBe(false);
+    // …but it IS still suspicious, so a forced send won't paste into it either.
+    expect(paneResumeMenuSuspect(noCursor)).toBe(true);
+  });
+
+  test("TWO cursors are ambiguous, so the pane is not claimed", () => {
+    // With no `─` rule the "active menu" is the whole capture, and claude echoes
+    // user prompts with a bare `❯` — a replayed `❯ 1. rerun the failing spec`
+    // would add a second selected option and leave a walk anchored on a highlight
+    // that isn't the real one.
+    const twoCursors = ["❯ 1. rerun the failing spec", RESUME_DIALOG_PLAIN.split("\n").slice(-10).join("\n")].join("\n");
+    expect(resumeDialogSelection(twoCursors)).toBeNull();
+    expect(paneResumeDialogActive(twoCursors)).toBe(false);
+  });
+
+  test("config: the default is the recommended option; 'as-is' is opt-in; junk falls back", () => {
+    expect(resumeDialogChoice({ ...DEFAULT_CONFIG })).toBe("summary");
+    expect(resumeDialogChoice({ ...DEFAULT_CONFIG, resumeDialogChoice: "as-is" })).toBe("as-is");
+    // Hand-edited JSON: an unrecognized value must not leave `send` unable to
+    // answer the dialog.
+    expect(resumeDialogChoice({ ...DEFAULT_CONFIG, resumeDialogChoice: "dont-ask" as never })).toBe("summary");
+  });
+});
+
 // GHOST-SUGGESTION fixtures: the same real pane captured three ways (window
 // cl-bg-3a8335a284b7, 2026-08-11), stored under e2e/fixtures/. The box rendered
 //   ❯ wait for the review, then commit and open the PR
@@ -991,6 +1267,285 @@ test.describe("paneReadiness: a greyed-out autocomplete suggestion is NOT typed 
     expect(paneReadiness(empty)).toBe("ready");
     expect(paneReadiness(empty, { x: 4, y: 1 })).toBe("ready");
     expect(paneReadiness(empty, { x: 99, y: 9 })).toBe("ready");
+  });
+});
+
+// BUSY-MARKER POSITION. The busy/compacting markers used to be matched against
+// `stripAnsi(raw)` — the WHOLE visible pane — but they are facts about the CLI's
+// own live status line, not about anything in the transcript. A session whose job
+// was to document agendo's detection layer printed a comparison table containing
+// `inferred (esc to interrupt, token counter)`, and `agendo list` reported the
+// finished, idle session as "busy". `agendo send` refuses a non-ready pane, so the
+// session was unreachable until the text scrolled off — the same blocked-forever
+// failure #30 fixed by another route, and not exotic here: any session working on
+// this file prints these markers.
+//
+// busy-quoted-marker.*: verbatim `tmux capture-pane` of that pane (session
+// codex-support, 2026-08-14), sterilized (home dir → /home/user, ids zeroed) but
+// otherwise byte-for-byte — `.ansi` is `-p -e`, `-plain.txt` is `-p`, `.cursor` is
+// the `#{cursor_x} #{cursor_y}` readout taken with it.
+const QUOTED_PANE = fullPane("busy-quoted-marker.ansi");
+const QUOTED_PANE_PLAIN = fullPane("busy-quoted-marker-plain.txt");
+const QUOTED_CURSOR = (() => {
+  const m = fullPane("busy-quoted-marker.cursor").match(/cursor_x=(\d+)\s+cursor_y=(\d+)/)!;
+  return { x: Number(m[1]), y: Number(m[2]) };
+})();
+
+test.describe("paneReadiness: busy is read from the live status line, not the transcript", () => {
+  test("REAL CAPTURE: an idle pane whose turn output QUOTES 'esc to interrupt' is ready", () => {
+    // The bug, verbatim. Was: "busy".
+    expect(paneReadiness(QUOTED_PANE)).toBe("ready");
+    expect(paneReadiness(QUOTED_PANE, QUOTED_CURSOR)).toBe("ready");
+  });
+
+  test("the marker really is on that screen, and really is transcript", () => {
+    // Guards the fixture itself: if a future re-sterilization dropped the phrase,
+    // the test above would pass for the wrong reason.
+    const lines = stripAnsi(QUOTED_PANE).split("\n");
+    const marker = lines.findIndex((l) => /esc to interrupt/i.test(l));
+    expect(marker).toBeGreaterThan(-1);
+    expect(lines[marker]).toContain("│"); // inside a box-drawing table, in a table cell
+    // …and it sits far above the input box, not on the status line above it.
+    const rule = lines.findLastIndex((l) => /─{20,}/.test(l));
+    expect(rule - marker).toBeGreaterThan(30);
+    // Nothing else could have produced the verdict: no live counter anywhere.
+    expect(stripAnsi(QUOTED_PANE)).not.toMatch(/[↑↓]/);
+    expect(stripAnsi(QUOTED_PANE)).not.toMatch(/compacting conversation/i);
+  });
+
+  test("the same pane with a LIVE spinner on its status line is busy", () => {
+    // The proof that this is positional and not a deletion: put a real spinner
+    // where the CLI draws one — the line above the box, here the idle
+    // `✻ Churned for 11m 13s` summary — and the very same capture reads "busy".
+    const lines = QUOTED_PANE.split("\n");
+    // The LAST such row: the status line is by definition the one nearest the box.
+    const statusRow = lines.findLastIndex((l) => /Churned for/.test(stripAnsi(l)));
+    expect(statusRow).toBeGreaterThan(-1);
+    // Replaced in place, so every row index the caret refers to is untouched.
+    lines[statusRow] = "✢ Tinkering… (58s · ↓ 3.9k tokens · esc to interrupt)";
+    expect(paneReadiness(lines.join("\n"))).toBe("busy");
+    expect(paneReadiness(lines.join("\n"), QUOTED_CURSOR)).toBe("busy");
+  });
+
+  test("REAL CAPTURE: the color-stripped form needs the caret, and the fix holds there too", () => {
+    // Same screen, escapes discarded: the box's dim history suggestion looks like
+    // a draft to the color read, so "queued" — but never "busy".
+    expect(paneReadiness(QUOTED_PANE_PLAIN)).toBe("queued");
+    expect(paneReadiness(QUOTED_PANE_PLAIN, QUOTED_CURSOR)).toBe("ready");
+  });
+
+  // Where the marker sits is the whole question, so each band gets pinned.
+  const rule = "  ─────────────────────────────────────────";
+  const box = [rule, "  ❯ ", rule];
+  const pane = (...above: string[]) => [...above, ...box].join("\n");
+
+  test("on the status line directly above the box: busy", () => {
+    expect(paneReadiness(pane("  ✢ Tinkering… (58s · ↓ 3.9k tokens)"))).toBe("busy");
+    expect(paneReadiness(pane("  ✢ Tinkering… (esc to interrupt)"))).toBe("busy");
+  });
+
+  test("in the transcript, with the status line between it and the box: ready", () => {
+    expect(
+      paneReadiness(
+        pane(
+          "  │ status │ inferred (esc to interrupt, token counter) │ Ready │",
+          "",
+          "  ✻ Churned for 11m 13s",
+          "",
+        ),
+      ),
+    ).toBe("ready");
+  });
+
+  test("in a task-panel item title: ready — the panel is standing UI, not CLI state", () => {
+    // Item titles are the user's own words and render between the status line and
+    // the box, so they must be skipped rather than read (see taskPanelLines).
+    expect(
+      paneReadiness(
+        pane(
+          "  ✻ Churned for 11m 13s",
+          "",
+          "  3 tasks (1 done, 1 in progress, 1 open)",
+          "  ◼ Make 'esc to interrupt' positional",
+          "  ◻ Add a regression fixture",
+          "  ✔ Read the #30 resume-dialog code",
+          "",
+        ),
+      ),
+    ).toBe("ready");
+  });
+
+  test("…but a task panel does not HIDE a live spinner above it", () => {
+    // The walk skips the panel and keeps going, so the status line is still read.
+    expect(
+      paneReadiness(
+        pane(
+          "  ✢ Tinkering… (58s · ↓ 3.9k tokens)",
+          "",
+          "  3 tasks (1 done, 1 in progress, 1 open)",
+          "  ◼ Make 'esc to interrupt' positional",
+          "",
+        ),
+      ),
+    ).toBe("busy");
+  });
+
+  // The box-side hints are the reason the walk cannot simply stop at the first
+  // non-blank line it finds. Both are right-aligned into the gap between the
+  // spinner row and the box's top rule — `busy-quoted-marker-plain.txt` line 64 is
+  // the context hint, 255 columns wide — so a walk that COLLECTED one would end at
+  // the next blank and never reach the spinner two rows up. That misses a live
+  // turn, which is the direction that lets `send` paste into a running pane. Found
+  // in review, not in the field; these are the probes that failed.
+  test("a right-aligned hint between the spinner and the box does not hide it", () => {
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    for (const hint of ["  new task? /clear to save 292.8k tokens", "  ● high · /effort"]) {
+      expect(paneReadiness(pane(spinner, hint))).toBe("busy"); // no blank between
+      expect(paneReadiness(pane(spinner, "", hint))).toBe("busy"); // and with one
+      expect(paneReadiness(pane(spinner, "", hint, ""))).toBe("busy");
+    }
+  });
+
+  test("hint AND task panel together still do not hide it", () => {
+    // The realistic long-session layout: a task list, the context hint, and the
+    // spinner three skips up.
+    expect(
+      paneReadiness(
+        pane(
+          "  ✢ Tinkering… (58s · ↓ 3.9k tokens)",
+          "",
+          "  3 tasks (1 done, 1 in progress, 1 open)",
+          "  ◼ Make 'esc to interrupt' positional",
+          "",
+          "  new task? /clear to save 292.8k tokens",
+        ),
+      ),
+    ).toBe("busy");
+  });
+
+  test("a hint does not hide mid-compaction either", () => {
+    expect(
+      paneReadiness(
+        pane("  ✻ Compacting conversation…", "  ▰▰▰▱▱▱ 42%", "", "  new task? /clear to save 292.8k tokens"),
+      ),
+    ).toBe("compacting");
+  });
+
+  test("an UNRECOGNIZED task-panel row does not hide the spinner either", () => {
+    // The strict taskPanelLines marks only the contiguous run under a header it
+    // recognizes, so one odd line used to leave the whole panel looking like content
+    // and end the walk. Two things keep it going: the loose header shape, and
+    // looksLikeTaskPanelRow for a panel whose header has scrolled off entirely.
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    const rows = ["  ◼ Cache layer + eviction policy", "  ◻ UI: status, counters"];
+    // Header wording outside TASK_PANEL_HEADER_RE's vocabulary.
+    expect(paneReadiness(pane(spinner, "", "  5 tasks (2 completed, 3 remaining)", ...rows, ""))).toBe("busy");
+    // Header wrapped on a narrow pane, so its `$` anchor misses — the leading half
+    // still has the shape, so the walk gets past it.
+    expect(paneReadiness(pane(spinner, "", "  7 tasks (3 done, 1 in progress,", ...rows, ""))).toBe("busy");
+    // No header at all (scrolled off the top of the panel).
+    expect(paneReadiness(pane(spinner, "", ...rows, ""))).toBe("busy");
+  });
+
+  test("a DONE row is only skippable under a header — and the loose header gives it back", () => {
+    // `✔` is both a real done-row glyph (limit-notice-task-panel.ansi:62) and how
+    // turn output is bulleted, so it can't be skipped on shape alone without
+    // reopening the transcript tunnel. The loose header licenses it positionally
+    // instead: a panel whose count is worded outside the strict vocabulary still
+    // gets walked past, done rows and all.
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    const rows = [
+      "  ◼ Cache layer + eviction policy + write path (priority 1)",
+      "  ◻ UI: status, counters, verbose mode",
+      "  ✔ Project skeleton that builds a debug binary",
+      "  … +2 completed",
+    ];
+    expect(paneReadiness(pane(spinner, "", "  5 tasks (2 completed, 3 remaining)", ...rows, ""))).toBe("busy");
+    expect(paneReadiness(pane(spinner, "", "  3 tasks (3 finished)", "  ✔ Only a done row", ""))).toBe("busy");
+    // The strict header still works too — this is the fixture's own wording.
+    expect(paneReadiness(pane(spinner, "", "  7 tasks (3 done, 1 in progress, 3 open)", ...rows, ""))).toBe("busy");
+  });
+
+  test("KNOWN LIMIT: prose shaped like a panel header licenses the rows under it", () => {
+    // The loose header is a shape, so a sentence starting `3 tasks (` opens a run
+    // and the permissive glyphs under it become skippable — the walk then reaches a
+    // marker quoted above. Accepted, not fixed: it needs a digit-led `N tasks (`
+    // line with NO blank and no prose before a contiguous run of glyph rows, all in
+    // the gap above the box, with a quoted marker within 3 lines above that — and
+    // real turn output puts such a sentence inside a `●` block, whose following
+    // lines are indented continuations. The error is also the cheap one: a refused
+    // `send` on an idle session, recoverable with `--force`, versus the miss the
+    // loose header bought back (`send`/`close` into a running turn).
+    const quoted = "  │ status │ inferred (esc to interrupt, token counter) │ Ready │";
+    const bullets = ["● a", "● b", "● c"];
+    expect(paneReadiness(pane(quoted, "  3 tasks (see below)", ...bullets))).toBe("busy");
+    // What the licensing actually requires — either control closes it.
+    expect(paneReadiness(pane(quoted, "  3 tasks (see below)", "", ...bullets))).toBe("ready");
+    expect(paneReadiness(pane(quoted, "  3 tasks (see below)", "  Here they are:", ...bullets))).toBe("ready");
+  });
+
+  test("KNOWN LIMIT: a WRAPPED panel line's tail is shapeless, and does end the walk", () => {
+    // Pinned, not endorsed. A continuation row is arbitrary text — `progress, 3
+    // open)` here — so nothing distinguishes it from transcript, the run stops
+    // there, and a genuinely busy pane reads "ready". Closing it means teaching
+    // taskPanelLines about wrapping, which needs a real narrow-pane capture that
+    // this repo does not have; the alternative, widening the walk by DISTANCE
+    // instead of by run, buys it back at the cost of the false positives this whole
+    // change exists to remove. Recorded here so the trade is deliberate and a
+    // future fix has a failing case to flip.
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    const wrapped = ["  7 tasks (3 done, 1 in", "  progress, 3 open)", "  ◼ Cache layer"];
+    expect(paneReadiness(pane(spinner, "", ...wrapped, ""))).toBe("ready");
+  });
+
+  test("a box whose top rule scrolled off falls back to scanning the whole pane", () => {
+    // With one rule, inputBox fabricates `top = bottom - 2`, which points at a
+    // transcript line, not a boundary — so there is no band to measure and the
+    // permissive read stands rather than a made-up one.
+    expect(paneReadiness(["  ✢ Tinkering… (58s · ↓ 3.9k tokens)", "  ❯ ", rule].join("\n"))).toBe("busy");
+  });
+
+  test("skipping chrome must not tunnel into the transcript", () => {
+    // `blockAbove` bounds what it COLLECTS, not how far it descends, so an
+    // over-eager skip predicate walks straight past the gap and reads history as
+    // status — the original bug, re-entered through the back door. Both blockers
+    // below must stop the walk: the chrome row the TUI normally draws…
+    const quoted = "  │ status │ inferred (esc to interrupt, token counter) │ Ready │";
+    const hint = "  new task? /clear to save 292.8k tokens";
+    expect(paneReadiness(pane(quoted, "", "  ✻ Churned for 11m 13s", "", hint))).toBe("ready");
+    // …and ordinary bulleted turn output, which wears the glyphs a task-panel row
+    // wears (`●`, `✔`, `✗`) and must NOT be skipped for it. Caught in review: with
+    // the wide glyph set, all three of these read "busy".
+    expect(paneReadiness(pane(quoted, "", "  ● Reviewed the detection layer.", "", hint))).toBe("ready");
+    expect(paneReadiness(pane(quoted, "", "  ✔ tests pass", "  ✗ lint failed", "", hint))).toBe("ready");
+    expect(paneReadiness(pane(quoted, "", ...Array.from({ length: 12 }, (_, i) => `  ● step ${i}`), "", hint))).toBe("ready");
+  });
+
+  test("below the box: busy — nothing under the input box is ever transcript", () => {
+    // Both real forms: the footer interrupt hint, and the sub-agent panel's own
+    // live counter (a finished turn waiting on a background agent is still busy).
+    expect(paneReadiness([...box, "  esc to interrupt"].join("\n"))).toBe("busy");
+    expect(paneReadiness([...box, "  ● main", "❯ ◯ general-purpose  Review  5m 39s · ↓ 99.9k tokens"].join("\n"))).toBe("busy");
+    // Pinned on the real capture too (this is what makes GHOST_PANE busy).
+    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+  });
+
+  test("typed INTO the box: queued, not busy — a draft is not a state", () => {
+    expect(paneReadiness([rule, "  ❯ why does esc to interrupt match?", rule].join("\n"))).toBe("queued");
+  });
+
+  test("compacting is positional the same way", () => {
+    expect(paneReadiness(pane("  ✻ Compacting conversation…", "  ▰▰▰▱▱▱ 42%"))).toBe("compacting");
+    expect(paneReadiness(pane("  I explained how compacting conversation works.", "", "  ✻ Churned for 2s", ""))).toBe("ready");
+  });
+
+  test("with NO input box to anchor on, the whole screen is still scanned", () => {
+    // Deliberately permissive: a boxless pane is un-sendable either way (it reads
+    // "unknown" at best), so narrowing against rules that may not be a box costs
+    // safety for nothing. Both cli.spec's boxless compacting pane and a bare
+    // spinner depend on this.
+    expect(paneReadiness("✻ Compacting conversation… (esc to interrupt)\n  ▰▰▰▱▱▱ 42%")).toBe("compacting");
+    expect(paneReadiness("  ✢ Tinkering… (58s · ↓ 3.9k tokens)")).toBe("busy");
   });
 });
 
@@ -1185,6 +1740,48 @@ test.describe("paneReadiness: Codex CLI panes (real captures)", () => {
     expect(paneReadiness(withProse)).toBe("ready");
   });
 
+  test("REGRESSION: a codex transcript that QUOTES the busy line is not busy", () => {
+    // The codex half of the bug #33 fixed for claude (see the busy-quoted-marker
+    // block below). The busy line is a fact about codex's live status region, not
+    // about anything in the scrollback — and it is exactly the sort of string that
+    // gets pasted around: any session working on THIS file prints it.
+    //
+    // Synthesized rather than captured: there is no real codex pane quoting its
+    // own marker, so it is spliced into the idle capture's transcript (row 8, far
+    // above the box) with everything else left byte-for-byte. Codex writes its
+    // transcript as `• …` bullets, so a turn describing the marker reproduces the
+    // exact leading shape the matcher keys on — which is the point: this must be
+    // a line the whole-pane scan WOULD have matched. Before the status region was
+    // anchored, it read "busy".
+    const quotedLine = "  • The busy marker is `• Working (25s • esc to interrupt)` above the box.";
+    expect(quotedLine).toMatch(/^[ \t]*•[^\n]*\(\s*\d+s\b[^\n]*\besc to interrupt\b/);
+    const idle = fullPane("codex-idle.ansi").split("\n");
+    const boxRow = idle.length - 1 - [...idle].reverse().findIndex((l) => l.includes("›"));
+    const quoted = [...idle.slice(0, 8), quotedLine, ...idle.slice(8)].join("\n");
+    // …and it really is transcript: far above the box, not in the status region.
+    expect(boxRow - 8).toBeGreaterThan(10);
+    expect(paneReadiness(quoted)).toBe("ready");
+    // The splice pushed every row below it down one, so the caret readout has to
+    // follow or it would be vouching for the wrong row.
+    const caret = codexCursor("codex-idle.cursor");
+    expect(paneReadiness(quoted, { x: caret.x, y: caret.y + 1 })).toBe("ready");
+  });
+
+  test("the status walk reaches a busy line the approval reviewer pushed off the box", () => {
+    // The other direction, and the one that fails dangerous: the walk must not
+    // stop short of the status line. `--approve-for-me` draws a `└ /bin/bash -lc
+    // …` detail row BETWEEN the busy line and the box, so a walk collecting only
+    // the row nearest the box would see the detail row and call the pane ready.
+    const approval = stripAnsi(fullPane("codex-busy-approval.ansi")).split("\n");
+    const busyRow = approval.findIndex((l) => /Reviewing approval request/.test(l));
+    const boxRow = approval.length - 1 - [...approval].reverse().findIndex((l) => l.includes("›"));
+    // Pins the geometry the verdict depends on: the marker is genuinely separated
+    // from the box, so "busy" here is the walk working, not the marker being adjacent.
+    expect(approval[busyRow + 1]).toContain("└");
+    expect(boxRow - busyRow).toBeGreaterThan(2);
+    expect(paneReadiness(fullPane("codex-busy-approval.ansi"))).toBe("busy");
+  });
+
   test("claude panes are not hijacked by the codex path", () => {
     // codexPane sniffs the CONTENT (the window name never carries the agent for
     // a `cl-wi-…` window), so the two classifiers share every capture. These are
@@ -1287,6 +1884,22 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(hour).toBe("15"); // the notice's 3pm, not the git line's 10:00
   });
 
+  test("REGRESSION: the anchor never reads a time off the NEXT line", () => {
+    // The limit DIALOG has no reset time (it hides it), yet its own option line
+    // ends in "…wait for limit to reset". If the anchor could cross the newline,
+    // any clock time on the following line would be reported as the reset — and
+    // `agendo list` would print that fabricated time next to "limited".
+    const now = new Date("2026-06-15T12:00:00Z");
+    const dialog = [
+      "❯ 1. Stop and wait for limit to reset",
+      "  2. Add funds at 4:30pm to continue with usage credits",
+    ].join("\n");
+    expect(parseResetTime(dialog, now)).toBeNull();
+    // Same for ordinary scrollback: a bare `git reset` ending its line, with an
+    // unrelated log timestamp beneath it (the old anchor returned 14:05 here).
+    expect(parseResetTime("$ git reset\n[14:05] rebuilt in 3s", now)).toBeNull();
+  });
+
   test("a weekday token inside the timezone name is not read as a weekday", () => {
     // "(America/Monterrey)" contains "Mon" — must NOT become "next Monday".
     const now = new Date(2026, 5, 15, 14, 0); // Mon Jun 15 2026, 2pm local
@@ -1341,6 +1954,41 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(d.getDate()).toBe(15); // today (already reopened)
     expect(d.getHours()).toBe(1);
     expect(at!).toBeLessThan(now.getTime());
+  });
+});
+
+// How a parsed reset instant is SHOWN. Bun's default Intl locale is a hardcoded
+// en-US whatever the environment says, so the display locale is resolved from the
+// POSIX locale vars instead — otherwise a 24-hour user would always be handed
+// 12-hour times. The env is passed in explicitly here (no process.env mutation),
+// which is also how the CLI e2e pins its expected output.
+test.describe("envLocale / formatResetTime: the reset clock a human sees", () => {
+  const at = new Date("2026-06-15T15:00:00Z").getTime();
+
+  test("POSIX locale vars map to BCP-47, most specific first", () => {
+    expect(envLocale({ LANG: "en_GB.UTF-8" })).toBe("en-GB");
+    expect(envLocale({ LC_ALL: "de_DE.UTF-8@euro", LC_TIME: "fr_FR.UTF-8", LANG: "en_US.UTF-8" })).toBe("de-DE");
+    expect(envLocale({ LC_TIME: "nb_NO.UTF-8", LANG: "en_US.UTF-8" })).toBe("nb-NO");
+  });
+
+  test("no usable locale → undefined (caller falls back to the runtime default)", () => {
+    expect(envLocale({})).toBeUndefined();
+    expect(envLocale({ LANG: "C" })).toBeUndefined();
+    expect(envLocale({ LC_ALL: "POSIX" })).toBeUndefined();
+    expect(envLocale({ LANG: "xx_YY.UTF-8" })).toBeUndefined(); // well-formed, unknown to ICU
+    expect(envLocale({ LANG: "en--GB" })).toBeUndefined(); // malformed: must not throw
+  });
+
+  test("the locale — not hand-rolled am/pm — decides 24h vs 12h", () => {
+    const gb = formatResetTime(at, { LC_ALL: "en_GB.UTF-8" });
+    const us = formatResetTime(at, { LC_ALL: "en_US.UTF-8" });
+    expect(gb).not.toMatch(/[AP]M/i); // 24-hour locale: no meridiem at all
+    expect(us).toMatch(/[AP]M/i);
+    // Time only, both ways — no date, so it fits beside a readiness word.
+    for (const s of [gb, us]) {
+      expect(s).toMatch(/\d{1,2}:\d{2}/);
+      expect(s).not.toMatch(/2026|Jun/i);
+    }
   });
 });
 
@@ -1600,6 +2248,94 @@ test.describe("isUnderRoot: segment-aware prefix match", () => {
   });
 });
 
+// The CLI's `--path` selector (`agendo list/status/wait`). isUnderRoot above is
+// the matcher; this is the resolution feeding it — the only part that touches the
+// filesystem, and the only place a symlinked checkout can silently scope to
+// nothing. Both spellings must survive: recorded session cwds are real process
+// working directories (symlink-free), but the tree a session runs in can itself
+// be reached through a symlink, so neither form alone matches every setup.
+test.describe("resolveScopeRoots: --path resolution", () => {
+  test("a plain path resolves to exactly one root, normalized and absolute", () => {
+    expect(resolveScopeRoots("repos/appweb", "/home/me")).toEqual(["/home/me/repos/appweb"]);
+    expect(resolveScopeRoots("./repos/../repos/appweb/", "/home/me")).toEqual(["/home/me/repos/appweb"]);
+    expect(resolveScopeRoots("/home/me/work", "/anywhere")).toEqual(["/home/me/work"]);
+  });
+
+  test("a path that isn't on disk keeps its literal form (no throw)", () => {
+    expect(resolveScopeRoots("/no/such/dir/anywhere", "/")).toEqual(["/no/such/dir/anywhere"]);
+  });
+
+  test("a symlinked path keeps BOTH the literal and the resolved root", () => {
+    // mkdtemp itself can sit behind a symlink (macOS /tmp), so compare against
+    // the realpath of the temp dir rather than assuming the literal is unique.
+    const dir = mkdtempSync(join(tmpdir(), "agendo-scope-"));
+    try {
+      const real = join(dir, "real-repo");
+      const link = join(dir, "link-repo");
+      mkdirSync(real, { recursive: true });
+      symlinkSync(real, link);
+      const roots = resolveScopeRoots(link, "/");
+      // Both spellings are kept, so a session recorded under either is in scope.
+      expect(roots).toHaveLength(2);
+      expect(isUnderRoot(join(link, "sub"), roots[0])).toBe(true);
+      expect(isUnderRoot(join(real, "sub"), roots[1])).toBe(true);
+      // …and the literal one the user typed stays first (it's what error
+      // messages echo back).
+      expect(roots[0]).toBe(normalizeCwd(link));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The predicate the three subcommands filter with. `--repo` reuses
+// sessions.ts's work-item scope matcher, so a bare repo name never shells out to
+// git and a worktree resolves to the repo it belongs to.
+test.describe("scopeFilter: --path AND --repo", () => {
+  const login = sess("login", "/h/repos/appweb/.claude/worktrees/login", 3);
+  const legacy = sess("legacy", "/h/repos/appweb-legacy/.claude/worktrees/port", 2);
+  const applib = sess("applib", "/h/repos/applib/.claude/worktrees/exp", 1);
+  const all = [login, legacy, applib];
+  const kept = (scope: Parameters<typeof scopeFilter>[0]) => all.filter(scopeFilter(scope)).map((s) => s.id);
+
+  test("no scope keeps everything", () => {
+    expect(kept(null)).toEqual(["login", "legacy", "applib"]);
+  });
+
+  test("--repo attributes a worktree to its parent repo, and stops at the name boundary", () => {
+    expect(kept({ roots: [], repo: "appweb" })).toEqual(["login"]);
+    expect(kept({ roots: [], repo: "appweb-legacy" })).toEqual(["legacy"]);
+    expect(kept({ roots: [], repo: "APPWEB" })).toEqual(["login"]); // case-insensitive
+  });
+
+  test("--path scopes by cwd, sibling prefixes excluded", () => {
+    expect(kept({ roots: ["/h/repos/appweb"], repo: null })).toEqual(["login"]);
+    expect(kept({ roots: ["/h/repos"], repo: null })).toEqual(["login", "legacy", "applib"]);
+  });
+
+  test("both axes are AND-ed; any of several roots matches", () => {
+    expect(kept({ roots: ["/h/repos/appweb"], repo: "applib" })).toEqual([]);
+    expect(kept({ roots: ["/h/repos/appweb", "/h/repos/applib"], repo: null })).toEqual(["login", "applib"]);
+  });
+});
+
+// The scope object the three subcommands share. `null` (not an empty scope) is
+// what keeps "no selector given" byte-identical to the old behavior, and what
+// `wait` tests to decide whether a selector was supplied at all.
+test.describe("makeSessionScope / describeScope", () => {
+  test("no selector yields null; either one yields a scope", () => {
+    expect(makeSessionScope({}, "/home/me")).toBeNull();
+    expect(makeSessionScope({ path: "", repo: "  " }, "/home/me")).toBeNull(); // blank ⇒ no selector
+    expect(makeSessionScope({ repo: "appweb" }, "/home/me")).toEqual({ roots: [], repo: "appweb" });
+    expect(makeSessionScope({ path: "work" }, "/home/me")).toEqual({ roots: ["/home/me/work"], repo: null });
+  });
+
+  test("describeScope names the flags that produced it, literal path first", () => {
+    expect(describeScope(null)).toBe("");
+    expect(describeScope({ roots: ["/a/b", "/real/b"], repo: "appweb" })).toBe("--path /a/b --repo appweb");
+  });
+});
+
 // The path-scoped repo picker's "always offer the scoped folder, ranked first"
 // rule. Lives next to isUnderRoot because it leans on the same normalizeCwd
 // convention: the two sides being compared come from different sources — the
@@ -1642,5 +2378,65 @@ test.describe("ensureRepoAtTop: the scoped folder is offered exactly once, first
   test("the filesystem root gets a non-empty name (basename('/') is '')", () => {
     // `agendo /` is legal; a blank name cell in the picker is not.
     expect(ensureRepoAtTop([], "/")[0].name).toBe("/");
+  });
+});
+
+// The bootstrap fallback's walk-up guard. `agendo <path>` is intent and may
+// resolve anywhere; the cwd fallback is only an INFERENCE, so it must stop below
+// $HOME — otherwise a dotfiles-tracked $HOME (chezmoi / yadm) turns every
+// non-repo cwd into "your dotfiles repo", and the picker's happy path writes a
+// worktree into ~/.claude/worktrees. Real dirs under a temp HOME, since the
+// walk-up is an `existsSync(.git)` test on the actual filesystem.
+test.describe("bootstrapRepoRoot: the cwd fallback never climbs into $HOME", () => {
+  let home: string;
+  let realHome: string | undefined;
+
+  test.beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "agendo-boot-"));
+    realHome = process.env.HOME;
+    process.env.HOME = home; // os.homedir() reads $HOME on linux
+  });
+  test.afterEach(() => {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a real checkout below $HOME is still resolved by walking up", () => {
+    const repo = join(home, "git", "proj");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const sub = join(repo, "packages", "web");
+    mkdirSync(sub, { recursive: true });
+    // The guard must not cost us the normal case: a subdir still resolves to its
+    // repo root, so a worktree lands at the root.
+    expect(bootstrapRepoRoot(sub)).toBe(repo);
+  });
+
+  test("a dotfiles $HOME is NOT inferred from a non-repo cwd under it", () => {
+    mkdirSync(join(home, ".git"), { recursive: true });
+    const plain = join(home, "projects", "newthing");
+    mkdirSync(plain, { recursive: true });
+    // Without the guard this returns `home` — and the picker then offers the
+    // dotfiles repo as a worktree host.
+    expect(bootstrapRepoRoot(plain)).toBe(plain);
+  });
+
+  test("standing IN a dotfiles $HOME still resolves to it — nothing was inferred", () => {
+    mkdirSync(join(home, ".git"), { recursive: true });
+    // The cwd IS the checkout, so there is no walk-up to second-guess. The guard
+    // is about silent climbing, not about banning $HOME outright.
+    expect(bootstrapRepoRoot(home)).toBe(home);
+  });
+
+  test("a checkout ABOVE $HOME is rejected too (never just $HOME itself)", () => {
+    // $HOME nested under the repo: the walk-up would reach an ancestor of $HOME,
+    // which is even further from anything the user pointed at.
+    const nestedHome = join(home, "users", "me");
+    mkdirSync(nestedHome, { recursive: true });
+    mkdirSync(join(home, ".git"), { recursive: true });
+    process.env.HOME = nestedHome;
+    const plain = join(nestedHome, "work");
+    mkdirSync(plain, { recursive: true });
+    expect(bootstrapRepoRoot(plain)).toBe(plain);
   });
 });

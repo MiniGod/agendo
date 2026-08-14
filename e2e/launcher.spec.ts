@@ -4,7 +4,7 @@
 // keystrokes and asserts on what the browser actually shows, or on what the
 // launcher tried to spawn (recorded by the fake-bin shims).
 import { join } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
 import { RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
 
@@ -424,6 +424,133 @@ test("new-session picker: UNSCOPED lists all session-derived repos, unchanged ra
   expect(picker).not.toContain("(no sessions yet)");
 });
 
+// ── the brand-new user: no sessions anywhere ──────────────────────────────────
+// The unscoped repo list is derived ENTIRELY from where past sessions ran, so a
+// fresh install has nothing to offer — and since the only way a repo enters that
+// list is by already having a session in it, an empty picker locks the user out
+// permanently. Reproduced the only safe way: an empty fixture HOME, never by
+// touching real session data. `cwd` is what the launcher falls back to, so these
+// pass it explicitly rather than a `[path]` arg (which takes the scoped route).
+
+/** Strip every session out of the fixture home — all three agent backends'
+ *  stores — leaving the ADO/config fixtures intact so the TUI still loads
+ *  normally. Missing one leaves the premise false: these tests assert what a
+ *  brand-new user sees, and a single surviving session repopulates the picker. */
+async function wipeSessions(home: string): Promise<void> {
+  await rm(join(home, ".claude", "projects"), { recursive: true, force: true });
+  await rm(join(home, ".copilot"), { recursive: true, force: true });
+  await rm(join(home, ".codex", "sessions"), { recursive: true, force: true });
+}
+
+test("new-session picker: a brand-new user with NO sessions is offered the launcher's cwd", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  // The checkout the user is standing in when they run bare `agendo`.
+  const repo = join(mock.home, "repos", "firstrepo");
+  await mkdir(join(repo, ".git"), { recursive: true });
+
+  const wt = await launch({ cwd: repo, cols: 140, rows: 40 }); // bare `agendo`, no path arg
+  await wt.waitForText("Current sprint", 20000);
+
+  // `n` must open the picker, not bail to the old "open or resume a session in a
+  // repo first" notice — advice that was impossible to follow from here.
+  const picker = await openRepoPicker(wt);
+  expect(picker).toMatch(/❯[^\n]*\bfirstrepo\b/);
+  expect(picker).toContain("(no sessions yet)");
+  expect(picker).not.toContain("open or resume a session");
+
+  // It's a real checkout, so the happy path stays enter-enter-enter into a worktree.
+  await wt.press(KEY.enter);
+  const where = await wt.waitForText("choose where to run");
+  expect(where).toMatch(/❯[^\n]*New git worktree/);
+});
+
+test("new-session picker: no sessions and cwd is a SUBDIR of a repo offers the repo root", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  const repo = join(mock.home, "repos", "firstrepo");
+  const subdir = join(repo, "packages", "core");
+  await mkdir(join(repo, ".git"), { recursive: true });
+  await mkdir(subdir, { recursive: true });
+
+  const wt = await launch({ cwd: subdir, cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  // Resolved UP to the git root, so a worktree lands at the root — same rule the
+  // scoped picker applies to a `[path]` inside a checkout.
+  const picker = await openRepoPicker(wt);
+  expect(picker).toMatch(/❯[^\n]*\bfirstrepo\b/);
+  expect(picker).not.toMatch(/❯[^\n]*\bcore\b/);
+});
+
+// $HOME tracked as a git repo (chezmoi / yadm / a bare dotfiles checkout) is a
+// common setup, and it poisons the cwd fallback: `repoRootForCwd` walks up to
+// the nearest ancestor `.git`, so ANY non-repo cwd resolves to $HOME. Offering
+// that as a checkout would make enter-enter-enter `git worktree add` into
+// `$HOME/.claude/worktrees/<name>` — a worktree of the user's dotfiles inside the
+// live Claude Code config dir agendo itself scans for sessions. The fallback
+// must stop below $HOME instead (bootstrapRepoRoot).
+test("new-session picker: a dotfiles $HOME is never inferred as the bootstrap repo", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  await mkdir(join(mock.home, ".git"), { recursive: true }); // $HOME is a checkout
+  const plain = join(mock.home, "projects", "newthing"); // …but the cwd is not
+  await mkdir(plain, { recursive: true });
+
+  const wt = await launch({ cwd: plain, cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // The cwd is offered, NOT the dotfiles repo the walk-up would have reached.
+  expect(picker).toMatch(/❯[^\n]*\bnewthing\b/);
+  expect(pickerRepoOrder(picker)).toEqual(["newthing"]);
+
+  // And because it isn't a checkout, the where-to-run step defaults to running in
+  // place — never "New git worktree", which is the step that would have written
+  // into ~/.claude/worktrees.
+  await wt.press(KEY.enter);
+  const where = await wt.waitForText("choose where to run");
+  expect(where).toMatch(/❯[^\n]*Main repo checkout/);
+  expect(where).not.toMatch(/❯[^\n]*New git worktree/);
+});
+
+// The genuinely undiscoverable case: no sessions AND the cwd isn't a checkout.
+// The free flow can still run in place there, but a work item structurally must
+// create a worktree — so instead of an empty list (or an enter that dead-ends on
+// "fatal: not a git repository") the picker has to say what would unblock it.
+test("fresh-session picker (work item): no sessions and a non-repo cwd shows an actionable hint", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  const plain = join(mock.home, "somewhere"); // no `.git`, nothing under it
+  await mkdir(plain, { recursive: true });
+
+  const wt = await launch({ cwd: plain, cols: 140, rows: 40 });
+  await wt.waitForText("Add login screen", 20000);
+  await wt.waitForStable();
+
+  // WI 101 → "+ start a fresh session…" → agent picker → repo picker. With no
+  // sessions the item has no session rows, so the fresh row is one step down.
+  await wt.press(KEY.enter); // expand WI 101
+  await wt.waitForText("+ start a fresh session…");
+  await wt.press(KEY.down); // fresh row
+  await wt.press(KEY.enter);
+  await wt.waitForText("Which agent should run this session?");
+  await wt.press(KEY.enter); // Claude
+  const picker = await wt.waitForText("Pick a repo to create the worktree in");
+
+  expect(picker).toContain("No git checkout here");
+  expect(picker).toContain("somewhere"); // still offered, for someone about to `git init`
+
+  // The free flow gets no such warning — running in place is a valid outcome there.
+  await wt.press(KEY.escape); // → agent picker
+  await wt.waitForStable();
+  await wt.press(KEY.escape); // → list
+  await wt.waitForStable();
+  const free = await openRepoPicker(wt);
+  expect(free).toMatch(/❯[^\n]*\bsomewhere\b/);
+  expect(free).not.toContain("No git checkout here");
+});
+
 // Poll an async predicate until it's true, or fail. Used for side effects that
 // land in the fake-bin logs slightly after a keystroke.
 async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
@@ -596,6 +723,127 @@ test("fresh-session flow creates a worktree and launches claude in tmux", async 
   });
 });
 
+// ── orchestrator mode from the TUI (`O` in the Sessions view) ─────────────────
+// The one-keypress entry point. It must be advertised, reuse the existing
+// repo → worktree → name flow (including the scoped-repo behaviour), and end up
+// spawning a claude that actually carries the orchestrator instructions.
+test("O in the Sessions view launches an orchestrator through the normal worktree flow", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3"); // Sessions view
+  let screen = await wt.waitForText("Running now");
+  // The action is discoverable, alongside the existing `n new`.
+  expect(screen).toContain("O orchestrator");
+
+  wt.write("O");
+  // Straight to the repo picker — no agent step, since the mode is Claude-only.
+  screen = await wt.waitForText("Orchestrator session — pick a repo");
+  expect(screen).toContain("writes no code itself");
+  expect(screen).not.toContain("Which agent should run this session?");
+  // Same repo list the plain new-session flow offers (scoped-repo behaviour reused).
+  expect(screen).toContain("appweb");
+
+  await wt.press(KEY.enter); // top repo (appweb) → worktree-vs-main choice
+  screen = await wt.waitForText("choose where to run");
+  expect(screen).toContain("Orchestrator session in appweb");
+  // The choice explains itself, and the cursor already sits on the main checkout —
+  // git keeps the main branch in one working tree, and merging is the whole job.
+  expect(screen).toContain("git keeps that");
+  expect(screen).toMatch(/❯\s+Main repo checkout/);
+
+  // Accepting that default launches immediately: there's no branch to name, so no
+  // prompt whose value would just be discarded.
+  await wt.press(KEY.enter);
+
+  // It runs in the repo ROOT, not a worktree, under a `cl-new-…` target, carrying
+  // the orchestrator instructions.
+  const expectedCwd = join(mock.home, "repos", "appweb");
+  await waitUntil(async () => {
+    const spawned = (await mock.tmuxLog()).find(
+      (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude"),
+    );
+    if (!spawned) return false;
+    const appended = spawned[spawned.indexOf("--append-system-prompt") + 1] ?? "";
+    return (
+      spawned.some((a) => a.startsWith("cl-new-")) &&
+      appended.includes("ORCHESTRATOR MODE") &&
+      appended.includes("Never write project code yourself") &&
+      appended.includes("do not open a pull request") &&
+      // The launcher's own pointer must still ride along in the same value.
+      appended.includes("You are running inside agendo")
+    );
+  });
+  // No worktree was created for it.
+  expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
+});
+
+// The isolation escape hatch is still reachable in the TUI: pick "New git worktree"
+// and the role-slug branch prompt appears as before.
+test("the orchestrator flow can still opt into its own worktree", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  await wt.waitForText("Running now");
+  wt.write("O");
+  await wt.waitForText("Orchestrator session — pick a repo");
+  await wt.press(KEY.enter); // appweb → wtchoice (cursor on "Main repo checkout")
+  await wt.waitForText("choose where to run");
+  await wt.press(KEY.up); // move up to "New git worktree"
+  await wt.press(KEY.enter);
+
+  // Now the branch prompt appears, prefilled with the ROLE slug. Assert on the
+  // labelled field, not a bare "orchestrator" substring — the same screen renders
+  // "→ claude (orchestrator mode)", which would satisfy that even if empty.
+  const screen = await wt.waitForText("New branch off origin/HEAD");
+  expect(screen).toMatch(/branch:\s*orchestrator/);
+  expect(screen).toContain("(orchestrator mode)");
+
+  await wt.press(KEY.enter);
+  const expectedCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "orchestrator");
+  await waitUntil(async () =>
+    (await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree") && l.includes(expectedCwd)),
+  );
+});
+
+test("n in the Sessions view still launches a plain session (no orchestrator prompt)", async ({ launch, mock }) => {
+  // The inverse guard: adding `O` must not have turned every manual session into
+  // an orchestrator, and `n` must still offer the agent picker it always did.
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  await wt.waitForText("Running now");
+
+  wt.write("n");
+  await wt.waitForText("Which agent should run this session?"); // agent step is intact
+  await wt.press(KEY.enter); // Claude
+  await wt.waitForText("New session — pick a repo");
+  await wt.press(KEY.enter); // appweb
+  await wt.waitForText("choose where to run");
+  await wt.press(KEY.enter); // new worktree
+  await wt.waitForText("New session in appweb");
+  // A plain free session has no prefilled name — type one.
+  wt.write("scratch");
+  await wt.waitForText("scratch");
+  await wt.press(KEY.enter);
+
+  const expectedCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "scratch");
+  await waitUntil(async () =>
+    (await mock.tmuxLog()).some((argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude")),
+  );
+  const spawned = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude"),
+  )!;
+  const appended = spawned[spawned.indexOf("--append-system-prompt") + 1] ?? "";
+  expect(appended).toContain("You are running inside agendo");
+  expect(appended).not.toContain("ORCHESTRATOR MODE");
+});
+
 test("renders identically with the running session flipped off", async ({ launch, mock }) => {
   // Flip fake-tmux to have no live sessions before launch: badge goes gray.
   await mock.setTmuxState({ sessions: [], windows: [], panes: [] });
@@ -752,6 +1000,55 @@ test("(b) the fast rescan does NO backend fetch; work items stay put across seve
   // ...and the rescan still surfaced the new session (proving it DID run).
   wt.write("3");
   await wt.waitForText("Another late session", 12000);
+});
+
+test("(c) the fast rescan spawns NO `git` process — the unpushed-work signal stays off the hot path", async ({ launch, mock }) => {
+  // Sibling guard to (b), for the shell rather than the network. `agendo status`
+  // / `list --json` report whether a checkout holds unpushed work; that answer is
+  // read from `.git` ref files precisely because SessionIndex.build() /
+  // loadLocalSessions() — which this 2s timer drives — must never spawn `git`.
+  // A per-repo spawn here is the ~62% CPU regression the parse cache exists to
+  // prevent, so the count of git invocations must not move across rescans.
+  //
+  // Scope: this catches a subprocess re-implementation of the signal. Moving the
+  // (spawn-free) ref reader itself onto this path wouldn't show up here — that is
+  // pinned separately by the static import check in cli.spec.ts.
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Add login screen", 20000); // full load done
+
+  // Snapshot only once the initial load's own git calls have stopped arriving —
+  // a fixed sleep would race a late one and move the count under us.
+  const gitCalls = async () => (await mock.callLog()).filter((l) => l.startsWith("git ")).length;
+  let before = -1;
+  for (let i = 0; i < 10; i++) {
+    const n = await gitCalls();
+    if (n === before) break;
+    before = n;
+    await sleep(1000);
+  }
+
+  // A new session mid-run in a repo root the initial load has NEVER seen. That
+  // matters: a naive per-repo `git` call memoized by root (the pattern already
+  // in src/sessions.ts) would spawn nothing for an already-indexed root, so the
+  // regression would slip past a probe pointed at appweb.
+  const SID = "55556666-7777-8888-9999-aaaabbbbcccc";
+  const win = `cl-claude-${shortIdOf(SID)}`;
+  const cwd = join(mock.home, "repos", "probe");
+  await mkdir(join(cwd, ".git"), { recursive: true });
+  await writeSession(mock.home, SID, cwd, "Unpushed probe session");
+  await mock.setTmuxState({
+    ...tmuxState,
+    windows: [{ session: RUNNING_TARGET, index: 1, name: win }],
+    panes: [...tmuxState.panes, { session: RUNNING_TARGET, window: win, cwd, placeholder: false }],
+    captures: { ...tmuxState.captures, [win]: IDLE_READY },
+  });
+
+  await sleep(6000); // several LIVE_POLL_MS rescans go by
+  expect(await gitCalls()).toBe(before);
+  // …and the rescan really did run (otherwise the assertion above is vacuous).
+  wt.write("3");
+  await wt.waitForText("Unpushed probe session", 12000);
 });
 
 test("(d) a rescan must not re-fire `continue` for an already-resumed limited window", async ({ launch, mock }) => {

@@ -206,6 +206,12 @@ export interface PullRequest {
   createdDate: number;
   /** Last-update time (epoch ms) — last pushed iteration; enrichment fills it. */
   updatedDate: number;
+  /**
+   * Web URL of the pull request, built by the backend's canonical URL builder
+   * (see Provider.urls). Empty string when the backend payload carried no
+   * repository to scope the link to — every consumer must read `""` as "no
+   * link" rather than opening or handing over a half-built URL.
+   */
   url: string;
 }
 
@@ -269,6 +275,7 @@ export interface WorkItem {
   prs: PullRequest[];
   /** Sessions whose branch matches one of this item's PR branches. */
   sessions: AgentSession[];
-  /** Web URL of the work item (the Boards details/edit page). */
+  /** Web URL of the work item (the Boards details/edit page), from the backend's
+   *  canonical URL builder. `""` means "no link" — see PullRequest.url. */
   url: string;
 }

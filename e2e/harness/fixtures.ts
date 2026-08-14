@@ -100,7 +100,74 @@ export async function materializeHome(home: string): Promise<void> {
     await mkdir(join(root, ".git"), { recursive: true });
   }
 
+  // Real `.git` REF FILES (no git binary involved) for the unpushed-work signal
+  // in `agendo status` / `list --json`, which reads them directly rather than
+  // spawning git (see src/gitrefs.ts).
+  //
+  //  • standalone: a plain checkout on `main` with a CONFIGURED origin upstream,
+  //    in sync — and the remote ref is PACKED, the normal state right after a
+  //    clone, so the packed-refs fallback is exercised too.
+  //  • appweb's `login` LINKED WORKTREE: the layout every agendo session actually
+  //    uses — the worktree's `.git` is a FILE pointing at
+  //    <repo>/.git/worktrees/login, which holds its own HEAD plus a `commondir`
+  //    back to the shared refs. feature/login has no configured upstream and no
+  //    origin/feature/login ref → the hedged "unpushed, or tracking another
+  //    remote" case, and the "parked mid-task" story.
+  //    appweb's config carries a section for a DIFFERENT branch, so a parser that
+  //    matched sections loosely would hand feature/login someone else's upstream.
+  //  • applib is a COMPLETE repo (HEAD + a ref) whose `experiment` worktree dir
+  //    deliberately does NOT exist — the copilot session points at a deleted
+  //    worktree, the routine post-merge state. The ref lookup must report
+  //    "unknown" for it and must NOT walk up and describe applib's own master as
+  //    if it were that session's branch.
+  const SHA_MAIN = "1111111111111111111111111111111111111111";
+  const SHA_LOGIN = "2222222222222222222222222222222222222222";
+  const SHA_APPLIB = "5555555555555555555555555555555555555555";
+  await mkdir(join(p.applib, ".git", "refs", "heads"), { recursive: true });
+  await writeFile(join(p.applib, ".git", "HEAD"), "ref: refs/heads/master\n");
+  await writeFile(join(p.applib, ".git", "refs", "heads", "master"), `${SHA_APPLIB}\n`);
+  await mkdir(join(p.standalone, ".git", "refs", "heads"), { recursive: true });
+  await writeFile(join(p.standalone, ".git", "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(p.standalone, ".git", "refs", "heads", "main"), `${SHA_MAIN}\n`);
+  await writeFile(
+    join(p.standalone, ".git", "packed-refs"),
+    `# pack-refs with: peeled fully-peeled sorted \n${SHA_MAIN} refs/remotes/origin/main\n`,
+  );
+  await writeFile(
+    join(p.standalone, ".git", "config"),
+    ['[branch "main"]', "\tremote = origin", "\tmerge = refs/heads/main", ""].join("\n"),
+  );
+
+  await mkdir(join(p.appweb, ".git", "refs", "heads", "feature"), { recursive: true });
+  await writeFile(join(p.appweb, ".git", "HEAD"), "ref: refs/heads/master\n");
+  await writeFile(join(p.appweb, ".git", "refs", "heads", "feature", "login"), `${SHA_LOGIN}\n`);
+  // The only branch section is for `master` — feature/login deliberately has none,
+  // so a lookup that matched sections loosely would report master's upstream as
+  // login's and turn "unknown" into a confident wrong answer.
+  await writeFile(
+    join(p.appweb, ".git", "config"),
+    ['[branch "master"]', "\tremote = origin", "\tmerge = refs/heads/master", ""].join("\n"),
+  );
+  // NB: only `login` gets a worktree dir. p.crashCwd must stay ABSENT — the
+  // placeholder-tab tests in features.spec.ts are about a tab whose directory is
+  // gone, and materializing it here would quietly disarm them.
+  {
+    const wtGitDir = join(p.appweb, ".git", "worktrees", "login");
+    await mkdir(wtGitDir, { recursive: true });
+    await writeFile(join(wtGitDir, "HEAD"), "ref: refs/heads/feature/login\n");
+    await writeFile(join(wtGitDir, "commondir"), "../..\n");
+    await mkdir(p.loginCwd, { recursive: true });
+    await writeFile(join(p.loginCwd, ".git"), `gitdir: ${wtGitDir}\n`);
+  }
+
   const projects = join(home, ".claude", "projects");
+
+  // A SECOND Claude config profile, deliberately empty of sessions. Profiles are
+  // the union of `~/.claude*` dirs that have a `projects/` subdir — not just the
+  // ones already holding sessions — so this is what gives the "move to another
+  // profile" picker somewhere to move TO. Empty on purpose: it adds a
+  // destination without perturbing any session count in the other specs.
+  await mkdir(join(home, ".claude-work", "projects"), { recursive: true });
 
   // 1) login session — running. Its gitBranch DELIBERATELY progresses across the
   // log: it starts on the base branch `master`, spends most records on an interim
@@ -314,6 +381,18 @@ const READY_PANE = [
   "  ❯ ",
   "  ─────────────────────────────────────────────",
   "  ? for shortcuts",
+].join("\n");
+
+/** A mid-generation claude TUI. The live token counter's directional ↑ arrow is
+ *  the signal `paneReadiness` keys on, so this classifies as "busy" — not
+ *  sendable, not settled. Shared by every spec/driver that needs a session to
+ *  keep working while something else is asserted around it. */
+export const BUSY_PANE = [
+  "  ● Implement login form",
+  "  ⠋ Working… (12s · ↑ 2.1k tokens)",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
 ].join("\n");
 
 export const tmuxState = {

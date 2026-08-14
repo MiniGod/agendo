@@ -201,7 +201,13 @@ export function parseResetTime(plain: string, now: Date, lookbackMs = 0): number
   // Confine the search to the notice itself when the phrase is present.
   const phrase = plain.match(USAGE_LIMIT_RE);
   const region = phrase ? plain.slice(phrase.index) : plain;
-  const anchor = region.match(/\breset[s]?(?:\s+(?:by|at))?\s+([^\n]*)/i);
+  // The anchor and its tail are SAME-LINE ([^\S\n] = horizontal space only): a
+  // plain `\s+` would step over the newline and read a clock time off the NEXT
+  // line, inventing a reset out of unrelated scrollback (e.g. a `git reset` line
+  // above a log timestamp, or the limit dialog's own "…wait for limit to reset"
+  // option above a later line). A wrapped notice that splits between "resets"
+  // and its time simply yields null — reporting no time beats reporting a wrong one.
+  const anchor = region.match(/\breset[s]?(?:[^\S\n]+(?:by|at))?[^\S\n]+([^\n]*)/i);
   if (!anchor) return null;
   let tail = anchor[1];
 
@@ -282,6 +288,61 @@ export function parseResetTime(plain: string, now: Date, lookbackMs = 0): number
     inst = instantFor(tz, base.getFullYear(), base.getMonth() + 1, base.getDate(), h, mi);
   }
   return inst;
+}
+
+/**
+ * The reset instant a limited pane states, or null when it states none. `plain`
+ * must be ANSI-stripped. The ONE place the display/report lookback is chosen, so
+ * `agendo list`, `agendo wait` and the TUI can't drift into three readings of
+ * the same screen; the TUI's auto-resume freezes the first value it sees per
+ * limit window, which this deliberately doesn't try to replicate — a one-shot
+ * CLI has no window to freeze.
+ */
+export function paneResetAt(plain: string, now: Date = new Date()): number | null {
+  return parseResetTime(plain, now, RESET_LOOKBACK_MS);
+}
+
+// ── reset-time display ─────────────────────────────────────────────────────────
+// A parsed reset instant is shown to humans as a bare clock time ("14:00" /
+// "2:00 PM") — short enough to sit next to the readiness word in a list column.
+// 24h vs 12h is the locale's call, never hand-rolled.
+
+/**
+ * The user's BCP-47 locale, taken from the POSIX locale environment
+ * (LC_ALL > LC_TIME > LANG) and normalized: `en_GB.UTF-8@euro` → `en-GB`.
+ * Returns undefined for the C/POSIX locale, an unset environment, or a tag ICU
+ * doesn't know — callers then fall back to the runtime default.
+ *
+ * We resolve this ourselves because Bun's default `Intl` locale is a hardcoded
+ * en-US regardless of the environment, which would give every user 12-hour
+ * times; its ICU *data* is complete, so an explicit tag formats correctly.
+ */
+export function envLocale(env: Record<string, string | undefined> = process.env): string | undefined {
+  const raw = env.LC_ALL || env.LC_TIME || env.LANG;
+  if (!raw) return undefined;
+  // Drop the .codeset and @modifier suffixes, then POSIX `_` → BCP-47 `-`.
+  const tag = raw.split(/[.@]/)[0].replace(/_/g, "-");
+  if (!tag || tag === "C" || tag === "POSIX") return undefined;
+  try {
+    return Intl.DateTimeFormat.supportedLocalesOf(tag).length ? tag : undefined;
+  } catch {
+    return undefined; // structurally invalid tag (supportedLocalesOf throws)
+  }
+}
+
+/**
+ * Format a reset instant as a locale-appropriate time of day, e.g. "14:00" or
+ * "2:00 PM". Deliberately time-only: it rides next to a readiness word in a list
+ * column, and the 5-hour cap — the one an operator is usually waiting on — always
+ * reopens the same day or the next. A weekly cap's reset can be days out, and
+ * this form does not say so; `agendo status` prints the full ISO instant, as does
+ * `list --json`, for when the date matters.
+ */
+export function formatResetTime(
+  resetAt: number,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return new Intl.DateTimeFormat(envLocale(env), { hour: "numeric", minute: "2-digit" }).format(new Date(resetAt));
 }
 
 // ── auto-resume decision ────────────────────────────────────────────────────────
