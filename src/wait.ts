@@ -18,9 +18,10 @@
  */
 import { basename } from "path";
 import {
-  capturePaneState, paneReadiness, paneResumeDialogActive, sessionName, shortId,
+  capturePaneState, paneReadiness, paneResumeDialogActive, sessionName, shortId, stripAnsi,
   type Readiness,
 } from "./tmux.ts";
+import { formatResetTime, paneResetAt } from "./usageLimit.ts";
 import { SessionIndex } from "./sessions.ts";
 import { refreshLiveTmux } from "./model.ts";
 import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
@@ -29,10 +30,27 @@ import { SELF_CMD } from "./launch.ts";
 import type { AgentSession } from "./types.ts";
 
 /**
- * Readiness states that mean the session is actively working (not settled) — the
- * default "still busy" set `agendo wait` polls against.
+ * Readiness states that mean the session is actively working. One half of what
+ * the default predicate rejects; NOT_SETTLED is the other.
  */
 const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
+
+/**
+ * States the DEFAULT predicate refuses to call settled, even though neither is
+ * "busy":
+ *  - `unknown` — a pane we couldn't read; counting it would report success off a
+ *    blank or not-yet-drawn screen.
+ *  - `limited` — a session parked at its usage cap. It has stopped, but it is not
+ *    DONE: it resumes when the window reopens (auto-resume) or when someone
+ *    unblocks it, and its work is still unfinished. Exiting 0 there tells an
+ *    orchestrator "finished" about work that is merely paused — while `agendo
+ *    list` shows the same session as `limited 17:00`, i.e. coming back later.
+ *    Rejecting it does NOT mean waiting it out in silence: the loop wakes on a
+ *    capped target immediately with `woke: "blocked"` and a non-zero exit (see
+ *    the `blocked` branch), so the caller is told at once without being told
+ *    "done". `--state limited` still treats the cap as the success condition.
+ */
+const NOT_SETTLED = new Set<WaitState>(["unknown", "limited"]);
 
 /**
  * Consecutive polls a target must be absent from the live set before `wait`
@@ -41,6 +59,17 @@ const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
  * wait, so a false one is unrecoverable. See `poll()`.
  */
 const EXIT_CONFIRM_TICKS = 2;
+
+/**
+ * Consecutive `limited` sightings before `wait` wakes with `blocked`. Two, for
+ * the same reason as EXIT_CONFIRM_TICKS: the wake is terminal, and `limited` has
+ * a real transient. The TUI's auto-resume sends one Escape to reveal the reset
+ * notice, and the pane it uncovers — notice above an idle input box — reads
+ * `limited` for a tick or two before generation restarts. Waking off that single
+ * sighting would report a session as capped at the exact moment it was being
+ * un-capped, with a reset instant already in the past.
+ */
+const LIMIT_CONFIRM_TICKS = 2;
 
 /**
  * What `agendo wait` can observe about a target. A superset of pane `Readiness`
@@ -106,6 +135,11 @@ export interface WaitResult {
   /** tmux window the session occupies now; the one resolved at startup if it has
    *  since gone away. */
   window: string;
+  /** When a `limited` session's cap resets, ISO 8601, or null when the pane
+   *  states no time (the numbered limit dialog hides it) or it isn't limited.
+   *  Same instant `agendo list --json` reports, so a caller woken by `blocked`
+   *  can back off until then without a second command. */
+  limitResetAt: string | null;
   /**
    * True when the session is sitting on claude's OWN resume dialog. Such a pane
    * reports `ready` (`send` answers the dialog itself), which would otherwise be
@@ -119,14 +153,18 @@ export interface WaitResult {
 
 /** The `--json` wake payload. `woke` is why the wait returned:
  *  `satisfied` (the predicate held) · `timeout` (deadline hit) · `unsatisfiable`
- *  (no remaining target can satisfy the predicate, so waiting longer is futile).
+ *  (no remaining target can satisfy the predicate, so waiting longer is futile) ·
+ *  `blocked` (a target is parked at its usage cap — see NOT_SETTLED: it hasn't
+ *  finished, so this is NOT a success, but it also won't move on its own for
+ *  hours, so we wake the caller now instead of holding the timeout open).
+ *  Only `satisfied` exits 0.
  *
  *  Emitted only once the wait actually runs. Setup failures — unknown id, bad
  *  selector, nothing running — exit non-zero with a plain-text reason on stderr
  *  and print NOTHING on stdout, even under `--json`, so a consumer must check the
  *  exit code before parsing rather than assuming a payload is always there. */
 export interface WaitPayload {
-  woke: "satisfied" | "timeout" | "unsatisfiable";
+  woke: "satisfied" | "timeout" | "unsatisfiable" | "blocked";
   /** Human-readable form of the predicate that was being waited on. */
   condition: string;
   mode: "all" | "any";
@@ -135,14 +173,16 @@ export interface WaitPayload {
 }
 
 /** Whether an observed state satisfies the wait predicate. The default (no
- *  `--state`/`--not`) waits for a *known, settled* non-busy state — "unknown" is
- *  excluded so a blank or not-yet-drawn pane doesn't count as "done" and report a
- *  false success. `exited` passes that default: a session whose window is gone is
- *  as settled as it will ever get. */
+ *  `--state`/`--not`) waits for a *known, settled, unblocked* non-busy state —
+ *  `unknown` and `limited` are excluded (see NOT_SETTLED) so neither an unread
+ *  pane nor a session sitting at its usage cap reports a false success. `exited`
+ *  passes that default: a session whose window is gone is as settled as it will
+ *  ever get. An explicit `--state`/`--not` is honoured verbatim, so
+ *  `--state limited` still wakes the moment the cap hits. */
 export function waitSatisfied(r: WaitState, o: WaitOptions): boolean {
   if (o.state) return r === o.state;
   if (o.not) return r !== o.not;
-  return !BUSY_STATES.has(r as Readiness) && r !== "unknown";
+  return !BUSY_STATES.has(r as Readiness) && !NOT_SETTLED.has(r);
 }
 
 /** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
@@ -318,7 +358,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
     return 1;
   }
 
-  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : "non-busy";
+  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : "settled (not busy, limited or unknown)";
   const mode: "all" | "any" = o.any ? "any" : "all";
   console.error(
     `waiting for ${o.any ? "any of" : "all"} ${targets.length} session(s) to be ${desc} ` +
@@ -334,6 +374,9 @@ export async function runWait(o: WaitOptions): Promise<number> {
   const first = new Map<string, WaitState>();
   // Consecutive ticks a target has been missing from the live set (see poll()).
   const misses = new Map<string, number>();
+  // Consecutive ticks a target has read `limited`, reset the moment it doesn't —
+  // the confirmation behind the `blocked` wake (see LIMIT_CONFIRM_TICKS).
+  const limitedTicks = new Map<string, number>();
 
   /** Read every target's current state in one tick.
    *
@@ -363,6 +406,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
     return targets.map(({ s, target }) => {
       const live = nowLive.get(sessionName(s));
       let state: WaitState;
+      let resetAt: number | null = null;
       // Read off the SAME capture the state came from, so the flag can't describe
       // a different frame than the state it qualifies. A target with no live
       // window has no pane to be parked in, so it is false there by construction.
@@ -372,6 +416,9 @@ export async function runWait(o: WaitOptions): Promise<number> {
         const { raw, cursor } = capturePaneState(live);
         state = paneReadiness(raw, cursor);
         resumeDialog = paneResumeDialogActive(raw);
+        // Same capture again — no extra tmux call, and the same helper `agendo
+        // list` uses, so the two never disagree on the time.
+        if (state === "limited") resetAt = paneResetAt(stripAnsi(raw));
       } else {
         const seen = (misses.get(s.id) ?? 0) + 1;
         misses.set(s.id, seen);
@@ -389,6 +436,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
         cwd: s.cwd,
         title: s.title,
         window: live ?? target,
+        limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
         resumeDialog,
       };
     });
@@ -424,6 +472,9 @@ export async function runWait(o: WaitOptions): Promise<number> {
     const results = poll();
     const done = results.filter((x) => x.satisfied);
     const pending = results.filter((x) => !x.satisfied);
+    for (const x of results) {
+      limitedTicks.set(x.id, x.state === "limited" ? (limitedTicks.get(x.id) ?? 0) + 1 : 0);
+    }
     // `--any` returns on the first session to satisfy, so one session stuck busy
     // can't mask the others; the default still requires all of them.
     if (o.any ? done.length > 0 : pending.length === 0) {
@@ -443,6 +494,31 @@ export async function runWait(o: WaitOptions): Promise<number> {
           pending.filter((x) => x.state === "exited").map((x) => x.shortId).join(", "),
       );
       return finish("unsatisfiable", results);
+    }
+    // A target at its usage cap won't move for hours (it resumes when the window
+    // reopens, or when someone unblocks it). Holding the timeout open would leave
+    // the caller blind for exactly as long as it asked to be notified within — the
+    // failure `exited` was introduced to remove — so wake NOW with the state and
+    // the reset instant. Not a success: `finish` only exits 0 for "satisfied", so
+    // a script can't mistake a capped session for finished work. Same mode rule as
+    // `stuck`: `--any` still needs every remaining candidate to be blocked.
+    //
+    // ONLY for the default predicate. An explicit `--state`/`--not` has already
+    // told us what this caller counts as done, and several of those predicates
+    // mean "wait THROUGH the cap" — `--state exited` (tell me when it's finished
+    // for good), `--state ready`, `--not limited` (tell me when the cap clears).
+    // Waking those with `blocked` would answer a question they didn't ask.
+    const capped = (x: WaitResult) => (limitedTicks.get(x.id) ?? 0) >= LIMIT_CONFIRM_TICKS;
+    const blocked = !o.state && !o.not && (o.any ? pending.every(capped) : pending.some(capped));
+    if (pending.length > 0 && blocked) {
+      console.error(
+        `wait: at usage limit, not settled — ` +
+          pending
+            .filter(capped)
+            .map((x) => `${x.shortId}${x.limitResetAt ? ` (resets ${formatResetTime(Date.parse(x.limitResetAt))})` : ""}`)
+            .join(", "),
+      );
+      return finish("blocked", results);
     }
     if (Date.now() >= deadline) {
       console.error(

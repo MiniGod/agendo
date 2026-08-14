@@ -131,6 +131,18 @@ export function bestSessionForCwd(sessions: AgentSession[], cwd: string): AgentS
 const ID_BEARING = /^cl-(?:claude|copilot|bg|new)-(.+)$/;
 
 /**
+ * Whether a managed window name embeds a SESSION short id (`cl-claude-…`,
+ * `cl-copilot-…`, `cl-bg-…`, `cl-new-…`) rather than a work-item / PR id. Only
+ * an id-bearing name identifies its session unambiguously; the rest are
+ * attributed by working directory (see `resolveWindowSession`), a heuristic that
+ * is fine for reading a pane but not for killing one — hence `agendo close`
+ * checks this before it kills an id-less window.
+ */
+export function idBearingName(name: string): boolean {
+  return ID_BEARING.test(name);
+}
+
+/**
  * Resolve which on-disk session a live launcher window is running.
  *
  * Id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-bg-`/`cl-new-`) embed the
@@ -270,6 +282,33 @@ export function recordLaunchedSession(
   const tabs = loadRestore(hostSession).filter((t) => t.name !== canonical);
   tabs.push(tab);
   saveRestore(hostSession, tabs);
+}
+
+/**
+ * Drop a session's tab from one host session's restore snapshot, so a session
+ * the user explicitly closed (`agendo close`) doesn't reappear as a placeholder
+ * the next time that launcher starts from scratch. Best-effort and narrowly
+ * scoped: only this session's tab is removed, and only from the host session
+ * that actually held the window (the caller resolves it from tmux), so a
+ * parallel path-scoped launcher's tabs are never touched.
+ *
+ * `target` is the window the session was closed through, which is NOT always the
+ * name its tab was saved under: a tab is always persisted canonically
+ * (`cl-<source>-<id>`, see RestoreTab.name) while a background session lives in
+ * the launch namespace (`cl-bg-<id>`). Same session, different prefix — so an
+ * id-bearing name is matched on the SHORT ID it embeds rather than the literal
+ * string, and anything else (a `cl-wi-…`/`cl-pr-…` window) falls back to an
+ * exact-name match.
+ *
+ * Nothing is deleted beyond that one snapshot entry — the session's transcript,
+ * worktree and branch are untouched, and `agendo resume <id>` still brings it
+ * back. No-op when the session has no saved tab.
+ */
+export function forgetRestoreTab(target: string, hostSession: string): void {
+  const sid = target.match(ID_BEARING)?.[1];
+  const tabs = loadRestore(hostSession);
+  const kept = tabs.filter((t) => t.name !== target && !(sid !== undefined && t.name.match(ID_BEARING)?.[1] === sid));
+  if (kept.length !== tabs.length) saveRestore(hostSession, kept);
 }
 
 /**
