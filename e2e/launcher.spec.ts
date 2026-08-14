@@ -4,7 +4,7 @@
 // keystrokes and asserts on what the browser actually shows, or on what the
 // launcher tried to spawn (recorded by the fake-bin shims).
 import { join } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
 import { RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
 
@@ -422,6 +422,130 @@ test("new-session picker: UNSCOPED lists all session-derived repos, unchanged ra
   expect(picker).toContain("standalone");
   expect(picker).toMatch(/❯[^\n]*appweb[^\n]*2 sessions/);
   expect(picker).not.toContain("(no sessions yet)");
+});
+
+// ── the brand-new user: no sessions anywhere ──────────────────────────────────
+// The unscoped repo list is derived ENTIRELY from where past sessions ran, so a
+// fresh install has nothing to offer — and since the only way a repo enters that
+// list is by already having a session in it, an empty picker locks the user out
+// permanently. Reproduced the only safe way: an empty fixture HOME, never by
+// touching real session data. `cwd` is what the launcher falls back to, so these
+// pass it explicitly rather than a `[path]` arg (which takes the scoped route).
+
+/** Strip every session out of the fixture home — both agent backends' stores —
+ *  leaving the ADO/config fixtures intact so the TUI still loads normally. */
+async function wipeSessions(home: string): Promise<void> {
+  await rm(join(home, ".claude", "projects"), { recursive: true, force: true });
+  await rm(join(home, ".copilot"), { recursive: true, force: true });
+}
+
+test("new-session picker: a brand-new user with NO sessions is offered the launcher's cwd", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  // The checkout the user is standing in when they run bare `agendo`.
+  const repo = join(mock.home, "repos", "firstrepo");
+  await mkdir(join(repo, ".git"), { recursive: true });
+
+  const wt = await launch({ cwd: repo, cols: 140, rows: 40 }); // bare `agendo`, no path arg
+  await wt.waitForText("Current sprint", 20000);
+
+  // `n` must open the picker, not bail to the old "open or resume a session in a
+  // repo first" notice — advice that was impossible to follow from here.
+  const picker = await openRepoPicker(wt);
+  expect(picker).toMatch(/❯[^\n]*\bfirstrepo\b/);
+  expect(picker).toContain("(no sessions yet)");
+  expect(picker).not.toContain("open or resume a session");
+
+  // It's a real checkout, so the happy path stays enter-enter-enter into a worktree.
+  await wt.press(KEY.enter);
+  const where = await wt.waitForText("choose where to run");
+  expect(where).toMatch(/❯[^\n]*New git worktree/);
+});
+
+test("new-session picker: no sessions and cwd is a SUBDIR of a repo offers the repo root", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  const repo = join(mock.home, "repos", "firstrepo");
+  const subdir = join(repo, "packages", "core");
+  await mkdir(join(repo, ".git"), { recursive: true });
+  await mkdir(subdir, { recursive: true });
+
+  const wt = await launch({ cwd: subdir, cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  // Resolved UP to the git root, so a worktree lands at the root — same rule the
+  // scoped picker applies to a `[path]` inside a checkout.
+  const picker = await openRepoPicker(wt);
+  expect(picker).toMatch(/❯[^\n]*\bfirstrepo\b/);
+  expect(picker).not.toMatch(/❯[^\n]*\bcore\b/);
+});
+
+// $HOME tracked as a git repo (chezmoi / yadm / a bare dotfiles checkout) is a
+// common setup, and it poisons the cwd fallback: `repoRootForCwd` walks up to
+// the nearest ancestor `.git`, so ANY non-repo cwd resolves to $HOME. Offering
+// that as a checkout would make enter-enter-enter `git worktree add` into
+// `$HOME/.claude/worktrees/<name>` — a worktree of the user's dotfiles inside the
+// live Claude Code config dir agendo itself scans for sessions. The fallback
+// must stop below $HOME instead (bootstrapRepoRoot).
+test("new-session picker: a dotfiles $HOME is never inferred as the bootstrap repo", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  await mkdir(join(mock.home, ".git"), { recursive: true }); // $HOME is a checkout
+  const plain = join(mock.home, "projects", "newthing"); // …but the cwd is not
+  await mkdir(plain, { recursive: true });
+
+  const wt = await launch({ cwd: plain, cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  const picker = await openRepoPicker(wt);
+  // The cwd is offered, NOT the dotfiles repo the walk-up would have reached.
+  expect(picker).toMatch(/❯[^\n]*\bnewthing\b/);
+  expect(pickerRepoOrder(picker)).toEqual(["newthing"]);
+
+  // And because it isn't a checkout, the where-to-run step defaults to running in
+  // place — never "New git worktree", which is the step that would have written
+  // into ~/.claude/worktrees.
+  await wt.press(KEY.enter);
+  const where = await wt.waitForText("choose where to run");
+  expect(where).toMatch(/❯[^\n]*Main repo checkout/);
+  expect(where).not.toMatch(/❯[^\n]*New git worktree/);
+});
+
+// The genuinely undiscoverable case: no sessions AND the cwd isn't a checkout.
+// The free flow can still run in place there, but a work item structurally must
+// create a worktree — so instead of an empty list (or an enter that dead-ends on
+// "fatal: not a git repository") the picker has to say what would unblock it.
+test("fresh-session picker (work item): no sessions and a non-repo cwd shows an actionable hint", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  const plain = join(mock.home, "somewhere"); // no `.git`, nothing under it
+  await mkdir(plain, { recursive: true });
+
+  const wt = await launch({ cwd: plain, cols: 140, rows: 40 });
+  await wt.waitForText("Add login screen", 20000);
+  await wt.waitForStable();
+
+  // WI 101 → "+ start a fresh session…" → agent picker → repo picker. With no
+  // sessions the item has no session rows, so the fresh row is one step down.
+  await wt.press(KEY.enter); // expand WI 101
+  await wt.waitForText("+ start a fresh session…");
+  await wt.press(KEY.down); // fresh row
+  await wt.press(KEY.enter);
+  await wt.waitForText("Which agent should run this session?");
+  await wt.press(KEY.enter); // Claude
+  const picker = await wt.waitForText("Pick a repo to create the worktree in");
+
+  expect(picker).toContain("No git checkout here");
+  expect(picker).toContain("somewhere"); // still offered, for someone about to `git init`
+
+  // The free flow gets no such warning — running in place is a valid outcome there.
+  await wt.press(KEY.escape); // → agent picker
+  await wt.waitForStable();
+  await wt.press(KEY.escape); // → list
+  await wt.waitForStable();
+  const free = await openRepoPicker(wt);
+  expect(free).toMatch(/❯[^\n]*\bsomewhere\b/);
+  expect(free).not.toContain("No git checkout here");
 });
 
 // Poll an async predicate until it's true, or fail. Used for side effects that

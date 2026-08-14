@@ -8,23 +8,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { BUSY_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
 const SHORT_ID = shortIdOf(LOGIN_SESSION_ID);
 const CRASH_SHORT_ID = shortIdOf(CRASH_SESSION_ID);
 const COP_SHORT_ID = shortIdOf(COPILOT_SESSION_ID);
-
-// A mid-generation TUI: the live token counter is the reliable "busy" signal, so
-// `paneReadiness` classifies this as "busy" (not sendable / not settled).
-const BUSY_PANE = [
-  "  ● Implement login form",
-  "  ⠋ Working… (12s · ↑ 2.1k tokens)",
-  "  ─────────────────────────────────────────────",
-  "  ❯ ",
-  "  ─────────────────────────────────────────────",
-].join("\n");
 
 function agendo(env: Record<string, string>, ...args: string[]) {
   return agendoIn(REPO_ROOT, env, ...args);
@@ -79,6 +69,25 @@ test("agendo --llm prints the background-session guide", async ({ mock }) => {
   expect(r.status).toBe(0);
   // The guide is the agent-facing workflow text, headed by the new name.
   expect(r.stdout).toContain("agendo — running a separate background claude session");
+  // `wait` MUST be advertised here, not just in --help. This guide is the only
+  // command list an agent is pointed at, so a verb missing from it effectively
+  // does not exist — which is why orchestrators re-polled `status` on a guessed
+  // cadence instead of being notified.
+  //
+  // Match only text that is INDEPENDENT of SELF_CMD. Every invocation line is
+  // prefixed with however this launcher can re-invoke itself, which varies by
+  // environment: `agendo` when it's on PATH, `bunx agendo` under a package
+  // runner, and a bare `<bun> <abs path to index.tsx>` in CI. Asserting on
+  // "agendo wait" passes locally and fails on a runner for reasons that have
+  // nothing to do with the guide.
+  expect(r.stdout).toContain(" wait <id...> --any --json --timeout 30m");
+  // …and that it actually teaches the workflow, not just that the verb exists:
+  // run it in the background, don't re-poll, and here's what each flag buys.
+  expect(r.stdout).toContain("Be told when it needs you (DON'T poll)");
+  expect(r.stdout).toContain("treat its exit as the");
+  expect(r.stdout).toContain("--any wakes on the first of several sessions to settle");
+  expect(r.stdout).toContain("--json prints what you woke up to find out");
+  expect(r.stdout).toContain("--state limited");
 });
 
 test("agendo list shows the running session with readiness", async ({ mock }) => {
@@ -515,6 +524,265 @@ test("agendo wait rejects a malformed --timeout and combined --state/--not", asy
   const both = agendo(mock.env, "wait", SHORT_ID, "--state", "ready", "--not", "dialog");
   expect(both.status).not.toBe(0);
   expect(both.stderr).toContain("only one of");
+});
+
+// ── wait as a notification primitive ─────────────────────────────────────────
+// `wait` exists so an orchestrator can be TOLD a background session changed
+// instead of re-polling `status` on a guessed cadence. These pin the wake
+// contract: the transitions that must fire, the ones that must NOT, and the
+// payload a caller reads to learn what it woke up to.
+
+/** Parse the `--json` wake payload off stdout. */
+function wakePayload(stdout: string) {
+  return JSON.parse(stdout) as {
+    woke: string;
+    condition: string;
+    mode: string;
+    elapsedMs: number;
+    sessions: { shortId: string; state: string; from: string; changed: boolean; satisfied: boolean; title: string }[];
+  };
+}
+
+test("agendo wait --json reports the busy → ready transition it woke on", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "200ms", "--timeout", "20s");
+  await sleep(1200);
+  await mock.setTmuxState(tmuxState); // → ready
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.mode).toBe("all");
+  expect(out.sessions).toHaveLength(1);
+  const [s] = out.sessions;
+  // The caller learns not just the destination but the transition — which is the
+  // whole reason it woke up, and what a bare `<id>\t<state>` line can't say.
+  expect(s.shortId).toBe(SHORT_ID);
+  expect(s.from).toBe("busy");
+  expect(s.state).toBe("ready");
+  expect(s.changed).toBe(true);
+  expect(s.satisfied).toBe(true);
+  expect(s.title).toBe("Implement login form");
+});
+
+test("agendo wait does not fire while nothing changes", async ({ mock }) => {
+  // Pane sits ready the whole time and we wait for `busy`, which never happens.
+  // A wake here would be spurious — the caller would burn a turn on a non-event.
+  const r = agendo(mock.env, "wait", SHORT_ID, "--state", "busy", "--json", "--interval", "150ms", "--timeout", "900ms");
+  expect(r.status).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("timeout");
+  const [s] = out.sessions;
+  expect(s.state).toBe("ready");
+  expect(s.changed).toBe(false);
+  expect(s.satisfied).toBe(false);
+});
+
+test("agendo wait accepts --state limited", async ({ mock }) => {
+  // `limited` is a real readiness that the accepted-values list used to omit,
+  // making "wake me when it hits its usage cap" unreachable.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const r = agendo(mock.env, "wait", SHORT_ID, "--state", "limited", "--interval", "150ms", "--timeout", "5s");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("limited");
+});
+
+test("agendo wait wakes when a session's window closes, instead of timing out", async ({ mock }) => {
+  // The commonest orchestrator wait: "tell me when the background session is
+  // DONE". A finished agent closes its window, leaving no pane to capture — which
+  // used to read `unknown` forever and report a spurious timeout.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "200ms", "--timeout", "20s");
+  await sleep(1200);
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.sessions[0].state).toBe("exited");
+  expect(out.sessions[0].changed).toBe(true);
+});
+
+test("agendo wait needs two consecutive missed sightings before declaring a session exited", async ({ mock }) => {
+  // Every tmux read maps a non-zero exit to an empty result, so ONE unlucky tick
+  // (server busy, fork failure, restart) empties the live set for ALL targets. If
+  // that alone meant `exited`, the default predicate would be satisfied and `wait`
+  // would exit 0 reporting "done" for a session still mid-turn — and because
+  // `exited` is terminal, nothing later could correct it. So an absence must
+  // repeat before it's believed.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "800ms", "--timeout", "30s");
+  await sleep(400); // first poll has already seen it alive and busy
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.sessions[0].state).toBe("exited");
+  // Two polls at 800ms apart had to miss it. A single-miss verdict would have
+  // woken around the first one, well under this bound.
+  expect(out.elapsedMs).toBeGreaterThan(1_400);
+});
+
+test("agendo wait gives up early on a --state an exited session can never reach", async ({ mock }) => {
+  // Nothing can change after the window is gone, so burning the full timeout is
+  // pointless — wake now with a reason the caller can act on.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--state", "ready", "--json", "--interval", "200ms", "--timeout", "60s");
+  await sleep(1200);
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("unsatisfiable");
+  // Well inside the 60s timeout: it short-circuited rather than waiting it out.
+  expect(out.elapsedMs).toBeLessThan(30_000);
+});
+
+test("agendo wait --any wakes on the first session to settle; the default waits for all", async ({ mock }) => {
+  // Two live sessions: login is ready, crash is stuck busy. An orchestrator
+  // watching both must not have the stuck one mask the settled one.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { ...tmuxState.captures, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  const any = agendo(mock.env, "wait", "--all", "--any", "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(any.status).toBe(0);
+  const out = wakePayload(any.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.mode).toBe("any");
+  // Both are reported, so the caller can see WHICH one woke it.
+  expect(out.sessions).toHaveLength(2);
+  expect(out.sessions.filter((s) => s.satisfied).map((s) => s.shortId)).toEqual([SHORT_ID]);
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("busy");
+
+  // Without --any the stuck session holds the wait open until the timeout.
+  const all = agendo(mock.env, "wait", "--all", "--interval", "150ms", "--timeout", "900ms");
+  expect(all.status).not.toBe(0);
+  expect(all.stderr).toContain("timed out");
+});
+
+test("agendo wait gives up when ONE of several targets exits under a state it can't reach", async ({ mock }) => {
+  // Waiting for ALL targets to hit `ready`: once one of them exits it can never
+  // get there, so the predicate is unreachable even though another session is
+  // still working. Polling on to the timeout here would reintroduce exactly the
+  // stall the `exited` state exists to remove — and note this can't be caught by
+  // the DEFAULT predicate, which `exited` satisfies.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: BUSY_PANE, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  const { done } = agendoAsync(
+    mock.env, "wait", "--all", "--state", "ready", "--json", "--interval", "200ms", "--timeout", "60s",
+  );
+  await sleep(1200);
+  // Drop ONLY the login session's window; the crash session keeps running busy.
+  await mock.setTmuxState({
+    ...twoLive,
+    sessions: [CRASH_TARGET],
+    panes: [{ session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false }],
+    captures: { [CRASH_TARGET]: BUSY_PANE },
+  });
+
+  const r = await done;
+  expect(r.code).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("unsatisfiable");
+  expect(out.elapsedMs).toBeLessThan(30_000); // nowhere near the 60s timeout
+  expect(out.sessions.find((s) => s.shortId === SHORT_ID)?.state).toBe("exited");
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("busy");
+  // The give-up line names only the dead session, not every still-pending one.
+  const gaveUp = r.stderr.split("\n").find((l) => l.includes("gave up"));
+  expect(gaveUp).toContain(SHORT_ID);
+  expect(gaveUp).not.toContain(CRASH_SHORT_ID);
+});
+
+test("agendo wait --any keeps waiting when one target exits but another can still settle", async ({ mock }) => {
+  // The mirror of the case above: --any only needs ONE target, so a dead one is
+  // not a reason to give up while a live one could still reach the state.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: BUSY_PANE, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  const { done } = agendoAsync(
+    mock.env, "wait", "--all", "--any", "--state", "ready", "--json", "--interval", "200ms", "--timeout", "25s",
+  );
+  // Login exits (can never be `ready`) while crash is still busy — must NOT wake.
+  await sleep(1000);
+  const loginGone = {
+    ...twoLive,
+    sessions: [CRASH_TARGET],
+    panes: [{ session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false }],
+    captures: { [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(loginGone);
+  // …then the survivor settles, which is the wake it was waiting for.
+  await sleep(1000);
+  await mock.setTmuxState({ ...loginGone, captures: { [CRASH_TARGET]: tmuxState.captures[RUNNING_TARGET] } });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("ready");
+  expect(out.sessions.find((s) => s.shortId === SHORT_ID)?.state).toBe("exited");
+});
+
+test("agendo wait prints nothing on stdout when it fails (non-JSON)", async ({ mock }) => {
+  // The pre-existing contract: `<id>\t<state>` lines mean "it settled". Emitting
+  // them on a timeout too would make scripts that test for non-empty stdout read
+  // a failed wait as success.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const timedOut = agendo(mock.env, "wait", SHORT_ID, "--interval", "150ms", "--timeout", "600ms");
+  expect(timedOut.status).not.toBe(0);
+  expect(timedOut.stdout.trim()).toBe("");
+  expect(timedOut.stderr).toContain("timed out");
+
+  // …while a successful wait still prints them.
+  await mock.setTmuxState(tmuxState); // pane back to ready
+  const settled = agendo(mock.env, "wait", SHORT_ID, "--interval", "150ms", "--timeout", "5s");
+  expect(settled.status).toBe(0);
+  expect(settled.stdout).toContain(`${SHORT_ID}\tready`);
+});
+
+test("agendo wait --repo only watches sessions in that repo", async ({ mock }) => {
+  // The login session's worktree resolves back to the `appweb` repo root, so a
+  // watcher scoped to a different repo must not fire for it.
+  const other = agendo(mock.env, "wait", "--repo", "applib", "--interval", "150ms", "--timeout", "3s");
+  expect(other.status).not.toBe(0);
+  expect(other.stderr).toContain("no running sessions matched");
+
+  const mine = agendo(mock.env, "wait", "--repo", "appweb", "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(mine.status).toBe(0);
+  const out = wakePayload(mine.stdout);
+  expect(out.sessions.map((s) => s.shortId)).toEqual([SHORT_ID]);
 });
 
 test("agendo resume navigates to a session already running under a cl-wi- window (no duplicate)", async ({ mock }) => {
