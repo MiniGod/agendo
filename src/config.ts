@@ -10,6 +10,7 @@
 import { homedir } from "os";
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { parseJsonFileOr } from "./errors.ts";
 import type { ProviderName } from "./types.ts";
 
 export interface Config {
@@ -62,15 +63,23 @@ function firstExisting(paths: string[]): string {
   return paths[0];
 }
 
+// A malformed config/state file falls back to defaults and records a warning
+// naming the path (surfaced by the UI) rather than throwing: both files are
+// preferences whose every value is re-derivable, so bricking the launcher over
+// one — with a message that doesn't even say which file — is strictly worse.
 export function loadConfig(): Config {
   const path = firstExisting([CONFIG_PATH, PREV_CONFIG_PATH, OLD_CONFIG_PATH]);
   if (!existsSync(path)) return DEFAULTS;
+  let text: string;
   try {
-    const override = JSON.parse(readFileSync(path, "utf-8"));
-    return { ...DEFAULTS, ...override };
+    text = readFileSync(path, "utf-8");
   } catch {
-    return DEFAULTS;
+    return DEFAULTS; // unreadable (permissions, races) — nothing to diagnose
   }
+  const override = parseJsonFileOr<Partial<Config>>(text, path, {});
+  // `JSON.parse('"oops"')`/`42` succeed but aren't records; spreading a string
+  // would inject its character indices as config keys (same guard as loadState).
+  return { ...DEFAULTS, ...(override && typeof override === "object" ? override : {}) };
 }
 
 // ── Persisted UI state ────────────────────────────────────────────────────────
@@ -97,11 +106,16 @@ export interface LauncherState {
 export function loadState(): LauncherState {
   const path = firstExisting([STATE_PATH, PREV_STATE_PATH, OLD_STATE_PATH]);
   if (!existsSync(path)) return {};
+  let text: string;
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as LauncherState;
+    text = readFileSync(path, "utf-8");
   } catch {
     return {};
   }
+  const state = parseJsonFileOr<LauncherState>(text, path, {});
+  // `JSON.parse("42")`/`"null"` succeed but aren't records; a non-object state
+  // would break every `state.x` read below it.
+  return state && typeof state === "object" ? state : {};
 }
 
 export function saveState(state: LauncherState): void {
