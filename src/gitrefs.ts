@@ -28,7 +28,25 @@
 //     never pushed. A branch tracking another LOCAL branch (`remote = .`) has
 //     nothing remote to compare against, so it takes that same fallback.
 import { readFileSync, statSync } from "fs";
-import { dirname, isAbsolute, join, resolve } from "path";
+import { homedir } from "os";
+import { dirname, isAbsolute, join, resolve, sep } from "path";
+
+/**
+ * Per-repo file caches, keyed by `commonDir`.
+ *
+ * `agendo list --all --json` calls `branchSync` once per indexed session, and
+ * sessions cluster heavily in a handful of repos — every worktree of one repo
+ * shares its `commonDir`, so without this the same `packed-refs` (multi-MB in a
+ * long-lived clone) and `config` are read and re-parsed once per session. Per
+ * call the cost is the "handful of small reads" this module advertises; per
+ * invocation it was hundreds of them. `repos.ts`'s `rootCache` is the same idea.
+ *
+ * Lifetime is the process, which is sound precisely because the only callers are
+ * one-shot CLI commands — the long-running TUI must not call `branchSync` at
+ * all (see the header), so there is no window in which these can go stale.
+ */
+const packedCache = new Map<string, Map<string, string>>();
+const configCache = new Map<string, string | null>();
 
 /** Local-vs-tracked state of one checkout, derived from its ref files. */
 export interface BranchSync {
@@ -98,6 +116,15 @@ function gitDirs(cwd: string): GitDirs | null {
   let dotGit: string | null = null;
   let st: ReturnType<typeof statSync> | null = null;
   while (true) {
+    // Stop before $HOME, exactly as `bootstrapRepoRoot` (repos.ts) does and for
+    // the same reason: on a machine whose $HOME is itself a checkout — chezmoi,
+    // yadm, a bare dotfiles repo, all common — an unbounded walk-up resolves ANY
+    // cwd outside a repo to $HOME. `agendo status` would then print a `work:`
+    // line about the user's DOTFILES, and `--json` would carry `unpushed: true`
+    // for it: a confident wrong "unfinished work here", which is the one failure
+    // this module exists to avoid. A session whose cwd IS that checkout is a
+    // different matter — nothing was inferred there, so it's allowed through.
+    if (dir !== cwd && atOrAboveHome(dir)) return null;
     const candidate = join(dir, ".git");
     try {
       st = statSync(candidate);
@@ -128,6 +155,13 @@ function gitDirs(cwd: string): GitDirs | null {
   return { gitDir, commonDir };
 }
 
+/** Whether `dir` is $HOME itself or an ancestor of it (i.e. we walked too far). */
+function atOrAboveHome(dir: string): boolean {
+  const home = homedir();
+  if (!home) return false;
+  return dir === home || home.startsWith(dir.endsWith(sep) ? dir : dir + sep);
+}
+
 function readText(path: string): string | null {
   try {
     return readFileSync(path, "utf-8");
@@ -148,15 +182,18 @@ function looseRef(dir: string, ref: string): string | null {
  * peeled tag targets and are skipped.
  */
 function packedRef(commonDir: string, ref: string): string | null {
-  const raw = readText(join(commonDir, "packed-refs"));
-  if (!raw) return null;
-  for (const line of raw.split("\n")) {
-    if (!line || line.startsWith("#") || line.startsWith("^")) continue;
-    const sp = line.indexOf(" ");
-    if (sp < 0) continue;
-    if (line.slice(sp + 1).trim() === ref) return line.slice(0, sp).trim();
+  let packed = packedCache.get(commonDir);
+  if (!packed) {
+    packed = new Map<string, string>();
+    for (const line of readText(join(commonDir, "packed-refs"))?.split("\n") ?? []) {
+      if (!line || line.startsWith("#") || line.startsWith("^")) continue;
+      const sp = line.indexOf(" ");
+      if (sp < 0) continue;
+      packed.set(line.slice(sp + 1).trim(), line.slice(0, sp).trim());
+    }
+    packedCache.set(commonDir, packed);
   }
-  return null;
+  return packed.get(ref) ?? null;
 }
 
 /** Resolve a ref to a sha, following `ref: …` redirects (bounded). */
@@ -181,7 +218,11 @@ function resolveRef(dirs: GitDirs, ref: string, depth = 0): string | null {
  * fully pushed. That is precisely the false signal an orchestrator would act on.
  */
 function configuredUpstream(commonDir: string, branch: string): string | null {
-  const raw = readText(join(commonDir, "config"));
+  let raw = configCache.get(commonDir);
+  if (raw === undefined) {
+    raw = readText(join(commonDir, "config"));
+    configCache.set(commonDir, raw);
+  }
   if (!raw) return null;
   let inSection = false;
   let remote: string | undefined;

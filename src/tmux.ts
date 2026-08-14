@@ -238,13 +238,31 @@ export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | 
 
 /**
  * The readiness states that mean the agent is actively working right now.
- * Everything else is settled in some way — idle, waiting on a human, blocked at
- * a usage limit, or unreadable. Canonical here (next to the type) because two
- * unrelated features key off the same distinction: `agendo wait`'s default
- * "still busy" predicate, and the stalled-session qualifier (see src/idle.ts),
- * which must never flag a session that is simply mid-turn.
+ * Canonical here (next to the type) because two unrelated features key off the
+ * same distinction: `agendo wait`'s default "still busy" predicate (see
+ * wait.ts) and the stalled-session qualifier (see idle.ts), neither of which may
+ * ever treat a session that is simply mid-turn as finished.
  */
 export const WORKING_READINESS: ReadonlySet<Readiness> = new Set<Readiness>(["busy", "compacting"]);
+
+/**
+ * Whether a state is *known and settled*: not working, and not `unknown`.
+ *
+ * The `unknown` exclusion is the load-bearing half. A blank, not-yet-drawn, or
+ * closed pane classifies as `unknown`, and treating that as settled reports a
+ * false success — `agendo wait` would return "done" for a session it simply
+ * failed to read. The stalled qualifier inherits the same rule for the same
+ * reason: absence of evidence that a session is working is not evidence that it
+ * has stopped, so it earns no verdict either way.
+ *
+ * Kept as one predicate with two callers rather than two lookalike rules that
+ * can drift. Note `wait` also admits its synthetic `exited` state through this
+ * (it is neither working nor `unknown`), which is correct — a session whose
+ * window is gone is as settled as it will ever get.
+ */
+export function isSettledReadiness(r: Readiness): boolean {
+  return !WORKING_READINESS.has(r) && r !== "unknown";
+}
 
 /**
  * Real (user-typed) text on the claude input line, ignoring the `❯` marker and
@@ -792,6 +810,31 @@ export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name:
     out.push({ name, cwd });
   }
   return out;
+}
+
+/**
+ * Whether `name` is a live, still-unopened restore PLACEHOLDER window in
+ * `session` — an idle bash awaiting a keypress, not a running agent.
+ *
+ * Existence and the `@cl_placeholder` flag come from ONE query scoped to that
+ * host session, deliberately: the same canonical window name can exist in two
+ * host sessions (one session tabbed in two path-scoped launchers), so reading the
+ * flag from a global window list could authorize an action against a window whose
+ * own flag has since been cleared — i.e. one the user is now working in. A dead
+ * window (a `remain-on-exit` corpse) is never a placeholder.
+ */
+export function isPlaceholderWindow(session: string, name: string): boolean {
+  for (const line of tmuxLines([
+    "list-windows",
+    "-t",
+    exactTarget(session),
+    "-F",
+    `#{window_name}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_dead}`,
+  ])) {
+    const [wname, placeholder, dead] = line.split("\t");
+    if (wname === name) return placeholder === "1" && dead !== "1";
+  }
+  return false;
 }
 
 /** `session:window_index` of the first window named `name`, or null. */

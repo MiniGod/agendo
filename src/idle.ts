@@ -25,7 +25,7 @@
 // point where it's plausibly still the same working block, while still catching
 // a session that died mid-afternoon on the same day.
 import { DEFAULT_STALLED_AFTER_MINUTES, loadConfig } from "./config.ts";
-import { WORKING_READINESS, type Readiness } from "./tmux.ts";
+import { isSettledReadiness, type Readiness } from "./tmux.ts";
 
 /**
  * The effective stall threshold in ms. Precedence: an explicit
@@ -62,8 +62,8 @@ export interface StallInput {
 }
 
 /**
- * Whether a session is stalled: it is still LIVE, its pane says it is not
- * mid-turn, and nothing has happened for at least the threshold.
+ * Whether a session is stalled: it is still LIVE, its pane reads as *known and
+ * settled*, and nothing has happened for at least the threshold.
  *
  * Every condition is there to keep the flag quiet unless it means something:
  *
@@ -71,16 +71,22 @@ export interface StallInput {
  *    running — flagging those would make every session on disk permanently
  *    "stalled" as it ages. For them, `running: false` plus the idle age (and
  *    `git.unpushed`, see src/gitrefs.ts) already tells the story.
- *  • A busy/compacting session is never stalled however old its transcript
- *    mtime looks — it is demonstrably alive and working.
- *  • An unreadable pane (`readiness === null` while nominally running — a
- *    restored-but-unopened placeholder tab, or a window we couldn't capture)
- *    is not stalled either: we cannot see that it ISN'T working, and a dormant
+ *  • The settled test is `isSettledReadiness`, the SAME predicate `agendo wait`
+ *    uses for "has this session stopped working" (tmux.ts) — not a second
+ *    lookalike rule. So a busy/compacting session is never stalled however old
+ *    its transcript looks, and neither is one reading `unknown`: a blank or
+ *    not-yet-drawn pane is absence of evidence, and `wait` refuses to call that
+ *    "done" for exactly the same reason.
+ *  • An unreadable pane (`readiness === null` while nominally running — a live
+ *    window we couldn't capture) is the same case one step earlier: no evidence,
+ *    so no verdict. Restored-but-unopened placeholder tabs never even reach this
+ *    branch: `reconcileLive` drops them from the live set, so they arrive here as
+ *    `running: false` and stop at the clause above — which is right, a dormant
  *    placeholder has no agent in it to stall in the first place.
  */
 export function isStalled(o: StallInput, thresholdMs: number): boolean {
   if (!o.running || o.readiness === null) return false;
-  if (WORKING_READINESS.has(o.readiness)) return false;
+  if (!isSettledReadiness(o.readiness)) return false;
   return o.idleSeconds * 1000 >= thresholdMs;
 }
 
@@ -93,10 +99,12 @@ export function shortAge(seconds: number): string {
 }
 
 /**
- * A configured duration, printed WITHOUT losing precision — unlike `shortAge`,
- * which is single-unit and would render a 90-minute threshold as "1h" and a
- * sub-second one as "0s". Used wherever we quote the threshold back to the user,
- * so what they configured is what they see: `1h30m`, `4h`, `1m`, `500ms`.
+ * A configured duration, printed across as many units as it takes — unlike
+ * `shortAge`, which is single-unit and would render a 90-minute threshold as
+ * "1h" and a sub-second one as "0s". Used wherever we quote the threshold back
+ * to the user, so what they configured is what they see: `1h30m`, `4h`, `1m`,
+ * `500ms`. Above a second it rounds to whole seconds — `2500ms` quotes back as
+ * `3s` — since that is the resolution a stall threshold is meaningful at.
  */
 export function durationLabel(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
