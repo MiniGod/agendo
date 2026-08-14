@@ -67,15 +67,20 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`/`open`/`wait`. So an agent can spin off _new_ sessions —
-each in its own fresh worktree — for separate pieces of work that deserve their own PR,
-then monitor and steer them through the same commands. One orchestrator session can fan a
-large task out across many worktrees and coordinate them, instead of hand-rolling
-tmux and `git worktree`. The sessions it starts inherit the same ability.
+launch`/`list`/`status`/`send`/`open`/`wait`/`close`. So an agent can spin off _new_
+sessions — each in its own fresh worktree — for separate pieces of work that deserve
+their own PR, then monitor, steer and finally close them through the same commands. One
+orchestrator session can fan a large task out across many worktrees and coordinate them,
+instead of hand-rolling tmux and `git worktree`. The sessions it starts inherit the same
+ability.
 
 To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
-a watched session stops working — settles to a non-busy state, or its window closes —
-so it can be run in the background with its **exit** as the notification:
+a watched session settles — a non-busy state, or its window closing — so it can be run
+in the background with its **exit** as the notification. A session parked at its usage
+cap is the one thing that stops without being _done_: the wait wakes on it promptly,
+but exits non-zero with `woke: "blocked"` and the session's `limitResetAt`, so a capped
+session is never mistaken for finished work (an explicit `--state`/`--not` is never
+pre-empted that way, so you can still wait _through_ a cap):
 
 ```sh
 agendo wait --repo myapp --any --json --timeout 30m
@@ -91,6 +96,11 @@ re-running `status` on a guessed cadence — either fires too often or finds out
 dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads **ready**),
 so it won't wake that wait. When a wake does find a session parked there, `--json` says
 so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
+
+When a session is finished with, `agendo close <id>` ends its window and only that — the
+worktree, branch and commits stay on disk, and `agendo resume <id>` brings it back — so
+no one has to reach for a raw `tmux kill-window`. A `wait` on a session closed underneath
+it doesn't hang: the window vanishing settles that session as `exited`.
 
 ### Orchestrator mode, one keypress away
 
