@@ -9,7 +9,8 @@ import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS
 import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
-import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
+import { createWorktree, checkoutWorktree, defaultBranch, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
+import { ORCHESTRATOR_SLUG, isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
 import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../errors.ts";
 import { repoRootForCwd, bootstrapRepoRoot, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
@@ -402,6 +403,13 @@ interface FreshTarget {
   defaultBranch: string;
   /** The PR's source branch to check out (kind "pr"). */
   prBranch?: string;
+  /**
+   * Launch this session in orchestrator mode — it coordinates and delegates
+   * instead of implementing (see src/orchestrator.ts). Only set on "free"
+   * targets, and it forces Claude (Copilot can't carry the instructions), so the
+   * flow skips the agent picker.
+   */
+  orchestrator?: boolean;
 }
 function wiTarget(item: WorkItem): FreshTarget {
   return {
@@ -424,6 +432,20 @@ function prTarget(pr: PRWithSessions): FreshTarget {
 }
 function freeTarget(): FreshTarget {
   return { kind: "free", tmuxName: "", defaultBranch: "", title: "New session" };
+}
+/**
+ * A free target that runs in orchestrator mode. `defaultBranch` prefills the
+ * worktree/branch prompt with the launcher's own orchestrator slug — the
+ * worktree is a coordination desk, so it's named after the role, not the work.
+ */
+function orchestratorTarget(): FreshTarget {
+  return {
+    kind: "free",
+    orchestrator: true,
+    tmuxName: "",
+    defaultBranch: ORCHESTRATOR_SLUG,
+    title: "Orchestrator session",
+  };
 }
 
 // What the "open in browser" (o) dialog can open for a given row. A row may
@@ -1068,7 +1090,11 @@ type Mode =
   | { kind: "clone"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string[] }
   | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
-  | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
+  // `seed` is the value the field was PREFILLED with (orchestrator flow only).
+  // Kept so submit can tell an untouched default from a name the user chose, and
+  // re-derive a free one — the prefill was computed when the screen opened, which
+  // may be minutes before enter is pressed.
+  | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean; seed?: string }
   // "move this session to another Claude profile". `choices` is every discovered
   // profile with the session's own flagged (see profileChoices) — shown for
   // orientation but skipped by the cursor, since moving somewhere you already are
@@ -1444,9 +1470,13 @@ export default function App({
     // Always offer the scoped folder itself, ranked FIRST — above child repos
     // that already have sessions. Scoping to a folder is a statement that the
     // folder is what you're working on, so a new session there is the "supervise
-    // this whole scope" entry point: `agendo ~/git` → new session in ~/git is an
-    // orchestrator watching the agendo sessions running in ~/git/*. That intent
-    // outranks any individual child repo, so it takes cursor 0.
+    // this whole scope" entry point: `agendo ~/git` → a new session in ~/git
+    // supervises the agendo sessions running in ~/git/*. That intent outranks any
+    // individual child repo, so it takes cursor 0.
+    // "Supervise" here is informal, and is NOT the formal orchestrator mode (the
+    // `O` key / `--orchestrator`): that one integrates by merging branches, so it
+    // needs a real checkout and is routed to `worktreeRepos` instead — see
+    // `reposForTarget`, which excludes it from this ranking on purpose.
     // The folder needn't be a git checkout — a bare parent like ~/git is a
     // legitimate place to run a session via the run-in-place path (see the
     // wtchoice default, which steers non-repos there).
@@ -1459,9 +1489,11 @@ export default function App({
   // ("new") and PR flows structurally cannot run in place — `pr` goes straight
   // to startCheckout, `new` launches with `worktree: true` — so a scoped folder
   // that isn't a git checkout can only ever produce "fatal: not a git
-  // repository" for them. The free flow has no such constraint (running in place
-  // IS the orchestrator entry point), which is why it keeps the scoped folder
-  // first unconditionally and only these two demote it.
+  // repository" for them. A plain free session has no such constraint (running in
+  // place IS the supervise-this-scope entry point), which is why it keeps the
+  // scoped folder first unconditionally. An ORCHESTRATOR target is free-kind but
+  // uses this list too: it squash-merges into a main branch, so a non-checkout is
+  // just as useless to it as to a work item (see `reposForTarget`).
   // Demoted below every hostable repo, not dropped: still selectable for someone
   // who knows they're about to `git init`, just never the enter-key default.
   const worktreeRepos = useMemo<RepoInfo[]>(() => {
@@ -1487,14 +1519,21 @@ export default function App({
     // Nothing to demote (or nowhere to demote it to) — keep the array identity.
     return rest.length === 0 || hostable.length === 0 ? scopedRepos : [...hostable, ...rest];
   }, [scoped, scopedRepos]);
-  /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
-  const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
-    kind === "free" ? scopedRepos : worktreeRepos;
+  /**
+   * Repo choices for a fresh-session target — see `worktreeRepos` for why they
+   * differ by kind. An orchestrator is a `free` target but needs the worktree
+   * ranking anyway: `scopedRepos` deliberately puts a NON-git scoped folder
+   * first, and an orchestrator must land in a real checkout — that's where it
+   * does its integration merges, and where a worktree could be cut for it.
+   */
+  const reposForTarget = (target: FreshTarget): RepoInfo[] =>
+    target.kind === "free" && !target.orchestrator ? scopedRepos : worktreeRepos;
   // Whether ANY offered repo can host a worktree — what the work-item / PR
   // picker warns about when none can. Memoized on the list it asks about
-  // (`worktreeRepos` is exactly `reposForTarget`'s non-free answer): every
-  // `isGitCheckout` is an `existsSync`, and the picker re-renders on each cursor
-  // keystroke, so asking per render would stat the whole list per keypress.
+  // (`worktreeRepos` is exactly what `reposForTarget` answers for every target
+  // except a plain free session): every `isGitCheckout` is an `existsSync`, and
+  // the picker re-renders on each cursor keystroke, so asking per render would
+  // stat the whole list per keypress.
   const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
 
   // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
@@ -1911,18 +1950,19 @@ export default function App({
     setMode({ kind: "agent", target, cursor: 0 });
   };
 
-  const enterNewSession = () => {
-    setNotice(null);
-    setCloneNote(null);
-    cloneNoteRef.current = null;
-    // `scopedRepos` is never empty once the model is loaded: scoped keeps the
-    // scoped folder, unscoped falls back to the launcher's cwd. So the only real
-    // way to land here is the model not being loaded yet — the length guard below
-    // is belt-and-braces, kept so a future change to that list can't silently
-    // resurrect the empty picker instead of saying something.
+  // Both free-session entry points (new session, orchestrator) need repos to pick
+  // from; without any, the flow has nowhere to run, so say why instead of opening
+  // an empty picker.
+  //
+  // `scopedRepos` is never empty once the model is loaded: scoped keeps the
+  // scoped folder, unscoped falls back to the launcher's cwd. So the only real
+  // way to land here is the model not being loaded yet — the length guard below
+  // is belt-and-braces, kept so a future change to that list can't silently
+  // resurrect the empty picker instead of saying something.
+  const haveRepos = () => {
     if (!model) {
       setNotice("Still loading — try again in a moment.");
-      return;
+      return false;
     }
     if (scopedRepos.length === 0) {
       // Leads with `agendo <dir>` on purpose: a plain "cd there and rerun" is
@@ -1932,9 +1972,34 @@ export default function App({
       // and nothing changes. A path arg resolves to its own host session, so it
       // always takes effect — and quitting first is the other way out.
       setNotice("No repo to start in — run `agendo <dir>` pointing at a git checkout (or quit with q, cd there, rerun).");
-      return;
+      return false;
     }
+    return true;
+  };
+
+  // Entering either free-session flow clears a leftover clone note: it reports the
+  // outcome of the LAST clone, and carrying it into a fresh pass through the
+  // picker would caption an unrelated repo choice.
+  const enterNewSession = () => {
+    setNotice(null);
+    setCloneNote(null);
+    cloneNoteRef.current = null;
+    if (!haveRepos()) return;
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
+  };
+
+  /**
+   * Open the orchestrator flow: the same repo → worktree → name steps as a plain
+   * new session, but the agent picker is skipped (orchestrator mode is Claude-only,
+   * so there's nothing to choose) and the session launches with the orchestrator
+   * instructions injected.
+   */
+  const enterOrchestrator = () => {
+    setNotice(null);
+    setCloneNote(null);
+    cloneNoteRef.current = null;
+    if (!haveRepos()) return;
+    setMode({ kind: "repo", target: orchestratorTarget(), agent: "claude", cursor: 0 });
   };
 
   // After the agent is chosen, resolve where to run: PRs check out their branch
@@ -1969,15 +2034,39 @@ export default function App({
   };
 
   // Work item / free session: create a branch+worktree or launch in main repo directly.
-  const startFresh = (target: FreshTarget, repo: RepoInfo, name: string, worktree: boolean, agent: AgentSource) => {
+  //
+  // `seed` (orchestrator flow only) is what the name field was prefilled with. If
+  // the user never edited it, we re-derive a free name HERE rather than trusting
+  // the one computed when the screen opened — another orchestrator (a CLI launch,
+  // or a second launcher) may have taken it in the meantime, and `createWorktree`
+  // treats an existing path as success, so the stale name would silently drop this
+  // session into that one's checkout. A name the user typed is left alone.
+  const startFresh = (
+    target: FreshTarget,
+    repo: RepoInfo,
+    name: string,
+    worktree: boolean,
+    agent: AgentSource,
+    seed?: string,
+  ) => {
     // A manual "new session" assigns its own session id (so it gets a canonical,
     // attachable `cl-new-<id>` window); work-item / PR launches keep their
     // item-named target. Both run the chosen agent in the resolved directory.
     const launch = (cwd: string) =>
-      open(target.kind === "free" ? launchNewSession(cwd, agent) : launchFresh(cwd, target.tmuxName, agent));
+      open(
+        target.kind === "free"
+          ? launchNewSession(cwd, agent, target.orchestrator)
+          : launchFresh(cwd, target.tmuxName, agent),
+      );
     if (worktree) {
-      setBusy(`Creating worktree ${name.trim()} in ${repo.name}…`);
-      const res = createWorktree(repo.root, name.trim());
+      // Untouched orchestrator default → re-derive from the base slug at the last
+      // possible moment (see the note above). Anything the user typed is used verbatim.
+      const branch =
+        seed && name.trim() === seed
+          ? freeWorktreeBranch(repo.root, target.defaultBranch)
+          : name.trim();
+      setBusy(`Creating worktree ${branch} in ${repo.name}…`);
+      const res = createWorktree(repo.root, branch);
       if (res.error) {
         setBusy(null);
         setMode({ kind: "list" });
@@ -2025,16 +2114,25 @@ export default function App({
   // already on disk; there is no second session-creation flow.
   const chooseRepo = (target: FreshTarget, repo: RepoInfo, agent: AgentSource) => {
     if (target.kind === "pr") return startCheckout(target, repo, agent);
-    // Default to "New git worktree" (cursor 0) only where one can exist: in a
-    // non-repo folder (`agendo ~/git` → the scoped parent itself) `git worktree
-    // add` can only ever print "fatal: not a git repository", so defaulting to
-    // it makes the enter-enter-enter happy path dead-end. Point those at "Main
-    // repo checkout" (cursor 1) instead; both options stay on screen.
+    // Default to "New git worktree" (cursor 0) only where one can exist and makes
+    // sense. Two cases point at "Main repo checkout" (cursor 1) instead; both
+    // options stay on screen either way:
+    //  - Orchestrators: that's where the main branch lives, and merging is their
+    //    whole job (see the wtchoice hint).
+    //  - A non-repo folder (`agendo ~/git` → the scoped parent itself), where
+    //    `git worktree add` can only ever print "fatal: not a git repository",
+    //    so defaulting to it makes the enter-enter-enter happy path dead-end.
     // INTERIM: the non-repo case really wants its own pair of options (run
     // here / clone-or-init something), not a worktree-vs-checkout question —
     // this just stops the default from being the one that cannot work.
     if (target.kind === "free")
-      return setMode({ kind: "wtchoice", target, agent, repo, cursor: isGitCheckout(repo.root) ? 0 : 1 });
+      return setMode({
+        kind: "wtchoice",
+        target,
+        agent,
+        repo,
+        cursor: target.orchestrator || !isGitCheckout(repo.root) ? 1 : 0,
+      });
     return setMode({
       kind: "branch",
       target,
@@ -2130,6 +2228,14 @@ export default function App({
   // configDir override is needed for resume.
   const continueInOtherAgent = async (s: AgentSession) => {
     const dest = otherAgent(s.source);
+    // Copilot has no `--append-system-prompt` equivalent, so converting an
+    // orchestrator to it would produce a session with none of the coordinate-
+    // don't-implement instructions — an "orchestrator" that just starts editing.
+    // Refuse, the way `launch --orchestrator --copilot` does on the CLI.
+    if (dest === "copilot" && isOrchestratorSession(s.id)) {
+      setNotice("That's an orchestrator session — Copilot can't carry the orchestrator instructions, so it won't convert.");
+      return;
+    }
     const direction = s.source === "claude" ? "claude-to-copilot" : "copilot-to-claude";
     setNotice(null);
     setBusy(`Converting session to ${dest} (npx converter)…`);
@@ -2361,7 +2467,7 @@ export default function App({
 
     // ── repo picker ──
     if (mode.kind === "repo") {
-      const repos = reposForTarget(mode.target.kind);
+      const repos = reposForTarget(mode.target);
       const len = repos.length || 1;
       const openClone = () =>
         setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
@@ -2380,7 +2486,20 @@ export default function App({
           const next = p.cursor + d;
           return { ...p, cursor: next < 0 || next >= len ? CLONE_ROW : next };
         });
-      if (key.escape) return setMode({ kind: "agent", target: mode.target, cursor: 0 });
+      // The orchestrator flow entered here directly (no agent step to go back to),
+      // which makes THIS the last exit out of the fresh flow for it — so it also
+      // takes on the agent step's job of dropping an unconsumed clone note. Without
+      // that, escaping out after a clone and then resuming some existing session
+      // would prefix that launch with "✓ cloned …", crediting it to a clone it had
+      // nothing to do with (same failure the agent-mode escape guards against).
+      if (key.escape) {
+        if (mode.target.orchestrator) {
+          setCloneNote(null);
+          cloneNoteRef.current = null;
+          return setMode({ kind: "list" });
+        }
+        return setMode({ kind: "agent", target: mode.target, cursor: 0 });
+      }
       if (key.upArrow || input === "k") return move(-1);
       if (key.downArrow || input === "j") return move(1);
       if (input === "c" && canClone) return openClone();
@@ -2456,14 +2575,32 @@ export default function App({
       if (key.downArrow || input === "j")
         return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor + 1) % 2 } : p));
       if (key.return) {
+        const worktree = mode.cursor === 0;
+        // Orchestrator in the main checkout: nothing to name (the main-repo path
+        // discards the name anyway, and it has no branch of its own), so launch
+        // straight away instead of showing a prompt whose value is thrown out.
+        if (!worktree && mode.target.orchestrator) {
+          return startFresh(mode.target, mode.repo, ORCHESTRATOR_SLUG, false, mode.agent);
+        }
+        // A plain free session has no default name (defaultBranch is ""), so this
+        // still opens an empty prompt; an orchestrator prefills its own role slug,
+        // stepped past any orchestrator worktree already in this repo. Only a
+        // preview — `startFresh` re-derives it at create time, since the user may
+        // sit on this screen for a while. (Moot for the main-repo option, which
+        // ignores the name entirely.)
+        const seed =
+          worktree && mode.target.defaultBranch
+            ? freeWorktreeBranch(mode.repo.root, mode.target.defaultBranch)
+            : mode.target.defaultBranch;
         return setMode({
           kind: "branch",
           target: mode.target,
           agent: mode.agent,
           repo: mode.repo,
-          value: "",
-          cursor: 0,
-          worktree: mode.cursor === 0,
+          value: seed,
+          cursor: seed.length,
+          worktree,
+          seed: seed || undefined,
         });
       }
       return;
@@ -2476,7 +2613,7 @@ export default function App({
         return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
       }
       if (key.return) {
-        if (mode.value.trim()) startFresh(mode.target, mode.repo, mode.value, mode.worktree, mode.agent);
+        if (mode.value.trim()) startFresh(mode.target, mode.repo, mode.value, mode.worktree, mode.agent, mode.seed);
         return;
       }
       // Functional updates so batched keystrokes (e.g. two Lefts in one chunk)
@@ -2618,6 +2755,11 @@ export default function App({
 
     // new arbitrary session (sessions view only)
     if (input === "n" && view === "sessions") { enterNewSession(); return; }
+
+    // new ORCHESTRATOR session (sessions view only) — a session that delegates
+    // every unit of work to further background sessions instead of implementing.
+    // Capital O, so the lowercase `o` open-in-browser binding is untouched.
+    if (input === "O" && view === "sessions") { enterOrchestrator(); return; }
 
     // focus the fuzzy-search input (all list views)
     if (input === "/") { setSearchFocus("input"); return; }
@@ -2817,19 +2959,28 @@ export default function App({
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
-    const repoChoices = reposForTarget(mode.target.kind);
+    const orch = !!mode.target.orchestrator;
+    const repoChoices = reposForTarget(mode.target);
     // Work-item / PR flows MUST create a worktree, so a list with no git checkout
     // in it can only ever produce "fatal: not a git repository" — the bootstrap
     // case, where the only offer is the launcher's own non-repo cwd. Say what
-    // would actually unblock it instead of letting enter dead-end. The free flow
-    // is exempt: running in place is a legitimate outcome there (see wtchoice).
-    const noCheckout = !isFree && !anyHostableRepo;
+    // would actually unblock it instead of letting enter dead-end. A plain free
+    // session is exempt: running in place is a legitimate outcome there (see
+    // wtchoice). An ORCHESTRATOR is not exempt, even though it is a free target —
+    // it integrates by merging branches, which a non-repo folder cannot do, so
+    // for it "run in place here" is just as dead an end as for a work item.
+    const noCheckout = (!isFree || orch) && !anyHostableRepo;
     return (
       <Box flexDirection="column">
-        <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
+        <Text bold>
+          {orch ? `Orchestrator session — pick a repo` : isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}
+        </Text>
         <Text dimColor>
           {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
         </Text>
+        {orch ? (
+          <Text color="magenta">{"It will delegate every unit of work to background sessions — it writes no code itself."}</Text>
+        ) : null}
         {noCheckout ? (
           <Text color="yellow">
             {canClone
@@ -3046,9 +3197,17 @@ export default function App({
     ];
     return (
       <Box flexDirection="column">
-        <Text bold>{`New session in ${mode.repo.name} — choose where to run`}</Text>
+        <Text bold>{`${mode.target.orchestrator ? "Orchestrator" : "New"} session in ${mode.repo.name} — choose where to run`}</Text>
         <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
         {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
+        {mode.target.orchestrator ? (
+          <Text color="magenta">
+            {"An orchestrator squash-merges finished branches into the main branch, and git keeps that"}
+          </Text>
+        ) : null}
+        {mode.target.orchestrator ? (
+          <Text color="magenta">{"branch in one working tree only — so the main checkout is the right home for it."}</Text>
+        ) : null}
         <Box marginTop={1} flexDirection="column">
           {opts.map((label, i) => {
             const sel = i === mode.cursor;
@@ -3071,9 +3230,12 @@ export default function App({
     // Free sessions get a `cl-new-<id>` name assigned at launch, so we can only
     // preview the prefix; item/PR launches already know their target name.
     const tmuxPreview = isFree ? "cl-new-…" : mode.target.tmuxName;
+    const orch = !!mode.target.orchestrator;
     return (
       <Box flexDirection="column">
-        <Text bold>{isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}</Text>
+        <Text bold>
+          {orch ? `Orchestrator session in ${mode.repo.name}` : isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}
+        </Text>
         <Text dimColor>{mode.worktree ? "New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back" : "Session name · ←/→ move · ⌃a/⌃e start/end · enter launch · esc back"}</Text>
         {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
         <Box marginTop={1}>
@@ -3084,8 +3246,8 @@ export default function App({
         </Box>
         <Box marginTop={1}>
           {mode.worktree
-            ? <Text dimColor>{`→ ${mode.agent} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
-            : <Text dimColor>{`→ ${mode.agent} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
+            ? <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
+            : <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
           }
         </Box>
       </Box>
@@ -3180,7 +3342,11 @@ export default function App({
             : searchFocus === "list"
               ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
               : view === "sessions"
-                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
+                // `⇥ view` (not "switch view") matches the PRs hint and buys back
+                // 7 columns for the `O orchestrator` and `m →profile` entries —
+                // this line already truncated at ~120 cols before either of them,
+                // so tail hints are at a premium.
+                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orchestrator · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}
