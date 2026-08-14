@@ -6,7 +6,7 @@
 import { join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
-import { RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
+import { COMPACTING_PANE, RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
 
 // Regression guard for the "session-detection regresses often" area: a launcher
 // scoped to a repo whose BASENAME CONTAINS A DOT (`kappflug.is-2`). The host
@@ -622,6 +622,22 @@ test("sessions view: Running now section plus per-repo groups", async ({ launch 
   expect(screen).toContain("appweb (2)");
   expect(screen).toContain("applib (1)");
   expect(screen).toContain("standalone (1)");
+});
+
+test("sessions view: a compacting session says so, and how far along it is", async ({ launch, mock }) => {
+  // Before this, `runningStatus` had no `compacting` case at all, so a session
+  // rewriting its own context fell through to the green "running → attach" — the
+  // one blocking state the menu rendered as idle and attachable. The percentage
+  // comes off the pane's own progress bar, so the row says whether to wait.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: COMPACTING_PANE } });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  const screen = await wt.waitForText("Running now");
+  expect(screen).toContain("(compacting… · 42%)");
+  expect(screen).not.toContain("ready → attach");
 });
 
 test("expanding a work item reveals its session and lazily-loaded activity", async ({ launch }) => {

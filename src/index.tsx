@@ -6,7 +6,7 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePaneState, readPaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
+  liveManagedPaths, managedKind, capturePaneState, readPaneState, sendToPane, sendResume, paneReadiness, paneShells, paneCompactionPercent, stripAnsi,
   sessionRoot, currentSessionName, killWindow, killManagedTarget, windowLocations, isPlaceholderWindow, exactTarget,
   paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, answerResumeDialog, paneAcceptsPaste,
   capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
@@ -879,7 +879,11 @@ async function runStatus(
   // so this reuses that snapshot rather than re-reading the same pane.
   if (pane) {
     const { raw } = pane;
-    console.log(`  ready:  ${readiness}`);
+    // Compaction rides on the readiness word itself ("compacting 42%") rather than
+    // getting a detail line like `limit:` below, because there is nothing to say
+    // beyond the number and `list` prints it the same way — one formatter, one
+    // reading, so the two commands can't disagree about how far a pane has got.
+    console.log(`  ready:  ${readyCell(readiness, null, rowCompactionPercent(readiness, raw))}`);
     // Reported ready (nothing is waiting on a decision about the work), but the
     // pane is parked on claude's own resume dialog — say so, since `send` will
     // answer it rather than paste into it.
@@ -1277,6 +1281,13 @@ interface ListRow {
    * being someone else's problem.
    */
   limitResetAt: string | null;
+  /**
+   * How far a "compacting" row's progress bar has got (0-100), null for every other
+   * state and for a compacting pane that isn't drawing one yet. Like `limitResetAt`,
+   * it says how long someone else's pause has left to run — a compacting session is
+   * blocked but progressing, and this is the difference between "wait" and "stuck".
+   */
+  compactionPercent: number | null;
   /** Background shells the running pane reports (0 when idle/unknown). */
   shells: number;
   /** How it was launched, when running (from the live-tmux reconciliation). */
@@ -1331,16 +1342,31 @@ function rowResetAt(readiness: Readiness | null, raw: string): number | null {
 }
 
 /**
- * The readiness column's text: the bare state word, plus the locale-formatted
- * reset time when a limited pane told us one ("limited 14:00"). No placeholder
- * when it didn't — a plain "limited" is the honest answer. The time is printed
- * as stated even when it has already passed (the pane's own claim, and a clock
- * time the reader can compare to now); the TUI, which has room, additionally
- * distinguishes that case as "reset passed".
+ * How far a compacting pane has got, or null for any other state. Gated on the
+ * readiness for the same reason `rowResetAt` is: the bar belongs to *this* state,
+ * and reading it off a pane that isn't compacting would report a stale number from
+ * whatever else drew blocks on screen.
  */
-function readyCell(readiness: Readiness | null, resetAt: number | null): string {
+function rowCompactionPercent(readiness: Readiness | null, raw: string): number | null {
+  return readiness === "compacting" ? paneCompactionPercent(raw) : null;
+}
+
+/**
+ * The readiness column's text: the bare state word, plus whatever detail the state
+ * itself carries — the locale-formatted reset time when a limited pane told us one
+ * ("limited 14:00"), or the progress of a compaction ("compacting 42%"). No
+ * placeholder when the pane didn't say — a plain "limited" / "compacting" is the
+ * honest answer. The reset time is printed as stated even when it has already
+ * passed (the pane's own claim, and a clock time the reader can compare to now);
+ * the TUI, which has room, additionally distinguishes that case as "reset passed".
+ *
+ * The two details are mutually exclusive by construction (each is gated on its own
+ * readiness), so at most one is ever appended.
+ */
+function readyCell(readiness: Readiness | null, resetAt: number | null, percent: number | null): string {
   const word = readiness ?? "-";
-  return resetAt === null ? word : `${word} ${formatResetTime(resetAt)}`;
+  if (resetAt !== null) return `${word} ${formatResetTime(resetAt)}`;
+  return percent === null ? word : `${word} ${percent}%`;
 }
 
 /**
@@ -1463,12 +1489,14 @@ async function runList(opts: ListOptions): Promise<void> {
     // yet, so its idle age is the previous run's and it is never stalled.
     let resumeDialog = false;
     let resetAt: number | null = null;
+    let compactionPercent: number | null = null;
     if (running && window) {
       const { raw, cursor } = capturePaneState(window);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
       resumeDialog = paneResumeDialogActive(raw);
       resetAt = rowResetAt(readiness, raw);
+      compactionPercent = rowCompactionPercent(readiness, raw);
     }
     const l = linkOf(s);
     const idle = idleSeconds(s.lastUsed);
@@ -1484,6 +1512,7 @@ async function runList(opts: ListOptions): Promise<void> {
       readiness,
       resumeDialog,
       limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
+      compactionPercent,
       shells,
       kind: running ? liveKinds.get(canon) ?? null : null,
       branch: s.branch ?? null,
@@ -1534,7 +1563,9 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   const itemLabel = model?.provider === "github" ? "issue" : "wi";
-  const ready = rows.map((r) => readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt)));
+  const ready = rows.map((r) =>
+    readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt), r.compactionPercent),
+  );
   const rw = readyWidth(ready);
   console.log(
     ["", "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
@@ -1612,7 +1643,7 @@ function runPlainList(
     );
     rows.push([
       "●",
-      readyCell(readiness, rowResetAt(readiness, raw)),
+      readyCell(readiness, rowResetAt(readiness, raw), rowCompactionPercent(readiness, raw)),
       KIND_LABEL[kind].padEnd(3),
       shortId(s.id),
       timeAgo(s.lastUsed).padEnd(8),

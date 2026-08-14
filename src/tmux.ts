@@ -1302,6 +1302,32 @@ export function paneResumeSafe(raw: string, cursor?: PaneCursor | null): boolean
 }
 
 /**
+ * The compaction progress bar's percentage — `42` for `▰▰▰▱▱▱ 42%` — or null when
+ * the pane isn't showing one. Read from the live status region (`liveStatusLines`),
+ * the same band `paneReadiness` takes the "compacting" verdict from, so a transcript
+ * that merely quotes a bar can't produce a reading.
+ *
+ * Anchored on the bar's own `▰`/`▱` blocks rather than on `%`, and that anchor is
+ * load-bearing: the status region deliberately includes everything below the input
+ * box, and the TUI's footer there is full of percentages — `29% ctx | 5h: 9% (3h 9m)
+ * | 7d: 63%` — any of which a bare `\d+%` would happily return as the compaction
+ * progress. The bar glyphs appear nowhere else.
+ *
+ * Deliberately NOT gated on the pane being compacting: callers that display it pair
+ * it with the readiness they already have (see `rowCompactionPercent` in index.tsx),
+ * which keeps this a pure read of one thing. Returns null rather than 0 when there
+ * is no bar — "no reading" and "0% done" are different claims, and a compaction that
+ * has genuinely just started does print `0%`.
+ */
+export function paneCompactionPercent(raw: string): number | null {
+  const m = liveStatusLines(raw).join("\n").match(/[▰▱]+\s*(\d{1,3})\s*%/);
+  if (!m) return null;
+  const pct = Number(m[1]);
+  // A bar that reports something impossible is a misread, not a datum.
+  return pct >= 0 && pct <= 100 ? pct : null;
+}
+
+/**
  * Number of background shells the session has running, read from the TUI's
  * `· N shell(s) ·` indicator (the footer's clickable "view background shells"
  * button, also echoed in the turn summary as `N shell still running`). This is

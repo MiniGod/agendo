@@ -352,6 +352,22 @@ export const BUSY_PANE = [
   "  ─────────────────────────────────────────────",
 ].join("\n");
 
+/** A claude TUI mid-compaction: the verb line and its progress bar on the status
+ *  row above an (empty) input box. Classifies as "compacting" — blocked, but
+ *  progressing, and `paneCompactionPercent` reads 42 off the bar. The footer below
+ *  the box carries percentages of its own on purpose: they are inside the same
+ *  status region, so this pins that the bar's glyphs are what the percent is
+ *  anchored on. */
+export const COMPACTING_PANE = [
+  "  ● Implement login form",
+  "  ✻ Compacting conversation…",
+  "  ▰▰▰▱▱▱ 42%",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+  "  09:14:02 | 29% ctx | 5h: 9% (3h 9m) | 7d: 63% (81h 19m) | Opus 5",
+].join("\n");
+
 export const tmuxState = {
   sessions: [RUNNING_TARGET],
   windows: [] as { session: string; index: number; name: string }[],
