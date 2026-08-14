@@ -163,6 +163,13 @@ export function llmGuide(): string {
     "  Check the exit code before parsing --json: a setup error (unknown id, nothing",
     "  running) reports on stderr and prints no payload at all.",
     "",
+    `Close it:     ${SELF_CMD} close <id>`,
+    "  Ends the session by killing ONLY its tmux window. Its git worktree, branch and",
+    "  commits are guaranteed untouched on disk, so nothing is lost and `resume <id>`",
+    "  brings it back. Refuses a session with work in flight (--force to override).",
+    "  Use this instead of `tmux kill-window`/`kill-session` — never hand-roll a kill.",
+    "  A `wait` on a session you close ends at once, reporting it as \"exited\".",
+    "",
     "The <id> is printed when you launch. Background sessions you start carry these same",
     "instructions, so they can launch and coordinate their own background sessions too.",
   ].join("\n");
