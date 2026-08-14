@@ -29,6 +29,12 @@ export interface Config {
   /** Work item states considered "done" — hidden unless expanded. */
   closedStates: string[];
   /**
+   * Minutes of inactivity after which a live, non-busy session is qualified as
+   * "stalled" in `agendo list` / `agendo status` (see src/idle.ts). Overridable
+   * per invocation with `--stalled-after <dur>`.
+   */
+  stalledAfterMinutes: number;
+  /**
    * Which option agendo picks when a resumed claude session opens the CLI's own
    * "how should I resume?" dialog (see paneResumeDialogActive in tmux.ts):
    *   - "summary" (default) — the option claude itself marks `(recommended)`,
@@ -44,6 +50,13 @@ export interface Config {
   resumeDialogChoice?: ResumeDialogChoice;
 }
 
+/**
+ * Default stall threshold, in minutes. Lives here (not in src/idle.ts) so
+ * `DEFAULT_CONFIG` below and the fallback idle.ts uses for a malformed
+ * configured value can't drift apart — idle.ts imports it.
+ */
+export const DEFAULT_STALLED_AFTER_MINUTES = 240;
+
 /** Shipped defaults — every field a config.json may override. */
 export const DEFAULT_CONFIG: Config = {
   org: "",
@@ -54,6 +67,7 @@ export const DEFAULT_CONFIG: Config = {
   // tenant) — used as the token resource/audience, not a secret.
   resource: "499b84ac-1321-427f-aa17-267ca6975798",
   closedStates: ["Closed", "Done", "Removed", "Resolved"],
+  stalledAfterMinutes: DEFAULT_STALLED_AFTER_MINUTES,
   // Default to whatever claude marks `(recommended)` — resuming from a summary,
   // which is also the cheaper of the two.
   resumeDialogChoice: "summary",

@@ -264,6 +264,49 @@ export function sendDialogReveal(target: string): void {
 export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "limited" | "unknown";
 
 /**
+ * The readiness states that mean the agent is actively working right now.
+ * Canonical here (next to the type) because two unrelated features key off the
+ * same distinction: `agendo wait`'s default "still busy" predicate (see
+ * wait.ts) and the stalled-session qualifier (see idle.ts), neither of which may
+ * ever treat a session that is simply mid-turn as finished.
+ */
+const WORKING_READINESS: ReadonlySet<Readiness> = new Set<Readiness>(["busy", "compacting"]);
+
+/**
+ * States the settled test refuses, even though neither is "busy":
+ *  - `unknown` — a pane we couldn't read. Treating it as settled reports a false
+ *    success off a blank or not-yet-drawn screen: `agendo wait` would return
+ *    "done" for a session it merely failed to read, and the stall qualifier would
+ *    pass a verdict on a session it never saw. Absence of evidence that a session
+ *    is working is not evidence that it has stopped.
+ *  - `limited` — a session parked at its usage cap. It has stopped, but it is not
+ *    DONE: it resumes when the cap lifts (auto-resume) or when someone unblocks
+ *    it, and its work is still unfinished. `wait` exiting 0 there would tell an
+ *    orchestrator "finished" about work that is merely paused; the stall marker
+ *    would call it hung when it is waiting on a quota reset whose time `list`
+ *    prints right next to it. `wait` doesn't wait it out in silence — it wakes on
+ *    a capped target at once with `woke: "blocked"` and a non-zero exit — and an
+ *    explicit `--state limited` still treats the cap as the success condition.
+ */
+const NOT_SETTLED: ReadonlySet<Readiness> = new Set<Readiness>(["unknown", "limited"]);
+
+/**
+ * Whether a state is *known, settled and unblocked*: not working, not unreadable,
+ * not parked at a usage cap.
+ *
+ * Kept as one predicate with two callers — `agendo wait`'s default predicate
+ * (wait.ts) and the stalled-session qualifier (idle.ts) — rather than two
+ * lookalike rules that can drift. Both are answering the same question, "has this
+ * session stopped working in a way that means something?", and they must never
+ * disagree about it. Note `wait` also admits its synthetic `exited` state through
+ * this (neither working nor in NOT_SETTLED), which is correct: a session whose
+ * window is gone is as settled as it will ever get.
+ */
+export function isSettledReadiness(r: Readiness): boolean {
+  return !WORKING_READINESS.has(r) && !NOT_SETTLED.has(r);
+}
+
+/**
  * Real (user-typed) text on the claude input line, ignoring the `❯` marker and
  * any gray/dim *suggestion* placeholder. The TUI renders a suggestion in faint
  * (`\e[2m`) / gray, and real text in the default color — so we count only

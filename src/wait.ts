@@ -18,7 +18,8 @@
  */
 import { basename } from "path";
 import {
-  capturePaneState, paneReadiness, paneResumeDialogActive, sessionName, shortId, stripAnsi,
+  capturePaneState, isSettledReadiness, paneReadiness, paneResumeDialogActive,
+  sessionName, shortId, stripAnsi,
   type Readiness,
 } from "./tmux.ts";
 import { formatResetTime, paneResetAt } from "./usageLimit.ts";
@@ -28,29 +29,6 @@ import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionS
 import { printJson } from "./output.ts";
 import { SELF_CMD } from "./launch.ts";
 import type { AgentSession } from "./types.ts";
-
-/**
- * Readiness states that mean the session is actively working. One half of what
- * the default predicate rejects; NOT_SETTLED is the other.
- */
-const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
-
-/**
- * States the DEFAULT predicate refuses to call settled, even though neither is
- * "busy":
- *  - `unknown` — a pane we couldn't read; counting it would report success off a
- *    blank or not-yet-drawn screen.
- *  - `limited` — a session parked at its usage cap. It has stopped, but it is not
- *    DONE: it resumes when the window reopens (auto-resume) or when someone
- *    unblocks it, and its work is still unfinished. Exiting 0 there tells an
- *    orchestrator "finished" about work that is merely paused — while `agendo
- *    list` shows the same session as `limited 17:00`, i.e. coming back later.
- *    Rejecting it does NOT mean waiting it out in silence: the loop wakes on a
- *    capped target immediately with `woke: "blocked"` and a non-zero exit (see
- *    the `blocked` branch), so the caller is told at once without being told
- *    "done". `--state limited` still treats the cap as the success condition.
- */
-const NOT_SETTLED = new Set<WaitState>(["unknown", "limited"]);
 
 /**
  * Consecutive polls a target must be absent from the live set before `wait`
@@ -154,7 +132,8 @@ export interface WaitResult {
 /** The `--json` wake payload. `woke` is why the wait returned:
  *  `satisfied` (the predicate held) · `timeout` (deadline hit) · `unsatisfiable`
  *  (no remaining target can satisfy the predicate, so waiting longer is futile) ·
- *  `blocked` (a target is parked at its usage cap — see NOT_SETTLED: it hasn't
+ *  `blocked` (a target is parked at its usage cap — see `isSettledReadiness` in
+ *  tmux.ts, which refuses to call that settled: it hasn't
  *  finished, so this is NOT a success, but it also won't move on its own for
  *  hours, so we wake the caller now instead of holding the timeout open).
  *  Only `satisfied` exits 0.
@@ -174,15 +153,21 @@ export interface WaitPayload {
 
 /** Whether an observed state satisfies the wait predicate. The default (no
  *  `--state`/`--not`) waits for a *known, settled, unblocked* non-busy state —
- *  `unknown` and `limited` are excluded (see NOT_SETTLED) so neither an unread
- *  pane nor a session sitting at its usage cap reports a false success. `exited`
- *  passes that default: a session whose window is gone is as settled as it will
- *  ever get. An explicit `--state`/`--not` is honoured verbatim, so
- *  `--state limited` still wakes the moment the cap hits. */
+ *  `unknown` and `limited` are excluded (see `isSettledReadiness`) so neither an
+ *  unread pane nor a session sitting at its usage cap reports a false success.
+ *  `exited` passes that default: a session whose window is gone is as settled as
+ *  it will ever get. An explicit `--state`/`--not` is honoured verbatim, so
+ *  `--state limited` still wakes the moment the cap hits.
+ *
+ *  The test itself lives in tmux.ts beside `Readiness`, shared with the
+ *  stalled-session qualifier (idle.ts) so the two can't drift into disagreeing
+ *  about what "stopped working" means — a capped session is neither finished nor
+ *  hung in both. The cast is safe for the reason above: `exited` is in neither
+ *  the working set nor the not-settled set, so it settles. */
 export function waitSatisfied(r: WaitState, o: WaitOptions): boolean {
   if (o.state) return r === o.state;
   if (o.not) return r !== o.not;
-  return !BUSY_STATES.has(r as Readiness) && !NOT_SETTLED.has(r);
+  return isSettledReadiness(r as Readiness);
 }
 
 /** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
