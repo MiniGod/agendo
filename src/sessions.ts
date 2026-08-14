@@ -11,6 +11,7 @@ import { spawnSync } from "child_process";
 import { basename, join } from "path";
 import { homedir } from "os";
 import { repoRootForCwd } from "./repos.ts";
+import { parseJsonLine } from "./errors.ts";
 import { parseGithubRemote } from "./github.ts";
 import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus, WorkflowRef } from "./types.ts";
 import { rebaseWorkflowPaths, WorkflowScan } from "./workflows.ts";
@@ -82,15 +83,13 @@ async function parseClaudeMeta(
   // Workflow runs ride the same line walk (and thus the same parse cache) —
   // launches and completion notifications are both transcript records.
   const workflows = new WorkflowScan();
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    // Skips are recorded as `<path>:<line>` warnings, except on the final line —
+    // a live agent's half-written trailing record is normal, not corruption.
+    const e: Record<string, any> | null = parseJsonLine(t, filePath, i + 1, { isLast: i === lines.length - 1 });
     if (!e || typeof e !== "object") continue;
     if (!cwd && e.cwd) cwd = e.cwd;
     if (!createdAt && e.timestamp) {
@@ -644,15 +643,11 @@ async function loadClaudeActivity(path?: string, full = false): Promise<SessionA
   // fallback for des-workflow sessions that never call TodoWrite.
   let latestTodos: TaskItem[] | null = null;
   const replay: TaskReplay = { map: new Map(), order: [], created: 0 };
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    const e: Record<string, any> | null = parseJsonLine(t, path, i + 1, { isLast: i === lines.length - 1 });
     // JSON.parse("null")/"42"/"\"x\"" succeed but aren't records — skip them so a
     // stray primitive line can't crash the field access below.
     if (!e || typeof e !== "object") continue;
@@ -748,24 +743,21 @@ function copilotAction(tr: any, ts: Date, full = false): ActionLine {
 
 async function loadCopilotActivity(dir?: string, full = false): Promise<SessionActivity> {
   if (!dir) return { actions: [] };
+  const eventsPath = join(dir, "events.jsonl");
   let raw: string;
   try {
-    raw = await readFile(join(dir, "events.jsonl"), "utf-8");
+    raw = await readFile(eventsPath, "utf-8");
   } catch {
     return { actions: [] };
   }
   const actions: ActionLine[] = [];
   let lastPrompt: string | undefined;
   let finalResponse: string | undefined;
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    const e: Record<string, any> | null = parseJsonLine(t, eventsPath, i + 1, { isLast: i === lines.length - 1 });
     if (!e || typeof e !== "object") continue;
     const ts = e.timestamp ? new Date(e.timestamp) : new Date(0);
     const data = e.data ?? {};

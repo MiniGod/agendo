@@ -4,28 +4,20 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, STANDALONE_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { BUSY_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, STANDALONE_SESSION_ID, RUNNING_TARGET, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
 const SHORT_ID = shortIdOf(LOGIN_SESSION_ID);
 const CRASH_SHORT_ID = shortIdOf(CRASH_SESSION_ID);
 const COP_SHORT_ID = shortIdOf(COPILOT_SESSION_ID);
-
-// A mid-generation TUI: the live token counter is the reliable "busy" signal, so
-// `paneReadiness` classifies this as "busy" (not sendable / not settled).
-const BUSY_PANE = [
-  "  ● Implement login form",
-  "  ⠋ Working… (12s · ↑ 2.1k tokens)",
-  "  ─────────────────────────────────────────────",
-  "  ❯ ",
-  "  ─────────────────────────────────────────────",
-].join("\n");
 
 function agendo(env: Record<string, string>, ...args: string[]) {
   return spawnSync("bun", ["run", join(REPO_ROOT, "src", "index.tsx"), ...args], {
@@ -70,6 +62,25 @@ test("agendo --llm prints the background-session guide", async ({ mock }) => {
   expect(r.status).toBe(0);
   // The guide is the agent-facing workflow text, headed by the new name.
   expect(r.stdout).toContain("agendo — running a separate background claude session");
+  // `wait` MUST be advertised here, not just in --help. This guide is the only
+  // command list an agent is pointed at, so a verb missing from it effectively
+  // does not exist — which is why orchestrators re-polled `status` on a guessed
+  // cadence instead of being notified.
+  //
+  // Match only text that is INDEPENDENT of SELF_CMD. Every invocation line is
+  // prefixed with however this launcher can re-invoke itself, which varies by
+  // environment: `agendo` when it's on PATH, `bunx agendo` under a package
+  // runner, and a bare `<bun> <abs path to index.tsx>` in CI. Asserting on
+  // "agendo wait" passes locally and fails on a runner for reasons that have
+  // nothing to do with the guide.
+  expect(r.stdout).toContain(" wait <id...> --any --json --timeout 30m");
+  // …and that it actually teaches the workflow, not just that the verb exists:
+  // run it in the background, don't re-poll, and here's what each flag buys.
+  expect(r.stdout).toContain("Be told when it needs you (DON'T poll)");
+  expect(r.stdout).toContain("treat its exit as the");
+  expect(r.stdout).toContain("--any wakes on the first of several sessions to settle");
+  expect(r.stdout).toContain("--json prints what you woke up to find out");
+  expect(r.stdout).toContain("--state limited");
 });
 
 test("agendo list shows the running session with readiness", async ({ mock }) => {
@@ -556,6 +567,336 @@ test("agendo send still refuses when the caret sits at the END of the same text 
   expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
 });
 
+// The claude CLI's OWN resume dialog, verbatim from a real blocked session (the
+// same fixture detection.spec.ts pins). There is NO input box behind it: `send`
+// is keystroke injection, so a message pasted here would be typed into a
+// numbered menu and Enter would pick whatever landed selected.
+const RESUME_DIALOG_PANE = readFileSync(join(import.meta.dirname, "fixtures", "resume-dialog.ansi"), "utf-8");
+// What the pane looks like once the session has actually reloaded.
+const RESUMED_BOX_PANE = [
+  "  ● Resumed from summary — picking the work back up.",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+  "  ? for shortcuts",
+].join("\n");
+
+/** Every `send-keys … <key>` invocation's position in the log, in order. */
+const keyIndexes = (log: string[][], key: string) =>
+  log.flatMap((argv, i) => (argv[0] === "send-keys" && argv[3] === key ? [i] : []));
+/** The keys sent to the running pane, in order — the whole keystroke story. */
+const keysSent = (log: string[][]) =>
+  log.filter((argv) => argv[0] === "send-keys" && argv[2] === RUNNING_TARGET).map((argv) => argv.slice(3).join(" "));
+
+/**
+ * Fake-tmux state whose pane serves `queue` one capture per read, then `rest`
+ * for every read after that — so a test can script the pane CHANGING between
+ * reads (dialog → dialog → box) deterministically, instead of racing a timer
+ * against the CLI's own polling. See `captureQueue` in e2e/fakebin/tmux.
+ */
+const scriptedPane = (queue: string[], rest: string) => ({
+  ...tmuxState,
+  captureQueue: { [RUNNING_TARGET]: queue },
+  captures: { [RUNNING_TARGET]: rest },
+});
+/**
+ * The same dialog with the `❯` cursor moved down onto option 2 (as-is) — what the
+ * pane looks like after one Down. Built by moving the marker between lines (the
+ * capture paints the cursor and the number in different colours, so the two are
+ * not adjacent in the raw text).
+ */
+const RESUME_DIALOG_ON_AS_IS = RESUME_DIALOG_PANE.split("\n")
+  .map((line) => {
+    if (/^\s*❯\s*1\./.test(stripAnsiText(line))) return line.replace("❯", " ");
+    if (/^\s{4}2\./.test(stripAnsiText(line))) return line.replace(/^ {4}/, "  ❯ ");
+    return line;
+  })
+  .join("\n");
+
+test("agendo send answers claude's resume dialog FIRST, then pastes the message", async ({ mock }) => {
+  // The whole point: before this, the session sat on the dialog forever
+  // (readiness "dialog" ⇒ send refuses). Now `send` confirms the configured
+  // option, waits for a real input box, and only then delivers.
+  //
+  // Three dialog reads: runSend's own readiness read, then the two matching
+  // looks that settle the selection. The cursor already sits on option 1, so the
+  // answer is a bare Enter.
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  // Default config ⇒ the option claude marks (recommended).
+  expect(r.stdout).toContain("answering claude's resume dialog (summary): 1. Resume from summary (recommended)");
+  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+
+  const log = await mock.tmuxLog();
+  const setBuffer = log.findIndex((argv) => argv[0] === "set-buffer");
+  const paste = log.findIndex((argv) => argv[0] === "paste-buffer");
+  const enters = keyIndexes(log, "Enter");
+  // THE ORDER IS THE SAFETY PROPERTY: the menu is confirmed before the message
+  // is ever staged, let alone pasted.
+  expect(enters).toHaveLength(2); // the dialog's confirm, then the message's submit
+  expect(setBuffer).toBeGreaterThan(enters[0]);
+  expect(paste).toBeGreaterThan(setBuffer);
+  expect(enters[1]).toBeGreaterThan(paste);
+  expect(log[setBuffer]).toEqual(["set-buffer", "-b", "cl-send", "--", "run the tests"]);
+  // Nothing but those two Enters ever reached the pane — in particular no digit,
+  // which could ACTIVATE an option on some CLI versions and merely select it on
+  // others, leaving no safe meaning for the Enter that follows.
+  expect(keysSent(log)).toEqual(["Enter", "Enter"]);
+});
+
+// ── the dialog step and the delivery step are separate concerns ──────────────
+// Answering the resume dialog is keystrokes; delivering the message may be the
+// socket. A peer frame arrives as "another Claude session sent a message", which
+// the receiver will NOT take as the answer to a pending prompt — so the socket is
+// an alternative for the DELIVERY only, and can never stand in for the dialog.
+
+test("agendo send answers the resume dialog with keystrokes, then delivers over the socket", async ({ mock }) => {
+  // The reconciliation, end to end: the dialog is confirmed by keystroke exactly
+  // as it is without a socket, and only the message itself changes route. If the
+  // socket were allowed to serve the dialog step, the frame would be queued past
+  // an unanswered menu and the session would stay parked forever.
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const peer = await fakePeer(mock, "peer-dialog", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "--timeout", "5s", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    // Step 1 still happened, on the pane.
+    expect(r.stdout).toContain("answering claude's resume dialog (summary): 1. Resume from summary (recommended)");
+    // Step 2 took the socket instead of the pane.
+    expect(r.stdout).toContain("via session socket");
+    expect(r.stdout).not.toContain(`sent to ${RUNNING_TARGET}`);
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+
+    const log = await mock.tmuxLog();
+    // ONE Enter — the dialog's confirm. The message's own submit Enter is absent
+    // because the message never went through the pane at all.
+    expect(keysSent(log)).toEqual(["Enter"]);
+    expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send won't queue past a resume dialog it failed to answer", async ({ mock }) => {
+  // The gate must bind the socket path too. The box never comes back, so the
+  // dialog is still up — and a frame queued behind it would sit unread while
+  // `send` reported success. Nothing is delivered by EITHER route.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const peer = await fakePeer(mock, "peer-dialog-stuck", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "--force", "--timeout", "1s", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("no input box appeared");
+    expect(peer.frames).toEqual([]); // not queued — the socket did not bypass the gate
+    const log = await mock.tmuxLog();
+    expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send walks the selection to the configured option before confirming", async ({ mock }) => {
+  // 'as-is' is option 2 while the cursor starts on 1: one Down, then a re-read
+  // that SEES the cursor land on 2, and only then Enter. Nothing is confirmed on
+  // an assumption about where the selection ended up.
+  const cfgPath = join(mock.home, ".claude-launcher", "config.json");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, resumeDialogChoice: "as-is" }, null, 2));
+
+  // Frames 4 and 5 are STALE — the pane hasn't repainted yet when it's read after
+  // the Down. However many such frames arrive, they must not provoke a second
+  // Down: one past the target is "Don't ask me again", which permanently changes
+  // the user's global claude CLI behaviour. (Two of them defeat a rule that only
+  // asks for "the same selection twice running" — a display running N frames
+  // behind is perfectly stable frame to frame.)
+  await mock.setTmuxState(
+    scriptedPane(
+      [...Array(5).fill(RESUME_DIALOG_PANE), ...Array(2).fill(RESUME_DIALOG_ON_AS_IS)],
+      RESUMED_BOX_PANE,
+    ),
+  );
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("answering claude's resume dialog (as-is): 2. Resume full session as-is");
+
+  const log = await mock.tmuxLog();
+  expect(keysSent(log)).toEqual(["Down", "Enter", "Enter"]); // move · confirm · submit
+  expect(keyIndexes(log, "Down")[0]).toBeLessThan(log.findIndex((argv) => argv[0] === "set-buffer"));
+});
+
+/** A synthetic resume menu: `cursorOn` is the highlighted option's number. */
+const resumeMenu = (cursorOn: number, labels: string[]) =>
+  [
+    "  This session is 1h 14m old and 249.4k tokens.",
+    "",
+    ...labels.map((l, i) => `  ${cursorOn === i + 1 ? "❯" : " "} ${i + 1}. ${l}`),
+    "",
+    "  Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+test("agendo send tracks its option by LABEL when the menu renumbers itself", async ({ mock }) => {
+  // If a CLI version reorders the options — or adds one — between frames, the
+  // number agendo first resolved belongs to something else. Aiming at it would,
+  // in this arrangement, confirm "Don't ask me again": a permanent change to the
+  // user's global claude CLI behaviour that agendo must never make.
+  const cfgPath = join(mock.home, ".claude-launcher", "config.json");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, resumeDialogChoice: "as-is" }, null, 2));
+
+  const AS_IS = "Resume full session as-is";
+  const before = ["Resume from summary (recommended)", AS_IS, "Don't ask me again"];
+  const after = ["Resume from summary (recommended)", "Don't ask me again", AS_IS];
+  await mock.setTmuxState(
+    scriptedPane(
+      [
+        ...Array(3).fill(resumeMenu(1, before)), // as-is is #2 here…
+        ...Array(2).fill(resumeMenu(2, after)), // …but #2 is now "Don't ask me again"
+        ...Array(2).fill(resumeMenu(3, after)), // as-is moved to #3
+      ],
+      RESUMED_BOX_PANE,
+    ),
+  );
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  const log = await mock.tmuxLog();
+  // It kept walking to the label instead of confirming #2 the moment the cursor
+  // reached that number.
+  expect(keysSent(log)).toEqual(["Down", "Down", "Enter", "Enter"]);
+});
+
+test("agendo send refuses when the dialog's selection won't move", async ({ mock }) => {
+  // The pane keeps showing the cursor on option 1, so the wanted option is never
+  // selected: give up rather than confirm the wrong one, and never paste. And
+  // exactly ONE arrow goes out — a pane that never shows the move must not have
+  // the highlight walked down onto "Don't ask me again" and abandoned there.
+  const cfgPath = join(mock.home, ".claude-launcher", "config.json");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, resumeDialogChoice: "as-is" }, null, 2));
+
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "send", "--timeout", "1s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("couldn't select");
+  const log = await mock.tmuxLog();
+  expect(keysSent(log)).toEqual(["Down"]); // it tried once, then stopped — no Enter
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+});
+
+test("agendo send: a message containing digits never leaks into the menu", async ({ mock }) => {
+  // The live footgun this feature has to avoid: pasting "2" + Enter into the
+  // resume menu selects "Resume full session as-is" instead of sending anything.
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const message = "2 or 3 tests still fail — check option 3 first";
+  const r = agendo(mock.env, "send", SHORT_ID, message);
+  expect(r.status).toBe(0);
+
+  const log = await mock.tmuxLog();
+  // No literal text was typed at the pane at all — the message travelled as a
+  // bracketed paste, in full, and only after the dialog was confirmed.
+  expect(log.some((argv) => argv[0] === "send-keys" && argv.includes("-l"))).toBe(false);
+  const setBuffer = log.findIndex((argv) => argv[0] === "set-buffer");
+  expect(log[setBuffer]).toEqual(["set-buffer", "-b", "cl-send", "--", message]);
+  expect(setBuffer).toBeGreaterThan(keyIndexes(log, "Enter")[0]);
+});
+
+test("agendo send --force still won't paste into a menu that only LOOKS like the dialog", async ({ mock }) => {
+  // A wrapped label (narrow pane) makes the detector miss — deliberately, it
+  // fails safe — so readiness is "dialog" and the normal refusal applies. The
+  // hazard is the documented escape hatch: --force would paste the message into
+  // the menu, where its digits pick options.
+  const wrapped = RESUME_DIALOG_PANE.replace("Resume full session as-is", "Resume full session\n     as-is");
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: wrapped } });
+  const r = agendo(mock.env, "send", "--force", SHORT_ID, "2 tests fail");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("resume menu");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  expect(keysSent(log)).toEqual([]);
+});
+
+test("agendo unblock refuses on the resume dialog — Escape would cancel it", async ({ mock }) => {
+  // `unblock` sends <esc>continue<enter>. On this dialog the Escape IS its "Esc
+  // to cancel", so it would abandon the resume. Refused even with --force.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "unblock", "--force", SHORT_ID);
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("resume dialog");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "send-keys" && argv.includes("Escape"))).toBe(false);
+  expect(log.some((argv) => argv[0] === "send-keys" && argv.includes("continue"))).toBe(false);
+});
+
+test("agendo send won't paste on a single glimpse of the input box", async ({ mock }) => {
+  // A reloading TUI paints its box before it has finished restoring, and a paste
+  // into that half-drawn screen can be discarded by the next repaint. So the box
+  // has to still be there a poll later: here it flickers into view once and the
+  // dialog comes back, and nothing is sent.
+  await mock.setTmuxState(scriptedPane([...Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE], RESUME_DIALOG_PANE));
+  const r = agendo(mock.env, "send", "--timeout", "1s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("no input box appeared");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+});
+
+test("agendo send refuses to paste when the input box never comes back", async ({ mock }) => {
+  // Never assume the answer worked: if the box doesn't reappear, the message is
+  // NOT pasted — a paste into a still-open menu is the exact hazard. Not even
+  // --force overrides that, since forcing a paste into a menu is the footgun.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "send", "--force", "--timeout", "1s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("no input box appeared");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  expect(log.some((argv) => argv[0] === "set-buffer")).toBe(false);
+});
+
+test("agendo send says so when a corrupt config.json cost it the resume choice", async ({ mock }) => {
+  // `send` is the one command that ACTS on config.json's value — by pressing keys
+  // into a live session. A corrupt file falls back to the default silently, which
+  // is precisely the "say what failed to parse" case: the fallback still answers
+  // the dialog (so the send goes through), but stderr names the file.
+  writeFileSync(join(mock.home, ".claude-launcher", "config.json"), "{ not json");
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const r = agendo(mock.env, "send", "--timeout", "5s", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stderr).toContain("send:");
+  expect(r.stderr).toContain("config.json");
+  // …and it fell back to the recommended option rather than refusing to answer.
+  expect(r.stdout).toContain("Resume from summary");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send rejects a malformed --timeout, and delivers nothing", async ({ mock }) => {
+  // `send` parses its own duration flag (sharing `wait`'s parseDuration but not
+  // its argv parser, which is wait-specific), so the rejection needs its own pin:
+  // a bad duration must fail LOUDLY under the send name rather than silently fall
+  // back to the default ceiling — and must not deliver the message on the way out.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const r = agendo(mock.env, "send", "--timeout", "5min", SHORT_ID, "run the tests");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("send: --timeout needs a duration");
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  expect(log.some((argv) => argv[0] === "send-keys")).toBe(false);
+});
+
+test("agendo status/list report the resume dialog as ready, not blocked", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const status = agendo(mock.env, "status", SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stdout).toContain("ready:  ready");
+  expect(status.stdout).not.toContain("ready:  dialog");
+  // …while still saying what the pane is actually showing.
+  expect(status.stdout).toContain("resume: claude's resume dialog is open");
+  const list = agendo(mock.env, "list");
+  expect(list.stdout).toContain("ready");
+  expect(list.stdout).not.toContain("dialog");
+});
+
 test("agendo list [dir] scopes the listing to sessions under the dir", async ({ mock }) => {
   // Two running managed windows under two different repo roots: the login claude
   // session (appweb) and the experiment copilot session (applib). `agendo list`
@@ -797,6 +1138,289 @@ test("agendo wait rejects a malformed --timeout and combined --state/--not", asy
   const both = agendo(mock.env, "wait", SHORT_ID, "--state", "ready", "--not", "dialog");
   expect(both.status).not.toBe(0);
   expect(both.stderr).toContain("only one of");
+});
+
+// ── wait as a notification primitive ─────────────────────────────────────────
+// `wait` exists so an orchestrator can be TOLD a background session changed
+// instead of re-polling `status` on a guessed cadence. These pin the wake
+// contract: the transitions that must fire, the ones that must NOT, and the
+// payload a caller reads to learn what it woke up to.
+
+/** Parse the `--json` wake payload off stdout. */
+function wakePayload(stdout: string) {
+  return JSON.parse(stdout) as {
+    woke: string;
+    condition: string;
+    mode: string;
+    elapsedMs: number;
+    sessions: {
+      shortId: string; state: string; from: string; changed: boolean; satisfied: boolean; title: string;
+      resumeDialog: boolean;
+    }[];
+  };
+}
+
+test("agendo wait --json reports the busy → ready transition it woke on", async ({ mock }) => {
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "200ms", "--timeout", "20s");
+  await sleep(1200);
+  await mock.setTmuxState(tmuxState); // → ready
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.mode).toBe("all");
+  expect(out.sessions).toHaveLength(1);
+  const [s] = out.sessions;
+  // The caller learns not just the destination but the transition — which is the
+  // whole reason it woke up, and what a bare `<id>\t<state>` line can't say.
+  expect(s.shortId).toBe(SHORT_ID);
+  expect(s.from).toBe("busy");
+  expect(s.state).toBe("ready");
+  expect(s.changed).toBe(true);
+  expect(s.satisfied).toBe(true);
+  expect(s.title).toBe("Implement login form");
+});
+
+test("agendo wait --json distinguishes a resume-dialog wake from a finished turn", async ({ mock }) => {
+  // Both report state "ready" — that's the point of the feature — so without a
+  // flag saying which, an orchestrator woken here reads back the PREVIOUS run's
+  // final answer and believes the work is done. `--state dialog` doesn't cover
+  // this either: the resume dialog deliberately isn't a question for a human.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const parked = agendo(mock.env, "wait", SHORT_ID, "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(parked.status).toBe(0); // it IS available — waking is right
+  const [p] = wakePayload(parked.stdout).sessions;
+  expect(p.state).toBe("ready");
+  expect(p.resumeDialog).toBe(true);
+
+  // …and a genuinely idle session is not mislabelled by the same field.
+  await mock.setTmuxState(tmuxState);
+  const idle = agendo(mock.env, "wait", SHORT_ID, "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(idle.status).toBe(0);
+  const [i] = wakePayload(idle.stdout).sessions;
+  expect(i.state).toBe("ready");
+  expect(i.resumeDialog).toBe(false);
+});
+
+test("agendo wait does not fire while nothing changes", async ({ mock }) => {
+  // Pane sits ready the whole time and we wait for `busy`, which never happens.
+  // A wake here would be spurious — the caller would burn a turn on a non-event.
+  const r = agendo(mock.env, "wait", SHORT_ID, "--state", "busy", "--json", "--interval", "150ms", "--timeout", "900ms");
+  expect(r.status).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("timeout");
+  const [s] = out.sessions;
+  expect(s.state).toBe("ready");
+  expect(s.changed).toBe(false);
+  expect(s.satisfied).toBe(false);
+});
+
+test("agendo wait accepts --state limited", async ({ mock }) => {
+  // `limited` is a real readiness that the accepted-values list used to omit,
+  // making "wake me when it hits its usage cap" unreachable.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const r = agendo(mock.env, "wait", SHORT_ID, "--state", "limited", "--interval", "150ms", "--timeout", "5s");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("limited");
+});
+
+test("agendo wait wakes when a session's window closes, instead of timing out", async ({ mock }) => {
+  // The commonest orchestrator wait: "tell me when the background session is
+  // DONE". A finished agent closes its window, leaving no pane to capture — which
+  // used to read `unknown` forever and report a spurious timeout.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "200ms", "--timeout", "20s");
+  await sleep(1200);
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.sessions[0].state).toBe("exited");
+  expect(out.sessions[0].changed).toBe(true);
+});
+
+test("agendo wait needs two consecutive missed sightings before declaring a session exited", async ({ mock }) => {
+  // Every tmux read maps a non-zero exit to an empty result, so ONE unlucky tick
+  // (server busy, fork failure, restart) empties the live set for ALL targets. If
+  // that alone meant `exited`, the default predicate would be satisfied and `wait`
+  // would exit 0 reporting "done" for a session still mid-turn — and because
+  // `exited` is terminal, nothing later could correct it. So an absence must
+  // repeat before it's believed.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--json", "--interval", "800ms", "--timeout", "30s");
+  await sleep(400); // first poll has already seen it alive and busy
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.sessions[0].state).toBe("exited");
+  // Two polls at 800ms apart had to miss it. A single-miss verdict would have
+  // woken around the first one, well under this bound.
+  expect(out.elapsedMs).toBeGreaterThan(1_400);
+});
+
+test("agendo wait gives up early on a --state an exited session can never reach", async ({ mock }) => {
+  // Nothing can change after the window is gone, so burning the full timeout is
+  // pointless — wake now with a reason the caller can act on.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--state", "ready", "--json", "--interval", "200ms", "--timeout", "60s");
+  await sleep(1200);
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("unsatisfiable");
+  // Well inside the 60s timeout: it short-circuited rather than waiting it out.
+  expect(out.elapsedMs).toBeLessThan(30_000);
+});
+
+test("agendo wait --any wakes on the first session to settle; the default waits for all", async ({ mock }) => {
+  // Two live sessions: login is ready, crash is stuck busy. An orchestrator
+  // watching both must not have the stuck one mask the settled one.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { ...tmuxState.captures, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  const any = agendo(mock.env, "wait", "--all", "--any", "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(any.status).toBe(0);
+  const out = wakePayload(any.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.mode).toBe("any");
+  // Both are reported, so the caller can see WHICH one woke it.
+  expect(out.sessions).toHaveLength(2);
+  expect(out.sessions.filter((s) => s.satisfied).map((s) => s.shortId)).toEqual([SHORT_ID]);
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("busy");
+
+  // Without --any the stuck session holds the wait open until the timeout.
+  const all = agendo(mock.env, "wait", "--all", "--interval", "150ms", "--timeout", "900ms");
+  expect(all.status).not.toBe(0);
+  expect(all.stderr).toContain("timed out");
+});
+
+test("agendo wait gives up when ONE of several targets exits under a state it can't reach", async ({ mock }) => {
+  // Waiting for ALL targets to hit `ready`: once one of them exits it can never
+  // get there, so the predicate is unreachable even though another session is
+  // still working. Polling on to the timeout here would reintroduce exactly the
+  // stall the `exited` state exists to remove — and note this can't be caught by
+  // the DEFAULT predicate, which `exited` satisfies.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: BUSY_PANE, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  const { done } = agendoAsync(
+    mock.env, "wait", "--all", "--state", "ready", "--json", "--interval", "200ms", "--timeout", "60s",
+  );
+  await sleep(1200);
+  // Drop ONLY the login session's window; the crash session keeps running busy.
+  await mock.setTmuxState({
+    ...twoLive,
+    sessions: [CRASH_TARGET],
+    panes: [{ session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false }],
+    captures: { [CRASH_TARGET]: BUSY_PANE },
+  });
+
+  const r = await done;
+  expect(r.code).not.toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("unsatisfiable");
+  expect(out.elapsedMs).toBeLessThan(30_000); // nowhere near the 60s timeout
+  expect(out.sessions.find((s) => s.shortId === SHORT_ID)?.state).toBe("exited");
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("busy");
+  // The give-up line names only the dead session, not every still-pending one.
+  const gaveUp = r.stderr.split("\n").find((l) => l.includes("gave up"));
+  expect(gaveUp).toContain(SHORT_ID);
+  expect(gaveUp).not.toContain(CRASH_SHORT_ID);
+});
+
+test("agendo wait --any keeps waiting when one target exits but another can still settle", async ({ mock }) => {
+  // The mirror of the case above: --any only needs ONE target, so a dead one is
+  // not a reason to give up while a live one could still reach the state.
+  const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+  const twoLive = {
+    ...tmuxState,
+    sessions: [RUNNING_TARGET, CRASH_TARGET],
+    panes: [
+      ...tmuxState.panes,
+      { session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: { [RUNNING_TARGET]: BUSY_PANE, [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(twoLive);
+
+  const { done } = agendoAsync(
+    mock.env, "wait", "--all", "--any", "--state", "ready", "--json", "--interval", "200ms", "--timeout", "25s",
+  );
+  // Login exits (can never be `ready`) while crash is still busy — must NOT wake.
+  await sleep(1000);
+  const loginGone = {
+    ...twoLive,
+    sessions: [CRASH_TARGET],
+    panes: [{ session: CRASH_TARGET, window: CRASH_TARGET, cwd: "/run/crash", placeholder: false }],
+    captures: { [CRASH_TARGET]: BUSY_PANE },
+  };
+  await mock.setTmuxState(loginGone);
+  // …then the survivor settles, which is the wake it was waiting for.
+  await sleep(1000);
+  await mock.setTmuxState({ ...loginGone, captures: { [CRASH_TARGET]: tmuxState.captures[RUNNING_TARGET] } });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  expect(out.woke).toBe("satisfied");
+  expect(out.sessions.find((s) => s.shortId === CRASH_SHORT_ID)?.state).toBe("ready");
+  expect(out.sessions.find((s) => s.shortId === SHORT_ID)?.state).toBe("exited");
+});
+
+test("agendo wait prints nothing on stdout when it fails (non-JSON)", async ({ mock }) => {
+  // The pre-existing contract: `<id>\t<state>` lines mean "it settled". Emitting
+  // them on a timeout too would make scripts that test for non-empty stdout read
+  // a failed wait as success.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const timedOut = agendo(mock.env, "wait", SHORT_ID, "--interval", "150ms", "--timeout", "600ms");
+  expect(timedOut.status).not.toBe(0);
+  expect(timedOut.stdout.trim()).toBe("");
+  expect(timedOut.stderr).toContain("timed out");
+
+  // …while a successful wait still prints them.
+  await mock.setTmuxState(tmuxState); // pane back to ready
+  const settled = agendo(mock.env, "wait", SHORT_ID, "--interval", "150ms", "--timeout", "5s");
+  expect(settled.status).toBe(0);
+  expect(settled.stdout).toContain(`${SHORT_ID}\tready`);
+});
+
+test("agendo wait --repo only watches sessions in that repo", async ({ mock }) => {
+  // The login session's worktree resolves back to the `appweb` repo root, so a
+  // watcher scoped to a different repo must not fire for it.
+  const other = agendo(mock.env, "wait", "--repo", "applib", "--interval", "150ms", "--timeout", "3s");
+  expect(other.status).not.toBe(0);
+  expect(other.stderr).toContain("no running sessions matched");
+
+  const mine = agendo(mock.env, "wait", "--repo", "appweb", "--json", "--interval", "150ms", "--timeout", "5s");
+  expect(mine.status).toBe(0);
+  const out = wakePayload(mine.stdout);
+  expect(out.sessions.map((s) => s.shortId)).toEqual([SHORT_ID]);
 });
 
 test("agendo resume navigates to a session already running under a cl-wi- window (no duplicate)", async ({ mock }) => {

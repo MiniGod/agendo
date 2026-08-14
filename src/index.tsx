@@ -8,7 +8,9 @@ import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
   sessionRoot, currentSessionName, killWindow,
-  type SessionKind, type Readiness,
+  paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, answerResumeDialog, paneAcceptsPaste,
+  capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
+  type SessionKind, type Readiness, type PaneSnapshot,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
@@ -18,8 +20,10 @@ import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./rest
 import { resolveContext, isUnderRoot } from "./context.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
-import { loadState } from "./config.ts";
-import { repoRootForCwd } from "./repos.ts";
+import { loadState, resumeDialogChoice } from "./config.ts";
+import { takeWarnings } from "./errors.ts";
+import { printJson } from "./output.ts";
+import { parseDuration, runWaitCli } from "./wait.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
@@ -66,11 +70,26 @@ Usage:
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status.
       --attach, -a              Switch/attach to it immediately (default: detached)
-  agendo wait [id...]          Poll until the target session(s) settle to a non-busy
-                                state, then exit 0; exit non-zero on timeout. With
-                                no ids, select with --all / --prefix / --repo.
-      --state <ready|busy|…>    Wait for exactly this readiness (default: non-busy)
-      --not <state>             Wait until readiness is anything but this
+  agendo wait [id...]          Block until the target session(s) settle to a
+                                non-busy state, then exit 0; exit non-zero on
+                                timeout. Run it in the background and use its exit
+                                as a notification instead of re-polling status.
+                                With no ids, select with --all / --prefix / --repo.
+                                A session whose window closes reads "exited": it
+                                satisfies the default wait, and short-circuits a
+                                --state it can no longer reach.
+      --any                     Wake on the FIRST session to satisfy, not all of
+                                them (so one stuck session can't mask the rest)
+      --json                    Emit a wake payload on stdout: why it woke, and
+                                each session's from → state, changed, satisfied,
+                                plus resumeDialog (parked on claude's resume
+                                dialog: it reads ready, but nothing has run yet)
+      --state <ready|busy|…>    Wait for exactly this state (default: non-busy).
+                                One of ready, busy, compacting, queued, dialog,
+                                limited, unknown, exited. "dialog" means a question
+                                for you — claude's own resume dialog reads ready,
+                                so it won't wake a --state dialog wait.
+      --not <state>             Wait until the state is anything but this
       --timeout <dur>           Give up after this long (default 120s)
       --interval <dur>          Poll cadence (default 2s). Durations: 500ms, 2s, 5m…
       --all                     All running sessions
@@ -88,7 +107,15 @@ Usage:
                                 older claude builds) gets it typed into the pane,
                                 and that refuses unless the input is idle/ready.
                                 Either way, refuses a session at its usage limit.
-      --force, -f               Send even if the input doesn't look ready
+                                If claude's own resume dialog is up, answers it
+                                first (config: resumeDialogChoice) with keystrokes
+                                and waits for the input box — the socket cannot
+                                answer a dialog — then delivers.
+      --force, -f               Send even if the input doesn't look ready (but
+                                never into claude's resume menu, see above)
+      --timeout <dur>           Deadline for the input box to appear after that
+                                dialog is answered — a ceiling, not a wait: it
+                                proceeds as soon as the box is there (default 120s)
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
                                 pane is still showing the usage-limit notice.
@@ -124,28 +151,6 @@ const KIND_LABEL: Record<SessionKind, string> = {
   pr: "pr",
   resumed: "—",
 };
-
-/**
- * Readiness states that mean the session is actively working (not settled) — the
- * default "still busy" set `agendo wait` polls against. Declared here, before the
- * subcommand dispatch runs, so the hoisted `waitSatisfied` never reads it in the
- * temporal dead zone during an early `wait` invocation.
- */
-const BUSY_STATES = new Set<Readiness>(["busy", "compacting"]);
-
-/**
- * Print a JSON payload and await the write. The subcommand dispatch calls
- * `process.exit(0)` right after its runner returns, and Bun drops stdout still
- * buffered at exit — a `console.log` of a large payload into a pipe truncates
- * at ~64KB (the pipe buffer), silently corrupting `--json` output for the
- * scripts consuming it. Awaiting the write callback guarantees the payload is
- * flushed before the dispatch can exit.
- */
-function printJson(value: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    process.stdout.write(JSON.stringify(value, null, 2) + "\n", (err) => (err ? reject(err) : resolve()));
-  });
-}
 
 /** Compact "last used" age for the list columns (matches the menu's timeAgo). */
 function timeAgo(d: Date): string {
@@ -299,16 +304,31 @@ if (process.argv[2] === "launch") {
 if (process.argv[2] === "send") {
   let id: string | undefined;
   let force = false;
+  // How long to wait for the input box to come back after answering claude's
+  // resume dialog (only used on that path).
+  let dialogWaitMs = RESUME_DIALOG_WAIT_MS;
   const parts: string[] = [];
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--force" || a === "-f") force = true;
+    // Only before the prompt begins: unlike --force, this flag consumes the NEXT
+    // token, so recognizing it mid-prompt would eat a word of the message. Shares
+    // `wait`'s duration grammar (and its parser, which lives in wait.ts) so the
+    // two commands can't drift into accepting different spellings of "2s".
+    else if (a === "--timeout" && parts.length === 0) {
+      const ms = parseDuration(rest[++i]);
+      if (ms === null) {
+        console.error(`send: --timeout needs a duration like 500ms, 2s, 5m, 1h (got "${rest[i] ?? ""}")`);
+        process.exit(1);
+      }
+      dialogWaitMs = ms;
+    }
     else if (a === "--") { parts.push(...rest.slice(i + 1)); break; }
     else if (id === undefined) id = a;
     else parts.push(a);
   }
-  await runSend(id, parts.join(" ").trim(), force);
+  await runSend(id, parts.join(" ").trim(), force, dialogWaitMs);
   process.exit(0);
 }
 
@@ -399,54 +419,13 @@ if (process.argv[2] === "unblock") {
   process.exit(0);
 }
 
-// `wait [id...]`: block until the selected session(s) reach a desired non-busy
-// state (like `gh run watch`), then exit 0; exit non-zero on timeout. Progress
-// goes to stderr, the final per-session state to stdout, so it composes in
-// scripts. Targets: explicit ids, or --all / --prefix / --repo selectors.
+// `wait [id...]`: block until the selected session(s) reach a desired state (like
+// `gh run watch`), then exit 0; exit non-zero on timeout. It's the notification
+// primitive for an orchestrator watching background sessions — run it in the
+// background and let its EXIT be the wake-up, instead of re-polling `status` on a
+// guessed cadence. See wait.ts for the poll contract and its cost.
 if (process.argv[2] === "wait") {
-  let all = false;
-  let prefix: string | undefined;
-  let repo: string | undefined;
-  let state: string | undefined;
-  let not: string | undefined;
-  let timeoutMs = 120_000;
-  let intervalMs = 2_000;
-  const ids: string[] = [];
-  const rest = process.argv.slice(3);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--all") all = true;
-    else if (a === "--prefix") prefix = rest[++i];
-    else if (a === "--repo") repo = rest[++i];
-    else if (a === "--state") state = rest[++i];
-    else if (a === "--not") not = rest[++i];
-    else if (a === "--timeout") timeoutMs = requireDuration("--timeout", rest[++i]);
-    else if (a === "--interval") intervalMs = requireDuration("--interval", rest[++i]);
-    else if (a === "--") { ids.push(...rest.slice(i + 1)); break; }
-    else ids.push(a);
-  }
-  const valid: Readiness[] = ["ready", "busy", "compacting", "queued", "dialog", "unknown"];
-  for (const [flag, v] of [["--state", state], ["--not", not]] as const) {
-    if (v !== undefined && !valid.includes(v as Readiness)) {
-      console.error(`wait: ${flag} must be one of ${valid.join("|")}, got "${v}"`);
-      process.exit(1);
-    }
-  }
-  if (state !== undefined && not !== undefined) {
-    console.error(`wait: use only one of --state / --not`);
-    process.exit(1);
-  }
-  await runWait({
-    ids,
-    all,
-    prefix,
-    repo,
-    state: state as Readiness | undefined,
-    not: not as Readiness | undefined,
-    timeoutMs,
-    intervalMs,
-  });
-  process.exit(0);
+  process.exit(await runWaitCli(process.argv.slice(3)));
 }
 
 // By default agendo runs inside a single canonical tmux host session — `agendo`
@@ -563,6 +542,13 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
     const { raw, cursor } = capturePaneState(target);
     const readiness = paneReadiness(raw, cursor);
     console.log(`  ready:  ${readiness}`);
+    // Reported ready (nothing is waiting on a decision about the work), but the
+    // pane is parked on claude's own resume dialog — say so, since `send` will
+    // answer it rather than paste into it.
+    if (paneResumeDialogActive(raw)) {
+      console.log(`  resume: claude's resume dialog is open — \`${SELF_CMD} send\` answers it (${resumeDialogChoice()}) before delivering`);
+      flushWarnings("status"); // the choice it just printed may have come from a config it had to ignore
+    }
     if (readiness === "limited") {
       const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
       console.log(
@@ -626,31 +612,79 @@ function indent(text: string): string {
 }
 
 /**
- * Send a prompt into a running session. Resolves the session by id or tmux name
- * and prefers its cross-session messaging socket (peer.ts), falling back to
- * typing into the tmux pane for sessions that expose no socket — Copilot, and
- * claude builds older than the peer protocol.
+ * Poll `target` until it's genuinely at an empty input box (see
+ * `paneAcceptsPaste` — a fresh capture each time, never an assumption), or null
+ * on timeout. Used after answering the CLI's resume dialog, where the session
+ * needs a moment to reload before its box comes back.
  *
- * Most of the readiness gate applies to the FALLBACK path only, and that
- * asymmetry is the point: a pane paste lands in whatever is on screen, so it
- * must first prove the TUI is idle (`--force` overrides) or it clobbers a
- * half-typed line. A socket frame is queued by the receiver and delivered when
- * it next reads input, so "busy" and "queued" are not hazards over the socket —
- * there is nothing to refuse. The pane state is still captured and reported, so
- * the caller sees what it walked into.
- *
- * `limited` is the exception that still refuses even though the socket would
- * accept the frame: a session sitting at its usage cap will not read it until the
- * cap resets, so reporting success would be a lie, and orchestrators key on the
- * exit-2 signal to know to wait or call `unblock`. That gate reads the PANE, so
- * it only fires for a session that has one — the registry reports
- * idle/busy/waiting/shell and has no way to say "at the cap", so a windowless
- * peer at its limit is queued to rather than refused. It will read the message
- * on reset; the exit code just can't warn about the delay.
+ * TWO consecutive good reads are required, a poll apart. A reloading TUI paints
+ * its box before it has finished restoring the conversation, and a paste into
+ * that half-drawn screen can be discarded by the next full repaint — so the box
+ * has to still be there a moment later to count.
  */
-async function runSend(token: string | undefined, prompt: string, force: boolean): Promise<void> {
+async function waitForInputBox(target: string, timeoutMs: number): Promise<PaneSnapshot | null> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const deadline = Date.now() + timeoutMs;
+  let settled = false;
+  while (true) {
+    const snap = capturePaneState(target);
+    const ok = paneAcceptsPaste(snap.raw, snap.cursor);
+    if (ok && settled) return snap;
+    settled = ok;
+    if (Date.now() >= deadline) return null;
+    await sleep(Math.min(RESUME_DIALOG_POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
+
+/**
+ * Send a prompt into a running session, resolved by id or tmux name.
+ *
+ * This is TWO jobs, and conflating them is the bug this shape exists to prevent:
+ *
+ *   1. ANSWERING claude's own resume dialog, when the pane is parked on one. Always
+ *      tmux keystrokes. A socket frame arrives as a *peer* message — the receiver
+ *      wraps it in "Another Claude session sent a message" and will NOT accept it as
+ *      the answer to a pending prompt — so the socket cannot do this job at all.
+ *   2. DELIVERING the message. Here the session's messaging socket (peer.ts) is
+ *      preferred, and typing into the pane is the fallback for anything that exposes
+ *      no socket: Copilot, and claude builds older than the peer protocol.
+ *
+ * The socket is an alternative for step 2 only, and never lets step 1 be skipped. A
+ * session sitting on the resume dialog has not started yet, so a frame queued past it
+ * would sit unread until a human answered the dialog — `send` would report success
+ * and leave the session parked. So the dialog is answered first, on the pane,
+ * whichever way the message then travels.
+ *
+ * One state reads "ready" without an input box behind it: that same resume dialog
+ * (see paneResumeDialogActive). Because the pane path is keystroke injection — paste,
+ * then Enter — a message delivered into that numbered menu would *pick an option*, so
+ * we answer the dialog first and re-verify a real box appeared before pasting
+ * anything. `--force` does NOT skip that: forcing a paste into a menu is precisely
+ * the footgun, so a dialog that never clears is an error either way — and a menu that
+ * only *looks* like it (a wrapped label, say, which the detector deliberately misses
+ * rather than over-matches) refuses the forced paste too (paneResumeMenuSuspect).
+ *
+ * Past the dialog, most of the readiness gate applies to the pane path only, and that
+ * asymmetry is the point: a paste lands in whatever is on screen, so it must first
+ * prove the TUI is idle (`--force` overrides) or it clobbers a half-typed line. A
+ * socket frame is queued by the receiver and read when it next reads input, so "busy"
+ * and "queued" are not hazards over the socket — there is nothing to refuse. The pane
+ * state is still captured and reported, so the caller sees what it walked into.
+ *
+ * `limited` is the exception that still refuses even though the socket would accept
+ * the frame: a session at its usage cap will not read it until the cap resets, so
+ * reporting success would be a lie, and orchestrators key on the exit-2 signal to
+ * know to wait or call `unblock`. It is checked AFTER the dialog step on purpose —
+ * the previous run's usage-limit notice is replayed above the resume dialog, so a
+ * pane read before answering it can report "limited" about a run that already ended.
+ * That gate reads the PANE, so it only fires for a session that has one: the registry
+ * reports idle/busy/waiting/shell and has no way to say "at the cap", so a windowless
+ * peer at its limit is queued to rather than refused. It will read the message on
+ * reset; the exit code just can't warn about the delay.
+ */
+async function runSend(token: string | undefined, prompt: string, force: boolean, dialogWaitMs: number): Promise<void> {
   if (!token || !prompt) {
-    console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force]`);
+    console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force] [--timeout <dur>]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
@@ -664,9 +698,52 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
     process.exit(1);
   }
-  // Pane state is advisory here and only exists when there IS a pane.
-  const { raw, cursor } = target ? capturePaneState(target) : { raw: "", cursor: null };
-  const readiness = target ? paneReadiness(raw, cursor) : null;
+  // Pane state only exists when there IS a pane. Where it exists it is what the
+  // dialog step below reads — that step is not advisory, and only a pane can
+  // satisfy it.
+  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target) : { raw: "", cursor: null };
+  let readiness: Readiness | null = target ? paneReadiness(raw, cursor) : null;
+  // ── Step 1: answer claude's resume dialog. Keystrokes only, and BEFORE any
+  // delivery — a queued frame can't answer it, and a session parked here hasn't
+  // started, so delivering past it would strand the message.
+  if (target && paneResumeDialogActive(raw)) {
+    const choice = resumeDialogChoice();
+    // Reading the config can report-and-ignore a malformed config.json, and this
+    // is the one command that ACTS on that file's value. Silently falling back to
+    // the default while pressing a key into a live session is exactly the case
+    // that warning exists for, so drain it here as `list` does for its own loads.
+    flushWarnings("send");
+    const option = resumeDialogOption(raw, choice);
+    if (!option) {
+      console.error(`Not sending: claude's resume dialog is open but no "${choice}" option was found — answer it yourself, then retry.`);
+      process.exit(2);
+    }
+    console.log(`▸ answering claude's resume dialog (${choice}): ${option.number}. ${option.label}`);
+    // Nothing was confirmed and the menu is still up — the cursor wouldn't move,
+    // or we couldn't read it. Stop here rather than wait out the whole timeout;
+    // either way not one character of the message has been sent.
+    if (!answerResumeDialog(target, option) && paneResumeDialogActive(capturePane(target))) {
+      console.error(
+        `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
+          `selection keys). Nothing was pasted — answer it yourself, then retry.`,
+      );
+      process.exit(2);
+    }
+    const settled = await waitForInputBox(target, dialogWaitMs);
+    if (!settled) {
+      console.error(
+        `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
+          `nothing was delivered by either route (a message typed into that menu would pick an option, and queueing one ` +
+          `past an unanswered dialog would strand it). Re-check with \`${SELF_CMD} status ${token}\`.`,
+      );
+      process.exit(2);
+    }
+    ({ raw, cursor } = settled);
+    readiness = paneReadiness(raw, cursor);
+  }
+  // ── Step 2: deliver. Checked only now: the previous run's usage-limit notice is
+  // replayed above the resume dialog, so reading this before step 1 could refuse on
+  // a cap that belonged to the run that already ended.
   if (readiness === "limited" && !force) {
     console.error(`Not sending: session is at its usage limit. Wait for the reset, \`${SELF_CMD} unblock ${token}\`, or pass --force.`);
     process.exit(2);
@@ -682,6 +759,15 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     try {
       await sendPeerMessage(peer, prompt);
       console.log(`▸ queued to ${where} via session socket${idle ? "" : ` (session is "${state}"; it will be delivered when it next reads input)`}`);
+      // A menu the detector wouldn't fully match was left standing (step 1 only
+      // acts on an exact match). Queueing past it is safe where a paste is not —
+      // a frame cannot pick an option — but nothing reads the queue until someone
+      // answers it, so don't let "queued" read as "the session acted on it".
+      if (paneResumeMenuSuspect(raw)) {
+        console.error(
+          `  note: the pane looks like a resume menu agendo won't answer, so the message waits until you do.`,
+        );
+      }
       return;
     } catch (e) {
       // The socket was advertised but unusable — the session died between
@@ -697,6 +783,20 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     console.error(`Not sending: session looks "${readiness}", not ready. Re-check with \`${SELF_CMD} status ${token}\`, or pass --force.`);
     console.error(`\n  current screen (tail):`);
     for (const l of stripAnsi(raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
+    process.exit(2);
+  }
+  // The one thing --force may not do. If the pane is showing something that
+  // looks like the resume menu but the detector didn't fully match it (a wrapped
+  // label, reworded footer, changed option set), the branch above never ran —
+  // and a forced paste would type the message INTO that menu, where its digits
+  // pick options and the trailing Enter confirms one. (The socket path returned
+  // long before this: queueing a frame can't pick an option, so this gate is
+  // about pasting specifically, not about reaching a parked session at all.)
+  if (paneResumeMenuSuspect(raw)) {
+    console.error(
+      `Not sending: the pane looks like claude's resume menu but doesn't match it exactly, so agendo won't answer it ` +
+        `and --force won't paste into it (the message would pick an option). Answer it yourself, then retry.`,
+    );
     process.exit(2);
   }
   sendToPane(target!, prompt); // non-null: reaching here means the peer path didn't return
@@ -721,6 +821,18 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
   }
   const { raw, cursor } = capturePaneState(target);
   const readiness = paneReadiness(raw, cursor);
+  // The resume keystrokes lead with Escape, which on claude's own resume dialog
+  // is its "Esc to cancel" — it would cancel the resume rather than unblock
+  // anything. Refused even with --force: there is no reading of `unblock` under
+  // which cancelling a resume is what the user meant. (The pane can still LOOK
+  // limited here — the previous run's notice is replayed above the dialog.)
+  if (paneResumeDialogActive(raw)) {
+    console.error(
+      `Not unblocking: the session is sitting on claude's resume dialog, and the resume keystrokes ` +
+        `lead with Escape — which would cancel it. Use \`${SELF_CMD} send ${token} "<prompt>"\`, which answers the dialog.`,
+    );
+    process.exit(2);
+  }
   if (readiness !== "limited" && !force) {
     console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
     process.exit(2);
@@ -777,6 +889,17 @@ interface ListRow {
  * identity, if any. Used by the association-resolving `list` modes so their
  * gh/az fetch set matches what the menu would show.
  */
+/**
+ * Print (and clear) anything the load reported-and-ignored. The TUI surfaces
+ * these as a notice; the CLI has no such chrome, so they go to stderr — leaving
+ * stdout clean for `--json`. Without this a corrupt `~/.agendo/state.json` would
+ * silently drop the persisted backend and identity, and the command would query
+ * the wrong backend with no hint as to why.
+ */
+function flushWarnings(prefix: string): void {
+  for (const w of takeWarnings()) console.error(`${prefix}: ${w}`);
+}
+
 function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProvider>; identity: Identity | null } {
   const st = loadState();
   const provider = resolveInitialProvider(st.provider);
@@ -815,6 +938,7 @@ async function runList(opts: ListOptions): Promise<void> {
     }
     console.error(`list: continuing without PR/work-item associations (${msg})`);
   }
+  flushWarnings("list");
 
   const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
   const linkOf = (s: AgentSession) => model?.sessionLinks.get(`${s.source}:${s.id}`);
@@ -1002,10 +1126,12 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
   try {
     model = await loadModel(currentModelOptions());
   } catch (e) {
+    flushWarnings("list pr");
     console.error(`list pr: could not load pull requests from the backend: ${(e as Error)?.message ?? e}`);
     process.exit(1);
     return;
   }
+  flushWarnings("list pr");
   // PRs I created: linked-to-a-work-item + orphans. Dedupe by repo:id — GitHub PR
   // numbers are per-repo, so id alone can collide across repos.
   const seen = new Set<string>();
@@ -1073,10 +1199,12 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
   try {
     model = await loadModel(currentModelOptions());
   } catch (e) {
+    flushWarnings("list issues");
     console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);
     process.exit(1);
     return;
   }
+  flushWarnings("list issues");
   const label = model.provider === "github" ? "issue" : "work item";
   const seen = new Set<number>();
   const items: WorkItem[] = [];
@@ -1184,150 +1312,6 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   console.log(`▸ resumed session ${shortId(s.id)}${plan.alreadyRunning ? " (was already running)" : ""}`);
   console.log(`  window:  ${plan.tmuxName}   (in ${s.cwd})`);
   console.log(`  status:  ${SELF_CMD} status ${shortId(s.id)}`);
-}
-
-interface WaitOptions {
-  ids: string[];
-  all: boolean;
-  prefix?: string;
-  repo?: string;
-  /** Desired readiness (exact match). Overrides the default non-busy predicate. */
-  state?: Readiness;
-  /** Wait until readiness is anything but this. */
-  not?: Readiness;
-  timeoutMs: number;
-  intervalMs: number;
-}
-
-/** Whether a pane's readiness satisfies the wait predicate. The default (no
- *  `--state`/`--not`) waits for a *known, settled* non-busy state — "unknown" is
- *  excluded so a blank, not-yet-drawn, or closed pane doesn't count as "done"
- *  and report a false success. */
-function waitSatisfied(r: Readiness, o: WaitOptions): boolean {
-  if (o.state) return r === o.state;
-  if (o.not) return r !== o.not;
-  return !BUSY_STATES.has(r) && r !== "unknown";
-}
-
-/** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
- *  if the string is missing or malformed, so the caller can reject it loudly
- *  rather than silently fall back to a default the user didn't ask for. */
-function parseDuration(s: string | undefined): number | null {
-  if (!s) return null;
-  const m = s.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i);
-  if (!m) return null;
-  const n = Number(m[1]);
-  switch ((m[2] ?? "s").toLowerCase()) {
-    case "ms": return n;
-    case "s": return n * 1_000;
-    case "m": return n * 60_000;
-    case "h": return n * 3_600_000;
-    default: return null;
-  }
-}
-
-/** Parse a required duration flag, exiting with a clear error on bad/missing input. */
-function requireDuration(flag: string, s: string | undefined): number {
-  const ms = parseDuration(s);
-  if (ms === null) {
-    console.error(`wait: ${flag} needs a duration like 500ms, 2s, 5m, 1h (got "${s ?? ""}")`);
-    process.exit(1);
-  }
-  return ms;
-}
-
-/**
- * Poll the selected session(s) until they all satisfy the wait predicate, then
- * exit 0; exit non-zero on timeout. Only running sessions can be waited on (an
- * idle session has no pane to read), so selectors filter to live targets;
- * explicit ids that aren't running are an error. Progress lines go to stderr and
- * the final per-session `<id>\t<state>` to stdout, so it composes in scripts.
- */
-async function runWait(o: WaitOptions): Promise<void> {
-  const index = await SessionIndex.build();
-  let sessions: AgentSession[];
-  if (o.ids.length) {
-    sessions = [];
-    const missing: string[] = [];
-    for (const tok of o.ids) {
-      const sid = tok.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(tok);
-      const s = index.all.find((x) => x.id === tok || shortId(x.id) === sid);
-      if (s) sessions.push(s);
-      else missing.push(tok);
-    }
-    if (missing.length) {
-      console.error(`wait: no session found for ${missing.join(", ")}`);
-      process.exit(1);
-    }
-  } else if (o.all) {
-    sessions = [...index.all];
-  } else if (o.prefix !== undefined || o.repo !== undefined) {
-    sessions = index.all.filter((s) => {
-      if (o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
-      if (o.repo !== undefined && basename(repoRootForCwd(s.cwd)) !== o.repo) return false;
-      return true;
-    });
-  } else {
-    console.error(
-      `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> ` +
-        `[--state <s>] [--not <s>] [--timeout <dur>] [--interval <dur>]`,
-    );
-    process.exit(1);
-  }
-
-  // Only running sessions have a pane to poll. Resolve each session's live
-  // window via the same reconciliation the menu uses (`refreshLiveTmux`), NOT
-  // `liveTargetForShortId`: that only matches id-bearing names, so a session
-  // running under a work-item / PR window (`cl-wi-…`/`cl-pr-…`, attributed by
-  // cwd) would be wrongly seen as not-running. `liveWindows` also excludes
-  // restored-but-unopened placeholders (idle bash), so we never "wait" on those.
-  // For explicit ids a non-running target can never settle, so it's an error;
-  // selectors just skip idle ones.
-  const { liveWindows } = refreshLiveTmux(index.all);
-  const targets: { s: AgentSession; target: string }[] = [];
-  const notRunning: AgentSession[] = [];
-  for (const s of sessions) {
-    const target = liveWindows.get(sessionName(s));
-    if (target) targets.push({ s, target });
-    else notRunning.push(s);
-  }
-  if (o.ids.length && notRunning.length) {
-    console.error(`wait: not running (no live window): ${notRunning.map((s) => shortId(s.id)).join(", ")}`);
-    process.exit(1);
-  }
-  if (targets.length === 0) {
-    console.error("wait: no running sessions matched — nothing to wait on.");
-    process.exit(1);
-  }
-
-  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : "non-busy";
-  console.error(`waiting for ${targets.length} session(s) to be ${desc} (timeout ${Math.round(o.timeoutMs / 1000)}s)…`);
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  // Floor the poll interval so a `--interval 0` can't spin a hot capture loop.
-  const interval = Math.max(100, o.intervalMs);
-  const deadline = Date.now() + o.timeoutMs;
-  while (true) {
-    const states = targets.map((t) => {
-      const { raw, cursor } = capturePaneState(t.target);
-      return { ...t, r: paneReadiness(raw, cursor) };
-    });
-    const pending = states.filter((x) => !waitSatisfied(x.r, o));
-    if (pending.length === 0) {
-      for (const x of states) console.log(`${shortId(x.s.id)}\t${x.r}`);
-      process.exit(0);
-    }
-    if (Date.now() >= deadline) {
-      console.error(
-        `wait: timed out after ${Math.round(o.timeoutMs / 1000)}s; still pending: ` +
-          pending.map((x) => `${shortId(x.s.id)}(${x.r})`).join(", "),
-      );
-      process.exit(1);
-    }
-    console.error(`  pending: ${pending.map((x) => `${shortId(x.s.id)}=${x.r}`).join(", ")}`);
-    // Never sleep past the deadline: bounds the timeout overrun to ~0 even when
-    // the interval is large relative to the remaining time.
-    await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
-  }
 }
 // Quit if our input stream goes away — e.g. the controlling terminal/PTY closed
 // because a parent process died, orphaning us. Without this, Ink keeps the

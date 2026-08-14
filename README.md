@@ -67,11 +67,30 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`. So an agent can spin off _new_ sessions — each in its
-own fresh worktree — for separate pieces of work that deserve their own PR, then
+launch`/`list`/`status`/`send`/`wait`. So an agent can spin off _new_ sessions — each in
+its own fresh worktree — for separate pieces of work that deserve their own PR, then
 monitor and steer them through the same commands. One orchestrator session can fan a
 large task out across many worktrees and coordinate them, instead of hand-rolling
 tmux and `git worktree`. The sessions it starts inherit the same ability.
+
+To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
+a watched session stops working — settles to a non-busy state, or its window closes —
+so it can be run in the background with its **exit** as the notification:
+
+```sh
+agendo wait --repo myapp --any --json --timeout 30m
+```
+
+`--any` returns on the first of several sessions to settle, so one long-running session
+can't hide the others; `--json` says why it woke and gives each session's `from → state`,
+so the wake needs no follow-up `list`. `--state <s>` waits for one exact state — e.g.
+`--state limited` to hear the moment a session hits its usage cap. The alternative —
+re-running `status` on a guessed cadence — either fires too often or finds out too late.
+
+`--state dialog` means a question awaiting *your* decision; the Claude CLI's own resume
+dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads **ready**),
+so it won't wake that wait. When a wake does find a session parked there, `--json` says
+so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
 
 ### Messages that queue instead of waiting for an idle pane
 
@@ -88,6 +107,12 @@ rather than a dependency: a session that doesn't advertise it (Copilot, older Cl
 builds) or whose socket refuses gets the prompt typed into the pane exactly as
 before. A session at its usage limit is refused either way — nothing would read the
 queued message until the cap resets.
+
+Delivering a message and *answering a dialog* stay separate jobs. A frame arrives as a
+peer message, which the receiver won't accept as the answer to a pending prompt — so
+when a session is parked on claude's own resume dialog, `send` still answers that with
+keystrokes first and only then delivers, by whichever route. The socket is an
+alternative for the delivery, never for the dialog.
 
 ### Fresh sessions in isolated worktrees
 
@@ -120,6 +145,23 @@ set them for your own setup (see `src/config.ts` for the shape); the token is fe
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
 found across your local sessions. Your selected backend is remembered in
 `~/.agendo/state.json`.
+
+### `resumeDialogChoice`
+
+Resuming a large session, the Claude CLI first asks how to reload it (_"Resume from
+summary (recommended)"_ / _"Resume full session as-is"_). agendo reports a session
+parked there as **ready**, not blocked, and answers the dialog itself the next time
+you `send` to it — then waits for the input box to actually come back before
+delivering your message.
+
+```jsonc
+// ~/.agendo/config.json
+{ "resumeDialogChoice": "summary" }  // default: whatever Claude marks (recommended)
+{ "resumeDialogChoice": "as-is" }    // resume the full session, at full token cost
+```
+
+The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
+it changes your global Claude CLI behaviour permanently, which is your call to make.
 
 ## Testing
 

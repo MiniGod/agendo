@@ -280,6 +280,18 @@ const READY_PANE = [
   "  ? for shortcuts",
 ].join("\n");
 
+/** A mid-generation claude TUI. The live token counter's directional ↑ arrow is
+ *  the signal `paneReadiness` keys on, so this classifies as "busy" — not
+ *  sendable, not settled. Shared by every spec/driver that needs a session to
+ *  keep working while something else is asserted around it. */
+export const BUSY_PANE = [
+  "  ● Implement login form",
+  "  ⠋ Working… (12s · ↑ 2.1k tokens)",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+].join("\n");
+
 export const tmuxState = {
   sessions: [RUNNING_TARGET],
   windows: [] as { session: string; index: number; name: string }[],
