@@ -94,11 +94,17 @@ const refCache = new Map<string, RepoRef | null>();
  * owner/repo` yields owner=`owner` (not `443`), and case-insensitive so
  * `GitHub.com` parses. Handles the SSH (`git@github.com:owner/repo(.git)`),
  * HTTPS (`https://github.com/owner/repo(.git)`), and `ssh://` forms.
+ *
+ * Parsing stops at the repo segment, so anything trailing it is ignored: a
+ * remote never has a trailing path, but a *web* URL pasted by a user does
+ * (`…/owner/repo/tree/main/src`, `…/owner/repo/pull/12`), and clone.ts feeds
+ * those through here to get the same host anchoring rather than a second,
+ * looser regex.
  */
 export function parseGithubRemote(url: string): { owner: string; repo: string } | null {
   const m = url
     .trim()
-    .match(/(?:^|@|\/\/)(?:ssh\.)?github\.com(?::\d+)?[:/]([^/]+)\/(.+?)(?:\.git)?\/?$/i);
+    .match(/(?:^|@|\/\/)(?:ssh\.)?github\.com(?::\d+)?[:/]([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/i);
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 

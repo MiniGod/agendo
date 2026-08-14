@@ -6,7 +6,7 @@
 // both resume natively (Claude via `claude --resume`, Copilot via
 // `copilot --resume=<id>`); see launch.ts:resumeArgv.
 import { existsSync } from "fs";
-import { readdir, readFile, stat } from "fs/promises";
+import { readdir, readFile, realpath, stat } from "fs/promises";
 import { spawnSync } from "child_process";
 import { basename, join } from "path";
 import { homedir } from "os";
@@ -14,35 +14,19 @@ import { repoRootForCwd } from "./repos.ts";
 import { parseJsonLine } from "./errors.ts";
 import { parseGithubRemote } from "./github.ts";
 import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus, WorkflowRef } from "./types.ts";
-import { WorkflowScan } from "./workflows.ts";
+import { rebaseWorkflowPaths, WorkflowScan } from "./workflows.ts";
+import { dedupeProfiles, discoverProfiles } from "./profiles.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");
 
 // Claude config dirs to scan. The user may run multiple subscriptions/profiles,
-// each with its own ~/.claude* dir (e.g. ~/.claude and ~/.claude-work). We scan
-// every ~/.claude*/projects we find and remember which config dir each came
-// from (needed to set CLAUDE_CONFIG_DIR on resume). stat() follows symlinks, so
-// ~/.claude pointing into a dotfiles repo works, and non-dirs like
-// ~/.claude.json are skipped (no projects subdir).
-async function claudeBaseDirs(): Promise<{ projects: string; configDir: string }[]> {
-  const home = homedir();
-  let entries: string[];
-  try {
-    entries = await readdir(home);
-  } catch {
-    return [];
-  }
-  const out: { projects: string; configDir: string }[] = [];
-  await Promise.all(
-    entries.map(async (e) => {
-      if (!e.startsWith(".claude")) return;
-      const configDir = join(home, e);
-      const projects = join(configDir, "projects");
-      const st = await stat(projects).catch(() => null);
-      if (st?.isDirectory()) out.push({ projects, configDir });
-    }),
-  );
-  return out;
+// each with its own ~/.claude* dir (e.g. ~/.claude and ~/.claude-work); we
+// remember which config dir each session came from (needed to set
+// CLAUDE_CONFIG_DIR on resume). Discovery — and the realpath dedupe that stops a
+// store symlinked between two profiles from being walked twice — lives in
+// profiles.ts, which also owns moving a session between them.
+function claudeBaseDirs(): Promise<{ projects: string; configDir: string }[]> {
+  return discoverProfiles().then(dedupeProfiles);
 }
 
 interface SessionProvider {
@@ -211,7 +195,11 @@ const claudeProvider: SessionProvider = {
                   createdAt: meta.createdAt,
                   configDir,
                   logPath: filePath,
-                  workflows: meta.workflows,
+                  // A workflow run records its dirs as ABSOLUTE paths inside the
+                  // transcript, so anything that relocates the session (a profile
+                  // move, a renamed config dir) would leave them dangling. Re-anchor
+                  // them on the transcript we just read, which cannot go stale.
+                  workflows: meta.workflows && rebaseWorkflowPaths(meta.workflows, join(dirPath, id), id),
                 };
                 claudeParseCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, session });
                 sessions.push(session);
@@ -295,16 +283,18 @@ export class SessionIndex {
   static async build(): Promise<SessionIndex> {
     const idx = new SessionIndex();
     const lists = await Promise.all(PROVIDERS.map((p) => p.index()));
-    // Dedupe by source:id — the same session file can be discovered more than
-    // once when two scanned config dirs resolve to the same place (e.g. a
-    // symlinked ~/.claude). Keep the most-recently-used copy so it isn't listed
-    // (or keyed in the UI) twice.
+    // Dedupe by source:id — the same session can be discovered more than once
+    // when a user has symlinked pieces of one profile's store into another (a
+    // single `<id>.jsonl`, an `<enc-cwd>/` dir; a symlinked `projects/` or
+    // `~/.claude` is already collapsed upstream by dedupeProfiles). A duplicate's
+    // filename — hence its id — is necessarily the same, so the id key catches
+    // every alias. Which copy survives is decided in preferredDuplicate.
     const byId = new Map<string, AgentSession>();
     for (const list of lists) {
       for (const s of list) {
         const key = `${s.source}:${s.id}`;
         const prev = byId.get(key);
-        if (!prev || s.lastUsed.getTime() > prev.lastUsed.getTime()) byId.set(key, s);
+        byId.set(key, prev ? await preferredDuplicate(prev, s) : s);
       }
     }
     for (const s of byId.values()) {
@@ -352,6 +342,32 @@ export class SessionIndex {
       return (s.branch && re.test(s.branch)) || re.test(s.cwd);
     });
   }
+}
+
+/**
+ * Which of two entries for the SAME session id to keep.
+ *
+ * Prefer the REALPATH OWNER — the one whose transcript path needs no symlink
+ * traversal — so a session symlinked from profile B into profile A is attributed
+ * to the profile that actually holds the bytes, and `CLAUDE_CONFIG_DIR` on resume
+ * points there. When ownership can't decide it (neither owns the path because the
+ * profile dir itself is a symlink, or both do because they're genuinely separate
+ * files that happen to share an id) fall back to the most-recently-used, which is
+ * the pre-existing tie-break.
+ *
+ * Only reached on an actual collision, so the realpath syscalls cost nothing on
+ * the overwhelmingly common no-duplicates path.
+ */
+async function preferredDuplicate(a: AgentSession, b: AgentSession): Promise<AgentSession> {
+  const [aOwns, bOwns] = await Promise.all([ownsLogPath(a), ownsLogPath(b)]);
+  if (aOwns !== bOwns) return aOwns ? a : b;
+  return b.lastUsed.getTime() > a.lastUsed.getTime() ? b : a;
+}
+
+/** Whether a session's transcript path reaches the file without a symlink hop. */
+async function ownsLogPath(s: AgentSession): Promise<boolean> {
+  if (!s.logPath) return false;
+  return (await realpath(s.logPath).catch(() => null)) === s.logPath;
 }
 
 // ── Repo scoping for forWorkItem ─────────────────────────────────────────────

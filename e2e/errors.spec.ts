@@ -22,6 +22,7 @@ import { test, expect } from "./harness/test.ts";
 // of loadModel (unlike the enrichment calls, which swallow their own errors).
 const WIQL = /_apis\/wit\/wiql$/i;
 const WORKITEMS = /_apis\/wit\/workitems$/i;
+const ITERATIONS = /_apis\/work\/teamsettings\/iterations$/i;
 
 // The token the fake `az` mints (e2e/fakebin/az). It must never reach the screen.
 const TOKEN = "fake-ado-token";
@@ -150,6 +151,27 @@ test("a transient failure recovers on the next attempt with no keypress", async 
 
   // Exactly one retry: the failed attempt plus the one that worked.
   expect(countRequests(mock.ado.requests, "/_apis/wit/wiql")).toBe(2);
+});
+
+test("a 404 the backend TOLERATES is an answer, not a failure to retry", async ({ launch, mock }) => {
+  fastRetries(mock.env);
+  // A team with no sprints 404s on the current-iteration endpoint, which #21
+  // resolves to null ("no current sprint") instead of throwing. That null is a
+  // successful answer, so it must never reach the retry loop — auto-retry and
+  // 404-tolerance have to compose, not fight. Guarded here because the two
+  // landed independently: #21 fixed the symptom by not throwing, this PR
+  // ensures nothing downstream re-introduces it by retrying.
+  mock.setAdoResponse(ITERATIONS, { status: 404, body: { message: "no iterations configured" } });
+
+  const wt = await launch(WIDE);
+  const loaded = await wt.waitForText("Current sprint", 20000);
+  expect(loaded).not.toContain(DEAD_END);
+  expect(loaded).not.toContain("retrying");
+  await wt.waitForStable();
+
+  // One request, not four: the tolerated 404 resolves inside adoFetch before any
+  // error object exists, so isRetryable never sees it.
+  expect(countRequests(mock.ado.requests, "/_apis/work/teamsettings/iterations")).toBe(1);
 });
 
 test("a permanent failure is not retried at all, and r/q still work", async ({ launch, mock }) => {

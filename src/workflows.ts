@@ -76,6 +76,38 @@ export class WorkflowScan {
 }
 
 /**
+ * Re-anchor a run's recorded paths onto the session's CURRENT sidecar dir.
+ *
+ * `transcriptDir` / `scriptPath` are written into the transcript as ABSOLUTE
+ * paths at launch time (`<profile>/projects/<enc-cwd>/<id>/…`), so anything that
+ * relocates the session afterwards — moving it to another Claude profile,
+ * renaming a config dir, restoring a backup elsewhere — leaves every run's
+ * details unreadable and the workflow section silently blank. Resolving them
+ * against the transcript we just read instead makes that structurally impossible:
+ * the recorded prefix is never trusted, only the tail below the session dir.
+ *
+ * The session id is always a path segment of a recorded path (the sidecar dir is
+ * named after it), so everything up to and including the LAST `/<id>/` is
+ * replaced with `sessionDir` — last, so an `<enc-cwd>` that happens to contain
+ * the id can't be mistaken for the sidecar. A path with no such segment isn't one
+ * of ours and is passed through exactly as recorded.
+ */
+export function rebaseWorkflowPaths(refs: WorkflowRef[], sessionDir: string, id: string): WorkflowRef[] {
+  return refs.map((r) => ({
+    ...r,
+    transcriptDir: rebaseUnderSession(r.transcriptDir, sessionDir, id),
+    scriptPath: rebaseUnderSession(r.scriptPath, sessionDir, id),
+  }));
+}
+
+function rebaseUnderSession(p: string | undefined, sessionDir: string, id: string): string | undefined {
+  if (!p) return p;
+  const marker = `/${id}/`;
+  const i = p.lastIndexOf(marker);
+  return i < 0 ? p : join(sessionDir, p.slice(i + marker.length));
+}
+
+/**
  * Effective run state. A notification is authoritative; without one the run is
  * only alive if its session still has a live tmux window (workflows run
  * in-process — no session, no workflow), else it died mid-run: "interrupted".

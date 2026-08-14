@@ -29,15 +29,23 @@ export interface AdoServer {
    *  so a test can flip status/isDraft/title between reloads to prove the app
    *  re-reads mutable PR state rather than serving a frozen cache. */
   setPr(id: number, patch: Record<string, unknown>): void;
+  /** Force the response for every request whose path matches — fault injection
+   *  for backend states the fixtures can't express, e.g. an endpoint that 404s
+   *  for a team with no sprints configured. Checked before routing, for any
+   *  method. Re-registering a path replaces the earlier rule, so a test can flip
+   *  a fault back off between reloads. `body` is JSON-encoded; for a body that
+   *  is deliberately NOT valid JSON, use setRaw. */
+  setResponse(match: RegExp, response: { status?: number; body?: unknown }): void;
   /**
-   * Force a RAW response for every request whose path matches — fault injection
-   * for backend states the fixtures can't express: an HTML sign-in page served
-   * with a 2xx (what an expired ADO auth actually looks like), a 5xx, a 404.
-   * The body is written verbatim, so it can be invalid JSON on purpose.
+   * setResponse's lower level: the body is written VERBATIM, so it can be
+   * invalid JSON on purpose — an HTML sign-in page served with a 2xx is what an
+   * expired ADO auth actually looks like, and it's the shape that produces a
+   * bare "Failed to parse JSON".
    *
    * `times` bounds how many matching requests the fault applies to (default:
    * every one), which is how a test makes a load fail once and succeed on the
-   * launcher's automatic retry. Checked before routing, for any method.
+   * launcher's automatic retry; `delayMs` holds the response back so a slow
+   * backend — and thus an in-flight retry attempt — is observable.
    */
   setRaw(match: RegExp, response: RawFault): void;
   close(): Promise<void>;
@@ -65,7 +73,8 @@ export async function startAdoServer(): Promise<AdoServer> {
   const prOverrides = new Map<number, Record<string, unknown>>();
   const withOverride = (pr: any): any =>
     pr && prOverrides.has(pr.pullRequestId) ? { ...pr, ...prOverrides.get(pr.pullRequestId) } : pr;
-  // Raw fault rules (see setRaw), newest first so a later registration wins.
+  // Forced responses (see setRaw / setResponse), tried against the request path
+  // newest-first so a later registration overrides an earlier one.
   const faults: {
     match: RegExp;
     status: number;
@@ -186,6 +195,20 @@ export async function startAdoServer(): Promise<AdoServer> {
         left: response.times ?? Number.POSITIVE_INFINITY,
         delayMs: response.delayMs ?? 0,
       }),
+    // The JSON-encoding wrapper over setRaw, so both fault injectors share one
+    // rule list and one match/precedence rule rather than racing each other.
+    setResponse: (match, response) => {
+      const status = response.status ?? 200;
+      const body = "body" in response ? response.body : { error: `forced ${status}` };
+      faults.unshift({
+        match: new RegExp(match.source, match.flags.replace(/[gy]/g, "")),
+        status,
+        body: JSON.stringify(body),
+        contentType: "application/json",
+        left: Number.POSITIVE_INFINITY,
+        delayMs: 0,
+      });
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

@@ -9,7 +9,7 @@
 // throwaway dir and assert on the parse counts it reports. The cache is module
 // state, so all scenarios run in that ONE child across successive builds.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
@@ -56,4 +56,46 @@ test("transcript parse cache: hit / invalidation / new file / prune", () => {
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// `agendo wait` is the notification path an orchestrator leaves running for
+// minutes at a time. It must ride the ONE cached index build it does up front and
+// add no transcript work per tick — a second scanner on this loop is the primary
+// way to reintroduce the CPU burn the cache exists to prevent.
+//
+// Counting parses over an untouched corpus would prove nothing (the cache serves
+// 0 misses either way), so the driver changes a transcript WHILE the wait polls.
+// Any per-tick rebuild would miss the cache on that file and re-parse it.
+test("agendo wait adds no transcript parsing beyond its one cached build", async ({ mock }) => {
+  const report = join(mock.tmpDir, "wait-driver.json");
+  const r = spawnSync("bun", [join(REPO_ROOT, "e2e", "harness", "waitPollDriver.ts")], {
+    env: { ...mock.env, WAIT_DRIVER_REPORT: report },
+    cwd: REPO_ROOT,
+    encoding: "utf-8",
+    timeout: 60_000,
+  });
+  expect(r.status, `driver stderr:\n${r.stderr}`).toBe(0);
+  const out = JSON.parse(readFileSync(report, "utf-8")) as {
+    code: number;
+    coldSessions: number;
+    coldParses: number;
+    waitParses: number;
+    mutated: boolean;
+    reparsesAfter: number;
+  };
+
+  // The wait itself settled (busy → ready) rather than timing out.
+  expect(out.code).toBe(0);
+  // The up-front build did real work, so "0 during the wait" isn't vacuous.
+  expect(out.coldSessions).toBeGreaterThan(0);
+  expect(out.coldParses).toBeGreaterThan(0);
+
+  // THE CORE ASSERTION: the whole poll loop re-parsed nothing.
+  expect(out.waitParses).toBe(0);
+
+  // …and the zero is real: the transcript really was rewritten mid-wait, and a
+  // genuine rebuild afterwards does re-parse it. So the loop skipped the file
+  // because it never scanned, not because the counter was stuck.
+  expect(out.mutated).toBe(true);
+  expect(out.reparsesAfter).toBe(1);
 });
