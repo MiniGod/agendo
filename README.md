@@ -87,6 +87,11 @@ so the wake needs no follow-up `list`. `--state <s>` waits for one exact state �
 `--state limited` to hear the moment a session hits its usage cap. The alternative —
 re-running `status` on a guessed cadence — either fires too often or finds out too late.
 
+`--state dialog` means a question awaiting *your* decision; the Claude CLI's own resume
+dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads **ready**),
+so it won't wake that wait. When a wake does find a session parked there, `--json` says
+so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
@@ -118,6 +123,23 @@ set them for your own setup (see `src/config.ts` for the shape); the token is fe
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
 found across your local sessions. Your selected backend is remembered in
 `~/.agendo/state.json`.
+
+### `resumeDialogChoice`
+
+Resuming a large session, the Claude CLI first asks how to reload it (_"Resume from
+summary (recommended)"_ / _"Resume full session as-is"_). agendo reports a session
+parked there as **ready**, not blocked, and answers the dialog itself the next time
+you `send` to it — then waits for the input box to actually come back before
+delivering your message.
+
+```jsonc
+// ~/.agendo/config.json
+{ "resumeDialogChoice": "summary" }  // default: whatever Claude marks (recommended)
+{ "resumeDialogChoice": "as-is" }    // resume the full session, at full token cost
+```
+
+The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
+it changes your global Claude CLI behaviour permanently, which is your call to make.
 
 ## Testing
 

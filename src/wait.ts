@@ -18,7 +18,7 @@
  */
 import { basename } from "path";
 import {
-  capturePaneState, paneReadiness, sessionName, shortId,
+  capturePaneState, paneReadiness, paneResumeDialogActive, sessionName, shortId,
   type Readiness,
 } from "./tmux.ts";
 import { SessionIndex } from "./sessions.ts";
@@ -58,7 +58,12 @@ export type WaitState = Readiness | "exited";
 
 /** Accepted `--state` / `--not` values. Enumerated (rather than derived) so the
  *  error message lists them; `limited` is included — it's a real readiness the
- *  old list omitted, which made "wake me when it hits its usage cap" unwaitable. */
+ *  old list omitted, which made "wake me when it hits its usage cap" unwaitable.
+ *
+ *  `dialog` means a question awaiting a HUMAN decision. The claude CLI's own
+ *  resume dialog is deliberately not one: `paneReadiness` reports it `ready`
+ *  (see `paneResumeDialogActive`), because `send` answers it itself. So a
+ *  `--state dialog` wait won't wake on a session merely parked on that. */
 export const WAIT_STATES: WaitState[] = [
   "ready", "busy", "compacting", "queued", "dialog", "limited", "unknown", "exited",
 ];
@@ -96,6 +101,15 @@ export interface WaitResult {
   /** tmux window the session occupies now; the one resolved at startup if it has
    *  since gone away. */
   window: string;
+  /**
+   * True when the session is sitting on claude's OWN resume dialog. Such a pane
+   * reports `ready` (`send` answers the dialog itself), which would otherwise be
+   * indistinguishable here from a session that genuinely finished a turn — and
+   * the two mean opposite things: nothing has run yet, so any activity a caller
+   * reads back is the PREVIOUS run's. Waking on it is right; mistaking it for a
+   * completed turn is not, so it is named rather than left to inference.
+   */
+  resumeDialog: boolean;
 }
 
 /** The `--json` wake payload. `woke` is why the wait returned:
@@ -318,10 +332,15 @@ export async function runWait(o: WaitOptions): Promise<number> {
     return targets.map(({ s, target }) => {
       const live = nowLive.get(sessionName(s));
       let state: WaitState;
+      // Read off the SAME capture the state came from, so the flag can't describe
+      // a different frame than the state it qualifies. A target with no live
+      // window has no pane to be parked in, so it is false there by construction.
+      let resumeDialog = false;
       if (live) {
         misses.set(s.id, 0);
         const { raw, cursor } = capturePaneState(live);
         state = paneReadiness(raw, cursor);
+        resumeDialog = paneResumeDialogActive(raw);
       } else {
         const seen = (misses.get(s.id) ?? 0) + 1;
         misses.set(s.id, seen);
@@ -339,6 +358,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
         cwd: s.cwd,
         title: s.title,
         window: live ?? target,
+        resumeDialog,
       };
     });
   }
