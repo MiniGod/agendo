@@ -67,11 +67,12 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`/`wait`/`close`. So an agent can spin off _new_ sessions —
-each in its own fresh worktree — for separate pieces of work that deserve their own PR,
-then monitor, steer and finally close them through the same commands. One orchestrator
-session can fan a large task out across many worktrees and coordinate them, instead of
-hand-rolling tmux and `git worktree`. The sessions it starts inherit the same ability.
+launch`/`list`/`status`/`send`/`open`/`wait`/`close`. So an agent can spin off _new_
+sessions — each in its own fresh worktree — for separate pieces of work that deserve
+their own PR, then monitor, steer and finally close them through the same commands. One
+orchestrator session can fan a large task out across many worktrees and coordinate them,
+instead of hand-rolling tmux and `git worktree`. The sessions it starts inherit the same
+ability.
 
 To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
 a watched session settles — a non-busy state, or its window closing — so it can be run
@@ -155,6 +156,11 @@ set them for your own setup (see `src/config.ts` for the shape); the token is fe
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
 found across your local sessions. Your selected backend is remembered in
 `~/.agendo/state.json`.
+
+Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
+platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
+executable to use instead, for hosts where that default isn't right (containers, WSL).
+Where nothing can be launched at all, `agendo open` still prints the full URL.
 
 ### `resumeDialogChoice`
 
