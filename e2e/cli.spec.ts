@@ -1293,6 +1293,32 @@ test("agendo wait needs two consecutive missed sightings before declaring a sess
   expect(states).toContain("busy"); // …and the sighting before the misses was live
 });
 
+test("agendo wait counts a repeated id once, so one missed sighting still can't confirm exit", async ({ mock }) => {
+  // The miss counter is keyed by session id, so the same session listed twice
+  // used to bump it twice per tick and reach the two-miss threshold on the FIRST
+  // absence — under `--any` that satisfied the predicate and returned exit 0
+  // reporting `exited` for a session that had merely been missed once. That is
+  // the very failure the threshold exists to prevent, reintroduced through the
+  // target list, and a script composing ids (`wait $A $B`, both resolving here)
+  // hits it without doing anything unusual.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: BUSY_PANE } });
+  const { child, done } = agendoAsync(
+    mock.env, "wait", SHORT_ID, LOGIN_SESSION_ID, "--any", "--json", "--interval", "400ms", "--timeout", "30s",
+  );
+  await whenStderrMatches(child, /pending: \w+=busy/);
+  await mock.setTmuxState({ ...tmuxState, sessions: [], panes: [], captures: {} });
+
+  const r = await done;
+  expect(r.code).toBe(0);
+  const out = wakePayload(r.stdout);
+  // One target, not two — and the caller isn't handed the same session twice
+  // with contradictory states to reconcile.
+  expect(out.sessions).toHaveLength(1);
+  expect(out.sessions[0].state).toBe("exited");
+  // …and the absence still had to repeat before it was believed.
+  expect(pendingStates(r.stderr).filter((s) => s === "unknown").length).toBeGreaterThanOrEqual(1);
+});
+
 test("agendo wait gives up early on a --state an exited session can never reach", async ({ mock }) => {
   // Nothing can change after the window is gone, so burning the full timeout is
   // pointless — wake now with a reason the caller can act on.
