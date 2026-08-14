@@ -114,6 +114,29 @@ when a session is parked on claude's own resume dialog, `send` still answers tha
 keystrokes first and only then delivers, by whichever route. The socket is an
 alternative for the delivery, never for the dialog.
 
+### Orchestrator mode, one keypress away
+
+Press `O` in the Sessions view — or run `agendo launch --orchestrator "<goal>"` — to
+start a session that is _only_ a coordinator. It gets the orchestrator instructions
+injected into its system prompt: write no project code, split the goal into units,
+launch one background session per unit (each running an implement → sub-agent review →
+fix loop until a review pass comes back clean), keep a live task list, parallelize
+independent units, monitor via `list`/`status` and steer via `send`, then squash-merge
+each finished branch into the main branch — no PRs. The framing is re-injected on
+resume, so a restored orchestrator doesn't quietly turn back into an implementer.
+
+Unlike every other launch, an orchestrator runs in the repo's **main checkout** rather
+than a worktree: git allows the main branch in only one working tree, and that's where
+its merges have to land. It writes no project code, so it needs no isolation of its own
+— pass `--worktree` (or pick "New git worktree") if you want it anyway.
+
+Because it acts on your main checkout and spawns further sessions, an orchestrator also
+**keeps its approval prompts** — it's the one background launch that isn't auto-approved.
+Add `--unattended` to waive them once you're happy to let it run on its own. For the same
+reason `--orchestrator` is documented here and in `--help`, but deliberately left out of
+`agendo --llm`: that guide is injected into every launched session, and a worktree-sandboxed
+agent shouldn't be able to read its way into starting an orchestrator in your main checkout.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
