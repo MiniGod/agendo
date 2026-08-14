@@ -290,6 +290,18 @@ export function parseResetTime(plain: string, now: Date, lookbackMs = 0): number
   return inst;
 }
 
+/**
+ * The reset instant a limited pane states, or null when it states none. `plain`
+ * must be ANSI-stripped. The ONE place the display/report lookback is chosen, so
+ * `agendo list`, `agendo wait` and the TUI can't drift into three readings of
+ * the same screen; the TUI's auto-resume freezes the first value it sees per
+ * limit window, which this deliberately doesn't try to replicate — a one-shot
+ * CLI has no window to freeze.
+ */
+export function paneResetAt(plain: string, now: Date = new Date()): number | null {
+  return parseResetTime(plain, now, RESET_LOOKBACK_MS);
+}
+
 // ── reset-time display ─────────────────────────────────────────────────────────
 // A parsed reset instant is shown to humans as a bare clock time ("14:00" /
 // "2:00 PM") — short enough to sit next to the readiness word in a list column.

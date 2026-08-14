@@ -67,11 +67,29 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`. So an agent can spin off _new_ sessions — each in its
-own fresh worktree — for separate pieces of work that deserve their own PR, then
+launch`/`list`/`status`/`send`/`wait`. So an agent can spin off _new_ sessions — each in
+its own fresh worktree — for separate pieces of work that deserve their own PR, then
 monitor and steer them through the same commands. One orchestrator session can fan a
 large task out across many worktrees and coordinate them, instead of hand-rolling
 tmux and `git worktree`. The sessions it starts inherit the same ability.
+
+To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
+a watched session settles — a non-busy state, or its window closing — so it can be run
+in the background with its **exit** as the notification. A session parked at its usage
+cap is the one thing that stops without being _done_: the wait wakes on it promptly,
+but exits non-zero with `woke: "blocked"` and the session's `limitResetAt`, so a capped
+session is never mistaken for finished work (an explicit `--state`/`--not` is never
+pre-empted that way, so you can still wait _through_ a cap):
+
+```sh
+agendo wait --repo myapp --any --json --timeout 30m
+```
+
+`--any` returns on the first of several sessions to settle, so one long-running session
+can't hide the others; `--json` says why it woke and gives each session's `from → state`,
+so the wake needs no follow-up `list`. `--state <s>` waits for one exact state — e.g.
+`--state limited` to hear the moment a session hits its usage cap. The alternative —
+re-running `status` on a guessed cadence — either fires too often or finds out too late.
 
 ### Fresh sessions in isolated worktrees
 
@@ -84,6 +102,17 @@ never disturbs your current checkout.
 Hover a session and press `c` to continue it in the _other_ agent: agendo converts the
 transcript to that agent's on-disk format and resumes it, so a conversation can move
 between Claude and Copilot without losing context.
+
+### Move a session between Claude profiles
+
+If you run more than one Claude login — `~/.claude`, `~/.claude-work`, anything
+matching `~/.claude*` with a `projects/` folder — a session sometimes lands in the
+wrong one. Hover it and press `m` to pick another profile; agendo relocates the
+transcript, its sidecar dir (tool results, sub-agents, workflow runs) and the
+session's `session-env/` + `tasks/` state, so `--resume` finds it under the right
+subscription. It refuses rather than clobber anything already at the destination,
+falls back to copy-then-delete across filesystems, and won't touch a session that is
+currently running — exit it first.
 
 ## Config
 
