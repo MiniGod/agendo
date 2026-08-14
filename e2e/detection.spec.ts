@@ -854,14 +854,18 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
 // attributes) is byte-for-byte as captured:
 //   - resume-dialog.ansi        `-p -e`, escapes intact — what capturePane feeds.
 //   - resume-dialog-plain.txt   `-p`, the SAME screen with colours discarded.
-// The caret sat at cursor_x=2 cursor_y=91 — on the `❯` of the selected option,
-// NOT in an input box (there is none behind the dialog). The ~85 lines of this
-// repo's own prior session output above the rule are kept rather than trimmed:
-// that replayed transcript is exactly what the block-scan heuristics
-// (paneUsageLimited, the busy counter) read, and the tests below splice into it.
+// The caret sat on the `❯` of the selected option, NOT in an input box (there is
+// none behind the dialog) — cursor_x=2 cursor_y=91 as captured, y=17 here.
+// The capture's ~74 lines of replayed transcript above the rule were trimmed to
+// the 9 that carry structure: a prompt echo, two `●` turn results and the blank
+// lines between them, then the `✻ Cogitated for 1m 8s` chrome line, a blank, and
+// the rule — the exact tail the block-scan heuristics (paneUsageLimited, the busy
+// counter) walk, and what the splice tests below write into. What went was one
+// unrelated in-flight feature's diff dump and notes: dead weight for detection,
+// and not something to park in this repo's history.
 const RESUME_DIALOG_PANE = fullPane("resume-dialog.ansi");
 const RESUME_DIALOG_PLAIN = fullPane("resume-dialog-plain.txt");
-const RESUME_DIALOG_CURSOR = { x: 2, y: 91 };
+const RESUME_DIALOG_CURSOR = { x: 2, y: 17 };
 
 test.describe("paneReadiness: the CLI's own resume dialog is idle, not 'dialog'", () => {
   test("REGRESSION, REAL CAPTURE: the resume dialog reads 'ready' (with and without escapes)", () => {
