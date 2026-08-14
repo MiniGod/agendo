@@ -17,7 +17,8 @@ import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi } from "../src/tmux.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect } from "../src/tmux.ts";
+import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
@@ -843,6 +844,280 @@ test.describe("paneReadiness: usage-limit detection (5-hour + weekly)", () => {
     // so a session quoting an API error would misclassify as limited.
     const pane = ["  Note: you have reached your rate limit for the OpenAI API.", idleBox].join("\n");
     expect(paneReadiness(pane)).toBe("ready");
+  });
+});
+
+// RESUME-DIALOG fixtures: verbatim `tmux capture-pane` output from a REAL session
+// blocked on the claude CLI's OWN startup prompt about how to reload itself
+// (window cl-claude-…, 2026-08-13), stored under e2e/fixtures/. Home dir, session
+// uuids and window names were sterilized; every line detection reads (the header,
+// the option labels, the `(recommended)` marker, the rule above them, the SGR
+// attributes) is byte-for-byte as captured:
+//   - resume-dialog.ansi        `-p -e`, escapes intact — what capturePane feeds.
+//   - resume-dialog-plain.txt   `-p`, the SAME screen with colours discarded.
+// The caret sat on the `❯` of the selected option, NOT in an input box (there is
+// none behind the dialog) — cursor_x=2 cursor_y=91 as captured, y=17 here.
+// The capture's ~74 lines of replayed transcript above the rule were trimmed to
+// the 9 that carry structure: a prompt echo, two `●` turn results and the blank
+// lines between them, then the `✻ Cogitated for 1m 8s` chrome line, a blank, and
+// the rule — the exact tail the block-scan heuristics (paneUsageLimited, the busy
+// counter) walk, and what the splice tests below write into. What went was one
+// unrelated in-flight feature's diff dump and notes: dead weight for detection,
+// and not something to park in this repo's history.
+const RESUME_DIALOG_PANE = fullPane("resume-dialog.ansi");
+const RESUME_DIALOG_PLAIN = fullPane("resume-dialog-plain.txt");
+const RESUME_DIALOG_CURSOR = { x: 2, y: 17 };
+
+test.describe("paneReadiness: the CLI's own resume dialog is idle, not 'dialog'", () => {
+  test("REGRESSION, REAL CAPTURE: the resume dialog reads 'ready' (with and without escapes)", () => {
+    // The blocking bug: structurally this is a dialog (numbered options under a
+    // rule, no input box), so it read "dialog" — `list`/`status` reported a
+    // blocked session and `send` refused, forever. Nothing is waiting on a human
+    // decision about the WORK, so it must present as an available session.
+    expect(paneResumeDialogActive(RESUME_DIALOG_PANE)).toBe(true);
+    expect(paneReadiness(RESUME_DIALOG_PANE, RESUME_DIALOG_CURSOR)).toBe("ready");
+    // Colour is not part of the signal: the plain capture classifies identically.
+    expect(paneResumeDialogActive(RESUME_DIALOG_PLAIN)).toBe(true);
+    expect(paneReadiness(RESUME_DIALOG_PLAIN, RESUME_DIALOG_CURSOR)).toBe("ready");
+  });
+
+  test("but it is NOT paste-able, and never resume-safe or limited", () => {
+    // "ready" here means "available", not "there's an empty box to paste into" —
+    // the dialog replaced the box. paneAcceptsPaste is the check every sender
+    // must make; and the usage-limit machinery must not be tempted by the
+    // dialog's own "…consume a substantial portion of your usage limits" prose.
+    expect(paneAcceptsPaste(RESUME_DIALOG_PANE, RESUME_DIALOG_CURSOR)).toBe(false);
+    expect(paneUsageLimited(RESUME_DIALOG_PANE)).toBe(false);
+    expect(paneLimitDialogActive(RESUME_DIALOG_PANE)).toBe(false);
+    expect(paneResumeSafe(RESUME_DIALOG_PANE, RESUME_DIALOG_CURSOR)).toBe(false);
+  });
+
+  test("REGRESSION GUARD: a genuine agent question still reads 'dialog'", () => {
+    // The detector is narrow on purpose — it must not be a loosening of isDialog,
+    // which is load-bearing for auto-resume safety. A real question, a numbered
+    // menu that merely mentions resuming, and the limit dialog all stay dialogs.
+    const question = [
+      "  ✔ Goal achieved (1m · 1 turn · 4.6k tokens)",
+      "  Do you want to proceed?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(paneResumeDialogActive(question)).toBe(false);
+    expect(paneReadiness(question)).toBe("dialog");
+
+    const aboutResuming = [
+      "  The session died mid-run. How should I pick it back up?",
+      "  ❯ 1. Resume from summary of what we did",
+      "    2. Start over",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n");
+    // Only ONE of the two anchors is present, so this stays a question for a human.
+    expect(paneResumeDialogActive(aboutResuming)).toBe(false);
+    expect(paneReadiness(aboutResuming)).toBe("dialog");
+  });
+
+  test("the motivating case: a limit notice in the REPLAYED transcript above it stays 'ready'", () => {
+    // The commonest reason to resume a 249k-token session is that it stopped at
+    // its usage limit — so the transcript replayed above the dialog ends in that
+    // very notice, and paneUsageLimited (which reads the block above the last
+    // rule) sees it. Judged in the usual order the pane would read "limited":
+    // `status` would print a stale reset time and `wait` would never settle —
+    // the same blocked-forever report in a different costume. Nothing there is
+    // the CURRENT state; no turn has run yet.
+    const lines = RESUME_DIALOG_PLAIN.split("\n");
+    const rule = lines.findIndex((l) => /─{20,}/.test(l));
+    // Placed in the transcript tail the block scan actually reads (it anchors two
+    // lines above the box's rule), which is where a replayed notice lands.
+    const at = rule - 3;
+    const limited = [
+      ...lines.slice(0, at),
+      "  ⎿  You've hit your session limit · resets 7:20pm (Atlantic/Reykjavik)",
+      ...lines.slice(at),
+    ].join("\n");
+    expect(paneUsageLimited(limited)).toBe(true); // the notice IS on screen…
+    expect(paneResumeDialogActive(limited)).toBe(true);
+    expect(paneReadiness(limited, RESUME_DIALOG_CURSOR)).toBe("ready"); // …but it's history
+    // And the auto-resume nudge must never fire here: it leads with Escape,
+    // which is this dialog's own "Esc to cancel".
+    expect(paneResumeSafe(limited, RESUME_DIALOG_CURSOR)).toBe(false);
+  });
+
+  test("a session BUSY behind stale scrollback still can't hide the dialog", () => {
+    // Same shape with an interrupted spinner's counter in the replayed tail.
+    const lines = RESUME_DIALOG_PLAIN.split("\n");
+    const rule = lines.findIndex((l) => /─{20,}/.test(l));
+    const busyTail = [...lines.slice(0, rule), "  ✢ Tinkering… (58s · ↓ 3.9k tokens)", ...lines.slice(rule)].join("\n");
+    expect(paneReadiness(busyTail, RESUME_DIALOG_CURSOR)).toBe("ready");
+  });
+
+  test("FALSE-POSITIVE GUARD: turn output merely QUOTING both labels is not the dialog", () => {
+    // A false positive here is fail-DANGEROUS, unlike isDialog's: it would make
+    // `send` press a digit into a live agent's box. The confirm/cancel footer —
+    // the affordance only a real open dialog draws — is what separates them.
+    const quoted = [
+      "● The CLI asked me how to reload it:",
+      "    1. Resume from summary (recommended)",
+      "    2. Resume full session as-is",
+      "● I picked the summary and carried on.",
+    ].join("\n");
+    expect(paneResumeDialogActive(quoted)).toBe(false);
+    expect(resumeDialogOption(quoted, "summary")).toBeNull();
+    // Each anchor is load-bearing on its own: quoted text that also carries a
+    // cursor still isn't the dialog without the footer, and vice versa.
+    const withCursor = quoted.replace("    1. Resume", "  ❯ 1. Resume");
+    expect(paneResumeDialogActive(withCursor)).toBe(false); // no footer
+    expect(paneResumeDialogActive([quoted, "  Enter to confirm · Esc to cancel"].join("\n"))).toBe(false); // no cursor
+    // With an input box below it (the ordinary case) it's plainly just history.
+    expect(paneReadiness([quoted, "─────────────────────────────────────────────", "❯ ", "─────────────────────────────────────────────"].join("\n"))).toBe("ready");
+  });
+
+  test("a WRAPPED option label fails safe — not the dialog, but still 'suspect'", () => {
+    // On a pane narrow enough to wrap a label the anchors stop matching, and the
+    // pane goes back to reading `dialog` (the pre-fix behaviour: send refuses).
+    // That is the safe direction — but `--force` is offered as the way past a
+    // refusal, so the weak signal has to keep a forced paste out of the menu.
+    const wrapped = RESUME_DIALOG_PLAIN.replace("Resume full session as-is", "Resume full session\n     as-is");
+    expect(paneResumeDialogActive(wrapped)).toBe(false);
+    expect(paneReadiness(wrapped)).toBe("dialog");
+    expect(paneResumeMenuSuspect(wrapped)).toBe(true);
+    // Even when BOTH labels wrap and only their heads survive on the numbered
+    // lines — the narrow-pane case the signal exists for.
+    const bothWrapped = [
+      "  ❯ 1. Resume from",
+      "     summary (recommended)",
+      "    2. Resume full",
+      "     session as-is",
+      "    3. Don't ask me again",
+      "  Enter to confirm · Esc",
+      "   to cancel",
+    ].join("\n");
+    expect(paneResumeDialogActive(bothWrapped)).toBe(false);
+    expect(paneResumeMenuSuspect(bothWrapped)).toBe(true);
+    // An ordinary question is not suspect — force keeps working everywhere else.
+    expect(paneResumeMenuSuspect("  Do you want to proceed?\n  ❯ 1. Yes\n    2. No\n  Enter to confirm")).toBe(false);
+    // Nor is a LIVE session whose own output quotes the labels: they sit ABOVE
+    // its input box, so they're not in the active-menu region at all and
+    // `--force` keeps working there exactly as before.
+    const quotingSession = [
+      "● The resume dialog offers:",
+      "    1. Resume from summary (recommended)",
+      "    2. Resume full session as-is",
+      "─────────────────────────────────────────────",
+      "❯ ",
+      "─────────────────────────────────────────────",
+    ].join("\n");
+    expect(paneResumeMenuSuspect(quotingSession)).toBe(false);
+  });
+
+  test("REGRESSION GUARD: the numbered LIMIT dialog is untouched (still limited + resume-safe)", () => {
+    for (const pane of [LIMIT_DIALOG_PANE, REAL_MENU_PANE, REAL_MENU_PANE_NOTICE_HIDDEN]) {
+      expect(paneResumeDialogActive(pane)).toBe(false);
+      expect(paneReadiness(pane)).toBe("limited");
+      expect(paneLimitDialogActive(pane)).toBe(true);
+      expect(paneResumeSafe(pane)).toBe(true);
+    }
+    // …and the text-form limit panes keep their verdicts too.
+    expect(paneReadiness(REAL_ESC_REVEALED_PANE)).toBe("limited");
+    expect(paneResumeSafe(REAL_ESC_REVEALED_PANE)).toBe(true);
+    expect(paneResumeSafe(REAL_TASK_PANEL_PANE)).toBe(true);
+    expect(paneResumeSafe(RECOVERED_PANE)).toBe(false);
+  });
+
+  test("the dialog left in SCROLLBACK above an idle box is not active", () => {
+    // Once answered, the same three options linger in history with an input box
+    // (and its `─` rule) beneath them — the structural demotion isDialog uses.
+    const answered = [
+      RESUME_DIALOG_PLAIN,
+      "● Resumed from summary. Picking the work back up.",
+      "─────────────────────────────────────────────",
+      "❯ ",
+      "─────────────────────────────────────────────",
+      "  ? for shortcuts",
+    ].join("\n");
+    expect(paneResumeDialogActive(answered)).toBe(false);
+    expect(paneReadiness(answered)).toBe("ready");
+    expect(paneAcceptsPaste(answered)).toBe(true);
+  });
+});
+
+test.describe("resume dialog: which option agendo picks, and how it presses it", () => {
+  test("the default follows claude's own (recommended) MARKER, not option index 1", () => {
+    const summary = resumeDialogOption(RESUME_DIALOG_PANE, "summary");
+    expect(summary).toEqual({ number: 1, label: "Resume from summary (recommended)", recommended: true, selected: true });
+    // Same verdict without colours — the labels are the anchor, not the SGR.
+    expect(resumeDialogOption(RESUME_DIALOG_PLAIN, "summary")?.number).toBe(1);
+
+    // Position is NOT what's matched: reorder the menu and the marker still wins.
+    const reordered = RESUME_DIALOG_PLAIN.replace("❯ 1. Resume from summary (recommended)", "❯ 1. Resume full session as-is")
+      .replace("  2. Resume full session as-is", "  2. Resume from summary (recommended)");
+    expect(resumeDialogOption(reordered, "summary")?.number).toBe(2);
+    expect(resumeDialogOption(reordered, "as-is")?.number).toBe(1);
+  });
+
+  test("the 'as-is' setting picks the full-session option", () => {
+    expect(resumeDialogOption(RESUME_DIALOG_PANE, "as-is")).toEqual({
+      number: 2,
+      label: "Resume full session as-is",
+      recommended: false,
+      selected: false, // the cursor starts on option 1 — answering has to move it
+    });
+  });
+
+  test("'Don't ask me again' is never selectable — not even if it wore the marker", () => {
+    // It permanently changes the user's global claude CLI behaviour; that's the
+    // user's call, not agendo's. Filtered out before the marker is consulted.
+    const marked = RESUME_DIALOG_PLAIN.replace("❯ 1. Resume from summary (recommended)", "❯ 1. Resume from summary")
+      .replace("3. Don't ask me again", "3. Don't ask me again (recommended)");
+    expect(resumeDialogOption(marked, "summary")?.number).toBe(1); // label fallback
+    expect(resumeDialogOption(marked, "as-is")?.number).toBe(2);
+    for (const choice of ["summary", "as-is"] as const) {
+      expect(resumeDialogOption(marked, choice)?.label).not.toMatch(/ask me again/i);
+      expect(resumeDialogOption(RESUME_DIALOG_PANE, choice)?.number).not.toBe(3);
+    }
+  });
+
+  test("a pane with no resume dialog yields no option", () => {
+    expect(resumeDialogOption("❯ 1. Yes\n  2. No\nEnter to confirm", "summary")).toBeNull();
+  });
+
+  test("answering moves the CURSOR and confirms — it never types the option's number", () => {
+    // A digit may activate an option outright on some CLI versions and merely
+    // select it on others, which leaves no safe meaning for an Enter after it.
+    // Arrows only ever move the highlight, so Enter is unambiguous.
+    expect(resumeDialogSelection(RESUME_DIALOG_PANE)?.number).toBe(1);
+    expect(resumeDialogStep("cl-claude-abc", 1, 2)).toEqual(["send-keys", "-t", "cl-claude-abc", "Down"]);
+    expect(resumeDialogStep("cl-claude-abc", 3, 2)).toEqual(["send-keys", "-t", "cl-claude-abc", "Up"]);
+    // Only once the cursor is already ON the wanted option is Enter sent.
+    expect(resumeDialogStep("cl-claude-abc", 2, 2)).toEqual(["send-keys", "-t", "cl-claude-abc", "Enter"]);
+  });
+
+  test("a menu with no visible cursor is not answerable (and not the dialog)", () => {
+    // Without a `❯` there is no way to know where a move would land, so the
+    // detector doesn't claim the pane at all.
+    const noCursor = RESUME_DIALOG_PLAIN.replace("❯ 1.", "  1.");
+    expect(resumeDialogSelection(noCursor)).toBeNull();
+    expect(paneResumeDialogActive(noCursor)).toBe(false);
+    // …but it IS still suspicious, so a forced send won't paste into it either.
+    expect(paneResumeMenuSuspect(noCursor)).toBe(true);
+  });
+
+  test("TWO cursors are ambiguous, so the pane is not claimed", () => {
+    // With no `─` rule the "active menu" is the whole capture, and claude echoes
+    // user prompts with a bare `❯` — a replayed `❯ 1. rerun the failing spec`
+    // would add a second selected option and leave a walk anchored on a highlight
+    // that isn't the real one.
+    const twoCursors = ["❯ 1. rerun the failing spec", RESUME_DIALOG_PLAIN.split("\n").slice(-10).join("\n")].join("\n");
+    expect(resumeDialogSelection(twoCursors)).toBeNull();
+    expect(paneResumeDialogActive(twoCursors)).toBe(false);
+  });
+
+  test("config: the default is the recommended option; 'as-is' is opt-in; junk falls back", () => {
+    expect(resumeDialogChoice({ ...DEFAULT_CONFIG })).toBe("summary");
+    expect(resumeDialogChoice({ ...DEFAULT_CONFIG, resumeDialogChoice: "as-is" })).toBe("as-is");
+    // Hand-edited JSON: an unrecognized value must not leave `send` unable to
+    // answer the dialog.
+    expect(resumeDialogChoice({ ...DEFAULT_CONFIG, resumeDialogChoice: "dont-ask" as never })).toBe("summary");
   });
 });
 
