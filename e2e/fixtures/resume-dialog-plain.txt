@@ -1,0 +1,22 @@
+❯ continue at 19:01
+
+● Picking up where I left off — running the new CLI tests:
+
+  Ran 1 shell command
+
+❯ do not do more work until 19:01
+
+● Pausing here as asked — I'll pick this back up at 19:01.
+
+✻ Cogitated for 1m 8s
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  This session is 1h 14m old and 249.4k tokens.
+
+  Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again
+
+  Enter to confirm · Esc to cancel

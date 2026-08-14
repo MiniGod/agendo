@@ -17,6 +17,7 @@
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { STATE_DIR, PREV_STATE_DIR, OLD_STATE_DIR } from "./config.ts";
+import { parseJsonFileOr } from "./errors.ts";
 import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, exactTarget, isPlaceholderWindow, killWindow, launcherWindowPaths, markPlaceholder, newWindowIn, sessionName, shortId } from "./tmux.ts";
 import { tmuxSafeName, normalizeCwd } from "./context.ts";
 import { resumeArgv } from "./launch.ts";
@@ -79,17 +80,22 @@ export interface RestoreTab {
 export function loadRestore(session: string = LAUNCHER_SESSION): RestoreTab[] {
   const path = restoreReadPath(session);
   if (!existsSync(path)) return [];
+  let text: string;
   try {
-    const data = JSON.parse(readFileSync(path, "utf-8"));
-    const tabs = Array.isArray(data?.tabs) ? data.tabs : [];
-    // Keep only well-formed entries — a hand-edited or stale file shouldn't crash startup.
-    return tabs.filter(
-      (t: any): t is RestoreTab =>
-        t && typeof t.name === "string" && typeof t.cwd === "string" && Array.isArray(t.argv) && t.argv.length > 0,
-    );
+    text = readFileSync(path, "utf-8");
   } catch {
     return [];
   }
+  // A snapshot is a pure cache of which tabs were open — losing it costs you the
+  // restored tab strip, nothing more. So a corrupt file is reported (by path,
+  // via parseJsonFileOr's warning) and ignored rather than failing startup.
+  const data = parseJsonFileOr<any>(text, path, null);
+  const tabs = Array.isArray(data?.tabs) ? data.tabs : [];
+  // Keep only well-formed entries — a hand-edited or stale file shouldn't crash startup.
+  return tabs.filter(
+    (t: any): t is RestoreTab =>
+      t && typeof t.name === "string" && typeof t.cwd === "string" && Array.isArray(t.argv) && t.argv.length > 0,
+  );
 }
 
 function saveRestore(session: string, tabs: RestoreTab[]): void {
@@ -168,9 +174,11 @@ export function captureRestore(index: SessionIndex, hostSession: string = LAUNCH
 }
 
 /**
- * Pure tab-building core of `captureRestore`: map the live `cl-*` launcher
- * windows to the deduped, self-contained `RestoreTab[]` to persist. Extracted so
- * it's testable without live tmux + a state file.
+ * Tab-building core of `captureRestore`: map the live `cl-*` launcher windows to
+ * the deduped, self-contained `RestoreTab[]` to persist. Extracted so it's
+ * testable without live tmux. Note it is not side-effect-free: the `resumeArgv`
+ * it calls per window reads the orchestrator marker file (see src/orchestrator.ts)
+ * to decide whether that session's resume re-injects the orchestrator prompt.
  *
  * Each window is attributed to the session it's running (a resumed window by its
  * canonical name, an id-less fresh-launch window by the most-recently-used

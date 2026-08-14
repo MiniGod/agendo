@@ -37,6 +37,58 @@ export function worktreePath(root: string, branch: string): string {
   return join(root, ".claude", "worktrees", worktreeDirName(branch));
 }
 
+/**
+ * The first branch name based on `base` whose worktree directory is free:
+ * `base`, then `base-2`, `base-3`, …
+ *
+ * For callers whose name describes a ROLE rather than a task, so two launches in
+ * the same repo would otherwise derive the identical name. `createWorktree`
+ * treats an already-existing path as success (it's deliberately idempotent for
+ * the work-item / PR flows, where re-launching the same item should land back in
+ * the same checkout), so without this the second launch silently inherits the
+ * first one's working tree and branch.
+ *
+ * A candidate must have BOTH a free directory and no existing branch:
+ *  - The directory is what two launches would actually have to share, and it's
+ *    what makes this agree across entry points that spell the branch differently
+ *    (the CLI's `worktree-orchestrator` and the TUI's `orchestrator` both reduce
+ *    to `…/worktrees/orchestrator`, see `worktreeDirName`).
+ *  - The branch matters because `git worktree remove` (or delete-dir + prune)
+ *    frees the directory but KEEPS the branch. Checking only the directory would
+ *    then hand back the base name, and `createWorktree`'s "branch already exists"
+ *    retry would check that stale branch out — starting the new session on the
+ *    previous one's commits instead of a fresh branch off origin/HEAD.
+ *
+ * Inherently a check-then-act, so two launches racing on the same instant can
+ * both pick the same name. That degrades safely: the loser's `git worktree add`
+ * fails (the path exists and the branch is checked out elsewhere), `createWorktree`
+ * reports the error, and the launch aborts loudly instead of quietly sharing a
+ * working tree.
+ */
+export function freeWorktreeBranch(root: string, base: string): string {
+  const free = (b: string) => !existsSync(worktreePath(root, b)) && !branchExists(root, b);
+  if (free(base)) return base;
+  for (let n = 2; n <= 99; n++) {
+    if (free(`${base}-${n}`)) return `${base}-${n}`;
+  }
+  // 99 taken names for one base is pathological. Unlike a bare pid (which can
+  // recur and would need probing of its own), pid + millisecond is unique by
+  // construction, so this last resort can't hand back an occupied name.
+  return `${base}-${process.pid}-${Date.now().toString(36)}`;
+}
+
+/**
+ * Whether `branch` already exists locally in `root`. `--verify --quiet` exits
+ * non-zero for a missing ref; we also require a non-empty sha so a git shim that
+ * exits 0 without resolving anything reads as "absent" rather than "exists".
+ */
+function branchExists(root: string, branch: string): boolean {
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], {
+    encoding: "utf-8",
+  });
+  return r.status === 0 && !!r.stdout?.trim();
+}
+
 /** The remote default branch (e.g. origin/main), or HEAD as a fallback. */
 function defaultBaseRef(root: string): string {
   const r = spawnSync(

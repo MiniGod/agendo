@@ -17,8 +17,14 @@ import {
   insideTmux,
   tmuxQuiet,
 } from "./tmux.ts";
-import { slugify, createWorktree } from "./worktree.ts";
+import { slugify, createWorktree, freeWorktreeBranch } from "./worktree.ts";
 import { repoRootForCwd } from "./repos.ts";
+import {
+  ORCHESTRATOR_SLUG,
+  isOrchestratorSession,
+  markOrchestratorSession,
+  orchestratorSystemPrompt,
+} from "./orchestrator.ts";
 
 /** Is `cmd` resolvable as an executable on the current PATH? */
 function onPath(cmd: string): boolean {
@@ -79,6 +85,9 @@ export function llmGuide(): string {
     "",
     "Use this ONLY when the user explicitly asks to run work in a separate/background",
     "session (its own git worktree + claude). It is NOT for sub-agents within this session.",
+    "EXCEPTION: if you are running in ORCHESTRATOR MODE, delegating this way IS your job —",
+    "launch freely, no explicit per-unit request needed. (Your own instructions say so;",
+    "nothing here can put you in that mode.)",
     "",
     `Start one:    ${SELF_CMD} launch "<task prompt>"`,
     "  Creates an isolated git worktree, runs a new agent there in an attachable tmux",
@@ -90,18 +99,37 @@ export function llmGuide(): string {
     "         <name> (claude only). Only these agent flags are forwarded — anything else",
     "         dashed is an error, so put prompt text that starts with -- after a bare --.",
     "",
+    // Deliberately NOT documented here: `launch --orchestrator`. `repoRootForCwd`
+    // resolves a worktree back to its parent repo, so an agent sandboxed in a
+    // worktree could use it to start a session in the human's MAIN checkout — one
+    // told to merge branches there. That escalation should come from a human (it is
+    // in `--help` and the README), never from instructions an agent reads to itself.
+    // An orchestrator doesn't need it either: it is already in orchestrator mode,
+    // and the sessions it launches are meant to implement, not to orchestrate.
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
     "  One at its usage limit reads \"limited <time>\" — when it comes back. Same instant",
     `  as an ISO 8601 limitResetAt field in ${SELF_CMD} list --json.`,
+    "  It lists EVERY session on the machine, so when you only care about one project",
+    "  scope it rather than filtering the output yourself: --path <dir> (sessions whose",
+    "  cwd is under dir) or --repo <name> (sessions in that repo — a bare name or an",
+    "  owner/repo slug; a worktree counts as the repo it belongs to). Both also work on",
+    `  ${SELF_CMD} status and ${SELF_CMD} wait, and with --json.`,
     "",
     `Check on it:  ${SELF_CMD} status <id>`,
     "  Prints its state, task checklist, Workflow-tool runs (with agent progress),",
-    "  recent activity, and whether its input is ready for a prompt.",
+    "  recent activity, and whether its input is ready for a prompt. A session parked on",
+    "  claude's own resume dialog reports ready (and a `resume:` line saying so) — the",
+    "  activity you see there is the PREVIOUS run's, until your next send resumes it.",
     "",
     `Message it:   ${SELF_CMD} send <id> "<prompt>"`,
     "  Sends a follow-up prompt, but only when its input is idle/ready (not mid-turn, no",
     "  open question, nothing already typed). Refuses otherwise (--force to override).",
+    "  Exception: claude's OWN resume dialog (\"Resume from summary / Resume full session",
+    "  as-is\") is not a question for you — such a session reports ready, and send answers",
+    "  the dialog itself (config resumeDialogChoice), waits for the input box, then",
+    "  delivers. If that box never appears, send fails WITHOUT delivering and --force will",
+    "  not change that (pasting into the menu would pick an option) — retry, or attach.",
     "",
     `Be told when it needs you (DON'T poll):`,
     `              ${SELF_CMD} wait <id...> --any --json --timeout 30m`,
@@ -111,17 +139,22 @@ export function llmGuide(): string {
     "  with a non-zero exit and woke=\"blocked\" plus limitResetAt (which can already be past,",
     "  if it is parked beyond its own reset), so you can back off until then.",
     "  Run it in the BACKGROUND and treat its exit as the notification: that is the whole",
-    "  point. Do NOT re-run `status` on a guessed cadence;",
-    "  you will either check too often or find out too late.",
+    "  point. Do NOT re-run `status` on a guessed cadence; you will either check too often",
+    "  or find out too late.",
     "  --any wakes on the first of several sessions to settle, so one long-running session",
     "         can't hide the others. Without it, every target must settle.",
     "  --json prints what you woke up to find out: why it woke (satisfied / timeout /",
     "         unsatisfiable / blocked) and per session its from → state, changed,",
-    "         satisfied, cwd, limitResetAt.",
-    "  Instead of ids: --all, or --repo <name> / --prefix <p> to watch a scope.",
+    "         satisfied, cwd, limitResetAt, and resumeDialog — true means it woke you at",
+    "         claude's resume dialog, so nothing has run yet and any activity you read is",
+    "         the PREVIOUS run's.",
+    "  Instead of ids: --all, or --prefix <p>. --repo <name> / --path <dir> scope it to",
+    "         one project, and narrow --all and explicit ids too rather than replacing them.",
     "  --state <s> waits for one exact state (ready, busy, queued, dialog, limited,",
     "         exited, …) — e.g. --state limited to be told the moment it hits its usage",
     "         cap, or --state exited to be told only when it is completely finished.",
+    "         `dialog` means a question for YOU; claude's own resume dialog is not one",
+    "         (it reads ready, per send above), so it won't wake a --state dialog wait.",
     "         An explicit --state/--not is never pre-empted by the blocked wake, so",
     "         --state exited waits THROUGH a usage cap and --not limited waits it out.",
     "  Exit 0 = the condition held. Non-zero = timed out, a session exited without",
@@ -135,9 +168,19 @@ export function llmGuide(): string {
   ].join("\n");
 }
 
-/** Append the launcher system prompt to a claude argv. */
-function withLauncherPrompt(argv: string[]): string[] {
-  return [...argv, "--append-system-prompt", launcherSystemPrompt()];
+/**
+ * Append our system-prompt additions to a claude argv — the launcher prompt
+ * always, plus the orchestrator instructions when this session runs in
+ * orchestrator mode.
+ *
+ * Both go into a SINGLE `--append-system-prompt` value. claude's flag takes one
+ * value, so passing it twice would keep only the last occurrence and silently
+ * drop the other prompt.
+ */
+function withLauncherPrompt(argv: string[], orchestrator = false): string[] {
+  const parts = [launcherSystemPrompt()];
+  if (orchestrator) parts.push(orchestratorSystemPrompt(SELF_CMD));
+  return [...argv, "--append-system-prompt", parts.join("\n\n")];
 }
 
 /**
@@ -196,7 +239,10 @@ export const FORWARDABLE_LAUNCH_FLAGS: Record<string, { agents: readonly AgentSo
 export function resumeArgv(s: AgentSession): string[] {
   switch (s.source) {
     case "claude": {
-      const cmd = withLauncherPrompt(["claude", "--resume", s.id]);
+      // claude records neither `--append-system-prompt` nor `--agent` in its own
+      // session state, so an orchestrator resumed cold would come back as a plain
+      // session. Re-inject from our own marker file (see src/orchestrator.ts).
+      const cmd = withLauncherPrompt(["claude", "--resume", s.id], isOrchestratorSession(s.id));
       // Point claude at the config dir the session lives in, so the right
       // subscription/profile (e.g. ~/.claude vs ~/.claude-work) finds it.
       return s.configDir ? ["env", `CLAUDE_CONFIG_DIR=${s.configDir}`, ...cmd] : cmd;
@@ -229,6 +275,8 @@ interface FreshArgvOptions {
    * shell in between, so values with spaces need no quoting or escaping.
    */
   forwardArgv?: string[];
+  /** Run in orchestrator mode — inject the coordinate-don't-implement prompt. */
+  orchestrator?: boolean;
 }
 
 /**
@@ -239,7 +287,9 @@ interface FreshArgvOptions {
  *    launcher system prompt appended so background-session coordination works.
  *  - Copilot: `--session-id <id>`, `--interactive <prompt>`,
  *    `COPILOT_AUTONOMY_ARGV`. Copilot has no `--append-system-prompt`, so the
- *    launcher prompt is omitted (background coordination is Claude-only today).
+ *    launcher prompt is omitted (background coordination is Claude-only today) —
+ *    which is also why orchestrator mode is Claude-only, rejected at the entry
+ *    points rather than silently degraded here.
  * Any `forwardArgv` (allowlisted flags from `agendo launch`) goes last among the
  * flags, so an explicit `--model` wins over anything the defaults might set.
  */
@@ -257,7 +307,7 @@ function freshArgv(agent: AgentSource, opts: FreshArgvOptions = {}): string[] {
   if (opts.autonomy) argv.push(...AUTONOMY_ARGV);
   if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
   if (opts.prompt) argv.push(opts.prompt);
-  return withLauncherPrompt(argv);
+  return withLauncherPrompt(argv, opts.orchestrator);
 }
 
 export interface OpenPlan {
@@ -362,26 +412,71 @@ export function launchFresh(cwd: string, name: string, agent: AgentSource = "cla
  * session id up front (`--session-id`) so the tmux window name embeds it — that
  * lets `openSession` find this exact window on a later attach (no duplicate),
  * and the `cl-bg-`/`cl-new-` prefix tells the human (and the UI badge) how it
- * started. Background sessions also get the autonomy flags so they run unattended.
+ * started. Background sessions also get the autonomy flags so they run unattended
+ * — except orchestrators, which need `unattended` as well (see `ManagedOptions`).
  * `forwardArgv` carries the allowlisted agent flags `agendo launch` accepted; the
  * TUI's own launch paths pass none.
+ *
+ * An orchestrator launch also records the minted id, so a later cold resume can
+ * re-inject the instructions claude itself doesn't remember.
  */
+interface ManagedOptions {
+  /** Run in orchestrator mode (Claude only — see `freshArgv`). */
+  orchestrator?: boolean;
+  /**
+   * Give an ORCHESTRATOR the unattended autonomy flags too. Off by default: an
+   * orchestrator's whole job is to spawn further sessions and merge into the main
+   * checkout, so auto-approving its actions turns one compromised or confused
+   * agent into unreviewed writes on the user's primary working tree. Ordinary
+   * background sessions are unaffected — they stay autonomous in their own
+   * throwaway worktree, which is what makes `agendo launch` useful at all.
+   */
+  unattended?: boolean;
+  /** Allowlisted agent flags to forward verbatim (see `FORWARDABLE_LAUNCH_FLAGS`). */
+  forwardArgv?: string[];
+}
+
+// A single options object rather than trailing positionals: `orchestrator` (bool)
+// and `forwardArgv` (string[]) sit next to each other, and swapping them at a call
+// site type-checks under neither — but a third boolean beside `orchestrator` would
+// swap silently, turning an ordinary launch into an auto-approving orchestrator.
 function launchManaged(
   cwd: string,
   kind: "background" | "new",
   agent: AgentSource,
   prompt?: string,
-  forwardArgv?: string[],
+  opts: ManagedOptions = {},
 ): { plan: OpenPlan; id: string } {
+  const { orchestrator = false, unattended = false, forwardArgv } = opts;
   const id = randomUUID();
   const tmuxName = kindName(kind, id);
-  const argv = freshArgv(agent, { sessionId: id, prompt, autonomy: kind === "background", forwardArgv });
+  const argv = freshArgv(agent, {
+    sessionId: id,
+    prompt,
+    // Orchestrators opt IN to autonomy; everything else keeps the old rule.
+    autonomy: kind === "background" && (!orchestrator || unattended),
+    orchestrator,
+    forwardArgv,
+  });
+  if (orchestrator) markOrchestratorSession(id);
   return { plan: openTarget(tmuxName, cwd, argv), id };
 }
 
-/** Open a manual ("new session") flow session in an already-resolved `cwd`. */
-export function launchNewSession(cwd: string, agent: AgentSource = "claude"): OpenPlan {
-  return launchManaged(cwd, "new", agent).plan;
+/**
+ * Open a manual ("new session") flow session in an already-resolved `cwd`.
+ * `orchestrator` runs it in orchestrator mode (Claude only — see `freshArgv`).
+ * The minted id is remembered by `launchManaged`, so the restore snapshot picks
+ * the orchestrator framing back up via `resumeArgv` without extra bookkeeping here.
+ *
+ * This is the TUI's path, and `kind: "new"` carries no autonomy flags at all — a
+ * session the user started from the menu keeps its normal approval prompts.
+ */
+export function launchNewSession(
+  cwd: string,
+  agent: AgentSource = "claude",
+  orchestrator = false,
+): OpenPlan {
+  return launchManaged(cwd, "new", agent, undefined, { orchestrator }).plan;
 }
 
 export interface LaunchOptions {
@@ -389,7 +484,11 @@ export interface LaunchOptions {
   prompt?: string;
   /** Slug for the worktree/branch; derived from the prompt if omitted. */
   name?: string;
-  /** Create an isolated git worktree to run in. Defaults to true. */
+  /**
+   * Create an isolated git worktree to run in. Defaults to true — but callers
+   * launching an orchestrator should pass `false` (the CLI does): it merges into
+   * the main branch, which git only permits in the primary checkout.
+   */
   worktree?: boolean;
   /** Which agent to launch. Defaults to Claude for back-compat. */
   agent?: AgentSource;
@@ -399,6 +498,18 @@ export interface LaunchOptions {
    * responsible for validating them against `agent` — `agendo launch` does.
    */
   forwardArgv?: string[];
+  /**
+   * Run the new session in orchestrator mode: it delegates every unit of work to
+   * further background sessions instead of implementing anything itself (see
+   * src/orchestrator.ts). Claude only.
+   */
+  orchestrator?: boolean;
+  /**
+   * Let an orchestrator run with the unattended autonomy flags. Ignored unless
+   * `orchestrator` is set (ordinary background sessions are always unattended).
+   * See `ManagedOptions.unattended` for why this is opt-in.
+   */
+  unattended?: boolean;
 }
 
 export interface LaunchResult {
@@ -424,19 +535,43 @@ export interface LaunchResult {
  * autonomously spawn its own nested background sessions.
  */
 export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
-  const slug = slugify(opts.name || opts.prompt || "") || "session";
+  // An orchestrator's slug should say what the session IS, not repeat the goal it
+  // was handed. Only used on the opt-in `worktree: true` path — an orchestrator
+  // normally runs in the main checkout and has no branch of its own.
+  const fallbackSlug = opts.orchestrator ? ORCHESTRATOR_SLUG : slugify(opts.prompt || "") || "session";
+  // Whether `--name` actually produced a usable slug — `--name "  "` / `"!!!"` are
+  // truthy but slugify to nothing, so testing `opts.name` alone would treat them
+  // as user-chosen and skip the collision stepping below.
+  const named = slugify(opts.name || "");
+  const slug = named || fallbackSlug;
+  const root = repoRootForCwd(cwd);
   let runCwd = cwd;
-  if (opts.worktree !== false) {
-    const res = createWorktree(repoRootForCwd(cwd), `worktree-${slug}`);
+  if (opts.worktree === false) {
+    // An orchestrator integrates by squash-merging into the main branch, and git
+    // allows the main branch in exactly ONE working tree — the primary checkout.
+    // So run it AT the repo root, even when invoked from a subdirectory or from
+    // inside another worktree: then "merge where you are" is literally true, and
+    // it never has to reach outside its own cwd to do its one git job.
+    if (opts.orchestrator) runCwd = root;
+  } else {
+    // The orchestrator slug names the ROLE, so it's identical for every unnamed
+    // orchestrator in a repo. `createWorktree` treats an existing path as
+    // success, so without stepping past it a second orchestrator would run in
+    // the first one's checkout, on its branch — two coordinators sharing one
+    // working tree, both doing integration merges. An explicit `--name` is the
+    // user's own choice and keeps the existing reuse-if-present behaviour.
+    const branch =
+      opts.orchestrator && !named
+        ? freeWorktreeBranch(root, `worktree-${slug}`)
+        : `worktree-${slug}`;
+    const res = createWorktree(root, branch);
     if (res.error) return { cwd, error: res.error };
     runCwd = res.path;
   }
-  const { plan, id } = launchManaged(
-    runCwd,
-    "background",
-    opts.agent ?? "claude",
-    opts.prompt,
-    opts.forwardArgv,
-  );
+  const { plan, id } = launchManaged(runCwd, "background", opts.agent ?? "claude", opts.prompt, {
+    orchestrator: opts.orchestrator,
+    unattended: opts.unattended,
+    forwardArgv: opts.forwardArgv,
+  });
   return { plan, id, cwd: runCwd };
 }

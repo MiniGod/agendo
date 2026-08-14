@@ -18,13 +18,13 @@
  */
 import { basename } from "path";
 import {
-  capturePaneState, paneReadiness, sessionName, shortId, stripAnsi,
+  capturePaneState, paneReadiness, paneResumeDialogActive, sessionName, shortId, stripAnsi,
   type Readiness,
 } from "./tmux.ts";
 import { formatResetTime, paneResetAt } from "./usageLimit.ts";
 import { SessionIndex } from "./sessions.ts";
 import { refreshLiveTmux } from "./model.ts";
-import { repoRootForCwd } from "./repos.ts";
+import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
 import { printJson } from "./output.ts";
 import { SELF_CMD } from "./launch.ts";
 import type { AgentSession } from "./types.ts";
@@ -87,7 +87,12 @@ export type WaitState = Readiness | "exited";
 
 /** Accepted `--state` / `--not` values. Enumerated (rather than derived) so the
  *  error message lists them; `limited` is included — it's a real readiness the
- *  old list omitted, which made "wake me when it hits its usage cap" unwaitable. */
+ *  old list omitted, which made "wake me when it hits its usage cap" unwaitable.
+ *
+ *  `dialog` means a question awaiting a HUMAN decision. The claude CLI's own
+ *  resume dialog is deliberately not one: `paneReadiness` reports it `ready`
+ *  (see `paneResumeDialogActive`), because `send` answers it itself. So a
+ *  `--state dialog` wait won't wake on a session merely parked on that. */
 export const WAIT_STATES: WaitState[] = [
   "ready", "busy", "compacting", "queued", "dialog", "limited", "unknown", "exited",
 ];
@@ -100,7 +105,12 @@ export interface WaitOptions {
   /** Emit the structured wake payload on stdout instead of `<id>\t<state>` lines. */
   json: boolean;
   prefix?: string;
-  repo?: string;
+  /**
+   * `--repo` / `--path` scope; null when neither was given. NOT a third way to
+   * choose the target set alongside `ids` / `--all` / `--prefix`, but a filter
+   * applied ON TOP of whichever of those did the choosing — see `runWait`.
+   */
+  scope: SessionScope | null;
   /** Desired state (exact match). Overrides the default non-busy predicate. */
   state?: WaitState;
   /** Wait until the state is anything but this. */
@@ -130,6 +140,15 @@ export interface WaitResult {
    *  Same instant `agendo list --json` reports, so a caller woken by `blocked`
    *  can back off until then without a second command. */
   limitResetAt: string | null;
+  /**
+   * True when the session is sitting on claude's OWN resume dialog. Such a pane
+   * reports `ready` (`send` answers the dialog itself), which would otherwise be
+   * indistinguishable here from a session that genuinely finished a turn — and
+   * the two mean opposite things: nothing has run yet, so any activity a caller
+   * reads back is the PREVIOUS run's. Waking on it is right; mistaking it for a
+   * completed turn is not, so it is named rather than left to inference.
+   */
+  resumeDialog: boolean;
 }
 
 /** The `--json` wake payload. `woke` is why the wait returned:
@@ -183,21 +202,25 @@ export function parseDuration(s: string | undefined): number | null {
   }
 }
 
+// `--repo`/`--path` appear both as a selector in their own right (scope alone
+// picks the set) and as a modifier on the others, which is exactly what they are.
 const USAGE =
-  `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> ` +
-  `[--any] [--json] [--state <s>] [--not <s>] [--timeout <dur>] [--interval <dur>]`;
+  `usage: ${SELF_CMD} wait <id...> | --all | --prefix <p> | --repo <name> | --path <dir> ` +
+  `[--repo <name>] [--path <dir>] [--any] [--json] [--state <s>] [--not <s>] ` +
+  `[--timeout <dur>] [--interval <dur>]`;
 
 /**
  * Parse `wait`'s argv tail into options. Returns the exit code to use on bad
  * input (printing the reason) rather than exiting, so the whole command is
  * testable in-process.
  */
-export function parseWaitArgs(rest: string[]): WaitOptions | number {
+export function parseWaitArgs(rest: string[], cwd = process.cwd()): WaitOptions | number {
   let all = false;
   let any = false;
   let json = false;
   let prefix: string | undefined;
   let repo: string | undefined;
+  let pathArg: string | undefined;
   let state: string | undefined;
   let not: string | undefined;
   let timeoutMs = 120_000;
@@ -208,8 +231,16 @@ export function parseWaitArgs(rest: string[]): WaitOptions | number {
     if (a === "--all") all = true;
     else if (a === "--any") any = true;
     else if (a === "--json") json = true;
+    // `--prefix` keeps its raw read: an empty prefix has always meant "match
+    // every basename" (i.e. `--all`), so guarding it like the scope flags below
+    // would turn a working invocation into an error.
     else if (a === "--prefix") prefix = rest[++i];
-    else if (a === "--repo") repo = rest[++i];
+    else if (a === "--repo" || a === "--path") {
+      const v = scopeFlagValue("wait", a, rest[++i]);
+      if (v === null) return 1;
+      if (a === "--repo") repo = v;
+      else pathArg = v;
+    }
     else if (a === "--state") state = rest[++i];
     else if (a === "--not") not = rest[++i];
     else if (a === "--timeout" || a === "--interval") {
@@ -221,7 +252,14 @@ export function parseWaitArgs(rest: string[]): WaitOptions | number {
       if (a === "--timeout") timeoutMs = ms;
       else intervalMs = ms;
     } else if (a === "--") { ids.push(...rest.slice(i + 1)); break; }
-    else ids.push(a);
+    // A session id can't start with `-` (shortId strips non-alphanumerics), so a
+    // dashed token here is a mistyped flag. Taking it as an id would report "no
+    // session found for --repo=x" and blame the user for a session that never
+    // existed, instead of naming the actual mistake. `--` above still escapes.
+    else if (a.startsWith("-")) {
+      console.error(`wait: unknown argument "${a}"`);
+      return 1;
+    } else ids.push(a);
   }
   for (const [flag, v] of [["--state", state], ["--not", not]] as const) {
     if (v !== undefined && !WAIT_STATES.includes(v as WaitState)) {
@@ -234,7 +272,8 @@ export function parseWaitArgs(rest: string[]): WaitOptions | number {
     return 1;
   }
   return {
-    ids, all, any, json, prefix, repo,
+    ids, all, any, json, prefix,
+    scope: makeSessionScope({ path: pathArg, repo }, cwd),
     state: state as WaitState | undefined,
     not: not as WaitState | undefined,
     timeoutMs, intervalMs,
@@ -261,27 +300,33 @@ export async function runWaitCli(rest: string[]): Promise<number> {
  */
 export async function runWait(o: WaitOptions): Promise<number> {
   const index = await SessionIndex.build();
+  // The scope narrows whichever selector chose the set — ids and `--all`
+  // included. A scoping flag that some other selector silently overrode would be
+  // worse than no flag at all: it would wait on more sessions than was asked for,
+  // which is exactly the mistake an orchestrator uses `--repo` to avoid.
+  const inScope = scopeFilter(o.scope);
+  const where = scopeNote(o.scope);
   let sessions: AgentSession[];
   if (o.ids.length) {
     sessions = [];
     const missing: string[] = [];
     for (const tok of o.ids) {
       const sid = tok.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(tok);
-      const s = index.all.find((x) => x.id === tok || shortId(x.id) === sid);
+      const s = index.all.find((x) => (x.id === tok || shortId(x.id) === sid) && inScope(x));
       if (s) sessions.push(s);
       else missing.push(tok);
     }
     if (missing.length) {
-      console.error(`wait: no session found for ${missing.join(", ")}`);
+      console.error(`wait: no session found for ${missing.join(", ")}${where}`);
       return 1;
     }
-  } else if (o.all) {
-    sessions = [...index.all];
-  } else if (o.prefix !== undefined || o.repo !== undefined) {
+  } else if (o.all || o.prefix !== undefined || o.scope) {
     sessions = index.all.filter((s) => {
-      if (o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
-      if (o.repo !== undefined && basename(repoRootForCwd(s.cwd)) !== o.repo) return false;
-      return true;
+      // `--all` still overrides `--prefix`, exactly as it did when the two lived
+      // in separate branches — merging them here is about the scope, and must not
+      // quietly redefine a selector pair that predates it.
+      if (!o.all && o.prefix !== undefined && !basename(s.cwd).startsWith(o.prefix)) return false;
+      return inScope(s);
     });
   } else {
     console.error(USAGE);
@@ -309,7 +354,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
     return 1;
   }
   if (targets.length === 0) {
-    console.error("wait: no running sessions matched — nothing to wait on.");
+    console.error(`wait: no running sessions matched${where} — nothing to wait on.`);
     return 1;
   }
 
@@ -362,12 +407,17 @@ export async function runWait(o: WaitOptions): Promise<number> {
       const live = nowLive.get(sessionName(s));
       let state: WaitState;
       let resetAt: number | null = null;
+      // Read off the SAME capture the state came from, so the flag can't describe
+      // a different frame than the state it qualifies. A target with no live
+      // window has no pane to be parked in, so it is false there by construction.
+      let resumeDialog = false;
       if (live) {
         misses.set(s.id, 0);
         const { raw, cursor } = capturePaneState(live);
         state = paneReadiness(raw, cursor);
-        // Read off the pane we already captured — no extra tmux call, and the
-        // same helper `agendo list` uses, so the two never disagree on the time.
+        resumeDialog = paneResumeDialogActive(raw);
+        // Same capture again — no extra tmux call, and the same helper `agendo
+        // list` uses, so the two never disagree on the time.
         if (state === "limited") resetAt = paneResetAt(stripAnsi(raw));
       } else {
         const seen = (misses.get(s.id) ?? 0) + 1;
@@ -387,6 +437,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
         title: s.title,
         window: live ?? target,
         limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
+        resumeDialog,
       };
     });
   }
