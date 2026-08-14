@@ -14,10 +14,18 @@ function readState() {
   try {
     const s = JSON.parse(fs.readFileSync(STATE, "utf-8"));
     return {
+      // Spread first so a key this stub doesn't know about survives the
+      // read-modify-write a queued `capture-pane` does (see captureQueue).
+      ...s,
       sessions: s.sessions ?? [],
       windows: s.windows ?? [],
       panes: s.panes ?? [],
       captures: s.captures ?? {},
+      // Per-target QUEUE of captures, consumed one per `capture-pane` call and
+      // falling back to `captures` once empty. Lets a test script a pane that
+      // CHANGES between reads — a dialog that clears once answered, a box that
+      // only appears on the third look — without racing a wall-clock timer.
+      captureQueue: s.captureQueue ?? {},
       // Per-target caret position ({x, y}), served to `display-message
       // '#{cursor_x} #{cursor_y}'` — the second signal the input-box classifier
       // reads (a greyed-out suggestion leaves the caret at the prompt).
@@ -38,11 +46,21 @@ function readState() {
       captureFails: s.captureFails ?? {},
     };
   } catch {
-    return { sessions: [], windows: [], panes: [], captures: {}, cursors: {} };
+    // Also the mid-write case: setTmuxState rewrites the file non-atomically
+    // while a launcher polls, so every key a command reads must be present here.
+    return { sessions: [], windows: [], panes: [], captures: {}, cursors: {}, captureQueue: {} };
   }
 }
 function writeState(s) {
   try { fs.writeFileSync(STATE, JSON.stringify(s, null, 2)); } catch {}
+}
+/** Write back just one target's remaining queue, onto the file as it is NOW. */
+function consumeQueue(target, rest) {
+  try {
+    const s = JSON.parse(fs.readFileSync(STATE, "utf-8"));
+    s.captureQueue = { ...(s.captureQueue ?? {}), [target]: rest };
+    fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
+  } catch {}
 }
 function log() {
   if (!LOG) return;
@@ -164,8 +182,20 @@ switch (cmd) {
     // and wave a busy session through the close guard.
     const target = flag("-t");
     // A pane tmux can't read at all: exit non-zero and print nothing, as the real
-    // thing does ("can't find pane"). Distinct from an empty capture below.
+    // thing does ("can't find pane"). Checked before the queue, since a failed
+    // read consumes nothing — the screen it would have shown is still pending.
     if (state.captureFails?.[target ?? ""]) process.exit(1);
+    const queued = state.captureQueue[target];
+    if (Array.isArray(queued) && queued.length) {
+      const text = queued.shift();
+      // Consume it so the next call reads the following one — writing back ONLY
+      // the queue, re-read fresh. This is the one command that mutates state
+      // while a test may also be calling setTmuxState, and rewriting our whole
+      // (older) snapshot would silently roll that back.
+      consumeQueue(target, queued);
+      process.stdout.write(text);
+      process.exit(0);
+    }
     const text = state.captures[targetName(state, target)] ?? "";
     process.stdout.write(text);
     process.exit(0);

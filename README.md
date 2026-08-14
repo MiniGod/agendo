@@ -87,10 +87,38 @@ so the wake needs no follow-up `list`. `--state <s>` waits for one exact state �
 `--state limited` to hear the moment a session hits its usage cap. The alternative —
 re-running `status` on a guessed cadence — either fires too often or finds out too late.
 
+`--state dialog` means a question awaiting *your* decision; the Claude CLI's own resume
+dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads **ready**),
+so it won't wake that wait. When a wake does find a session parked there, `--json` says
+so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
+
 When a session is finished with, `agendo close <id>` ends its window and only that — the
 worktree, branch and commits stay on disk, and `agendo resume <id>` brings it back — so
 no one has to reach for a raw `tmux kill-window`. A `wait` on a session closed underneath
 it doesn't hang: the window vanishing settles that session as `exited`.
+
+### Orchestrator mode, one keypress away
+
+Press `O` in the Sessions view — or run `agendo launch --orchestrator "<goal>"` — to
+start a session that is _only_ a coordinator. It gets the orchestrator instructions
+injected into its system prompt: write no project code, split the goal into units,
+launch one background session per unit (each running an implement → sub-agent review →
+fix loop until a review pass comes back clean), keep a live task list, parallelize
+independent units, monitor via `list`/`status` and steer via `send`, then squash-merge
+each finished branch into the main branch — no PRs. The framing is re-injected on
+resume, so a restored orchestrator doesn't quietly turn back into an implementer.
+
+Unlike every other launch, an orchestrator runs in the repo's **main checkout** rather
+than a worktree: git allows the main branch in only one working tree, and that's where
+its merges have to land. It writes no project code, so it needs no isolation of its own
+— pass `--worktree` (or pick "New git worktree") if you want it anyway.
+
+Because it acts on your main checkout and spawns further sessions, an orchestrator also
+**keeps its approval prompts** — it's the one background launch that isn't auto-approved.
+Add `--unattended` to waive them once you're happy to let it run on its own. For the same
+reason `--orchestrator` is documented here and in `--help`, but deliberately left out of
+`agendo --llm`: that guide is injected into every launched session, and a worktree-sandboxed
+agent shouldn't be able to read its way into starting an orchestrator in your main checkout.
 
 ### Fresh sessions in isolated worktrees
 
@@ -123,6 +151,23 @@ set them for your own setup (see `src/config.ts` for the shape); the token is fe
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
 found across your local sessions. Your selected backend is remembered in
 `~/.agendo/state.json`.
+
+### `resumeDialogChoice`
+
+Resuming a large session, the Claude CLI first asks how to reload it (_"Resume from
+summary (recommended)"_ / _"Resume full session as-is"_). agendo reports a session
+parked there as **ready**, not blocked, and answers the dialog itself the next time
+you `send` to it — then waits for the input box to actually come back before
+delivering your message.
+
+```jsonc
+// ~/.agendo/config.json
+{ "resumeDialogChoice": "summary" }  // default: whatever Claude marks (recommended)
+{ "resumeDialogChoice": "as-is" }    // resume the full session, at full token cost
+```
+
+The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
+it changes your global Claude CLI behaviour permanently, which is your call to make.
 
 ## Testing
 
