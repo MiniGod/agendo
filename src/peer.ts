@@ -52,6 +52,8 @@ export interface PeerSession {
   waitingFor?: string;
   /** `<tmux-session>:@<window>.%<pane>` when the session runs under tmux. */
   tmux?: string;
+  /** Always "interactive" here — see the kind filter in livePeers. */
+  kind: string;
   /** Wire-protocol version. Only PEER_PROTOCOL is spoken. */
   peerProtocol: number;
 }
@@ -145,6 +147,12 @@ export async function livePeers(): Promise<PeerSession[]> {
           const socketPath = typeof r.messagingSocketPath === "string" ? r.messagingSocketPath : "";
           if (!Number.isFinite(pid) || !sessionId || !socketPath) return;
           if (r.peerProtocol !== PEER_PROTOCOL) return;
+          // Only a session with a human at a TUI will ever render a queued prompt.
+          // The registry is not exclusively those — `kind` distinguishes them, and
+          // every protocol-1 entry observed carries it — so anything that isn't
+          // explicitly interactive is treated as "no peer" and left to the tmux
+          // path, the same safe direction as an unrecognized peerProtocol.
+          if (r.kind !== "interactive") return;
           if (!pidAlive(pid, typeof r.procStart === "string" ? r.procStart : undefined)) return;
           out.push({
             pid,
@@ -154,6 +162,7 @@ export async function livePeers(): Promise<PeerSession[]> {
             status: typeof r.status === "string" ? r.status : undefined,
             waitingFor: typeof r.waitingFor === "string" ? r.waitingFor : undefined,
             tmux: typeof r.tmux === "string" ? r.tmux : undefined,
+            kind: "interactive",
             peerProtocol: PEER_PROTOCOL,
           });
         }),
@@ -176,7 +185,14 @@ export async function findPeer(match: (sessionId: string) => boolean): Promise<P
   return peers.find((p) => match(p.sessionId)) ?? null;
 }
 
-/** Backstop for a receiver that accepts the connection but never drains it. */
+/**
+ * Backstop for a write that never completes. It rarely fires: a receiver that
+ * accepts and then never reads still takes a prompt-sized frame straight into
+ * the kernel's socket buffer, so the write finishes regardless (measured: 5 MB
+ * accepted in 11 ms by a receiver doing nothing). It is here for the case that
+ * buffer cannot absorb — a backed-up receiver and a large enough payload — not
+ * for a merely unresponsive one.
+ */
 const SEND_TIMEOUT_MS = 5_000;
 
 /**

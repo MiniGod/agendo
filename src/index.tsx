@@ -535,8 +535,10 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   const target = refreshLiveTmux(index.all).liveWindows.get(sessionName(s)) ?? liveTargetForShortId(shortId(s.id));
   // A claude running outside agendo has no window here but is very much alive;
   // report it as running (◆) rather than idle, and say why it can't be attached.
-  const peer = s.source === "claude" ? await findPeer((id) => id === s.id) : null;
-  const external = !target && !!peer;
+  // Only consulted when no window was found — with a window in hand the registry
+  // adds nothing, and the scan would be pure cost on the common path.
+  const peer = !target && s.source === "claude" ? await findPeer((id) => id === s.id) : null;
+  const external = !!peer;
   const running = !!target || liveTargets().has(sessionName(s)) || external;
   const act = await loadActivity(s, { full });
   console.log(`${external ? "◆ running" : running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
@@ -544,9 +546,18 @@ async function runStatus(token: string | undefined, full = false): Promise<void>
   console.log(`  dir:    ${s.cwd}`);
   if (s.branch) console.log(`  branch: ${s.branch}`);
   console.log(`  last:   ${s.lastUsed.toISOString()}`);
-  if (external && peer) {
+  if (peer) {
     console.log(`  state:  ${peer.status ?? "running"}${peer.waitingFor ? ` (${peer.waitingFor})` : ""}`);
-    console.log(`  where:  pid ${peer.pid}, no agendo window — \`${SELF_CMD} send\` reaches it, attach does not`);
+    // Don't claim "no window" on the registry's authority alone. The peer reports
+    // the pane it runs in, and a window agendo failed to ATTRIBUTE (an id-less
+    // `cl-wi-…` whose cwd matched a newer sibling session) is not the same thing
+    // as no window at all — saying so would send the user looking for a terminal
+    // that doesn't exist. Report what the session itself says.
+    console.log(
+      peer.tmux
+        ? `  where:  pid ${peer.pid}, tmux ${peer.tmux} — not attributed to an agendo window; \`${SELF_CMD} send\` reaches it`
+        : `  where:  pid ${peer.pid}, no tmux pane — \`${SELF_CMD} send\` reaches it, attach does not`,
+    );
   }
   if (target) {
     const { raw, cursor } = capturePaneState(target);
@@ -628,10 +639,14 @@ function indent(text: string): string {
  * there is nothing to refuse. The pane state is still captured and reported, so
  * the caller sees what it walked into.
  *
- * `limited` is the exception that still refuses on BOTH paths: a session sitting
- * at its usage cap will not read a queued frame until the cap resets, so
- * reporting success would be a lie, and orchestrators key on the exit-2 signal
- * to know to wait or call `unblock`.
+ * `limited` is the exception that still refuses even though the socket would
+ * accept the frame: a session sitting at its usage cap will not read it until the
+ * cap resets, so reporting success would be a lie, and orchestrators key on the
+ * exit-2 signal to know to wait or call `unblock`. That gate reads the PANE, so
+ * it only fires for a session that has one — the registry reports
+ * idle/busy/waiting/shell and has no way to say "at the cap", so a windowless
+ * peer at its limit is queued to rather than refused. It will read the message
+ * on reset; the exit code just can't warn about the delay.
  */
 async function runSend(token: string | undefined, prompt: string, force: boolean): Promise<void> {
   if (!token || !prompt) {
@@ -1142,7 +1157,11 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   if (!liveWindow) {
     const peer = s.source === "claude" ? await findPeer((id) => id === s.id) : null;
     if (peer) {
-      console.error(`Session ${shortId(s.id)} is already running outside agendo (pid ${peer.pid}, ${peer.status ?? "running"}).`);
+      // Say where it actually is. "Outside agendo" is an inference from a failed
+      // window lookup; `peer.tmux` is the session's own report, and the two differ
+      // when a window exists but wasn't attributed to this session.
+      const where = peer.tmux ? `pid ${peer.pid} in tmux ${peer.tmux}` : `pid ${peer.pid}, no tmux pane`;
+      console.error(`Session ${shortId(s.id)} is already running outside agendo (${where}, ${peer.status ?? "running"}).`);
       console.error(`Resuming would run two agents on one transcript. Use \`${SELF_CMD} send ${shortId(s.id)} "<prompt>"\` to message it instead.`);
       process.exit(2);
     }

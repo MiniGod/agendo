@@ -232,14 +232,16 @@ async function fakePeer(
   name: string,
   status: string,
   sessionId: string = LOGIN_SESSION_ID,
+  over: Record<string, unknown> = {},
+  configDir = ".claude",
 ) {
   const sockPath = join(mock.tmpDir, `${name}.sock`);
   const frames: string[] = [];
   const server = createServer((c) => c.on("data", (d) => frames.push(d.toString())));
   await new Promise<void>((r) => server.listen(sockPath, r));
-  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await mkdir(join(mock.home, configDir, "sessions"), { recursive: true });
   await writeFile(
-    join(mock.home, ".claude", "sessions", `${process.pid}.json`),
+    join(mock.home, configDir, "sessions", `${process.pid}.json`),
     JSON.stringify({
       pid: process.pid,
       sessionId,
@@ -248,10 +250,15 @@ async function fakePeer(
       kind: "interactive",
       messagingSocketPath: sockPath,
       status,
+      ...over,
     }),
   );
   return { frames, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
+
+/** The frame text the peer has received so far — polled, since the parent's
+ *  socket read races the child's exit. */
+const framesOf = (peer: { frames: string[] }) => () => peer.frames.join("");
 
 test("agendo send prefers the session's messaging socket over the tmux pane", async ({ mock }) => {
   const peer = await fakePeer(mock, "peer", "idle");
@@ -262,7 +269,7 @@ test("agendo send prefers the session's messaging socket over the tmux pane", as
 
     // Exactly the documented injection frame, addressed by session id so the
     // receiver can drop it if this pid ever gets recycled.
-    expect(peer.frames.join("")).toBe(
+    await expect.poll(framesOf(peer)).toBe(
       JSON.stringify({
         type: "user",
         message: { role: "user", content: "run the tests" },
@@ -291,7 +298,7 @@ test("agendo send over the socket queues into a busy session instead of refusing
     const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
     expect(r.code).toBe(0); // NOT refused, unlike the paste path
     expect(r.stdout).toContain("compacting"); // but it reports what it walked into
-    expect(peer.frames.join("")).toContain('"content":"run the tests"');
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
   } finally {
     await peer.close();
   }
@@ -307,7 +314,7 @@ test("agendo send reaches a session that has a socket but NO tmux window", async
     const r = await agendoAsync(mock.env, "send", shortIdOf(STANDALONE_SESSION_ID), "run the tests").done;
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("via session socket");
-    expect(peer.frames.join("")).toContain('"content":"run the tests"');
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
     // Nothing was typed anywhere — there is no pane for this session.
     const tmux = await mock.tmuxLog();
     expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
@@ -414,29 +421,88 @@ test("agendo send falls back to the tmux pane when the registry entry is stale",
   expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
 });
 
-test("agendo send ignores a peer advertising an unknown protocol version", async ({ mock }) => {
-  // The wire format is internal and undocumented. A session speaking a version
-  // we don't know must read as "no peer" — writing frames it may not parse is
-  // worse than typing into the pane, which always works.
-  const peer = await fakePeer(mock, "peer-future", "idle");
-  await writeFile(
-    join(mock.home, ".claude", "sessions", `${process.pid}.json`),
-    JSON.stringify({
-      pid: process.pid,
-      sessionId: LOGIN_SESSION_ID,
-      cwd: "/run/login",
-      peerProtocol: 99,
-      kind: "interactive",
-      messagingSocketPath: join(mock.tmpDir, "peer-future.sock"),
-      status: "idle",
-    }),
-  );
+// Anything the registry advertises that we don't positively recognize must read
+// as "no peer" and leave the send on the tmux path. Writing frames a receiver may
+// not parse — or queueing into something with no TUI to render them — is worse
+// than typing into the pane, which always works.
+for (const [label, over] of [
+  ["an unknown protocol version", { peerProtocol: 99 }],
+  ["a non-interactive kind", { kind: "background" }],
+] as const) {
+  test(`agendo send ignores a peer advertising ${label}`, async ({ mock }) => {
+    const peer = await fakePeer(mock, "peer-unrecognized", "idle", LOGIN_SESSION_ID, over);
+    try {
+      const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+      expect(r.stdout).not.toContain("via session socket");
+      expect(peer.frames).toEqual([]); // the socket was never written to
+    } finally {
+      await peer.close();
+    }
+  });
+}
+
+test("agendo send finds a peer registered under a second ~/.claude* profile", async ({ mock }) => {
+  // Sessions are spread across profile dirs (~/.claude, ~/.claude-work), which is
+  // why claudeConfigDirs() exists. Discovery that only looked at ~/.claude would
+  // silently drop half a machine's sessions back onto the pane path.
+  const peer = await fakePeer(mock, "peer-profile", "idle", LOGIN_SESSION_ID, {}, ".claude-work");
   try {
     const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+    expect(r.stdout).toContain("via session socket");
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send never routes a copilot session to a claude peer", async ({ mock }) => {
+  // `send` resolves the peer from the bare token without consulting the session
+  // index, so nothing structural stops a copilot id from matching a claude peer's
+  // short id. Only claude registers a socket, so a copilot session must always
+  // take the pane path — pinned here so a future id scheme can't silently
+  // misdeliver one agent's prompt into another's queue.
+  const peer = await fakePeer(mock, "peer-copilot", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", COP_SHORT_ID, "run the tests").done;
     expect(r.stdout).not.toContain("via session socket");
-    expect(peer.frames).toEqual([]); // the socket was never written to
+    expect(peer.frames).toEqual([]); // the claude peer was left alone
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send --force queues to a usage-limited session over the socket", async ({ mock }) => {
+  // The un-forced case refuses (exit 2). --force is the documented override, and
+  // over the socket it means "queue it anyway, it'll be read after the reset" —
+  // not the pane path's "type into whatever is on screen".
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const peer = await fakePeer(mock, "peer-limited-forced", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "-f", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("via session socket");
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+    // Still the socket, not keystrokes — --force must not downgrade the path.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo status prefers the window over the registry when a session has both", async ({ mock }) => {
+  // A peer with a live agendo window is attachable, so it must read ● (attach
+  // works), never ◆ (attach does not) — the registry must not override tmux.
+  const peer = await fakePeer(mock, "peer-both", "busy");
+  try {
+    const r = await agendoAsync(mock.env, "status", SHORT_ID).done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("● running");
+    expect(r.stdout).not.toContain("◆ running");
+    expect(r.stdout).not.toContain("attach does not");
   } finally {
     await peer.close();
   }
