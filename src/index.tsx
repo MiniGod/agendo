@@ -19,6 +19,7 @@ import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "
 import { resolveInitialProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
 import { loadState } from "./config.ts";
+import { takeWarnings } from "./errors.ts";
 import { printJson, printLine } from "./output.ts";
 import { runWaitCli } from "./wait.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
@@ -534,7 +535,7 @@ async function runStatus(token: string | undefined, full = false, withUrls = fal
   // Full, clickable links for whatever this session is working on. Vertical
   // output, so a long URL costs nothing here (unlike the `list` table).
   if (withUrls) {
-    const resolved = await resolveSessionLink(s);
+    const resolved = await resolveSessionLink(s, "status");
     const V = linkVocab(resolved.provider);
     // As in runOpen: a link with no resolvable URL reads as absent, never as a
     // partial link a human might paste.
@@ -638,6 +639,8 @@ function linkVocab(provider: ProviderName): { prPrefix: string; abbrev: string; 
  */
 async function resolveSessionLink(
   s: AgentSession,
+  /** Command name for any reported-and-ignored load warnings (see flushWarnings). */
+  prefix: string,
 ): Promise<{ link?: SessionLink; provider: ProviderName; error?: string }> {
   const opts = currentModelOptions();
   try {
@@ -645,6 +648,11 @@ async function resolveSessionLink(
     return { link: model.sessionLinks.get(`${s.source}:${s.id}`), provider: model.provider };
   } catch (e) {
     return { provider: opts.provider, error: (e as Error)?.message ?? String(e) };
+  } finally {
+    // Whether or not the load succeeded: a corrupt state.json silently drops the
+    // persisted backend, which would otherwise resolve links against the wrong
+    // one with no hint why. stderr, so `--print` output stays pipeable.
+    flushWarnings(prefix);
   }
 }
 
@@ -674,7 +682,7 @@ async function runOpen(
     console.error(`No session found for "${token}".`);
     process.exit(1);
   }
-  const resolved = await resolveSessionLink(s);
+  const resolved = await resolveSessionLink(s, "open");
   const V = linkVocab(resolved.provider);
   if (resolved.error) {
     console.error(`open: could not resolve associations from the backend: ${resolved.error}`);
@@ -835,6 +843,17 @@ interface ListRow {
  * identity, if any. Used by the association-resolving `list` modes so their
  * gh/az fetch set matches what the menu would show.
  */
+/**
+ * Print (and clear) anything the load reported-and-ignored. The TUI surfaces
+ * these as a notice; the CLI has no such chrome, so they go to stderr — leaving
+ * stdout clean for `--json`. Without this a corrupt `~/.agendo/state.json` would
+ * silently drop the persisted backend and identity, and the command would query
+ * the wrong backend with no hint as to why.
+ */
+function flushWarnings(prefix: string): void {
+  for (const w of takeWarnings()) console.error(`${prefix}: ${w}`);
+}
+
 function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProvider>; identity: Identity | null } {
   const st = loadState();
   const provider = resolveInitialProvider(st.provider);
@@ -873,6 +892,7 @@ async function runList(opts: ListOptions): Promise<void> {
     }
     console.error(`list: continuing without PR/work-item associations (${msg})`);
   }
+  flushWarnings("list");
 
   const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
   const linkOf = (s: AgentSession) => model?.sessionLinks.get(`${s.source}:${s.id}`);
@@ -1066,10 +1086,12 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
   try {
     model = await loadModel(currentModelOptions());
   } catch (e) {
+    flushWarnings("list pr");
     console.error(`list pr: could not load pull requests from the backend: ${(e as Error)?.message ?? e}`);
     process.exit(1);
     return;
   }
+  flushWarnings("list pr");
   // PRs I created: linked-to-a-work-item + orphans. Dedupe by repo:id — GitHub PR
   // numbers are per-repo, so id alone can collide across repos.
   const seen = new Set<string>();
@@ -1139,10 +1161,12 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
   try {
     model = await loadModel(currentModelOptions());
   } catch (e) {
+    flushWarnings("list issues");
     console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);
     process.exit(1);
     return;
   }
+  flushWarnings("list issues");
   const label = model.provider === "github" ? "issue" : "work item";
   const seen = new Set<number>();
   const items: WorkItem[] = [];

@@ -10,6 +10,7 @@
 // Issue↔PR links come from closing references, "#N" mentions, or the issue id
 // embedded in the PR branch (see linkedIssues).
 import { spawn, spawnSync } from "child_process";
+import { messageOf, snippetOf, tag } from "./errors.ts";
 import type { RepoInfo } from "./repos.ts";
 import type { EntityUrls, FetchContext } from "./provider.ts";
 import type {
@@ -22,24 +23,43 @@ import type {
 } from "./types.ts";
 
 // ── gh invocation ─────────────────────────────────────────────────────────────
+/**
+ * Whether a failed `gh` run looks worth retrying. `gh` collapses every failure
+ * into a non-zero exit, so the only signal is stderr: a 5xx, a rate limit, or a
+ * transport-level error can clear on its own, while a 401/403/404 or a bad
+ * argument is the same answer every time. Anything unrecognised counts as
+ * permanent — see isRetryable on why that's the safe default.
+ */
+function transientGhFailure(stderr: string): boolean {
+  return /HTTP 5\d\d|\brate limit\b|connection (reset|refused)|timed? ?out|temporary failure|no such host|network is unreachable|EOF\b/i.test(
+    stderr,
+  );
+}
+
 /** Run `gh` and parse its stdout as JSON (null on empty output). */
 function gh(args: string[]): Promise<any> {
   return new Promise((resolve, reject) => {
     const child = spawn("gh", args);
+    const cmd = `gh ${args.join(" ")}`;
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
-    child.on("error", reject);
+    child.on("error", reject); // couldn't spawn (gh not installed) — never transient
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`gh ${args.join(" ")} -> exit ${code}: ${err.trim()}`));
+        reject(tag(new Error(`${cmd} -> exit ${code}: ${err.trim()}`), { retryable: transientGhFailure(err) }));
         return;
       }
       try {
         resolve(out.trim() ? JSON.parse(out) : null);
-      } catch (e) {
-        reject(new Error(`gh ${args.join(" ")} -> bad JSON: ${(e as Error).message}`));
+      } catch (cause) {
+        // Name the command AND quote what came back, so `gh` printing an
+        // interstitial ("A new release of gh is available…") or an HTML error
+        // page is recognisable rather than a bare parse failure.
+        reject(
+          new Error(`Failed to parse JSON from \`${cmd}\` (${snippetOf(out)}): ${messageOf(cause)}`, { cause }),
+        );
       }
     });
   });
