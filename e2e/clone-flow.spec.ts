@@ -520,3 +520,57 @@ test("a brand-new user with no sessions can clone their first repo and start a w
   await wt.waitForStable();
   expect(await openRepoPicker(wt)).toContain("newthing");
 });
+
+// ── the clone composes with orchestrator mode ─────────────────────────────────
+// Both flows converge on `chooseRepo`: the picker's enter calls it, and so does
+// the post-clone hand-off. That is the whole point of routing through one
+// function — a cloned checkout must reach the orchestrator's where-to-run dialog
+// by the same path a repo that was already on disk does, with no second
+// session-creation flow to keep in sync. If the orchestrator routing were
+// duplicated into the picker's key handler instead, this test would land on the
+// plain new-session dialog (cursor on "New git worktree") and never orchestrate.
+test("an orchestrator can be started in a repo it just cloned", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const parent = join(mock.home, "repos");
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+
+  // Sessions view → O, which enters the repo picker directly (Claude-only mode,
+  // so there is no agent step) — and the clone row is offered there too.
+  await wt.press("3");
+  await wt.waitForStable();
+  await wt.press("O");
+  const picker = await wt.waitForText("Orchestrator session — pick a repo");
+  expect(picker).toContain("Clone from URL…");
+
+  await openClonePrompt(wt);
+  wt.write("https://github.com/ada/newthing");
+  await wt.waitForText("clones into");
+  await wt.press(KEY.enter);
+
+  // It lands on the ORCHESTRATOR where-to-run dialog for the fresh clone, with
+  // the cursor already on the main checkout — the orchestrator rule survived the
+  // clone hand-off rather than being reset to the plain free-session default.
+  const where = await wt.waitForText("choose where to run", 20000);
+  expect(where).toContain("Orchestrator session in newthing");
+  expect(where).toMatch(/cloned ada\/newthing/);
+  expect(where).toMatch(/❯\s+Main repo checkout/);
+  expect(where).toContain("git keeps that");
+
+  // Accepting it launches the orchestrator in the clone's ROOT — no worktree.
+  await wt.press(KEY.enter);
+  const dest = join(parent, "newthing");
+  await expect
+    .poll(
+      async () =>
+        (await mock.tmuxLog()).some((argv) => {
+          if (argv[0] !== "new-session" || !argv.includes(dest) || !argv.includes("claude")) return false;
+          const appended = argv[argv.indexOf("--append-system-prompt") + 1] ?? "";
+          return appended.includes("ORCHESTRATOR MODE") && appended.includes("Never write project code yourself");
+        }),
+      { timeout: 10000 },
+    )
+    .toBe(true);
+  // The clone itself is the only git worktree-ish thing that ran: no `worktree add`.
+  expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes('"worktree"'))).toBe(false);
+});

@@ -174,9 +174,11 @@ export function captureRestore(index: SessionIndex, hostSession: string = LAUNCH
 }
 
 /**
- * Pure tab-building core of `captureRestore`: map the live `cl-*` launcher
- * windows to the deduped, self-contained `RestoreTab[]` to persist. Extracted so
- * it's testable without live tmux + a state file.
+ * Tab-building core of `captureRestore`: map the live `cl-*` launcher windows to
+ * the deduped, self-contained `RestoreTab[]` to persist. Extracted so it's
+ * testable without live tmux. Note it is not side-effect-free: the `resumeArgv`
+ * it calls per window reads the orchestrator marker file (see src/orchestrator.ts)
+ * to decide whether that session's resume re-injects the orchestrator prompt.
  *
  * Each window is attributed to the session it's running (a resumed window by its
  * canonical name, an id-less fresh-launch window by the most-recently-used

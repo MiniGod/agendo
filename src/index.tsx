@@ -44,8 +44,28 @@ Usage:
       --attach, -a              Switch/attach to it immediately (default: detached)
       --name, -n <slug>         Name the worktree/branch (else derived from prompt)
       --no-worktree             Run in the current checkout instead of a new worktree
+      --worktree                Force a new worktree (only useful with --orchestrator,
+                                which otherwise runs in the main checkout)
       --agent <claude|copilot>  Which agent to launch (default: claude)
       --copilot / --claude      Shorthand for --agent copilot / --agent claude
+      --orchestrator, -O        Run the session in ORCHESTRATOR MODE: it writes no
+                                project code itself — it splits the goal into units,
+                                launches one background session per unit (each with a
+                                sub-agent dev→review loop), monitors them via
+                                list/status/send, and squash-merges each finished
+                                branch into the main branch. Claude only. Runs in the
+                                repo's MAIN checkout (not a worktree) — git allows the
+                                main branch in only one working tree, which is where
+                                the merges have to happen. --worktree overrides, and
+                                then names the branch "orchestrator" (-2, -3, … if
+                                taken) unless --name says otherwise. Unlike other
+                                background launches it keeps its approval prompts,
+                                since it acts on your main checkout; --unattended
+                                waives them.
+      --unattended              Only with --orchestrator: run it auto-approving, like
+                                an ordinary background session. It merges into your
+                                main checkout and spawns further sessions, so this
+                                hands all of that over unreviewed.
       --model <name>            Model for the new session, passed to the agent
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
@@ -223,8 +243,11 @@ if (process.argv[2] === "status") {
 // swallowed into the prompt, so a typo'd flag can't quietly change the task.
 if (process.argv[2] === "launch") {
   let name: string | undefined;
-  let worktree = true;
+  // undefined = "not specified", so the default can depend on --orchestrator below.
+  let worktree: boolean | undefined;
   let attach = false;
+  let orchestrator = false;
+  let unattended = false;
   let agent: AgentSource = "claude";
   // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
   const forwardArgv: string[] = [];
@@ -240,7 +263,24 @@ if (process.argv[2] === "launch") {
     const flag = inline ? a.slice(0, eq) : a;
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
+    else if (a === "--worktree") worktree = true;
     else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
+    // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
+    // would be rejected outright and `-O` would fall through into the prompt —
+    // launching an ordinary session that looks like it was asked to orchestrate.
+    else if (flag === "--orchestrator" || a === "-O" || a.startsWith("-O=")) {
+      // A boolean flag: `--orchestrator=false` reads as "off" to a human but
+      // would enable it here, so an inline value is refused, never guessed.
+      // `-O=…` is checked separately because `inline` only recognises the `--`
+      // form, and single-dash args fall through to the prompt rather than to the
+      // unknown-flag guard — so without this it would silently become prompt text.
+      if (inline || a.startsWith("-O=")) {
+        console.error(`launch failed: --orchestrator takes no value (got "${a}")`);
+        process.exit(1);
+      }
+      orchestrator = true;
+    }
+    else if (a === "--unattended") unattended = true;
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
     else if (flag === "--agent") {
@@ -280,8 +320,38 @@ if (process.argv[2] === "launch") {
       process.exit(1);
     }
   }
+  // Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
+  // equivalent for, so a Copilot orchestrator would run with none of the
+  // coordinate-don't-implement instructions. Refuse loudly rather than degrade.
+  // `agent` defaults to claude, so "copilot" here can only mean a flag asked for
+  // it — no need to track explicitness separately.
+  if (orchestrator && agent === "copilot") {
+    console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
+    process.exit(1);
+  }
+  // `--unattended` only ever loosens an ORCHESTRATOR's approvals — a plain
+  // background session is already unattended. Accepting it elsewhere would read
+  // as "this made a difference" when it changed nothing at all.
+  if (unattended && !orchestrator) {
+    console.error(`launch failed: --unattended only applies with --orchestrator (background sessions already run unattended)`);
+    process.exit(1);
+  }
+  // An orchestrator squash-merges into the main branch, and git allows the main
+  // branch in only ONE working tree — the primary checkout. A worktree would give
+  // it an empty branch it never commits to while forcing every merge to reach out
+  // to the repo root, so orchestrators run in the main checkout unless asked
+  // otherwise. Ordinary background sessions keep their isolation.
+  const useWorktree = worktree ?? !orchestrator;
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), { prompt, name, worktree, agent, forwardArgv });
+  const { plan, id, cwd, error } = launchTask(process.cwd(), {
+    prompt,
+    name,
+    worktree: useWorktree,
+    agent,
+    orchestrator,
+    unattended,
+    forwardArgv,
+  });
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -297,7 +367,7 @@ if (process.argv[2] === "launch") {
       {
         id,
         cwd,
-        title: prompt || "background session",
+        title: prompt || (orchestrator ? "orchestrator session" : "background session"),
         source: agent,
         // Claude is profile-scoped via CLAUDE_CONFIG_DIR; Copilot keeps all state
         // under ~/.copilot, so it carries no config dir.
@@ -314,7 +384,7 @@ if (process.argv[2] === "launch") {
     spawnSync(cmd, args, { stdio: "inherit" });
   } else {
     // Print machine-readable next steps for the agent/human that launched it.
-    console.log(`▸ launched background session ${id}`);
+    console.log(`▸ launched ${orchestrator ? "orchestrator" : "background"} session ${id}`);
     console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
     console.log(`  status:  ${SELF_CMD} status ${id}`);
     console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);
