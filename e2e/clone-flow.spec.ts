@@ -13,7 +13,7 @@
 // these tests and must work exactly the same.
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
 import type { WebTerminal } from "./harness/wterm.ts";
 
@@ -25,6 +25,12 @@ async function openRepoPicker(wt: WebTerminal): Promise<string> {
   await wt.waitForText("New session — pick an agent");
   await wt.press(KEY.enter);
   return wt.waitForText("New session — pick a repo");
+}
+
+/** A machine with no agent history at all — no sessions for any repo. */
+async function wipeSessions(home: string): Promise<void> {
+  await rm(join(home, ".claude", "projects"), { recursive: true, force: true });
+  await rm(join(home, ".copilot"), { recursive: true, force: true });
 }
 
 /** Repo picker → the clone prompt (via the `c` shortcut). */
@@ -447,4 +453,70 @@ test("a name collision steps aside instead of clobbering the directory", async (
   // The user's directory is untouched.
   expect(existsSync(join(parent, "newthing", "some-other-work"))).toBe(true);
   expect(existsSync(join(parent, "newthing", ".git"))).toBe(false);
+});
+
+// The overlap between this feature and the bootstrap picker (PR #20): the user
+// with NOTHING — no sessions anywhere, and a scoped directory that isn't a
+// checkout and has none under it. #20 makes that picker offer the folder itself
+// rather than dead-ending; cloning is the step that turns the folder into
+// somewhere a worktree can actually be made. A work item is the demanding case:
+// it MUST create a worktree, so before the clone there is genuinely nothing here
+// that can host the session, and the picker has to say so.
+test("a brand-new user with no sessions can clone their first repo and start a work item in it", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  await wipeSessions(mock.home);
+  const parent = join(mock.home, "fresh"); // empty, not a checkout, nothing under it
+  await mkdir(parent, { recursive: true });
+
+  const wt = await launch({ args: [parent], cols: 140, rows: 40 });
+  await wt.waitForText("Add login screen", 20000);
+  await wt.waitForStable();
+
+  // WI 101 → "+ start a fresh session…" → agent picker → repo picker.
+  await wt.press(KEY.enter);
+  await wt.waitForText("+ start a fresh session…");
+  await wt.press(KEY.down);
+  await wt.press(KEY.enter);
+  await wt.waitForText("Which agent should run this session?");
+  await wt.press(KEY.enter); // Claude
+  const picker = await wt.waitForText("Pick a repo to create the worktree in");
+
+  // The bootstrap fallback offers the scoped folder, and because it can't host a
+  // worktree the hint fires — pointing at the clone row, which is right here.
+  expect(picker).toMatch(/❯[^\n]*\bfresh\b/);
+  expect(picker).toContain("No git checkout here");
+  expect(picker).toContain("press c to clone one");
+  expect(picker).toContain("Clone from URL…");
+
+  await openClonePrompt(wt);
+  wt.write("https://github.com/ada/newthing");
+  await wt.waitForText("clones into");
+  await wt.press(KEY.enter);
+
+  // Straight into the work item's branch prompt — the same one an already-present
+  // repo reaches. The clone is a worktree host, so `worktree: true` stands.
+  const branch = await wt.waitForText("New branch off origin/HEAD", 20000);
+  expect(branch).toContain("Fresh session in newthing");
+  expect(branch).toMatch(/cloned ada\/newthing/);
+  expect(branch).toContain(join(parent, "newthing", ".claude", "worktrees"));
+  expect(existsSync(join(parent, "newthing", ".git"))).toBe(true);
+
+  // Back out to the picker: the clone is now an ordinary row, and the "no git
+  // checkout here" hint is gone because there finally is one.
+  await wt.press(KEY.escape);
+  const after = await wt.waitForText("Pick a repo to create the worktree in");
+  expect(after).toContain("newthing");
+  expect(after).not.toContain("No git checkout here");
+
+  // And it survives `a` (scoped → global). That view is the bootstrap fallback's
+  // own branch — with no sessions anywhere it builds the list from the launcher's
+  // cwd rather than from history, so the clone has to be merged into THAT list
+  // too, or the repo the user just waited for disappears on a keystroke.
+  await wt.press(KEY.escape); // → agent picker
+  await wt.waitForStable();
+  await wt.press(KEY.escape); // → list
+  await wt.waitForStable();
+  await wt.press("a");
+  await wt.waitForStable();
+  expect(await openRepoPicker(wt)).toContain("newthing");
 });

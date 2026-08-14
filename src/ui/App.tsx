@@ -1,15 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
-import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
+import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
+import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
+import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, worktreeDirName } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
+import { repoRootForCwd, bootstrapRepoRoot, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
 import {
   parseRepoUrl,
   repoUrlLabel,
@@ -295,15 +297,18 @@ function cloneError(res: CloneOutcome): string[] {
 }
 
 // Labeled context lines shown under an expanded session — one [label, value]
-// pair per line, so they read cleanly instead of crowding a single row. The
-// final line advertises the cross-agent "continue" action (press `c`).
+// pair per line, so they read cleanly instead of crowding a single row. Two of
+// them double as action hints: the profile line advertises the move action
+// (press `m`, Claude only — Copilot has no profile), and the final line the
+// cross-agent "continue" action (press `c`).
 function sessionMeta(s: AgentSession): Array<[string, string]> {
   const out: Array<[string, string]> = [
     ["dir", homeShort(s.cwd)],
     ["repo", sessionRepo(s)],
   ];
   if (s.branch) out.push(["branch", s.branch]);
-  if (s.source === "claude" && s.configDir) out.push(["profile", basename(s.configDir)]);
+  if (s.source === "claude" && s.configDir)
+    out.push(["profile", `${basename(s.configDir)}  ·  press m → move to another profile`]);
   out.push(["continue", `press c → convert & resume in ${otherAgent(s.source)}`]);
   return out;
 }
@@ -1060,6 +1065,11 @@ type Mode =
   | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
   | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean }
+  // "move this session to another Claude profile". `choices` is every discovered
+  // profile with the session's own flagged (see profileChoices) — shown for
+  // orientation but skipped by the cursor, since moving somewhere you already are
+  // is not a choice.
+  | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
   | { kind: "open"; targets: OpenTargets; title: string };
 
 /**
@@ -1310,7 +1320,26 @@ export default function App({
   ];
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
-    if (!scoped) return withCloned(model.repos);
+    if (!scoped) {
+      if (model.repos.length > 0) return withCloned(model.repos);
+      // Bootstrap: the unscoped list is derived ENTIRELY from where past sessions
+      // ran, so a fresh install (no sessions anywhere — a new machine, or a first
+      // WSL setup whose Claude history lives on the Windows side) has nothing to
+      // offer and the picker dead-ends. That locks the user out for good: the only
+      // way a repo enters the list is by already having a session in it.
+      // Fall back to where the launcher was started — its enclosing checkout, or
+      // the directory itself when it isn't one — which is the one place we know
+      // the user is standing in. `filterRoot` wins when there is one (only
+      // reachable with `a` toggled to the global view, where the scoped folder is
+      // still the better guess than an unrelated cwd), and goes through
+      // `repoRootForCwd` directly: an explicit path IS intent, so its walk-up
+      // needs none of `bootstrapRepoRoot`'s guard against climbing into $HOME.
+      // Deliberately ONLY when the list is empty: an install with sessions keeps
+      // its session-count ranking exactly as before.
+      return withCloned(
+        ensureRepoAtTop([], filterRoot ? repoRootForCwd(filterRoot) : bootstrapRepoRoot(process.cwd())),
+      );
+    }
     const inScopeRepos = withCloned(
       model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root)),
     );
@@ -1363,6 +1392,12 @@ export default function App({
   /** Repo choices for a fresh-session target — see `worktreeRepos` for why they differ by kind. */
   const reposForTarget = (kind: FreshTarget["kind"]): RepoInfo[] =>
     kind === "free" ? scopedRepos : worktreeRepos;
+  // Whether ANY offered repo can host a worktree — what the work-item / PR
+  // picker warns about when none can. Memoized on the list it asks about
+  // (`worktreeRepos` is exactly `reposForTarget`'s non-free answer): every
+  // `isGitCheckout` is an `existsSync`, and the picker re-renders on each cursor
+  // keystroke, so asking per render would stat the whole list per keypress.
+  const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
 
   // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
   // chatty once it's transferring, but silent while it resolves DNS, completes
@@ -1782,18 +1817,23 @@ export default function App({
     setNotice(null);
     setCloneNote(null);
     cloneNoteRef.current = null;
-    // A scoped picker is never empty — `scopedRepos` always keeps at least the
-    // scoped folder itself when nothing else is in scope — so the only ways to
-    // land here are the model not being loaded yet, or an unscoped launcher on a
-    // machine where no session has ever run in any repo. Those need different
-    // advice: one is "wait", the other is "go start a session somewhere". No
-    // "press a to widen" hint in either case — widening isn't what's missing.
+    // `scopedRepos` is never empty once the model is loaded: scoped keeps the
+    // scoped folder, unscoped falls back to the launcher's cwd. So the only real
+    // way to land here is the model not being loaded yet — the length guard below
+    // is belt-and-braces, kept so a future change to that list can't silently
+    // resurrect the empty picker instead of saying something.
     if (!model) {
       setNotice("Still loading — try again in a moment.");
       return;
     }
     if (scopedRepos.length === 0) {
-      setNotice("No known repos yet — open or resume a session in a repo first.");
+      // Leads with `agendo <dir>` on purpose: a plain "cd there and rerun" is
+      // wrong in the default tmux mode, where rerunning re-attaches to the
+      // ALREADY-RUNNING launcher (enterLauncherSession only spawns a new one
+      // when the launcher window is dead), so the process keeps its original cwd
+      // and nothing changes. A path arg resolves to its own host session, so it
+      // always takes effect — and quitting first is the other way out.
+      setNotice("No repo to start in — run `agendo <dir>` pointing at a git checkout (or quit with q, cd there, rerun).");
       return;
     }
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
@@ -2014,6 +2054,106 @@ export default function App({
       setMode({ kind: "list" });
       setNotice(`Convert to ${dest} failed: ${e?.message ?? e}`);
     }
+  };
+
+  // ── move a session to another Claude profile ────────────────────────────────
+  // Open the picker for the hovered session. Every guard that can be answered
+  // without touching disk is answered here, so the picker only ever appears when
+  // a move is actually possible.
+  //
+  // A RUNNING session is refused rather than moved. agendo can tell that a
+  // session is live (window→session attribution), and `paneReadiness` can even
+  // say its input box looks idle — but that read is a documented best-effort
+  // screen scrape (it returns "unknown" for any screen it doesn't recognize, and
+  // says nothing about background bash, in-flight sub-agents or background
+  // tasks), and there is no graceful-exit primitive to hand the agent anyway:
+  // killWindow is a hard kill. Moving files out from under a live `claude` is not
+  // worth guessing at, so the safe refusal is the whole behaviour.
+  const enterProfilePicker = async (s: AgentSession) => {
+    setNotice(null);
+    if (s.source !== "claude") {
+      setNotice(`${s.source} sessions have no profile — only Claude sessions live in a ~/.claude* dir.`);
+      return;
+    }
+    if (!s.configDir || !s.logPath) {
+      setNotice("This session has no on-disk transcript to move.");
+      return;
+    }
+    if (isRunning(s, model?.liveTmux ?? new Set())) {
+      setNotice(`${s.title} is running — exit it (or close its tmux window) before moving it to another profile.`);
+      return;
+    }
+    setBusy("Scanning Claude profiles…");
+    const choices = profileChoices(await discoverProfiles(), s);
+    setBusy(null);
+    const firstTarget = choices.findIndex((c) => !c.current);
+    if (firstTarget < 0) {
+      setNotice("No other Claude profile found — create a second ~/.claude* dir with a projects/ folder first.");
+      return;
+    }
+    setMode({ kind: "profile", session: s, choices, cursor: firstTarget });
+  };
+
+  // Perform the move, then refresh: the session index is keyed by transcript
+  // path, so a reload is what re-files it under the target profile (and re-reads
+  // its activity from the new location).
+  //
+  // Two guards stand between a keystroke and the filesystem:
+  //  • `moveInFlight` — `busy` swaps the RENDER but doesn't gate `useInput`, and
+  //    `mode` only leaves "profile" once the await resolves, so a key-repeat on
+  //    enter would otherwise start a second move racing the first over the same
+  //    four renames. The loser hits ENOENT and rolls back the entries it won,
+  //    tearing the session in half across the two profiles — exactly the state
+  //    this feature must never produce. The mode is also dropped up front, so a
+  //    stray enter has no picker left to act on.
+  //  • a FRESH liveness read — the running-session refusal is the entire safety
+  //    story for a live agent, and the picker can sit open indefinitely. A session
+  //    resumed in the meantime (a keypress in its restore-placeholder tab from
+  //    another tmux client, a second agendo) must not have its files pulled out
+  //    from under it, so the check is re-run against tmux at commit time rather
+  //    than trusted from picker-entry.
+  const moveInFlight = useRef(false);
+  const moveToProfile = async (s: AgentSession, target: ClaudeProfile) => {
+    if (moveInFlight.current) return;
+    moveInFlight.current = true;
+    setNotice(null);
+    setMode({ kind: "list" });
+    setBusy(`Moving “${s.title}” to ${target.name}…`);
+    try {
+      await runMove(s, target);
+    } finally {
+      moveInFlight.current = false;
+      setBusy(null);
+    }
+  };
+
+  const runMove = async (s: AgentSession, target: ClaudeProfile) => {
+    const sessions = (modelRef.current?.sessionGroups ?? []).flatMap((g) => g.sessions);
+    if (isRunning(s, refreshLiveTmux(sessions).live)) {
+      setNotice(`${s.title} started running — exit it (or close its tmux window) before moving it to another profile.`);
+      return;
+    }
+    const res = await moveSessionToProfile(s, target);
+    if (res.error) {
+      setNotice(`Move failed: ${res.error}`);
+      return;
+    }
+    if (res.noop) {
+      setNotice(`${target.name} is the same directory on disk as this session's profile — nothing to move.`);
+      return;
+    }
+    // The restore snapshot bakes CLAUDE_CONFIG_DIR into each tab's argv, so a
+    // moved session's saved tab has to be repointed — and an already-visible
+    // placeholder tab rebuilt — or it would resume against the profile it just left.
+    const tab = retargetRestoreProfile(s, target.configDir, hostSession);
+    setActivity(new Map()); // its log lives elsewhere now — drop the cached parse
+    requested.current.clear();
+    reload();
+    const extras = [
+      res.warning,
+      tab.placeholderRefreshed ? "restored tab repointed" : null,
+    ].filter(Boolean);
+    setNotice(`Moved “${s.title}” → ${target.name}${extras.length ? ` (${extras.join("; ")})` : ""}`);
   };
 
   useInput((input, key) => {
@@ -2328,6 +2468,30 @@ export default function App({
       return;
     }
 
+    // ── Claude profile picker (move a session between ~/.claude* dirs) ──
+    if (mode.kind === "profile") {
+      if (key.escape) return setMode({ kind: "list" });
+      // Only the profiles the session ISN'T in are selectable; its own is on
+      // screen for orientation, so the cursor steps over it in both directions.
+      const targets = mode.choices.flatMap((c, i) => (c.current ? [] : [i]));
+      if (targets.length === 0) return;
+      const step = (dir: number) =>
+        setMode((p) => {
+          if (p.kind !== "profile") return p;
+          const at = targets.indexOf(p.cursor);
+          const next = at < 0 ? targets[0] : targets[(at + dir + targets.length) % targets.length];
+          return { ...p, cursor: next };
+        });
+      if (key.upArrow || input === "k") return step(-1);
+      if (key.downArrow || input === "j") return step(1);
+      if (key.return) {
+        const picked = mode.choices[mode.cursor];
+        if (picked && !picked.current) moveToProfile(mode.session, picked.profile);
+        return;
+      }
+      return;
+    }
+
     // ── list mode ──
     // view switching (Tab forward, Shift-Tab back)
     if (key.tab) {
@@ -2396,6 +2560,18 @@ export default function App({
         return;
       }
       continueInOtherAgent(row.session);
+      return;
+    }
+
+    // move the hovered session to another Claude profile (~/.claude*). Works on
+    // a session row in any view, like `c`.
+    if (input === "m" && !key.ctrl && !key.meta) {
+      const row = rows[cursor];
+      if (!row || row.kind !== "session") {
+        setNotice("Select a session row first to move it to another profile.");
+        return;
+      }
+      enterProfilePicker(row.session);
       return;
     }
 
@@ -2523,15 +2699,28 @@ export default function App({
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
-    const repoRows = reposForTarget(mode.target.kind);
+    const repoChoices = reposForTarget(mode.target.kind);
+    // Work-item / PR flows MUST create a worktree, so a list with no git checkout
+    // in it can only ever produce "fatal: not a git repository" — the bootstrap
+    // case, where the only offer is the launcher's own non-repo cwd. Say what
+    // would actually unblock it instead of letting enter dead-end. The free flow
+    // is exempt: running in place is a legitimate outcome there (see wtchoice).
+    const noCheckout = !isFree && !anyHostableRepo;
     return (
       <Box flexDirection="column">
         <Text bold>{isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
         <Text dimColor>
           {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
         </Text>
+        {noCheckout ? (
+          <Text color="yellow">
+            {canClone
+              ? "No git checkout here — press c to clone one, or run `agendo <dir>` pointing at a repo."
+              : "No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
+          </Text>
+        ) : null}
         <Box marginTop={1} flexDirection="column">
-          {repoRows.map((r, i) => {
+          {repoChoices.map((r, i) => {
             const sel = i === mode.cursor;
             return (
               <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
@@ -2785,6 +2974,31 @@ export default function App({
     );
   }
 
+  if (mode.kind === "profile") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{`Move to another Claude profile — ${mode.session.title.slice(0, 44)}`}</Text>
+        <Text dimColor>
+          {"Relocates the transcript + its sidecar files  ·  ↑/↓ move · enter move · esc cancel"}
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          {mode.choices.map((c, i) => {
+            const sel = i === mode.cursor;
+            return (
+              <Text key={c.profile.configDir} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
+                {sel ? "❯ " : "  "}
+                <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
+                <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{c.profile.name.padEnd(18).slice(0, 18)}</Text>
+                <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
+                <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
+              </Text>
+            );
+          })}
+        </Box>
+      </Box>
+    );
+  }
+
   if (mode.kind === "open") {
     const { pr, workItem } = mode.targets;
     return (
@@ -2848,7 +3062,7 @@ export default function App({
             : searchFocus === "list"
               ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
               : view === "sessions"
-                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
+                ? `↑/↓ move · → expand · ⇥ switch view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}

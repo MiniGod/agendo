@@ -9,7 +9,10 @@ import { WebTerminal } from "./wterm.ts";
 
 interface Fixtures {
   mock: MockEnv;
-  launch: (opts?: { cols?: number; rows?: number; args?: string[] }) => Promise<WebTerminal>;
+  /** `cwd` defaults to the agendo checkout; override it to drive behaviour that
+   *  depends on WHERE the launcher was started (the unscoped picker's cwd
+   *  fallback), which a `[path]` arg deliberately bypasses. */
+  launch: (opts?: { cols?: number; rows?: number; args?: string[]; cwd?: string }) => Promise<WebTerminal>;
 }
 
 export const test = base.extend<Fixtures>({
@@ -20,7 +23,7 @@ export const test = base.extend<Fixtures>({
   },
   launch: async ({ page, mock }, use) => {
     const terminals: WebTerminal[] = [];
-    const factory = async (opts: { cols?: number; rows?: number; args?: string[] } = {}) => {
+    const factory = async (opts: { cols?: number; rows?: number; args?: string[]; cwd?: string } = {}) => {
       const wt = await WebTerminal.launch({
         page,
         command: "bun",
@@ -29,7 +32,7 @@ export const test = base.extend<Fixtures>({
         // is unset in the mock env), so the outside-tmux behaviour is unchanged.
         // Extra `args` (e.g. a `[path]` to scope the launcher) follow the entrypoint.
         args: ["run", join(REPO_ROOT, "src", "index.tsx"), "--no-tmux", ...(opts.args ?? [])],
-        cwd: REPO_ROOT,
+        cwd: opts.cwd ?? REPO_ROOT,
         env: mock.env,
         cols: opts.cols,
         rows: opts.rows,
