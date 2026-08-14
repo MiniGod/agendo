@@ -72,6 +72,7 @@ const code = await runWait({
   all: false,
   any: false,
   json: false,
+  scope: null,
   timeoutMs: 15_000,
   intervalMs: 150,
 });
