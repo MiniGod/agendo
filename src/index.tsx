@@ -8,20 +8,23 @@ import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   liveManagedPaths, managedKind, capturePaneState, sendToPane, sendResume, paneReadiness, paneShells, stripAnsi,
   sessionRoot, currentSessionName, killWindow,
-  type SessionKind, type Readiness,
+  paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, answerResumeDialog, paneAcceptsPaste,
+  capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
+  type SessionKind, type Readiness, type PaneSnapshot,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
-import { resolveContext, isUnderRoot } from "./context.ts";
+import { resolveContext } from "./context.ts";
+import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
-import { loadState } from "./config.ts";
+import { loadState, resumeDialogChoice } from "./config.ts";
 import { takeWarnings } from "./errors.ts";
 import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
-import { runWaitCli } from "./wait.ts";
+import { parseDuration, runWaitCli } from "./wait.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
@@ -59,6 +62,10 @@ Usage:
       --pr <n>                  Only sessions linked to PR #n (resolved via the
                                 backend, so gh/az data is fetched).
       --issue, --work-item <n>  Only sessions linked to that issue / work item.
+      --path <dir>              Same as the [dir] positional: only sessions whose
+                                cwd is under dir. Combines with --repo.
+      --repo <name>             Only sessions in that repo — a bare name or an
+                                owner/repo slug. Worktrees count as their repo.
   agendo list pr, prs          List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
                                 approvals, branch, session, title). --json for full rows.
@@ -73,23 +80,31 @@ Usage:
                                 non-busy state, then exit 0; exit non-zero on
                                 timeout. Run it in the background and use its exit
                                 as a notification instead of re-polling status.
-                                With no ids, select with --all / --prefix / --repo.
+                                With no ids, select with --all / --prefix, and
+                                scope any of those with --repo / --path.
                                 A session whose window closes reads "exited": it
                                 satisfies the default wait, and short-circuits a
                                 --state it can no longer reach.
       --any                     Wake on the FIRST session to satisfy, not all of
                                 them (so one stuck session can't mask the rest)
       --json                    Emit a wake payload on stdout: why it woke, and
-                                each session's from → state, changed, satisfied
+                                each session's from → state, changed, satisfied,
+                                plus resumeDialog (parked on claude's resume
+                                dialog: it reads ready, but nothing has run yet)
       --state <ready|busy|…>    Wait for exactly this state (default: non-busy).
                                 One of ready, busy, compacting, queued, dialog,
-                                limited, unknown, exited.
+                                limited, unknown, exited. "dialog" means a question
+                                for you — claude's own resume dialog reads ready,
+                                so it won't wake a --state dialog wait.
       --not <state>             Wait until the state is anything but this
       --timeout <dur>           Give up after this long (default 120s)
       --interval <dur>          Poll cadence (default 2s). Durations: 500ms, 2s, 5m…
       --all                     All running sessions
       --prefix <p>              Sessions whose dir basename starts with p
-      --repo <name>             Sessions whose repo root basename is name
+      --repo <name>             Sessions in that repo (bare name or owner/repo)
+      --path <dir>              Sessions whose cwd is under dir
+                                --repo/--path narrow whichever selector chose the
+                                set — including --all and explicit <id>s.
   agendo status <id>           Show a session's state, task checklist, workflows
                                 (Workflow-tool runs with agent progress), recent
                                 activity + full final response, and input
@@ -99,6 +114,8 @@ Usage:
       --urls, --links           Also resolve and print the full URLs of the linked
                                 PR / work item (needs the backend, so it's opt-in —
                                 the default status stays fast and auth-free).
+      --path <dir>              Only resolve <id> among sessions under dir
+      --repo <name>             Only resolve <id> among sessions in that repo
   agendo open <id>             Open the session's linked PR / work item in your
                                 browser — the CLI mirror of the menu's o key. Every
                                 resolved URL is printed first, so the link is
@@ -106,10 +123,18 @@ Usage:
       --pr                      Open the pull request (the default when both exist)
       --issue, --work-item      Open the work item / issue instead
       --print, -p               Only print the URL(s); never launch a browser
+      --path <dir>              Only resolve <id> among sessions under dir
+      --repo <name>             Only resolve <id> among sessions in that repo
   agendo send <id> <prompt>    Send a prompt to a running session. Refuses unless
                                 its input is idle/ready (not mid-turn, no open
-                                question, nothing already typed).
-      --force, -f               Send even if the input doesn't look ready
+                                question, nothing already typed). If claude's own
+                                resume dialog is up, answers it first (config:
+                                resumeDialogChoice) and waits for the input box.
+      --force, -f               Send even if the input doesn't look ready (but
+                                never into claude's resume menu, see above)
+      --timeout <dur>           Deadline for the input box to appear after that
+                                dialog is answered — a ceiling, not a wait: it
+                                proceeds as soon as the box is there (default 120s)
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the
                                 pane is still showing the usage-limit notice.
@@ -176,13 +201,33 @@ if (!tmuxAvailable()) {
 // menu shows, so an agent that launched a background session can poll it.
 if (process.argv[2] === "status") {
   const rest = process.argv.slice(3);
-  const full = rest.includes("--full") || rest.includes("-F");
+  let full = false;
   // `--urls` opts into the backend round-trip that resolves the session's linked
   // PR / work item. Off by default: `status` is the command orchestrators poll,
   // and a model load costs network + backend auth on every call.
-  const withUrls = rest.includes("--urls") || rest.includes("--links");
-  const token = rest.find((a) => !a.startsWith("-"));
-  await runStatus(token, full, withUrls);
+  let withUrls = false;
+  let token: string | undefined;
+  // The scope selectors don't pick the session (an id still does) — they narrow
+  // the set the id is resolved against, so an orchestrator polling one repo can
+  // never be handed a same-short-id session from a different project.
+  let pathArg: string | undefined;
+  let repoArg: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--full" || a === "-F") full = true;
+    else if (a === "--urls" || a === "--links") withUrls = true;
+    else if (a === "--path") pathArg = requireValue("status", a, rest[++i]);
+    else if (a === "--repo") repoArg = requireValue("status", a, rest[++i]);
+    // A dashed token can't be an id, so reject it rather than take it as one: a
+    // typo'd or `=`-joined scope flag (`--rep x`, `--repo=x`) would otherwise
+    // parse to "no scope" and print a confidently UNSCOPED report — defeating,
+    // silently, the exact guard the caller asked for.
+    else if (a.startsWith("-")) {
+      console.error(`status: unknown argument "${a}"`);
+      process.exit(1);
+    } else if (token === undefined) token = a;
+  }
+  await runStatus(token, full, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()), withUrls);
   process.exit(0);
 }
 
@@ -194,7 +239,14 @@ if (process.argv[2] === "open") {
   let token: string | undefined;
   let want: "pr" | "item" | undefined;
   let printOnly = false;
-  for (const a of process.argv.slice(3)) {
+  // Same scope selectors as `status`, for the same reason: `open` resolves a
+  // short id too, and launching a browser at the wrong repo's PR is a worse
+  // outcome than printing the wrong status.
+  let pathArg: string | undefined;
+  let repoArg: string | undefined;
+  const rest = process.argv.slice(3);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
     const sel = a === "--pr" ? "pr" : a === "--issue" || a === "--work-item" || a === "--workitem" ? "item" : null;
     if (sel) {
       // Two conflicting selectors is a mistake, not a silent last-one-wins.
@@ -204,6 +256,8 @@ if (process.argv[2] === "open") {
       }
       want = sel;
     } else if (a === "--print" || a === "-p") printOnly = true;
+    else if (a === "--path") pathArg = requireValue("open", a, rest[++i]);
+    else if (a === "--repo") repoArg = requireValue("open", a, rest[++i]);
     else if (a.startsWith("-")) {
       console.error(`open: unknown argument "${a}"`);
       process.exit(1);
@@ -213,7 +267,7 @@ if (process.argv[2] === "open") {
       process.exit(1);
     }
   }
-  await runOpen(token, want, printOnly);
+  await runOpen(token, want, printOnly, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()));
   process.exit(0);
 }
 
@@ -333,16 +387,31 @@ if (process.argv[2] === "launch") {
 if (process.argv[2] === "send") {
   let id: string | undefined;
   let force = false;
+  // How long to wait for the input box to come back after answering claude's
+  // resume dialog (only used on that path).
+  let dialogWaitMs = RESUME_DIALOG_WAIT_MS;
   const parts: string[] = [];
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--force" || a === "-f") force = true;
+    // Only before the prompt begins: unlike --force, this flag consumes the NEXT
+    // token, so recognizing it mid-prompt would eat a word of the message. Shares
+    // `wait`'s duration grammar (and its parser, which lives in wait.ts) so the
+    // two commands can't drift into accepting different spellings of "2s".
+    else if (a === "--timeout" && parts.length === 0) {
+      const ms = parseDuration(rest[++i]);
+      if (ms === null) {
+        console.error(`send: --timeout needs a duration like 500ms, 2s, 5m, 1h (got "${rest[i] ?? ""}")`);
+        process.exit(1);
+      }
+      dialogWaitMs = ms;
+    }
     else if (a === "--") { parts.push(...rest.slice(i + 1)); break; }
     else if (id === undefined) id = a;
     else parts.push(a);
   }
-  await runSend(id, parts.join(" ").trim(), force);
+  await runSend(id, parts.join(" ").trim(), force, dialogWaitMs);
   process.exit(0);
 }
 
@@ -377,9 +446,11 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   let all = false;
   let pr: number | undefined;
   let item: number | undefined;
-  // Optional `[dir]` positional scopes the listing to sessions whose cwd is under
-  // it, mirroring the TUI's path filter; resolved against the current directory.
+  // Optional `[dir]` positional (or its `--path` flag form) scopes the listing to
+  // sessions whose cwd is under it, mirroring the TUI's path filter; resolved
+  // against the current directory. `--repo` scopes by repo instead/as well.
   let dirArg: string | undefined;
+  let repoArg: string | undefined;
   const rest = process.argv.slice(3);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -387,8 +458,18 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     else if (a === "--all" || a === "--include-idle") all = true;
     else if (a === "--pr") pr = Number(rest[++i]);
     else if (a === "--issue" || a === "--work-item" || a === "--workitem") item = Number(rest[++i]);
-    else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
-    else {
+    // `--path` and the `[dir]` positional are the SAME slot, so a second one is a
+    // mistake — silently letting the later win would scope the listing to
+    // something other than what the command line reads as. Both spellings share
+    // one guard so the error doesn't depend on which came first.
+    else if (a === "--path") {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = requireValue("list", a, rest[++i]);
+    } else if (a === "--repo") repoArg = requireValue("list", a, rest[++i]);
+    else if (!a.startsWith("-")) {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = a;
+    } else {
       console.error(`list: unknown argument "${a}"`);
       process.exit(1);
     }
@@ -397,8 +478,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
     console.error(`list: --pr/--issue/--work-item need a numeric id`);
     process.exit(1);
   }
-  const filterRoot = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
-  await runList({ json, all, pr, item, filterRoot });
+  await runList({ json, all, pr, item, scope: makeSessionScope({ path: dirArg, repo: repoArg }, process.cwd()) });
   process.exit(0);
 }
 
@@ -507,21 +587,31 @@ if (!process.argv.includes("--no-tmux")) {
  * `withUrls` additionally resolves the session's linked PR / work item from the
  * backend and prints their full URLs (see `resolveSessionLink`).
  */
-async function runStatus(token: string | undefined, full = false, withUrls = false): Promise<void> {
+async function runStatus(
+  token: string | undefined,
+  full: boolean,
+  scope: SessionScope | null,
+  withUrls = false,
+): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} status <id> [--full] [--urls]`);
+    console.error(`usage: ${SELF_CMD} status <id> [--full] [--urls] [--path <dir>] [--repo <name>]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const index = await SessionIndex.build();
-  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  const inScope = scopeFilter(scope);
+  const s = index.all.find((x) => (x.id === token || shortId(x.id) === sid) && inScope(x));
   if (!s) {
-    const live = liveTargetForShortId(sid);
+    // The live-window fallback below answers for a session too young to have a
+    // transcript — but a bare tmux target carries no cwd we can hold against the
+    // scope, so under an explicit scope we decline rather than answer for a
+    // session that may well be in another repo.
+    const live = scope ? null : liveTargetForShortId(sid);
     if (live) {
       console.log(`● running (${live}) — no activity logged yet; it may still be starting.`);
       process.exit(0);
     }
-    console.error(`No session found for "${token}".`);
+    console.error(`No session found for "${token}"${scopeNote(scope)}.`);
     process.exit(1);
   }
   const target = liveTargetForShortId(shortId(s.id));
@@ -554,6 +644,13 @@ async function runStatus(token: string | undefined, full = false, withUrls = fal
     const { raw, cursor } = capturePaneState(target);
     const readiness = paneReadiness(raw, cursor);
     console.log(`  ready:  ${readiness}`);
+    // Reported ready (nothing is waiting on a decision about the work), but the
+    // pane is parked on claude's own resume dialog — say so, since `send` will
+    // answer it rather than paste into it.
+    if (paneResumeDialogActive(raw)) {
+      console.log(`  resume: claude's resume dialog is open — \`${SELF_CMD} send\` answers it (${resumeDialogChoice()}) before delivering`);
+      flushWarnings("status"); // the choice it just printed may have come from a config it had to ignore
+    }
     if (readiness === "limited") {
       const resetAt = parseResetTime(stripAnsi(raw), new Date(), RESET_LOOKBACK_MS);
       console.log(
@@ -656,16 +753,22 @@ async function runOpen(
   token: string | undefined,
   want: "pr" | "item" | undefined,
   printOnly: boolean,
+  scope: SessionScope | null,
 ): Promise<void> {
   if (!token) {
-    console.error(`usage: ${SELF_CMD} open <id> [--pr | --work-item] [--print]`);
+    console.error(
+      `usage: ${SELF_CMD} open <id> [--pr | --work-item] [--print] [--path <dir>] [--repo <name>]`,
+    );
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const index = await SessionIndex.build();
-  const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
+  const inScope = scopeFilter(scope);
+  const s = index.all.find((x) => (x.id === token || shortId(x.id) === sid) && inScope(x));
   if (!s) {
-    console.error(`No session found for "${token}".`);
+    // No live-window fallback here (unlike `status`): a session too young to have
+    // a transcript has no links to open anyway.
+    console.error(`No session found for "${token}"${scopeNote(scope)}.`);
     process.exit(1);
   }
   const resolved = await resolveSessionLink(s, "open");
@@ -719,14 +822,49 @@ async function runOpen(
 }
 
 /**
+ * Poll `target` until it's genuinely at an empty input box (see
+ * `paneAcceptsPaste` — a fresh capture each time, never an assumption), or null
+ * on timeout. Used after answering the CLI's resume dialog, where the session
+ * needs a moment to reload before its box comes back.
+ *
+ * TWO consecutive good reads are required, a poll apart. A reloading TUI paints
+ * its box before it has finished restoring the conversation, and a paste into
+ * that half-drawn screen can be discarded by the next full repaint — so the box
+ * has to still be there a moment later to count.
+ */
+async function waitForInputBox(target: string, timeoutMs: number): Promise<PaneSnapshot | null> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const deadline = Date.now() + timeoutMs;
+  let settled = false;
+  while (true) {
+    const snap = capturePaneState(target);
+    const ok = paneAcceptsPaste(snap.raw, snap.cursor);
+    if (ok && settled) return snap;
+    settled = ok;
+    if (Date.now() >= deadline) return null;
+    await sleep(Math.min(RESUME_DIALOG_POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
+
+/**
  * Send a prompt into a running session's input box. Refuses unless the TUI is
  * "ready" (idle, empty input) so we never clobber an open question, a generating
  * turn, or text already queued — pass `force` to override. Resolves the session
  * by id or tmux name.
+ *
+ * One state reads "ready" without an input box behind it: the claude CLI's own
+ * resume dialog (see paneResumeDialogActive). Because `send` is keystroke
+ * injection — paste, then Enter — a message delivered into that numbered menu
+ * would *pick an option*, so we answer the dialog first and re-verify a real
+ * box appeared before pasting anything. `--force` does NOT skip that: forcing a
+ * paste into a menu is precisely the footgun, so a dialog that never clears is
+ * an error either way — and a menu that only *looks* like it (a wrapped label,
+ * say, which the detector deliberately misses rather than over-matches) refuses
+ * the forced paste too (paneResumeMenuSuspect).
  */
-async function runSend(token: string | undefined, prompt: string, force: boolean): Promise<void> {
+async function runSend(token: string | undefined, prompt: string, force: boolean, dialogWaitMs: number): Promise<void> {
   if (!token || !prompt) {
-    console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force]`);
+    console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force] [--timeout <dur>]`);
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
@@ -735,12 +873,58 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     console.error(`Session ${token} is not running (no live tmux window to send to).`);
     process.exit(1);
   }
-  const { raw, cursor } = capturePaneState(target);
-  const readiness = paneReadiness(raw, cursor);
+  let { raw, cursor } = capturePaneState(target);
+  let readiness = paneReadiness(raw, cursor);
+  if (paneResumeDialogActive(raw)) {
+    const choice = resumeDialogChoice();
+    // Reading the config can report-and-ignore a malformed config.json, and this
+    // is the one command that ACTS on that file's value. Silently falling back to
+    // the default while pressing a key into a live session is exactly the case
+    // that warning exists for, so drain it here as `list` does for its own loads.
+    flushWarnings("send");
+    const option = resumeDialogOption(raw, choice);
+    if (!option) {
+      console.error(`Not sending: claude's resume dialog is open but no "${choice}" option was found — answer it yourself, then retry.`);
+      process.exit(2);
+    }
+    console.log(`▸ answering claude's resume dialog (${choice}): ${option.number}. ${option.label}`);
+    // Nothing was confirmed and the menu is still up — the cursor wouldn't move,
+    // or we couldn't read it. Stop here rather than wait out the whole timeout;
+    // either way not one character of the message has been sent.
+    if (!answerResumeDialog(target, option) && paneResumeDialogActive(capturePane(target))) {
+      console.error(
+        `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
+          `selection keys). Nothing was pasted — answer it yourself, then retry.`,
+      );
+      process.exit(2);
+    }
+    const settled = await waitForInputBox(target, dialogWaitMs);
+    if (!settled) {
+      console.error(
+        `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
+          `nothing was pasted (a message typed into that menu would pick an option). Re-check with \`${SELF_CMD} status ${token}\`.`,
+      );
+      process.exit(2);
+    }
+    ({ raw, cursor } = settled);
+    readiness = paneReadiness(raw, cursor);
+  }
   if (readiness !== "ready" && !force) {
     console.error(`Not sending: session looks "${readiness}", not ready. Re-check with \`${SELF_CMD} status ${token}\`, or pass --force.`);
     console.error(`\n  current screen (tail):`);
     for (const l of stripAnsi(raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
+    process.exit(2);
+  }
+  // The one thing --force may not do. If the pane is showing something that
+  // looks like the resume menu but the detector didn't fully match it (a wrapped
+  // label, reworded footer, changed option set), the branch above never ran —
+  // and a forced paste would type the message INTO that menu, where its digits
+  // pick options and the trailing Enter confirms one.
+  if (paneResumeMenuSuspect(raw)) {
+    console.error(
+      `Not sending: the pane looks like claude's resume menu but doesn't match it exactly, so agendo won't answer it ` +
+        `and --force won't paste into it (the message would pick an option). Answer it yourself, then retry.`,
+    );
     process.exit(2);
   }
   sendToPane(target, prompt);
@@ -765,6 +949,18 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
   }
   const { raw, cursor } = capturePaneState(target);
   const readiness = paneReadiness(raw, cursor);
+  // The resume keystrokes lead with Escape, which on claude's own resume dialog
+  // is its "Esc to cancel" — it would cancel the resume rather than unblock
+  // anything. Refused even with --force: there is no reading of `unblock` under
+  // which cancelling a resume is what the user meant. (The pane can still LOOK
+  // limited here — the previous run's notice is replayed above the dialog.)
+  if (paneResumeDialogActive(raw)) {
+    console.error(
+      `Not unblocking: the session is sitting on claude's resume dialog, and the resume keystrokes ` +
+        `lead with Escape — which would cancel it. Use \`${SELF_CMD} send ${token} "<prompt>"\`, which answers the dialog.`,
+    );
+    process.exit(2);
+  }
   if (readiness !== "limited" && !force) {
     console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
     process.exit(2);
@@ -785,8 +981,8 @@ interface ListOptions {
   pr?: number;
   /** Only sessions linked to this work-item / issue id (enriched path). */
   item?: number;
-  /** Scope to sessions whose cwd is under this absolute root (TUI path filter). */
-  filterRoot: string | null;
+  /** Scope to sessions by cwd (`[dir]`/`--path`) and/or repo (`--repo`); null = all. */
+  scope: SessionScope | null;
 }
 
 /** One session as reported by the enriched (`--json` / `--all` / query) list. */
@@ -856,12 +1052,14 @@ function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProv
  * `--all`/`--include-idle`, and `--pr`/`--issue`/`--work-item` query flags opt
  * into the enriched path, which loads the model so each row carries its branch
  * and linked PR / work item (via `sessionLinks`) and can include idle sessions.
- * An optional `filterRoot` scopes every mode to sessions whose cwd is under it.
+ * An optional scope narrows every mode — plain, enriched and `--json` alike — to
+ * the sessions under a path and/or in a repo.
  */
 async function runList(opts: ListOptions): Promise<void> {
   const index = await SessionIndex.build();
+  const inScope = scopeFilter(opts.scope);
   const enriched = opts.json || opts.all || opts.pr !== undefined || opts.item !== undefined;
-  if (!enriched) return runPlainList(index, opts.filterRoot);
+  if (!enriched) return runPlainList(index, inScope);
 
   const isQuery = opts.pr !== undefined || opts.item !== undefined;
   // Associations come from the model's reverse index. A query MUST have it (the
@@ -906,8 +1104,8 @@ async function runList(opts: ListOptions): Promise<void> {
   } else {
     sessions = index.all.filter((s) => live.has(sessionName(s)));
   }
-  // Path scoping (the `[dir]` positional): keep only sessions under the root.
-  if (opts.filterRoot) sessions = sessions.filter((s) => isUnderRoot(s.cwd, opts.filterRoot!));
+  // Scoping (`[dir]`/`--path`, `--repo`): keep only the sessions it selects.
+  sessions = sessions.filter(inScope);
   sessions.sort((a, b) => b.lastUsed.getTime() - a.lastUsed.getTime());
 
   const rows: ListRow[] = sessions.map((s) => {
@@ -957,10 +1155,13 @@ async function runList(opts: ListOptions): Promise<void> {
     return;
   }
   if (rows.length === 0) {
+    // Name the scope when there is one: an empty listing under a `--repo` typo
+    // otherwise reads as "nothing is running" rather than "nothing matched".
+    const where = scopeNote(opts.scope);
     console.log(
       isQuery
-        ? "No sessions linked to that item (query covers open PRs / work items in the current identity's scope)."
-        : "No sessions.",
+        ? `No sessions linked to that item${where} (query covers open PRs / work items in the current identity's scope).`
+        : `No sessions${where}.`,
     );
     return;
   }
@@ -992,9 +1193,10 @@ async function runList(opts: ListOptions): Promise<void> {
  * session — id-bearing names (`cl-bg-`/`cl-new-`/`cl-claude-`/`cl-copilot-`) by
  * embedded short id, work-item / PR names by working directory (as in model.ts)
  * — then report readiness, kind, id, location and title. Running-only and
- * model-free by design. An optional `filterRoot` scopes to sessions under it.
+ * model-free by design. `inScope` is the `--path`/`--repo` filter (match-all when
+ * no selector was given).
  */
-function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
+function runPlainList(index: SessionIndex, inScope: (s: AgentSession) => boolean): void {
   const seen = new Set<string>();
   const rows: string[] = [];
   for (const { name, cwd, placeholder } of liveManagedPaths()) {
@@ -1008,8 +1210,8 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     // path). Shared so the CLI list can't drift from the menu's running state.
     const s = resolveWindowSession(index.all, name, cwd);
     if (!s) continue;
-    // Path scoping: skip sessions whose cwd isn't under the requested dir.
-    if (filterRoot && !isUnderRoot(s.cwd, filterRoot)) continue;
+    // Scoping: skip sessions the requested path / repo filter doesn't select.
+    if (!inScope(s)) continue;
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1245,6 +1447,24 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   console.log(`▸ resumed session ${shortId(s.id)}${plan.alreadyRunning ? " (was already running)" : ""}`);
   console.log(`  window:  ${plan.tmuxName}   (in ${s.cwd})`);
   console.log(`  status:  ${SELF_CMD} status ${shortId(s.id)}`);
+}
+
+/**
+ * The exiting form of `scopeFlagValue`, for the subcommands parsed here (`wait`
+ * uses the returning form directly — it turns its whole argv tail into an exit
+ * code rather than exiting mid-parse). One guard, so a missing `--repo` can't be
+ * an error on one subcommand and a silent "no filter" on another.
+ */
+function requireValue(cmd: string, flag: string, v: string | undefined): string {
+  const value = scopeFlagValue(cmd, flag, v);
+  if (value === null) process.exit(1);
+  return value;
+}
+
+/** `list`'s path scope was named twice — as `[dir]`, as `--path`, or as both. */
+function duplicatePathScope(): never {
+  console.error(`list: the path scope was given twice — [dir] and --path <dir> name the same slot`);
+  process.exit(1);
 }
 // Quit if our input stream goes away — e.g. the controlling terminal/PTY closed
 // because a parent process died, orphaning us. Without this, Ink keeps the

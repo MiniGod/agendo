@@ -68,8 +68,8 @@ so startup never spawns a fleet of agents.
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
 launch`/`list`/`status`/`send`/`open`/`wait`. So an agent can spin off _new_ sessions —
-each in its own fresh worktree — for separate pieces of work that deserve their own PR, then
-monitor and steer them through the same commands. One orchestrator session can fan a
+each in its own fresh worktree — for separate pieces of work that deserve their own PR,
+then monitor and steer them through the same commands. One orchestrator session can fan a
 large task out across many worktrees and coordinate them, instead of hand-rolling
 tmux and `git worktree`. The sessions it starts inherit the same ability.
 
@@ -86,6 +86,11 @@ can't hide the others; `--json` says why it woke and gives each session's `from 
 so the wake needs no follow-up `list`. `--state <s>` waits for one exact state — e.g.
 `--state limited` to hear the moment a session hits its usage cap. The alternative —
 re-running `status` on a guessed cadence — either fires too often or finds out too late.
+
+`--state dialog` means a question awaiting *your* decision; the Claude CLI's own resume
+dialog isn't one (see [`resumeDialogChoice`](#resumedialogchoice) — it reads **ready**),
+so it won't wake that wait. When a wake does find a session parked there, `--json` says
+so with `resumeDialog: true`: nothing has run yet, so the activity is the previous run's.
 
 ### Fresh sessions in isolated worktrees
 
@@ -123,6 +128,23 @@ Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses
 platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
 executable to use instead, for hosts where that default isn't right (containers, WSL).
 Where nothing can be launched at all, `agendo open` still prints the full URL.
+
+### `resumeDialogChoice`
+
+Resuming a large session, the Claude CLI first asks how to reload it (_"Resume from
+summary (recommended)"_ / _"Resume full session as-is"_). agendo reports a session
+parked there as **ready**, not blocked, and answers the dialog itself the next time
+you `send` to it — then waits for the input box to actually come back before
+delivering your message.
+
+```jsonc
+// ~/.agendo/config.json
+{ "resumeDialogChoice": "summary" }  // default: whatever Claude marks (recommended)
+{ "resumeDialogChoice": "as-is" }    // resume the full session, at full token cost
+```
+
+The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
+it changes your global Claude CLI behaviour permanently, which is your call to make.
 
 ## Testing
 
