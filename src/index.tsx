@@ -20,7 +20,7 @@ import { resolveInitialProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
 import { loadState } from "./config.ts";
 import { takeWarnings } from "./errors.ts";
-import { printJson, printLine } from "./output.ts";
+import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
 import { runWaitCli } from "./wait.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
@@ -614,20 +614,6 @@ function indent(text: string): string {
     .split("\n")
     .map((l) => `    ${l}`)
     .join("\n");
-}
-
-/** One `label: id  url` line, columns padded so the PR and work-item rows line
- *  up under each other (and under `status`'s other `key:` lines). */
-function linkLine(label: string, id: string, url: string): string {
-  return `  ${`${label}:`.padEnd(7)} ${id.padEnd(7)} ${url}`;
-}
-
-/** Provider-specific labels for the CLI's entity-link output. (vocab.ts holds
- *  the TUI's fuller vocabulary; the link lines only need these three.) */
-function linkVocab(provider: ProviderName): { prPrefix: string; abbrev: string; noun: string } {
-  return provider === "github"
-    ? { prPrefix: "#", abbrev: "issue", noun: "issue" }
-    : { prPrefix: "!", abbrev: "wi", noun: "work item" };
 }
 
 /**
