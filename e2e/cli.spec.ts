@@ -588,6 +588,12 @@ test("agendo send refuses to paste when the input box never comes back", async (
   const r = agendo(mock.env, "send", "--force", "--timeout", "1s", SHORT_ID, "run the tests");
   expect(r.status).toBe(2);
   expect(r.stderr).toContain("no input box appeared");
+  // …and it must say what to do INSTEAD of forcing. This is the ordinary state of
+  // a session in the minute after a resume (answering the dialog, then compacting),
+  // so a bare refusal reads as a broken session rather than "try again shortly".
+  const flat = stripAnsiText(r.stderr).replace(/\s+/g, " ");
+  expect(flat).toContain("WAIT AND RETRY");
+  expect(flat).toContain("--force cannot help");
   const log = await mock.tmuxLog();
   expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(false);
   expect(log.some((argv) => argv[0] === "set-buffer")).toBe(false);
@@ -2993,13 +2999,25 @@ function spawnedAgentArgv(tmux: string[][]): string[] | undefined {
   return sep >= 0 ? call.slice(sep + 1) : undefined;
 }
 
+/**
+ * The agent binary a spawn argv runs. Every launched session is prefixed with an
+ * `env NAME=value …` block (the self-command, plus claude's config dir when the
+ * session has one), so the binary is the first token past those assignments.
+ */
+function agentBin(argv: string[]): string | undefined {
+  if (argv[0] !== "env") return argv[0];
+  let i = 1;
+  while (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i])) i++;
+  return argv[i];
+}
+
 test("agendo launch forwards --model into the new claude's argv", async ({ mock }) => {
   const r = agendo(mock.env, "launch", "--no-worktree", "--model", "opus", "do the thing");
   expect(r.status).toBe(0);
   expect(r.stdout).toContain("launched background session");
 
   const argv = spawnedAgentArgv(await mock.tmuxLog())!;
-  expect(argv[0]).toBe("claude");
+  expect(agentBin(argv)).toBe("claude");
   // The flag pair is forwarded verbatim, adjacent, alongside the usual autonomy
   // flags and the prompt.
   expect(argv.join(" ")).toContain("--model opus");
@@ -3015,7 +3033,7 @@ test("agendo launch forwards --model to copilot too, and keeps multi-word values
   expect(r.status).toBe(0);
 
   const argv = spawnedAgentArgv(await mock.tmuxLog())!;
-  expect(argv[0]).toBe("copilot");
+  expect(agentBin(argv)).toBe("copilot");
   const at = argv.indexOf("--model");
   expect(at).toBeGreaterThan(0);
   expect(argv[at + 1]).toBe("claude sonnet 4.5"); // still a single, unsplit token
@@ -3044,7 +3062,7 @@ test("agendo launch accepts the GNU --flag=value form for forwarded flags", asyn
   expect(r.status).toBe(0);
 
   const argv = spawnedAgentArgv(await mock.tmuxLog())!;
-  expect(argv[0]).toBe("copilot"); // `--agent=copilot` parsed too
+  expect(agentBin(argv)).toBe("copilot"); // `--agent=copilot` parsed too
   expect(argv.join(" ")).toContain("--model opus");
   expect(argv).not.toContain("--model=opus");
 
@@ -3635,4 +3653,174 @@ test("orchestrator mode survives a cold resume; an ordinary session isn't given 
   );
   expect(other).toBeTruthy();
   expect(appendedPrompt(other!)).not.toContain("ORCHESTRATOR MODE");
+});
+
+// ── a session whose window is gone is not a lost session ──────────────────────
+// A real orchestrator hit `send`'s "is not running", concluded the session could
+// not be revived, and relaunched the whole task in a fresh worktree — abandoning
+// the branch and commits the original had already made. `resume` is the answer,
+// so every refusal that reports a session as not running has to name it, and the
+// agent-facing guide has to teach it.
+
+test("agendo --llm gives `resume` its own section: a gone window is not a lost session", async ({ mock }) => {
+  const r = agendo(mock.env, "--llm");
+  expect(r.status).toBe(0);
+  // SELF_CMD-independent matches only (see the guide test above): the invocation
+  // prefix legitimately differs between a local run, a package runner and CI.
+  expect(r.stdout).toContain(" resume <id>");
+  // Phrases are matched against a whitespace-collapsed copy: the guide is hard
+  // wrapped, and where a sentence happens to break is formatting, not meaning.
+  const flat = stripAnsiText(r.stdout).replace(/\s+/g, " ");
+  // The belief to overwrite, stated as such — and every way a window can vanish,
+  // since "the tmux server restarted" is the case that reads most like death.
+  expect(flat).toContain("is GONE is NOT a lost session, and must never be relaunched from scratch");
+  expect(flat).toContain("the tmux server was restarted, the machine rebooted");
+  expect(flat).toContain("ABANDONS that branch and those commits");
+  // …and that it answers exactly the errors an agent will have just read.
+  expect(flat).toContain('This is the answer to "is not running" from `send` / `unblock` / `wait`');
+  // The nuance that makes the first send after a resume fail legitimately: retry,
+  // never --force (a paste into that menu would pick an option).
+  expect(flat).toContain("AFTER A RESUME, GIVE IT A MOMENT");
+  expect(flat).toContain("WAIT AND RETRY");
+  expect(flat).toContain("Do NOT reach for --force");
+  // `close` already promises resume brings it back, so the two must agree.
+  expect(flat).toContain('brings it back — see "Bring one back" below');
+});
+
+test("agendo --llm points at --help rather than letting an agent guess a flag", async ({ mock }) => {
+  const flat = stripAnsiText(agendo(mock.env, "--llm").stdout).replace(/\s+/g, " ");
+  expect(flat).toContain("It is not the complete flag reference");
+  expect(flat).toContain("recalling from memory rather than reading here");
+});
+
+test("send / unblock / wait name `resume` when the session isn't running", async ({ mock }) => {
+  // The crash fixture is on disk with no live window — the exact state that
+  // produced the false "it can't be revived" conclusion.
+  const send = agendo(mock.env, "send", CRASH_SHORT_ID, "carry on");
+  expect(send.status).toBe(1);
+  expect(send.stderr).toContain("is not running");
+  expect(send.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+  expect(send.stderr).toContain("It is NOT lost");
+  expect(send.stderr).toContain("Do not relaunch the work in");
+
+  const unblock = agendo(mock.env, "unblock", CRASH_SHORT_ID);
+  expect(unblock.status).toBe(1);
+  expect(unblock.stderr).toContain("is not running");
+  expect(unblock.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+
+  // `wait` names the ids that aren't running, then how to bring one back.
+  const waited = await agendoAsync(mock.env, "wait", CRASH_SHORT_ID, "--timeout", "2s").done;
+  expect(waited.code).toBe(1);
+  expect(stripAnsiText(waited.stderr)).toContain("not running (no live window)");
+  expect(stripAnsiText(waited.stderr)).toContain(" resume <id>");
+});
+
+test("status and close point an idle session at `resume` too", async ({ mock }) => {
+  const status = agendo(mock.env, "status", CRASH_SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stdout).toContain("○ idle");
+  expect(status.stdout).toContain(`resume ${CRASH_SHORT_ID}`);
+  expect(status.stdout).toContain("worktree, branch and commits are intact");
+
+  // `close` on it is a no-op success — and says the session can still come back,
+  // rather than leaving "not running" to read as gone for good.
+  const closed = agendo(mock.env, "close", CRASH_SHORT_ID);
+  expect(closed.status).toBe(0);
+  expect(closed.stdout).toContain("not running");
+  expect(closed.stdout).toContain(`resume ${CRASH_SHORT_ID}`);
+
+  // A running session's status keeps the OTHER meaning of the `resume:` slot
+  // (claude's own resume dialog) — the hint is for idle sessions only.
+  const live = agendo(mock.env, "status", SHORT_ID);
+  expect(live.stdout).toContain("● running");
+  expect(live.stdout).not.toContain(`resume ${SHORT_ID}`);
+});
+
+// ── the self-command a session is handed ──────────────────────────────────────
+// Every agent-facing string names a command to re-invoke agendo with. It must be
+// the invocation that started THIS chain (a PR build, say), not one reconstructed
+// from the package manager — which can only ever name the published release, so a
+// PR build's sessions would run the published CLI against state this build wrote.
+//
+// NEVER assert the literal derived prefix: it differs between a local run, bunx,
+// npx and CI. These tests assert the propagation instead — what gets injected,
+// that a spawned session inherits it, and that the derived value is used only
+// when nothing was propagated.
+
+/** A spec that could never be derived from the environment — only propagated. */
+const SELF_SENTINEL = "bunx github:acme/agendo#pull/99/head";
+
+/** The command the guide tells agents to run, read back off its first usage line. */
+function guideSelfCmd(stdout: string): string {
+  return stripAnsiText(stdout).match(/^Start one:\s+(.+?) launch "/m)?.[1] ?? "";
+}
+
+/** The `AGENDO_SELF_CMD` value from a spawned session's `env …` argv prefix. */
+function propagatedSelfCmd(argv: string[]): string | null {
+  const at = argv.find((t) => t.startsWith("AGENDO_SELF_CMD="));
+  return at ? at.slice("AGENDO_SELF_CMD=".length) : null;
+}
+
+test("a propagated self-command wins over anything derived from this process", async ({ mock }) => {
+  const propagated = agendo({ ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL }, "--llm");
+  expect(propagated.status).toBe(0);
+  expect(guideSelfCmd(propagated.stdout)).toBe(SELF_SENTINEL);
+
+  // Nothing propagated → the derived value. Whatever it is (that's environment-
+  // dependent, hence no literal here), it is a real command and not the sentinel.
+  const derived = agendo(mock.env, "--llm");
+  expect(guideSelfCmd(derived.stdout)).toBeTruthy();
+  expect(guideSelfCmd(derived.stdout)).not.toBe(SELF_SENTINEL);
+});
+
+test("a launched session inherits the launcher's own invocation", async ({ mock }) => {
+  const env = { ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL };
+  const r = agendo(env, "launch", "--no-worktree", "do the thing");
+  expect(r.status).toBe(0);
+
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  // It reaches the agent as an environment variable, so every command the agent
+  // itself runs — and every session IT launches — stays on this same build.
+  expect(propagatedSelfCmd(argv)).toBe(SELF_SENTINEL);
+  // …and the system prompt it is given points at the very same one, so the
+  // session can't be told one thing and handed another.
+  expect(appendedPrompt(argv)).toContain(`${SELF_SENTINEL} --llm`);
+  expect(agentBin(argv)).toBe("claude");
+});
+
+test("what agendo TELLS agents to run is exactly what it propagates to them", async ({ mock }) => {
+  // The derived case, asserted without naming the derived string: whatever this
+  // environment resolves to, the guide and the spawned session must agree — a
+  // mismatch is how a chain of sessions ends up split across two builds.
+  const guide = guideSelfCmd(agendo(mock.env, "--llm").stdout);
+  expect(guide).toBeTruthy();
+
+  const r = agendo(mock.env, "launch", "--no-worktree", "do the thing");
+  expect(r.status).toBe(0);
+  expect(propagatedSelfCmd(spawnedAgentArgv(await mock.tmuxLog())!)).toBe(guide);
+});
+
+test("a copilot launch and a resume propagate it too", async ({ mock }) => {
+  const env = { ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL };
+
+  // Copilot has no --append-system-prompt, so the env var is the ONLY way the
+  // invocation reaches a copilot session.
+  const cop = agendo(env, "launch", "--no-worktree", "--copilot", "spike it");
+  expect(cop.status).toBe(0);
+  const copArgv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(copArgv)).toBe("copilot");
+  expect(propagatedSelfCmd(copArgv)).toBe(SELF_SENTINEL);
+
+  // Resuming an existing session propagates it as well — a session brought back
+  // hours later must not silently switch to the published CLI.
+  const resumed = agendo(env, "resume", CRASH_SHORT_ID);
+  expect(resumed.status).toBe(0);
+  const argv = (await mock.tmuxLog()).find(
+    (a) => a[0] === "new-session" && a.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  )!;
+  const agentArgv = argv.slice(argv.indexOf("--", 1) + 1);
+  expect(propagatedSelfCmd(agentArgv)).toBe(SELF_SENTINEL);
+  // One `env` block, not two stacked ones — claude's config dir shares it.
+  expect(agentArgv.filter((t) => t === "env")).toHaveLength(1);
+  expect(agentBin(agentArgv)).toBe("claude");
 });
