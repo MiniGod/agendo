@@ -5,6 +5,7 @@
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripAnsi } from "../src/tmux.ts";
@@ -278,7 +279,7 @@ test("agendo list carries workflow state (◆ marker + --json rows)", async ({ m
 test("agendo send delivers a prompt to a ready session", async ({ mock }) => {
   const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
 
   // It went through tmux: a paste buffer for the text, then an Enter to submit.
   const tmux = await mock.tmuxLog();
@@ -307,7 +308,579 @@ test("agendo send refuses a compacting session unless forced", async ({ mock }) 
   // With --force it goes through despite the compacting state.
   const forced = agendo(mock.env, "send", "-f", SHORT_ID, "run the tests");
   expect(forced.status).toBe(0);
-  expect(forced.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  expect(forced.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+});
+
+/**
+ * Stand up what a live claude session exposes: a real unix socket, plus the
+ * `~/.claude/sessions/<pid>.json` registry entry that advertises it. The pid is
+ * THIS process's so peer.ts's liveness probe passes. Returns the frames the
+ * socket received and a closer.
+ *
+ * NB these tests must use `agendoAsync`, not `agendo`: the server runs
+ * in-process, and a blocking spawnSync would freeze the event loop so the
+ * connection is never accepted (same hazard as the mock ADO server).
+ */
+async function fakePeer(
+  mock: { tmpDir: string; home: string },
+  name: string,
+  status: string,
+  sessionId: string = LOGIN_SESSION_ID,
+  over: Record<string, unknown> = {},
+  configDir = ".claude",
+) {
+  const sockPath = join(mock.tmpDir, `${name}.sock`);
+  const frames: string[] = [];
+  const server = createServer((c) => c.on("data", (d) => frames.push(d.toString())));
+  await new Promise<void>((r) => server.listen(sockPath, r));
+  await mkdir(join(mock.home, configDir, "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, configDir, "sessions", `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      sessionId,
+      cwd: "/run/login",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: sockPath,
+      status,
+      ...over,
+    }),
+  );
+  return { frames, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+/** The frame text the peer has received so far — polled, since the parent's
+ *  socket read races the child's exit. */
+const framesOf = (peer: { frames: string[] }) => () => peer.frames.join("");
+
+test("agendo send prefers the session's messaging socket over the tmux pane", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("queued via socket");
+
+    // Exactly the documented injection frame, addressed by session id so the
+    // receiver can drop it if this pid ever gets recycled.
+    await expect.poll(framesOf(peer)).toBe(
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: "run the tests" },
+        session_id: LOGIN_SESSION_ID,
+      }) + "\n",
+    );
+
+    // …and nothing was typed into the pane.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send over the socket queues into a busy session instead of refusing", async ({ mock }) => {
+  // The pane-paste path must refuse a compacting session (it would clobber the
+  // screen). The socket path has no such hazard — the receiver queues the frame
+  // and reads it when the turn ends — so it goes through and says so.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: ["✻ Compacting conversation… (esc to interrupt)", "  ▰▰▰▱▱▱ 42%"].join("\n") },
+  });
+  const peer = await fakePeer(mock, "peer-busy", "busy");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0); // NOT refused, unlike the paste path
+    expect(r.stdout).toContain("compacting"); // but it reports what it walked into
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send reaches a session that has a socket but NO tmux window", async ({ mock }) => {
+  // A session running outside agendo (plain terminal, editor) has no `cl-…`
+  // window. `status` reports it as ◆ running and tells you to `send` to it, so
+  // send must not require a window it can never have. The standalone fixture
+  // session is idle in tmux terms; give it a socket and it becomes reachable.
+  const peer = await fakePeer(mock, "peer-windowless", "idle", STANDALONE_SESSION_ID);
+  try {
+    const r = await agendoAsync(mock.env, "send", shortIdOf(STANDALONE_SESSION_ID), "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("queued via socket");
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+    // Nothing was typed anywhere — there is no pane for this session.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+// ── which route did it take? ─────────────────────────────────────────────────
+// The two routes are not interchangeable — the socket queues into a session that
+// may be mid-turn, the pane types into one that had to be idle — and nothing
+// about the session afterwards tells them apart. So `send` names the route it
+// took, on both outputs, always. These pin the machine-readable half: a caller
+// that keys on `route`/`queued` is relying on them being present and correct on
+// every outcome, refusals included.
+
+/** The `--json` payload, with stdout proven to be JSON and nothing else. */
+function sendJson(stdout: string): Record<string, unknown> {
+  expect(stdout.trimStart().startsWith("{")).toBe(true); // no ▸ progress lines leaked in
+  return JSON.parse(stdout);
+}
+
+test("agendo send --json reports the socket route it took", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer-json-socket", "busy");
+  try {
+    const r = await agendoAsync(mock.env, "send", "--json", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    const o = sendJson(r.stdout);
+    expect(o.ok).toBe(true);
+    expect(o.route).toBe("socket");
+    // The load-bearing distinction: this message is in a QUEUE, not on screen.
+    expect(o.queued).toBe(true);
+    expect(o.sessionId).toBe(LOGIN_SESSION_ID);
+    expect(o.pid).toBe(process.pid);
+    expect(o.socket).toEqual({ enabled: true, disabledBy: null });
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send --json reports the pane route it took", async ({ mock }) => {
+  // No peer at all, so the same command means something different: the text is on
+  // screen now, and the pane had to be ready to accept it.
+  const r = await agendoAsync(mock.env, "send", "--json", SHORT_ID, "run the tests").done;
+  expect(r.code).toBe(0);
+  const o = sendJson(r.stdout);
+  expect(o.ok).toBe(true);
+  expect(o.route).toBe("pane");
+  expect(o.queued).toBe(false);
+  expect(o.target).toBe(RUNNING_TARGET);
+  expect(o.sessionId).toBe(null); // nothing resolved a peer
+});
+
+test("agendo send --json carries a route of null and a reason when it refuses", async ({ mock }) => {
+  // A refusal is exactly when a caller most needs to know what happened, and
+  // `route: null` is the unambiguous "delivered by neither" — distinct from a
+  // pane send that merely printed something to stderr on the way.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const peer = await fakePeer(mock, "peer-json-refused", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "--json", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(2);
+    const o = sendJson(r.stdout);
+    expect(o.ok).toBe(false);
+    expect(o.route).toBe(null);
+    expect(o.queued).toBe(false);
+    expect(o.reason).toBe("limited");
+    expect(peer.frames).toEqual([]);
+  } finally {
+    await peer.close();
+  }
+});
+
+// ── the kill switch ──────────────────────────────────────────────────────────
+// The socket rides an internal, undocumented claude protocol. `peerProtocol`
+// gates on the version claude advertises and an unusable socket falls back to
+// the pane, but neither catches the failure that would matter: a build that
+// still advertises version 1 and still ACCEPTS the frame, having changed what it
+// does with it. So there is a switch a human can throw immediately — durably in
+// config.json, or per-invocation via the environment.
+//
+// Off has to mean off: not "discover the peer and then decline to use it", but
+// no discovery and no write at all, since a resolved peer changes the outcome by
+// itself (a windowless session would read as reachable right up to the refusal).
+// Every case below therefore asserts on the socket receiving NOTHING, not just
+// on what was printed.
+
+/** Where the fixture $HOME keeps its config.json (the legacy dir loadConfig falls back to). */
+const configPath = (mock: { home: string }) => join(mock.home, ".claude-launcher", "config.json");
+
+test("agendo send takes the pane when config.json turns the socket off", async ({ mock }) => {
+  writeFileSync(configPath(mock), JSON.stringify({ peerSocket: false }));
+  const peer = await fakePeer(mock, "peer-cfg-off", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+    // Named, not silent: a caller expecting socket semantics has to be able to
+    // see that it got keystroke semantics, and why.
+    expect(r.stdout).toContain("socket disabled by config");
+    expect(peer.frames).toEqual([]);
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send takes the pane when AGENDO_PEER_SOCKET turns the socket off", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer-env-off", "idle");
+  try {
+    const env = { ...mock.env, AGENDO_PEER_SOCKET: "0" };
+    const r = await agendoAsync(env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+    expect(r.stdout).toContain("socket disabled by AGENDO_PEER_SOCKET");
+    expect(peer.frames).toEqual([]);
+  } finally {
+    await peer.close();
+  }
+});
+
+// The variable is the one-off override and the file is the durable preference,
+// so the variable has to win in BOTH directions — an override that could only
+// disable would be half a switch, and would leave no way to test a `false`
+// config's effect without editing the file back and forth.
+for (const [label, configured, envValue, expectSocket] of [
+  ["AGENDO_PEER_SOCKET=1 re-enables a config that says false", false, "1", true],
+  ["AGENDO_PEER_SOCKET=0 overrides a config that says true", true, "0", false],
+] as const) {
+  test(`agendo send: ${label}`, async ({ mock }) => {
+    writeFileSync(configPath(mock), JSON.stringify({ peerSocket: configured }));
+    const peer = await fakePeer(mock, `peer-override-${envValue}`, "idle");
+    try {
+      const env = { ...mock.env, AGENDO_PEER_SOCKET: envValue };
+      const r = await agendoAsync(env, "send", "--json", SHORT_ID, "run the tests").done;
+      expect(r.code).toBe(0);
+      const o = sendJson(r.stdout);
+      expect(o.route).toBe(expectSocket ? "socket" : "pane");
+      // …and the payload attributes the decision to the env var either way, so
+      // "why is this on the wrong route" is answerable without guessing.
+      expect(o.socket).toEqual({ enabled: expectSocket, disabledBy: expectSocket ? null : "env" });
+      if (expectSocket) await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+      else expect(peer.frames).toEqual([]);
+    } finally {
+      await peer.close();
+    }
+  });
+}
+
+test("an unrecognized AGENDO_PEER_SOCKET value disables the socket and says so", async ({ mock }) => {
+  // Deliberately fails CLOSED, unlike the config key (where a stray value is
+  // ignored, as resumeDialogChoice's is). Setting this variable at all is an act
+  // of turning something off in a hurry; a typo that handed back the very path
+  // the user was escaping would make it a switch you cannot rely on.
+  const peer = await fakePeer(mock, "peer-env-typo", "idle");
+  try {
+    const env = { ...mock.env, AGENDO_PEER_SOCKET: "disbale" };
+    const r = await agendoAsync(env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("isn't a recognized on/off value");
+    expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+    expect(peer.frames).toEqual([]);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("with the socket off, send refuses a busy pane again", async ({ mock }) => {
+  // The behaviour the switch is really restoring. With the socket on, a
+  // compacting session is queued to and reported (exit 0). With it off, `send`
+  // is back to what it was before the socket existed: a paste would clobber the
+  // screen, so it refuses — and refuses without having written to the socket
+  // that was sitting right there.
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: { [RUNNING_TARGET]: ["✻ Compacting conversation… (esc to interrupt)", "  ▰▰▰▱▱▱ 42%"].join("\n") },
+  });
+  const peer = await fakePeer(mock, "peer-off-busy", "busy");
+  try {
+    const env = { ...mock.env, AGENDO_PEER_SOCKET: "off" };
+    const r = await agendoAsync(env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not ready");
+    expect(peer.frames).toEqual([]);
+  } finally {
+    await peer.close();
+  }
+});
+
+// ── unreachable is not the same failure as gone ──────────────────────────────
+// #38 made "is not running" point at `resume`, because the bare refusal read as a
+// death notice and cost a session its branch. The switch introduces a second way
+// to fail with no window in hand — alive, but with the only route to it turned off
+// — and the two need OPPOSITE advice: `resume` on a live session would put a
+// second claude on one transcript. So each says its own thing, and neither is
+// allowed to borrow the other's.
+
+test("with the socket off, a live windowless session says so — and does NOT say resume", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer-off-windowless", "idle", STANDALONE_SESSION_ID);
+  try {
+    const env = { ...mock.env, AGENDO_PEER_SOCKET: "0" };
+    const r = await agendoAsync(env, "send", shortIdOf(STANDALONE_SESSION_ID), "run the tests").done;
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("IS running");
+    expect(r.stderr).toContain("messaging socket is disabled");
+    expect(r.stderr).toContain("AGENDO_PEER_SOCKET");
+    // The reconciliation, pinned: #38's hint must NOT appear here. Following it
+    // would start a second claude on a transcript that already has one.
+    expect(r.stderr).not.toContain("It is NOT lost");
+    expect(r.stderr).toContain("Do NOT resume it");
+    expect(peer.frames).toEqual([]);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("with the socket off, a session that is genuinely gone still gets the resume hint", async ({ mock }) => {
+  // The other direction, and the one that would be easy to get wrong: with the
+  // switch off it is tempting to blame the switch for every windowless failure.
+  // This session has no window and no live process, so the switch changed
+  // nothing — telling the caller to unset a variable would send them to fix
+  // something that isn't broken, instead of to the command that revives it.
+  const env = { ...mock.env, AGENDO_PEER_SOCKET: "0" };
+  const r = agendo(env, "send", CRASH_SHORT_ID, "carry on");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("is not running");
+  expect(r.stderr).toContain("It is NOT lost");
+  expect(r.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+  expect(r.stderr).not.toContain("socket is disabled");
+});
+
+test("agendo status still sees a peer with the socket switched off", async ({ mock }) => {
+  // The switch turns off SPEAKING an undocumented protocol; it does not turn off
+  // reading a registry file. Gating discovery everywhere would make a live
+  // session vanish from `status` — and stop `resume` refusing to put a second
+  // claude on a transcript that already has one — which is the opposite of the
+  // caution the switch exists for.
+  const peer = await fakePeer(mock, "peer-off-status", "busy", STANDALONE_SESSION_ID);
+  try {
+    const env = { ...mock.env, AGENDO_PEER_SOCKET: "0" };
+    const r = await agendoAsync(env, "status", shortIdOf(STANDALONE_SESSION_ID)).done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("◆ running");
+    expect(r.stdout).toContain(`pid ${process.pid}`);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo status reports a session running outside agendo as ◆ running", async ({ mock }) => {
+  const peer = await fakePeer(mock, "peer-status", "busy", STANDALONE_SESSION_ID);
+  try {
+    const r = await agendoAsync(mock.env, "status", shortIdOf(STANDALONE_SESSION_ID)).done;
+    expect(r.code).toBe(0);
+    // Not "○ idle": the transcript is stale but the process is alive.
+    expect(r.stdout).toContain("◆ running");
+    expect(r.stdout).toContain(`pid ${process.pid}`);
+    expect(r.stdout).toContain("attach does not");
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo resume refuses a session already running outside agendo", async ({ mock }) => {
+  // Resuming it would put a second live claude on one transcript.
+  const peer = await fakePeer(mock, "peer-resume", "busy", STANDALONE_SESSION_ID);
+  try {
+    const r = await agendoAsync(mock.env, "resume", shortIdOf(STANDALONE_SESSION_ID)).done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("already running outside agendo");
+    // No window was created for it.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "new-window" || argv[0] === "new-session")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send falls back to the tmux pane when the advertised socket is dead", async ({ mock }) => {
+  // The nastier stale case: the pid IS live (it's ours) but the socket it
+  // advertises is gone — the session died between discovery and send. Failing
+  // here would strand a prompt even though the tmux window is still usable, so
+  // the send must fall through to the pane.
+  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".claude", "sessions", `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      sessionId: LOGIN_SESSION_ID,
+      cwd: "/run/login",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: join(mock.tmpDir, "never-bound.sock"),
+      status: "idle",
+    }),
+  );
+
+  const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+  expect(r.code).toBe(0);
+  expect(r.stderr).toContain("falling back to the tmux pane");
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send refuses a usage-limited session even over the socket", async ({ mock }) => {
+  // Queuing is safe for "busy", but not for "limited": nothing will read the
+  // frame until the cap resets, so claiming success would mislead an
+  // orchestrator that keys on the exit code.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const peer = await fakePeer(mock, "peer-limited", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("usage limit");
+    expect(peer.frames).toEqual([]); // nothing was queued
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send falls back to the tmux pane when the registry entry is stale", async ({ mock }) => {
+  // A registry file outlives its process. Point one at a dead pid (and a socket
+  // that does not exist) — the liveness probe must reject it and the send must
+  // still land, via the pane, rather than erroring on a vanished socket.
+  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".claude", "sessions", "999999999.json"),
+    JSON.stringify({
+      pid: 999_999_999, // above /proc/sys/kernel/pid_max — cannot be live
+      sessionId: LOGIN_SESSION_ID,
+      cwd: "/run/login",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: join(mock.tmpDir, "gone.sock"),
+      status: "idle",
+    }),
+  );
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+  expect(r.stdout).not.toContain("queued via socket");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
+test("agendo send refuses a closed session rather than queueing where nobody reads", async ({ mock }) => {
+  // What `agendo close` leaves behind: the window is gone and the process is
+  // dead, but the registry file it wrote outlives it — and on an abrupt kill the
+  // socket inode can outlive it too. Both are therefore present here, and the
+  // socket is genuinely LISTENING, so the only thing separating this from a live
+  // peer is the pid. If discovery trusted the advertised socket instead, `send`
+  // would connect, hand over the bytes and report a queued success for a message
+  // no one will ever read — the exact false success this test exists to forbid.
+  const sockPath = join(mock.tmpDir, "closed-session.sock");
+  const frames: string[] = [];
+  const orphan = createServer((c) => c.on("data", (d) => frames.push(d.toString())));
+  await new Promise<void>((r) => orphan.listen(sockPath, r));
+  await mkdir(join(mock.home, ".claude", "sessions"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".claude", "sessions", "999999998.json"),
+    JSON.stringify({
+      pid: 999_999_998, // above /proc/sys/kernel/pid_max — cannot be live
+      sessionId: STANDALONE_SESSION_ID,
+      cwd: "/run/standalone",
+      peerProtocol: 1,
+      kind: "interactive",
+      messagingSocketPath: sockPath,
+      status: "idle",
+    }),
+  );
+  try {
+    // STANDALONE has no `cl-…` window, so once the peer is rejected there is no
+    // route left at all — and "no route" must be an error, never a quiet success.
+    const r = await agendoAsync(mock.env, "send", shortIdOf(STANDALONE_SESSION_ID), "run the tests").done;
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("no live tmux window and no messaging socket");
+    expect(r.stdout).not.toContain("queued via socket");
+    expect(frames).toEqual([]); // nothing was handed to the orphaned socket
+  } finally {
+    await new Promise<void>((r) => orphan.close(() => r()));
+  }
+});
+
+// Anything the registry advertises that we don't positively recognize must read
+// as "no peer" and leave the send on the tmux path. Writing frames a receiver may
+// not parse — or queueing into something with no TUI to render them — is worse
+// than typing into the pane, which always works.
+for (const [label, over] of [
+  ["an unknown protocol version", { peerProtocol: 99 }],
+  ["a non-interactive kind", { kind: "background" }],
+] as const) {
+  test(`agendo send ignores a peer advertising ${label}`, async ({ mock }) => {
+    const peer = await fakePeer(mock, "peer-unrecognized", "idle", LOGIN_SESSION_ID, over);
+    try {
+      const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+      expect(r.stdout).not.toContain("queued via socket");
+      expect(peer.frames).toEqual([]); // the socket was never written to
+    } finally {
+      await peer.close();
+    }
+  });
+}
+
+test("agendo send finds a peer registered under a second ~/.claude* profile", async ({ mock }) => {
+  // Sessions are spread across profile dirs (~/.claude, ~/.claude-work), which is
+  // why claudeConfigDirs() exists. Discovery that only looked at ~/.claude would
+  // silently drop half a machine's sessions back onto the pane path.
+  const peer = await fakePeer(mock, "peer-profile", "idle", LOGIN_SESSION_ID, {}, ".claude-work");
+  try {
+    const r = await agendoAsync(mock.env, "send", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("queued via socket");
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send never routes a copilot session to a claude peer", async ({ mock }) => {
+  // `send` resolves the peer from the bare token without consulting the session
+  // index, so nothing structural stops a copilot id from matching a claude peer's
+  // short id. Only claude registers a socket, so a copilot session must always
+  // take the pane path — pinned here so a future id scheme can't silently
+  // misdeliver one agent's prompt into another's queue.
+  const peer = await fakePeer(mock, "peer-copilot", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", COP_SHORT_ID, "run the tests").done;
+    expect(r.stdout).not.toContain("queued via socket");
+    expect(peer.frames).toEqual([]); // the claude peer was left alone
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send --force queues to a usage-limited session over the socket", async ({ mock }) => {
+  // The un-forced case refuses (exit 2). --force is the documented override, and
+  // over the socket it means "queue it anyway, it'll be read after the reset" —
+  // not the pane path's "type into whatever is on screen".
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_PANE } });
+  const peer = await fakePeer(mock, "peer-limited-forced", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "-f", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("queued via socket");
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+    // Still the socket, not keystrokes — --force must not downgrade the path.
+    const tmux = await mock.tmuxLog();
+    expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo status prefers the window over the registry when a session has both", async ({ mock }) => {
+  // A peer with a live agendo window is attachable, so it must read ● (attach
+  // works), never ◆ (attach does not) — the registry must not override tmux.
+  const peer = await fakePeer(mock, "peer-both", "busy");
+  try {
+    const r = await agendoAsync(mock.env, "status", SHORT_ID).done;
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("● running");
+    expect(r.stdout).not.toContain("◆ running");
+    expect(r.stdout).not.toContain("attach does not");
+  } finally {
+    await peer.close();
+  }
 });
 
 // A pane whose input box holds claude's greyed-out autocomplete SUGGESTION —
@@ -335,7 +908,7 @@ test("agendo send treats a ghost suggestion as an empty box (caret still at the 
 
   const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
   const tmux = await mock.tmuxLog();
   expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
 });
@@ -417,7 +990,7 @@ test("agendo send answers claude's resume dialog FIRST, then pastes the message"
   expect(r.status).toBe(0);
   // Default config ⇒ the option claude marks (recommended).
   expect(r.stdout).toContain("answering claude's resume dialog (summary): 1. Resume from summary (recommended)");
-  expect(r.stdout).toContain(`sent to ${RUNNING_TARGET}`);
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
 
   const log = await mock.tmuxLog();
   const setBuffer = log.findIndex((argv) => argv[0] === "set-buffer");
@@ -434,6 +1007,57 @@ test("agendo send answers claude's resume dialog FIRST, then pastes the message"
   // which could ACTIVATE an option on some CLI versions and merely select it on
   // others, leaving no safe meaning for the Enter that follows.
   expect(keysSent(log)).toEqual(["Enter", "Enter"]);
+});
+
+// ── the dialog step and the delivery step are separate concerns ──────────────
+// Answering the resume dialog is keystrokes; delivering the message may be the
+// socket. A peer frame arrives as "another Claude session sent a message", which
+// the receiver will NOT take as the answer to a pending prompt — so the socket is
+// an alternative for the DELIVERY only, and can never stand in for the dialog.
+
+test("agendo send answers the resume dialog with keystrokes, then delivers over the socket", async ({ mock }) => {
+  // The reconciliation, end to end: the dialog is confirmed by keystroke exactly
+  // as it is without a socket, and only the message itself changes route. If the
+  // socket were allowed to serve the dialog step, the frame would be queued past
+  // an unanswered menu and the session would stay parked forever.
+  await mock.setTmuxState(scriptedPane(Array(3).fill(RESUME_DIALOG_PANE), RESUMED_BOX_PANE));
+  const peer = await fakePeer(mock, "peer-dialog", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "--timeout", "5s", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(0);
+    // Step 1 still happened, on the pane.
+    expect(r.stdout).toContain("answering claude's resume dialog (summary): 1. Resume from summary (recommended)");
+    // Step 2 took the socket instead of the pane.
+    expect(r.stdout).toContain("queued via socket");
+    expect(r.stdout).not.toContain(`pasted into pane ${RUNNING_TARGET}`);
+    await expect.poll(framesOf(peer)).toContain('"content":"run the tests"');
+
+    const log = await mock.tmuxLog();
+    // ONE Enter — the dialog's confirm. The message's own submit Enter is absent
+    // because the message never went through the pane at all.
+    expect(keysSent(log)).toEqual(["Enter"]);
+    expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
+});
+
+test("agendo send won't queue past a resume dialog it failed to answer", async ({ mock }) => {
+  // The gate must bind the socket path too. The box never comes back, so the
+  // dialog is still up — and a frame queued behind it would sit unread while
+  // `send` reported success. Nothing is delivered by EITHER route.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: RESUME_DIALOG_PANE } });
+  const peer = await fakePeer(mock, "peer-dialog-stuck", "idle");
+  try {
+    const r = await agendoAsync(mock.env, "send", "--force", "--timeout", "1s", SHORT_ID, "run the tests").done;
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("no input box appeared");
+    expect(peer.frames).toEqual([]); // not queued — the socket did not bypass the gate
+    const log = await mock.tmuxLog();
+    expect(log.some((argv) => argv[0] === "set-buffer" || argv[0] === "paste-buffer")).toBe(false);
+  } finally {
+    await peer.close();
+  }
 });
 
 test("agendo send walks the selection to the configured option before confirming", async ({ mock }) => {

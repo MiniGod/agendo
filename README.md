@@ -115,6 +115,66 @@ worktree, branch and commits stay on disk, and `agendo resume <id>` brings it ba
 no one has to reach for a raw `tmux kill-window`. A `wait` on a session closed underneath
 it doesn't hang: the window vanishing settles that session as `exited`.
 
+### Messages that queue instead of waiting for an idle pane
+
+`agendo send` delivers to a running Claude session over the messaging socket that
+session advertises, rather than typing into its tmux pane. The difference is that the
+receiver **queues** it: you can message a session mid-turn and it picks the prompt up
+when it next reads input, instead of `send` refusing because the pane isn't idle. It
+is addressed by session id, so a recycled pid can't misdeliver into someone else's
+session — and a session running outside agendo entirely (a plain terminal) is
+reachable too, with no tmux window involved.
+
+This is an internal, undocumented channel, so agendo treats it as an optimization
+rather than a dependency: a session that doesn't advertise it (Copilot, older Claude
+builds) or whose socket refuses gets the prompt typed into the pane exactly as
+before. A session at its usage limit is refused either way — nothing would read the
+queued message until the cap resets.
+
+Delivering a message and *answering a dialog* stay separate jobs. A frame arrives as a
+peer message, which the receiver won't accept as the answer to a pending prompt — so
+when a session is parked on claude's own resume dialog, `send` still answers that with
+keystrokes first and only then delivers, by whichever route. The socket is an
+alternative for the delivery, never for the dialog.
+
+What `send` promises over the socket is *handover*, not *reading*: the frame is queued
+for a session that is still running. So `agendo close` on that session discards anything
+it hadn't read yet. Once a session is closed it stops being a peer at all — its process
+is gone, so `send` refuses outright rather than queueing into a socket nobody is left to
+read.
+
+Because the two routes mean different things, `send` always says which one it took —
+`▸ queued via socket to …` versus `▸ pasted into pane …`, and `route: "socket" | "pane"`
+(plus `queued`) on `--json`. Queued means the message may sit unread for a while in a
+session that is mid-turn; pasted means it is on screen now, and the pane had to be idle
+to accept it. Nothing about the session afterwards distinguishes the two, and the socket
+isn't guaranteed to exist, so the route is reported rather than inferred.
+
+### Turning the socket off
+
+The socket speaks an internal, undocumented claude protocol. agendo gates on the
+version claude advertises and falls back to the pane when the socket refuses — but
+neither catches the failure that would actually matter: a build that still advertises
+the same version and still accepts the frame, having changed what it does with it. From
+this side that write simply succeeded. So there is a switch:
+
+```jsonc
+// ~/.agendo/config.json — the durable preference
+{ "peerSocket": false }
+```
+
+```sh
+AGENDO_PEER_SOCKET=0 agendo send <id> "…"   # one-off override
+```
+
+The variable wins over the config file **in both directions**, so `AGENDO_PEER_SOCKET=1`
+re-enables the socket for a single command against a `"peerSocket": false` config. Either
+one set to off forces the tmux keystroke path outright — no registry discovery, no socket
+write — which is exactly how `send` behaved before this path existed: a non-idle pane is
+refused again, and a session with no tmux window is unreachable. (Unset or empty means
+"not set"; any other value the variable is given counts as off, since it is a switch you
+reach for when something has gone wrong.)
+
 ### Telling a finished session from a stalled one
 
 A session that fell over mid-task 22 hours ago and one that answered cleanly 20
@@ -226,8 +286,9 @@ Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `proj
 set them for your own setup (see `src/config.ts` for the shape); the token is fetched
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
 found across your local sessions. The stall threshold (`stalledAfterMinutes`, default
-240) lives in the same file. Your selected backend is remembered in
-`~/.agendo/state.json`.
+240) lives in the same file, as does `peerSocket` (see
+[Turning the socket off](#turning-the-socket-off)). Your selected backend is remembered
+in `~/.agendo/state.json`.
 
 Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
 platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the

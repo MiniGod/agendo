@@ -48,7 +48,29 @@ export interface Config {
    * needn't carry it; `resumeDialogChoice()` below resolves absence to the default.
    */
   resumeDialogChoice?: ResumeDialogChoice;
+  /**
+   * Whether `send` may deliver over a claude session's messaging socket
+   * (src/peer.ts). Default true. Set false to force the tmux keystroke path
+   * outright — no registry discovery, no socket write — which is exactly the
+   * behaviour `send` had before that path existed, refusal of a non-idle pane
+   * included.
+   *
+   * This exists because the socket speaks an INTERNAL, undocumented claude
+   * protocol. `peerProtocol` gates on the version claude advertises, and an
+   * unusable socket falls back to the pane — but neither catches the failure
+   * that matters here: a build that still advertises version 1 and still accepts
+   * the frame, having changed what it does with it. No marker can catch that,
+   * and no fallback fires, because from agendo's side the write succeeded. So
+   * there has to be a switch a human can throw without waiting for a release.
+   *
+   * `AGENDO_PEER_SOCKET` overrides this per-invocation, in either direction —
+   * see `peerSocketEnabled`.
+   */
+  peerSocket?: boolean;
 }
+
+/** Env override for `peerSocket`. Recognized in either direction; see below. */
+export const PEER_SOCKET_ENV = "AGENDO_PEER_SOCKET";
 
 /**
  * Default stall threshold, in minutes. Lives here (not in src/idle.ts) so
@@ -71,6 +93,10 @@ export const DEFAULT_CONFIG: Config = {
   // Default to whatever claude marks `(recommended)` — resuming from a summary,
   // which is also the cheaper of the two.
   resumeDialogChoice: "summary",
+  // On by default: where the socket exists it is strictly better than typing
+  // into a pane (it queues instead of refusing a busy session). The switch is
+  // for turning it back OFF, not for opting in.
+  peerSocket: true,
 };
 
 // New data dir (`~/.agendo/`) — all writes go here. The older dirs are read-only,
@@ -133,6 +159,52 @@ export function loadConfig(): Config {
  */
 export function resumeDialogChoice(c: Config = loadConfig()): ResumeDialogChoice {
   return c.resumeDialogChoice === "as-is" ? "as-is" : "summary";
+}
+
+/**
+ * Where a `peerSocket` decision came from, so `send` can name it: an unset env
+ * var leaves `"config"` (which covers the shipped default too — the user sees
+ * the same behaviour either way), and any recognized env value wins as `"env"`.
+ */
+export type PeerSocketSource = "env" | "config";
+
+const OFF = new Set(["0", "false", "off", "no", "disable", "disabled"]);
+const ON = new Set(["1", "true", "on", "yes", "enable", "enabled"]);
+
+/**
+ * Whether `send` may use the messaging socket, and which of the two settings
+ * decided it.
+ *
+ * Precedence is env over config, deliberately in BOTH directions: the config
+ * key is the durable preference and the variable is the one-off override, so
+ * `AGENDO_PEER_SOCKET=1` has to be able to re-enable a `"peerSocket": false`
+ * config for a single command, not just disable an enabled one. An override
+ * that only worked one way would be half a switch.
+ *
+ * An empty value counts as unset — `AGENDO_PEER_SOCKET=` is how a shell clears
+ * an exported variable, and reading that as a decision would make it impossible
+ * to get back to the config value without unsetting it in the parent shell.
+ *
+ * An UNRECOGNIZED value disables, and says so. That is the deliberate asymmetry
+ * with the config key (where a stray value is ignored, as `resumeDialogChoice`
+ * ignores one): setting this variable at all is an act of turning something off
+ * in a hurry, usually because the protocol has just misbehaved. Falling open on
+ * a typo would hand back the exact path the user was trying to escape, and a
+ * kill switch that can fail open isn't one. The config key can afford the
+ * opposite default because it is edited deliberately, not in an incident.
+ */
+export function peerSocketEnabled(c: Config = loadConfig()): { enabled: boolean; source: PeerSocketSource; note?: string } {
+  const raw = (process.env[PEER_SOCKET_ENV] ?? "").trim().toLowerCase();
+  if (raw) {
+    if (ON.has(raw)) return { enabled: true, source: "env" };
+    if (OFF.has(raw)) return { enabled: false, source: "env" };
+    return {
+      enabled: false,
+      source: "env",
+      note: `${PEER_SOCKET_ENV}="${process.env[PEER_SOCKET_ENV]}" isn't a recognized on/off value, so the socket is treated as disabled`,
+    };
+  }
+  return { enabled: c.peerSocket !== false, source: "config" };
 }
 
 // ── Persisted UI state ────────────────────────────────────────────────────────
