@@ -10,12 +10,20 @@
 // session id, so they attribute to the most-recently-used session in the same
 // working directory — and the resulting `liveWindows` map is what lets the app
 // attach to that existing window instead of spawning a duplicate.
-import { readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
-import { reconcileLive } from "../src/model.ts";
+import { reconcileLive, filterModelByRepos, itemInRepoScope, prInRepoScope, type LoadedModel } from "../src/model.ts";
+import {
+  discoverGitReposUnder,
+  mergeRepos,
+  repoScopeKeys,
+  ensureRepoAtTop,
+  bootstrapRepoRoot,
+  type RepoInfo,
+} from "../src/repos.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
@@ -23,9 +31,8 @@ import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRev
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
-import { ensureRepoAtTop, bootstrapRepoRoot, type RepoInfo } from "../src/repos.ts";
 import { resolveScopeRoots, makeSessionScope, describeScope, scopeFilter } from "../src/scope.ts";
-import type { AgentSession } from "../src/types.ts";
+import type { AgentSession, PullRequest, WorkItem } from "../src/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
 function sess(id: string, cwd: string, lastUsedMs: number, source: AgentSession["source"] = "claude"): AgentSession {
@@ -2034,6 +2041,236 @@ test.describe("isUnderRoot: segment-aware prefix match", () => {
     expect(isUnderRoot("/anything/here", "/")).toBe(true);
     expect(isUnderRoot("/home/me/work/", "/home/me/work")).toBe(true);
     expect(isUnderRoot("/home/me/work", "/home/me/work/")).toBe(true);
+  });
+});
+
+// Repo-scoped filtering: a path context (`agendo <path>`) narrows the work-item
+// and PR views to the git repos found inside it. Two pure halves, both pinned
+// here: the downward repo scan (real temp dirs with `.git` markers — no git
+// binary needed, same existsSync test repoRootForCwd uses) and the predicates
+// that decide whether an item / PR belongs to the discovered set.
+test.describe("discoverGitReposUnder: repos at or under a path", () => {
+  let dir: string;
+
+  test.beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "agendo-repos-"));
+  });
+  test.afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Make `<dir>/<rel>` a repo (a `.git` marker is all discovery looks for). */
+  const repo = (rel: string) => mkdirSync(join(dir, rel, ".git"), { recursive: true });
+  const names = (root: string) => discoverGitReposUnder(root).map((r) => r.name);
+
+  test("a target that is itself a checkout is the only repo", () => {
+    repo(".");
+    mkdirSync(join(dir, "packages", "inner", ".git"), { recursive: true });
+    // The scan stops at the target: a nested checkout inside a repo (a vendored
+    // clone, a worktree) belongs to that root, it isn't a sibling repo.
+    expect(discoverGitReposUnder(dir).map((r) => r.root)).toEqual([dir]);
+  });
+
+  test("a target below a repo root scopes to the repo it is in", () => {
+    repo(".");
+    const sub = join(dir, "packages", "web");
+    mkdirSync(sub, { recursive: true });
+    // `agendo ~/git/proj/packages/web` means proj — not "no repos here", and not
+    // whatever vendored checkouts happen to sit under the subdirectory.
+    expect(discoverGitReposUnder(sub).map((r) => r.root)).toEqual([dir]);
+  });
+
+  test("a parent folder inside an unrelated checkout still scopes to the repos in it", () => {
+    // The `$HOME tracked as dotfiles` shape: `~/.git` exists, so the upward walk
+    // from `~/git` finds it — but `agendo ~/git` means the projects in there, not
+    // the dotfiles repo. What's below wins whenever the scan finds anything.
+    repo(".");
+    repo(join("git", "alpha"));
+    repo(join("git", "beta"));
+    expect(names(join(dir, "git"))).toEqual(["alpha", "beta"]);
+  });
+
+  test("a parent folder yields every repo inside it, direct or deeply nested", () => {
+    repo("alpha");
+    repo("beta");
+    repo(join("nested", "deep", "gamma"));
+    expect(names(dir)).toEqual(["alpha", "beta", "gamma"]); // sorted by name
+  });
+
+  test("worktrees and node_modules are not separate repos", () => {
+    repo("alpha");
+    // A launcher worktree carries its own `.git` file but belongs to its root…
+    mkdirSync(join(dir, "alpha", ".claude", "worktrees", "feature", ".git"), { recursive: true });
+    // …and a vendored checkout under node_modules is not the user's repo.
+    mkdirSync(join(dir, "node_modules", "dep", ".git"), { recursive: true });
+    expect(names(dir)).toEqual(["alpha"]);
+  });
+
+  test("a folder with no repo inside it yields nothing (callers treat that as unscoped)", () => {
+    mkdirSync(join(dir, "notes", "more"), { recursive: true });
+    expect(discoverGitReposUnder(dir)).toEqual([]);
+  });
+
+  test("the scan is cached per target, and `fresh` re-walks it (the `r` refresh)", () => {
+    repo("alpha");
+    expect(names(dir)).toEqual(["alpha"]);
+    // A repo cloned into the target after launch: the cached scan can't see it…
+    repo("beta");
+    expect(names(dir)).toEqual(["alpha"]);
+    // …until a refresh rescans, which also replaces the cached result.
+    expect(discoverGitReposUnder(dir, true).map((r) => r.name)).toEqual(["alpha", "beta"]);
+    expect(names(dir)).toEqual(["alpha", "beta"]);
+  });
+});
+
+test.describe("repo scope predicates", () => {
+  const scope = new Set(["appweb", "ada/appweb"]);
+  const pr = (id: number, repositoryId: string, repositoryName?: string): PullRequest => ({
+    id, title: `PR ${id}`, status: "active", branch: "b", repositoryId, repositoryName,
+    isDraft: false, approvals: 0, rejections: 0, waiting: 0, approvedCount: 0, requiredCount: 0,
+    ci: "none", createdDate: 0, updatedDate: 0, url: "",
+  });
+  const item = (id: number, project: string, prs: PullRequest[] = []): WorkItem => ({
+    id, type: "Bug", title: `WI ${id}`, state: "Active", iterationPath: "", project,
+    inCurrentSprint: true, prs, sessions: [], url: "",
+  });
+
+  test("a PR matches on either repo identity (GitHub slug id / ADO repo name)", () => {
+    expect(prInRepoScope(pr(1, "ada/appweb", "appweb"), scope)).toBe(true); // GitHub
+    expect(prInRepoScope(pr(2, "repoA-guid", "appweb"), scope)).toBe(true); // ADO (guid id)
+    expect(prInRepoScope(pr(3, "repoB-guid", "applib"), scope)).toBe(false);
+  });
+
+  test("a null scope (no path context, or the filter toggled off) passes everything", () => {
+    expect(prInRepoScope(pr(3, "repoB-guid", "applib"), null)).toBe(true);
+    expect(itemInRepoScope(item(9, "Widgets"), "ado", null)).toBe(true);
+  });
+
+  test("GitHub issues match exactly, on the owner/repo slug they carry", () => {
+    expect(itemInRepoScope(item(1, "ada/appweb"), "github", scope)).toBe(true);
+    expect(itemInRepoScope(item(2, "ada/applib"), "github", scope)).toBe(false);
+  });
+
+  test("ADO work items match through their PRs; PR-less items carry no repo signal", () => {
+    // `project` is the ADO team project, never a repo — so linked PRs are the
+    // only signal, and an item with none is kept rather than silently hidden.
+    expect(itemInRepoScope(item(1, "Widgets", [pr(1, "repoA-guid", "appweb")]), "ado", scope)).toBe(true);
+    expect(itemInRepoScope(item(2, "Widgets", [pr(2, "repoB-guid", "applib")]), "ado", scope)).toBe(false);
+    expect(itemInRepoScope(item(3, "Widgets"), "ado", scope)).toBe(true);
+  });
+
+  test("filterModelByRepos narrows every item / PR list and leaves the rest alone", () => {
+    const model = {
+      provider: "ado" as const,
+      current: [item(1, "Widgets", [pr(1, "repoA-guid", "appweb")]), item(2, "Widgets", [pr(2, "repoB-guid", "applib")])],
+      other: [],
+      prLinked: [],
+      linkedPrs: [{ ...pr(1, "repoA-guid", "appweb"), sessions: [], workItemId: 1, workItemType: "Bug", workItemTitle: "", workItemUrl: "" }],
+      reviewPrs: [{ ...pr(7, "repoB-guid", "applib"), sessions: [], reviewReason: "you" }],
+      orphanPrs: [{ ...pr(6, "repoB-guid", "applib"), sessions: [] }],
+      repos: [{ root: "/r", name: "r", total: 1, claude: 1, copilot: 0 }],
+    } as unknown as LoadedModel;
+
+    const filtered = filterModelByRepos(model, scope);
+    expect(filtered.current.map((i) => i.id)).toEqual([1]);
+    expect(filtered.linkedPrs.map((p) => p.id)).toEqual([1]);
+    expect(filtered.reviewPrs).toEqual([]);
+    expect(filtered.orphanPrs).toEqual([]);
+    expect(filtered.repos).toBe(model.repos); // untouched — sessions views don't scope by repo
+    expect(filterModelByRepos(model, null)).toBe(model); // inert without a scope
+  });
+});
+
+test.describe("mergeRepos: session-derived ∪ path-discovered", () => {
+  test("dedupes by root, keeping the entry that carries the session counts", () => {
+    const sessionDerived = [{ root: "/r/appweb", name: "appweb", total: 2, claude: 2, copilot: 0 }];
+    const discovered = [
+      { root: "/r/appweb", name: "appweb", total: 0, claude: 0, copilot: 0 },
+      { root: "/r/fresh", name: "fresh", total: 0, claude: 0, copilot: 0 },
+    ];
+    const merged = mergeRepos(sessionDerived, discovered);
+    expect(merged.map((r) => r.name).sort()).toEqual(["appweb", "fresh"]);
+    expect(merged.find((r) => r.name === "appweb")!.total).toBe(2);
+  });
+});
+
+test.describe("repoScopeKeys: what a checkout matches as", () => {
+  // A stub `git` on PATH answering `-C <root> remote get-url origin` per root, so
+  // the key derivation is pinned without touching a real repo (same trick the
+  // provider tests use for detectRepoProvider).
+  function withOrigins(origins: Record<string, string>, fn: () => void): void {
+    const bin = mkdtempSync(join(tmpdir(), "agendo-keys-bin-"));
+    const cases = Object.entries(origins)
+      .map(([p, url]) => `    "${p}") echo "${url}"; exit 0;;`)
+      .join("\n");
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\ncase "$*" in\n  *"remote get-url origin"*)\n  case "$2" in\n${cases}\n  esac\n  exit 1;;\nesac\nexit 0\n`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const saved = process.env.PATH;
+    process.env.PATH = bin;
+    try {
+      fn();
+    } finally {
+      process.env.PATH = saved;
+    }
+  }
+  // Keys are cached per root for the process lifetime, so every case gets a root
+  // path of its own.
+  const repo = (root: string): RepoInfo => ({ root, name: root.split("/").pop()!, total: 0, claude: 0, copilot: 0 });
+  const pr = (id: number, repositoryId: string, repositoryName: string): PullRequest => ({
+    id, title: `PR ${id}`, status: "active", branch: "b", repositoryId, repositoryName,
+    isDraft: false, approvals: 0, rejections: 0, waiting: 0, approvedCount: 0, requiredCount: 0,
+    ci: "none", createdDate: 0, updatedDate: 0, url: "",
+  });
+
+  test("a GitHub checkout matches only on its owner/repo slug, never the bare name", () => {
+    // The bare name would let a same-named repo under another owner (a fork the
+    // user has sessions in, so it's still fetched) slip past the PR filter via
+    // PullRequest.repositoryName, while its issues were correctly dropped.
+    withOrigins({ "/k1/appweb": "https://github.com/ada/appweb.git" }, () => {
+      const keys = repoScopeKeys([repo("/k1/appweb")]);
+      expect([...keys]).toEqual(["ada/appweb"]);
+      expect(prInRepoScope(pr(1, "bob/appweb", "appweb"), keys)).toBe(false);
+      expect(prInRepoScope(pr(2, "ada/appweb", "appweb"), keys)).toBe(true);
+    });
+  });
+
+  test("an Azure DevOps checkout matches on its _git/<repo> name (what its PRs carry)", () => {
+    withOrigins({ "/k2/web": "https://dev.azure.com/org/proj/_git/appweb" }, () => {
+      const keys = repoScopeKeys([repo("/k2/web")]);
+      expect([...keys]).toEqual(["appweb"]); // the remote's name, not the directory's
+      expect(prInRepoScope(pr(3, "repo-guid", "appweb"), keys)).toBe(true);
+    });
+  });
+
+  test("an ADO checkout cloned over ssh matches on the v3 triple's repo name", () => {
+    // The modern ADO ssh remote has no `_git` segment; without its own pattern
+    // the checkout would silently degrade to the directory basename ("frontend")
+    // and every one of its PRs would vanish from the filtered views.
+    withOrigins({ "/k4/frontend": "git@ssh.dev.azure.com:v3/org/proj/appweb" }, () => {
+      const keys = repoScopeKeys([repo("/k4/frontend")]);
+      expect([...keys]).toEqual(["appweb"]);
+      expect(prInRepoScope(pr(4, "repo-guid", "appweb"), keys)).toBe(true);
+    });
+  });
+
+  test("an ADO repo name with a space is decoded, not left percent-encoded", () => {
+    // The remote URL escapes it; the PRs carry the display name. Without decoding
+    // the key ("my%20repo") never matches, and every PR of that repo — plus the
+    // work items linked only to them — silently disappears from the filtered views.
+    withOrigins({ "/k5/myrepo": "https://dev.azure.com/org/proj/_git/My%20Repo" }, () => {
+      const keys = repoScopeKeys([repo("/k5/myrepo")]);
+      expect([...keys]).toEqual(["my repo"]);
+      expect(prInRepoScope(pr(5, "repo-guid", "My Repo"), keys)).toBe(true);
+    });
+  });
+
+  test("a checkout with no origin falls back to its directory basename", () => {
+    withOrigins({}, () => {
+      expect([...repoScopeKeys([repo("/k3/applib")])]).toEqual(["applib"]);
+    });
   });
 });
 
