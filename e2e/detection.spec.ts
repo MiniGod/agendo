@@ -49,8 +49,16 @@ test.describe("managedKind: name-prefix → launch kind", () => {
     expect(managedKind("cl-pr-5001")).toBe("pr");
     expect(managedKind("cl-claude-abc")).toBe("resumed");
     expect(managedKind("cl-copilot-abc")).toBe("resumed");
+    expect(managedKind("cl-codex-abc")).toBe("resumed");
     expect(managedKind("cl-bogus-abc")).toBeNull();
     expect(managedKind("not-managed")).toBeNull();
+  });
+
+  test("a tagged id-less fresh name still classifies by its kind prefix", () => {
+    // Codex can't be handed a session id, so its fresh windows carry an extra
+    // `<agent>-` segment. The badge must still read bg/new.
+    expect(managedKind("cl-bg-codex-abc123")).toBe("background");
+    expect(managedKind("cl-new-codex-abc123")).toBe("new");
   });
 });
 
@@ -78,6 +86,14 @@ test.describe("resolveWindowSession: window name → session", () => {
 
   test("legacy name in a cwd with no session resolves to nothing", () => {
     expect(resolveWindowSession(all, "cl-wi-101", "/nowhere")).toBeUndefined();
+  });
+
+  test("a tagged id-less fresh name attributes by cwd, like the legacy names", () => {
+    // `cl-bg-codex-<uniquifier>` embeds no session id — the uniquifier is only
+    // there to keep window names distinct. Falling through to the cwd MRU is
+    // what lets a codex session (whose id codex assigns itself) be found at all.
+    expect(resolveWindowSession(all, "cl-bg-codex-aaaolder", "/repo")).toBe(newer);
+    expect(resolveWindowSession(all, "cl-new-codex-zzz", "/other")).toBe(elsewhere);
   });
 });
 
@@ -116,6 +132,17 @@ test.describe("SessionIndex.forWorkItem: repo-scoped id-in-branch/cwd match (M1)
     };
     expect(indexOf(cop).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["c1"]);
     expect(indexOf(cop).forWorkItem(2, "ada/other")).toEqual([]);
+  });
+
+  test("Codex's recorded repository field satisfies the scope the same way", () => {
+    // Codex records the raw origin URL; the provider reduces it to a slug so it
+    // lands in the same identity domain as the scope (see repoIdFromRemote).
+    const cdx: AgentSession = {
+      id: "x1", source: "codex", cwd: "/tmp/gone", branch: "fix-2",
+      repository: "ada/appweb", title: "x1", lastUsed: new Date(0),
+    };
+    expect(indexOf(cdx).forWorkItem(2, "ada/appweb").map((s) => s.id)).toEqual(["x1"]);
+    expect(indexOf(cdx).forWorkItem(2, "ada/other")).toEqual([]);
   });
 
   test("unscoped (ADO) match is unchanged, digit boundaries still hold", () => {
@@ -341,6 +368,24 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     expect(sessionName(s)).toBe(`cl-copilot-${shortId(s.id)}`);
     const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }], [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
+  });
+
+  test("a resumed codex window attributes by its canonical id-bearing name", () => {
+    const s = sess("019cde00-1111-7000-8000-00000000cde0", "/x", 1_000, "codex");
+    expect(sessionName(s)).toBe("cl-codex-019cde001111");
+    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }], [s]);
+    expect(r.live.has(sessionName(s))).toBe(true);
+    expect(r.liveKinds.get(sessionName(s))).toBe("resumed");
+  });
+
+  test("a fresh codex window attributes to the session codex created in its cwd", () => {
+    // The window name carries no session id, so this is the path that makes a
+    // `agendo launch --agent codex` session show up as running at all.
+    const s = sess("019cde00-1111-7000-8000-00000000cde0", "/wt", 1_000, "codex");
+    const r = reconcileLive(new Set(), [{ name: "cl-bg-codex-9f8e7d6c", cwd: "/wt", placeholder: false }], [s]);
+    expect(r.live.has(sessionName(s))).toBe(true);
+    expect(r.liveKinds.get(sessionName(s))).toBe("background");
+    expect(r.liveWindows.get(sessionName(s))).toBe("cl-bg-codex-9f8e7d6c");
   });
 });
 
@@ -1588,6 +1633,190 @@ test.describe("paneResumeSafe: a suggestion in the box must not block auto-resum
   });
 });
 
+// CODEX fixtures: raw `tmux capture-pane -p -e` output plus the matching
+// `#{cursor_x} #{cursor_y}` readout, captured live from Codex CLI v0.147.0
+// running under `--approve-for-me` (window agendo:26, 2026-08-13). The only
+// edit is length-preserving anonymization of the home path in the transcript
+// body (`kristjan` → `someuser`, 8 chars either way, so every column stays put);
+// the footer, the status line and the input box are byte-for-byte as captured.
+//   - codex-idle.ansi           settled between turns: footer `… · Ready · …`,
+//                               the box holding codex's DIM rotating example
+//                               ("Summarize recent commits") — not typed text.
+//   - codex-draft.ansi          the same box with a real 55-char prompt typed
+//                               and not yet submitted; caret pushed to its end.
+//   - codex-busy.ansi           25s into a 67s turn: footer `Working`, and the
+//                               status line `• Working (25s • esc to interrupt)`
+//                               above the box. The box still shows the dim
+//                               placeholder — an empty-LOOKING box mid-turn.
+//   - codex-busy-approval.ansi  the same turn while `--approve-for-me`'s
+//                               automatic reviewer runs: the status line reads
+//                               `• Reviewing approval request (2s • esc to
+//                               interrupt)`. The verb changes; the shape doesn't.
+//   - codex-done.ansi           the turn finished: footer back to `Ready`, and
+//                               the completion marker `─ Worked for 1m 06s ───`
+//                               where the counter used to be — no interrupt hint.
+//   - codex-dialog.ansi         `/statusline` open: the field checkboxes (which
+//                               is how run-state can be switched off) over a
+//                               footer that still says `Ready`, and codex's own
+//                               "enter to confirm and close; esc to close" line.
+// The caret is deliberately NOT a busy signal here: it read `2 66` on every
+// frame of the turn, busy and idle alike. It still speaks for the input box.
+const codexCursor = (name: string) => {
+  const m = fullPane(name).trim().match(/^(\d+)\s+(\d+)$/)!;
+  return { x: Number(m[1]), y: Number(m[2]) };
+};
+
+/**
+ * Simulate `/statusline` unchecking the run-state field: blank the run-state
+ * WORD out of the footer line only. It is SGR-wrapped, so a plain string
+ * replace over the capture misses it — match it between its escapes. Every
+ * caller asserts the edit actually took, so a silently-missed edit can't turn
+ * one of these into a test that passes for the wrong reason.
+ */
+const dropRunState = (raw: string) => {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!stripAnsi(lines[i]).trim()) continue;
+    lines[i] = lines[i].replace(/(\x1b\[[0-9;]*m)(Ready|Working|Thinking)(?=\x1b)/g, "$1");
+    break;
+  }
+  const out = lines.join("\n");
+  const footer = stripAnsi(out).split("\n").filter((l) => l.trim()).pop() ?? "";
+  expect(footer, "the run-state word must be gone from the footer").not.toMatch(/\b(Ready|Working|Thinking)\b/);
+  return out;
+};
+
+test.describe("paneReadiness: Codex CLI panes (real captures)", () => {
+  test("settled between turns reads 'ready' — the dim example prompt is not a draft", () => {
+    // Codex parks a rotating suggestion in the box; treating it as typed text
+    // would make `agendo send` refuse forever on an idle session.
+    expect(paneReadiness(fullPane("codex-idle.ansi"))).toBe("ready");
+    expect(paneReadiness(fullPane("codex-idle.ansi"), codexCursor("codex-idle.cursor"))).toBe("ready");
+  });
+
+  test("a real typed prompt reads 'queued'", () => {
+    expect(paneReadiness(fullPane("codex-draft.ansi"))).toBe("queued");
+    expect(paneReadiness(fullPane("codex-draft.ansi"), codexCursor("codex-draft.cursor"))).toBe("queued");
+  });
+
+  test("mid-turn reads 'busy' even though the box looks empty", () => {
+    // The trap this pins: codex ACCEPTS typing mid-turn (it queues it), so the
+    // box being empty is not permission to send. The footer and status line are.
+    expect(paneReadiness(fullPane("codex-busy.ansi"))).toBe("busy");
+    expect(paneReadiness(fullPane("codex-busy.ansi"), codexCursor("codex-busy.cursor"))).toBe("busy");
+  });
+
+  test("the busy status line is matched by SHAPE, not by verb", () => {
+    // `--approve-for-me` swaps `Working` for `Reviewing approval request` while
+    // its classifier vets a command. Matching the verb list read those 16 frames
+    // as a gap in the turn; matching the counter + interrupt hint does not.
+    const approval = fullPane("codex-busy-approval.ansi");
+    expect(stripAnsi(approval)).toContain("Reviewing approval request");
+    expect(paneReadiness(approval)).toBe("busy");
+    expect(paneReadiness(approval, codexCursor("codex-busy-approval.cursor"))).toBe("busy");
+  });
+
+  test("the finished-turn marker is not a live counter — the settled pane reads 'ready'", () => {
+    // `─ Worked for 1m 06s ───` carries an elapsed time but no interrupt hint,
+    // which is exactly what keeps it out of the busy match.
+    const done = fullPane("codex-done.ansi");
+    expect(stripAnsi(done)).toContain("Worked for 1m 06s");
+    expect(paneReadiness(done)).toBe("ready");
+    expect(paneReadiness(done, codexCursor("codex-done.cursor"))).toBe("ready");
+  });
+
+  test("an open dialog reads 'dialog' even with the footer still saying 'Ready'", () => {
+    // The `/statusline` picker replaces the input box; the footer underneath is
+    // unchanged, so the dialog check has to outrank the run-state read.
+    expect(stripAnsi(fullPane("codex-dialog.ansi"))).toContain("Ready");
+    expect(paneReadiness(fullPane("codex-dialog.ansi"))).toBe("dialog");
+    expect(paneReadiness(fullPane("codex-dialog.ansi"), codexCursor("codex-dialog.cursor"))).toBe("dialog");
+  });
+
+  test("the status line alone proves busy when the footer's run-state is switched off", () => {
+    // `/statusline` is a checkbox list, so run-state is optional. With it off,
+    // a running turn is still unambiguous from the line above the box.
+    expect(paneReadiness(dropRunState(fullPane("codex-busy.ansi")))).toBe("busy");
+    expect(paneReadiness(dropRunState(fullPane("codex-busy-approval.ansi")))).toBe("busy");
+  });
+
+  test("with run-state off, an IDLE pane degrades to 'unknown' — never to 'ready'", () => {
+    // The asymmetry the classifier is built around: "ready" is only ever
+    // returned on the positive evidence of the footer saying `Ready`. Guessing
+    // here would inject a prompt into a session that may well be working.
+    expect(paneReadiness(dropRunState(fullPane("codex-idle.ansi")))).toBe("unknown");
+    expect(paneReadiness(dropRunState(fullPane("codex-done.ansi")))).toBe("unknown");
+    // And with the caret vouching for an empty box, still unknown — the caret
+    // speaks for the box, not for whether the model is working.
+    expect(paneReadiness(dropRunState(fullPane("codex-idle.ansi")), codexCursor("codex-idle.cursor"))).toBe("unknown");
+  });
+
+  test("the run-state word only counts as a whole footer field", () => {
+    // Otherwise any transcript line quoting "Working" would fake a busy pane —
+    // and any pane whose prose ends in "Ready" would fake a sendable one.
+    const idle = fullPane("codex-idle.ansi").split("\n");
+    // Slipped in as the last transcript line, directly above the input box.
+    const boxRow = idle.length - 1 - [...idle].reverse().findIndex((l) => l.includes("›"));
+    const withProse = [
+      ...idle.slice(0, boxRow),
+      "  • Working on the parser, then Ready to review",
+      ...idle.slice(boxRow),
+    ].join("\n");
+    expect(paneReadiness(withProse)).toBe("ready");
+  });
+
+  test("REGRESSION: a codex transcript that QUOTES the busy line is not busy", () => {
+    // The codex half of the bug #33 fixed for claude (see the busy-quoted-marker
+    // block below). The busy line is a fact about codex's live status region, not
+    // about anything in the scrollback — and it is exactly the sort of string that
+    // gets pasted around: any session working on THIS file prints it.
+    //
+    // Synthesized rather than captured: there is no real codex pane quoting its
+    // own marker, so it is spliced into the idle capture's transcript (row 8, far
+    // above the box) with everything else left byte-for-byte. Codex writes its
+    // transcript as `• …` bullets, so a turn describing the marker reproduces the
+    // exact leading shape the matcher keys on — which is the point: this must be
+    // a line the whole-pane scan WOULD have matched. Before the status region was
+    // anchored, it read "busy".
+    const quotedLine = "  • The busy marker is `• Working (25s • esc to interrupt)` above the box.";
+    expect(quotedLine).toMatch(/^[ \t]*•[^\n]*\(\s*\d+s\b[^\n]*\besc to interrupt\b/);
+    const idle = fullPane("codex-idle.ansi").split("\n");
+    const boxRow = idle.length - 1 - [...idle].reverse().findIndex((l) => l.includes("›"));
+    const quoted = [...idle.slice(0, 8), quotedLine, ...idle.slice(8)].join("\n");
+    // …and it really is transcript: far above the box, not in the status region.
+    expect(boxRow - 8).toBeGreaterThan(10);
+    expect(paneReadiness(quoted)).toBe("ready");
+    // The splice pushed every row below it down one, so the caret readout has to
+    // follow or it would be vouching for the wrong row.
+    const caret = codexCursor("codex-idle.cursor");
+    expect(paneReadiness(quoted, { x: caret.x, y: caret.y + 1 })).toBe("ready");
+  });
+
+  test("the status walk reaches a busy line the approval reviewer pushed off the box", () => {
+    // The other direction, and the one that fails dangerous: the walk must not
+    // stop short of the status line. `--approve-for-me` draws a `└ /bin/bash -lc
+    // …` detail row BETWEEN the busy line and the box, so a walk collecting only
+    // the row nearest the box would see the detail row and call the pane ready.
+    const approval = stripAnsi(fullPane("codex-busy-approval.ansi")).split("\n");
+    const busyRow = approval.findIndex((l) => /Reviewing approval request/.test(l));
+    const boxRow = approval.length - 1 - [...approval].reverse().findIndex((l) => l.includes("›"));
+    // Pins the geometry the verdict depends on: the marker is genuinely separated
+    // from the box, so "busy" here is the walk working, not the marker being adjacent.
+    expect(approval[busyRow + 1]).toContain("└");
+    expect(boxRow - busyRow).toBeGreaterThan(2);
+    expect(paneReadiness(fullPane("codex-busy-approval.ansi"))).toBe("busy");
+  });
+
+  test("claude panes are not hijacked by the codex path", () => {
+    // codexPane sniffs the CONTENT (the window name never carries the agent for
+    // a `cl-wi-…` window), so the two classifiers share every capture. These are
+    // the verdicts the claude fixtures had before codex existed.
+    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+    expect(paneReadiness(REAL_CLEAR_HINT_PANE)).toBe("limited");
+    expect(paneReadiness(REAL_MENU_PANE)).toBe("limited");
+  });
+});
+
 test.describe("parseResetTime: extract the reset instant from the notice", () => {
   test("time + IANA timezone → that wall-clock time in the named zone", () => {
     const now = new Date("2026-06-15T12:00:00Z");
@@ -2183,10 +2412,10 @@ test.describe("repo scope predicates", () => {
 
 test.describe("mergeRepos: session-derived ∪ path-discovered", () => {
   test("dedupes by root, keeping the entry that carries the session counts", () => {
-    const sessionDerived = [{ root: "/r/appweb", name: "appweb", total: 2, claude: 2, copilot: 0 }];
+    const sessionDerived = [{ root: "/r/appweb", name: "appweb", total: 2, claude: 2, copilot: 0, codex: 0 }];
     const discovered = [
-      { root: "/r/appweb", name: "appweb", total: 0, claude: 0, copilot: 0 },
-      { root: "/r/fresh", name: "fresh", total: 0, claude: 0, copilot: 0 },
+      { root: "/r/appweb", name: "appweb", total: 0, claude: 0, copilot: 0, codex: 0 },
+      { root: "/r/fresh", name: "fresh", total: 0, claude: 0, copilot: 0, codex: 0 },
     ];
     const merged = mergeRepos(sessionDerived, discovered);
     expect(merged.map((r) => r.name).sort()).toEqual(["appweb", "fresh"]);
@@ -2218,7 +2447,7 @@ test.describe("repoScopeKeys: what a checkout matches as", () => {
   }
   // Keys are cached per root for the process lifetime, so every case gets a root
   // path of its own.
-  const repo = (root: string): RepoInfo => ({ root, name: root.split("/").pop()!, total: 0, claude: 0, copilot: 0 });
+  const repo = (root: string): RepoInfo => ({ root, name: root.split("/").pop()!, total: 0, claude: 0, copilot: 0, codex: 0 });
   const pr = (id: number, repositoryId: string, repositoryName: string): PullRequest => ({
     id, title: `PR ${id}`, status: "active", branch: "b", repositoryId, repositoryName,
     isDraft: false, approvals: 0, rejections: 0, waiting: 0, approvedCount: 0, requiredCount: 0,
@@ -2370,7 +2599,7 @@ test.describe("makeSessionScope / describeScope", () => {
 // spelling differences. The browser-driven picker tests can't reach this: every
 // path they feed in is already clean, so only a direct test pins the dedupe.
 test.describe("ensureRepoAtTop: the scoped folder is offered exactly once, first", () => {
-  const repo = (root: string, total = 1): RepoInfo => ({ root, name: root.split("/").pop() || root, total, claude: total, copilot: 0 });
+  const repo = (root: string, total = 1): RepoInfo => ({ root, name: root.split("/").pop() || root, total, claude: total, copilot: 0, codex: 0 });
 
   test("an existing repo is promoted, not duplicated", () => {
     const out = ensureRepoAtTop([repo("/h/appweb", 2), repo("/h/applib", 1)], "/h/applib");
@@ -2381,7 +2610,7 @@ test.describe("ensureRepoAtTop: the scoped folder is offered exactly once, first
   test("an absent repo is synthesized as a zero-count entry on top", () => {
     const out = ensureRepoAtTop([repo("/h/appweb", 2)], "/h/greenfield");
     expect(out.map((r) => r.root)).toEqual(["/h/greenfield", "/h/appweb"]);
-    expect(out[0]).toMatchObject({ name: "greenfield", total: 0, claude: 0, copilot: 0 });
+    expect(out[0]).toMatchObject({ name: "greenfield", total: 0, claude: 0, copilot: 0, codex: 0 });
   });
 
   test("representation drift still dedupes — the same repo never appears twice", () => {
