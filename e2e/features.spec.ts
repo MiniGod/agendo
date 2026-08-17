@@ -23,6 +23,24 @@ async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 8000): Promise<
   throw new Error(`waitUntil timed out after ${timeoutMs}ms`);
 }
 
+/**
+ * The agent command inside a tmux spawn argv: past the `--` separator, then past
+ * the `env NAME=value …` prefix every launch and resume now carries (the
+ * self-command, plus claude's config dir when the session has one).
+ *
+ * Read by NAME rather than by position on purpose — an assertion that indexes
+ * into the raw argv, or matches it whole, silently starts describing the env
+ * block instead of the command the moment another variable is added to it.
+ */
+function spawnedAgent(argv: string[]): string[] {
+  const sep = argv.indexOf("--", 1);
+  const cmd = sep >= 0 ? argv.slice(sep + 1) : [];
+  if (cmd[0] !== "env") return cmd;
+  let i = 1;
+  while (i < cmd.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(cmd[i])) i++;
+  return cmd.slice(i);
+}
+
 test("identity switcher: switching to a teammate reloads their work items", async ({ launch }) => {
   const wt = await launch();
   await wt.waitForText("Add login screen", 20000);
@@ -232,16 +250,14 @@ test("resuming a Codex session launches `codex resume <id>`", async ({ launch, m
   const codexTarget = sessionName("codex", CODEX_SESSION_ID);
   await waitUntil(async () => {
     const log = await mock.tmuxLog();
-    return log.some((argv) => {
-      const sep = argv.indexOf("--", 1);
-      const agent = sep >= 0 ? argv.slice(sep + 1) : [];
-      return (
+    return log.some(
+      (argv) =>
         argv[0] === "new-session" &&
         argv.includes(codexTarget) &&
-        // `resume` is a subcommand and the id a positional — not `--resume=<id>`.
-        agent.join(" ") === `codex resume ${CODEX_SESSION_ID}`
-      );
-    });
+        // `resume` is a subcommand and the id a positional — not `--resume=<id>`,
+        // and not the bare `codex resume` that opens codex's own picker.
+        spawnedAgent(argv).join(" ") === `codex resume ${CODEX_SESSION_ID}`,
+    );
   });
 });
 

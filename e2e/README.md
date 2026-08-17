@@ -126,6 +126,7 @@ e2e/
                    (idle / draft / mid-turn / approval review / finished /
                    `/statusline` dialog). Only anonymized, never reformatted.
   launcher.spec.ts behavioral tests (navigation, flows, side effects)
+  placeholder.spec.ts  the PAUSED tab's own script (resume / q-Esc close / re-pause)
   screenshots.spec.ts          styled-grid snapshot tests for every view
   screenshots.spec.ts-snapshots/  committed snapshot baselines
   screenshots/     non-asserted PNG artifacts for eyeballing (gitignored)

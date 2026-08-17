@@ -13,7 +13,7 @@ import {
   type SessionKind, type Readiness, type PaneSnapshot,
 } from "./tmux.ts";
 import { formatResetTime, paneResetAt } from "./usageLimit.ts";
-import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
+import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, notRunningHint, openSession, SELF_CMD, withSelfCmdEnv, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { durationLabel, idleSeconds, isStalled, resolveStalledAfterMs, shortAge } from "./idle.ts";
 import { branchSync, type BranchSync } from "./gitrefs.ts";
@@ -114,7 +114,14 @@ Usage:
         work-items)             GitHub says "issue", Azure DevOps "work item".
                                 --json for full rows (id + sessions[]).
   agendo resume <id>           Headless resume of an idle session in its own tmux
-                                window (detached). <id> as for status.
+                                window (detached). <id> as for status. A missing
+                                window — closed, crashed, tmux server restarted,
+                                machine rebooted — never means the session is
+                                lost: its worktree, branch, commits and transcript
+                                are on disk, and this brings it back. Right after
+                                one it sits on claude's resume dialog and may
+                                compact, so the first \`send\` can time out waiting
+                                for an input box — retry rather than --force.
       --attach, -a              Switch/attach to it immediately (default: detached)
   agendo wait [id...]          Block until the target session(s) settle, then exit
                                 0; exit non-zero if they don't (timeout, exited,
@@ -783,7 +790,11 @@ if (!process.argv.includes("--no-tmux")) {
     ctx.hostSession,
     ctx.filterRoot,
     process.cwd(),
-    [process.argv[0], process.argv[1], ...menuArgs],
+    // The menu inside tmux is the process that will actually spawn agents, so it
+    // carries our invocation forward too (`SELF_CMD_ENV`) — otherwise it would
+    // re-derive one from its own argv and hand the sessions it starts a different
+    // way of naming the same build.
+    withSelfCmdEnv([process.argv[0], process.argv[1], ...menuArgs]),
     () => restoreTabs(ctx.hostSession),
   );
   process.exit(0);
@@ -871,6 +882,12 @@ async function runStatus(
   // process, no fetch — see src/gitrefs.ts). Silent when it can't be determined.
   const sync = branchSync(s.cwd);
   if (sync) console.log(`  work:   ${describeSync(sync)}`);
+  // `○ idle` says the tmux window is gone, not that the session is. Say what to do
+  // about it here, where the caller is already looking — the `resume:` slot is free
+  // in exactly this case (the running form of the line reports the resume DIALOG).
+  if (!running) {
+    console.log(`  resume: ${SELF_CMD} resume ${shortId(s.id)}   (brings it back; worktree, branch and commits are intact)`);
+  }
   // Full, clickable links for whatever this session is working on. Vertical
   // output, so a long URL costs nothing here (unlike the `list` table).
   if (withUrls) {
@@ -1152,6 +1169,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   const target = liveTargetForShortId(sid);
   if (!target) {
     console.error(`Session ${token} is not running (no live tmux window to send to).`);
+    console.error(notRunningHint(token, "then send again"));
     process.exit(1);
   }
   let { raw, cursor } = capturePaneState(target);
@@ -1183,7 +1201,9 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     if (!settled) {
       console.error(
         `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
-          `nothing was pasted (a message typed into that menu would pick an option). Re-check with \`${SELF_CMD} status ${token}\`.`,
+          `nothing was pasted (a message typed into that menu would pick an option). This is ordinary right after ` +
+          `a resume, where the session may compact before its input exists: WAIT AND RETRY (or raise --timeout). ` +
+          `--force cannot help — it never pastes into that menu. Re-check with \`${SELF_CMD} status ${token}\`.`,
       );
       process.exit(2);
     }
@@ -1226,6 +1246,7 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
   const target = liveTargetForShortId(sid);
   if (!target) {
     console.error(`Session ${token} is not running (no live tmux window to unblock).`);
+    console.error(notRunningHint(token, "then unblock it"));
     process.exit(1);
   }
   const { raw, cursor } = capturePaneState(target);
@@ -1865,6 +1886,7 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
   if (!s) {
     console.error(`No session found for "${token}".`);
+    console.error(`  \`${SELF_CMD} list --all\` lists idle sessions as well as running ones.`);
     process.exit(1);
   }
   const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
@@ -1973,6 +1995,9 @@ async function runClose(token: string | undefined, force: boolean, verb = "close
     // Already closed / never started. The desired end state holds, so this is a
     // success — `close` is idempotent for the scripts and agents driving it.
     console.log(`○ session ${label} is not running — nothing to close.`);
+    // Idempotent success, but the caller may have expected a live session here; an
+    // indexed one can still be brought back (an unindexed id has nothing to resume).
+    if (s) console.log(`  resume:  ${SELF_CMD} resume ${label}   (its worktree, branch and commits are intact)`);
     return;
   }
   if (!managedKind(target)) {

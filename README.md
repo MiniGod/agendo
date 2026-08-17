@@ -42,6 +42,19 @@ bunx github:MiniGod/agendo#pull/8/head   # run agendo from PR #8
 Handy for trying a change against your own real sessions before merging it. Swap
 `8` for the PR number; `#HEAD` gets you the tip of the default branch.
 
+Every session agendo starts is told how to re-invoke agendo (that's the command in
+its `--llm` guide and system prompt), and it now inherits **the invocation you
+typed** rather than a reconstructed one — `bunx` exposes the original spec, so a PR
+build hands `bunx github:MiniGod/agendo#pull/8/head` down to the sessions it
+spawns, and they pass it on to theirs. So the whole chain stays on the PR build and
+you are testing the branch's **agent-facing** surface (`launch`/`list`/`send`/
+`wait`/`close`, the guide text, the on-disk state formats), not just its TUI.
+
+Caveat for `npx`: npm does not expose the spec it was given, so agendo falls back to
+the copy in npm's own `_npx` cache — the build actually running, and correct for the
+life of the session, but invalidated by an `npm cache clean`. Prefer `bunx` for
+running a PR.
+
 ## Features
 
 ### Azure DevOps & GitHub backends

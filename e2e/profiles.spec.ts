@@ -178,7 +178,10 @@ test("move a session between Claude profiles: move · clobber · EXDEV · symlin
     // profile (rebuilt through resumeArgv), every other tab untouched.
     expect(out.restore.tabUpdated).toBe(true);
     expect(out.restore.argv[0]).toBe("env");
-    expect(out.restore.argv[1]).toMatch(/^CLAUDE_CONFIG_DIR=.*\.claude-work$/);
+    // One `env` block carries every assignment the session needs (the launcher's
+    // own self-command rides in it too), so match the one under test by name
+    // rather than by position.
+    expect(out.restore.argv.some((a: string) => /^CLAUDE_CONFIG_DIR=.*\.claude-work$/.test(a))).toBe(true);
     expect(out.restore.argv).toContain("--resume");
     expect(out.restore.untouched).toEqual(["claude", "--resume", "zzzz9999"]);
     expect(out.restore.noTab).toBe(false);
