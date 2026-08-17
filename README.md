@@ -67,11 +67,12 @@ so startup never spawns a fleet of agents.
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo
-launch`/`list`/`status`/`send`/`wait`/`close`. So an agent can spin off _new_ sessions —
-each in its own fresh worktree — for separate pieces of work that deserve their own PR,
-then monitor, steer and finally close them through the same commands. One orchestrator
-session can fan a large task out across many worktrees and coordinate them, instead of
-hand-rolling tmux and `git worktree`. The sessions it starts inherit the same ability.
+launch`/`list`/`status`/`send`/`open`/`wait`/`close`. So an agent can spin off _new_
+sessions — each in its own fresh worktree — for separate pieces of work that deserve
+their own PR, then monitor, steer and finally close them through the same commands. One
+orchestrator session can fan a large task out across many worktrees and coordinate them,
+instead of hand-rolling tmux and `git worktree`. The sessions it starts inherit the same
+ability.
 
 To follow them, an orchestrator should be _told_, not poll. `agendo wait` blocks until
 a watched session settles — a non-busy state, or its window closing — so it can be run
@@ -129,6 +130,73 @@ it hadn't read yet. Once a session is closed it stops being a peer at all — it
 is gone, so `send` refuses outright rather than queueing into a socket nobody is left to
 read.
 
+Because the two routes mean different things, `send` always says which one it took —
+`▸ queued via socket to …` versus `▸ pasted into pane …`, and `route: "socket" | "pane"`
+(plus `queued`) on `--json`. Queued means the message may sit unread for a while in a
+session that is mid-turn; pasted means it is on screen now, and the pane had to be idle
+to accept it. Nothing about the session afterwards distinguishes the two, and the socket
+isn't guaranteed to exist, so the route is reported rather than inferred.
+
+### Turning the socket off
+
+The socket speaks an internal, undocumented claude protocol. agendo gates on the
+version claude advertises and falls back to the pane when the socket refuses — but
+neither catches the failure that would actually matter: a build that still advertises
+the same version and still accepts the frame, having changed what it does with it. From
+this side that write simply succeeded. So there is a switch:
+
+```jsonc
+// ~/.agendo/config.json — the durable preference
+{ "peerSocket": false }
+```
+
+```sh
+AGENDO_PEER_SOCKET=0 agendo send <id> "…"   # one-off override
+```
+
+The variable wins over the config file **in both directions**, so `AGENDO_PEER_SOCKET=1`
+re-enables the socket for a single command against a `"peerSocket": false` config. Either
+one set to off forces the tmux keystroke path outright — no registry discovery, no socket
+write — which is exactly how `send` behaved before this path existed: a non-idle pane is
+refused again, and a session with no tmux window is unreachable. (Unset or empty means
+"not set"; any other value the variable is given counts as off, since it is a switch you
+reach for when something has gone wrong.)
+
+### Telling a finished session from a stalled one
+
+A session that fell over mid-task 22 hours ago and one that answered cleanly 20
+seconds ago both sit at a `ready` prompt. So `agendo list`/`status` also report how
+long since a session last did anything, and mark a live, non-busy one that has been
+silent past a threshold (4h by default — `stalledAfterMinutes` in
+`~/.agendo/config.json`, or `--stalled-after <dur>`) with `⚠stalled`. That flag only
+ever means "nothing has happened for that long"; agendo cannot know whether the work
+finished. Alongside it, `--json` carries `idleSeconds` and whether the checkout holds
+commits the remote doesn't — read straight from its `.git` refs, never by shelling out
+to `git` — which is usually enough for an orchestrator to spot a parked session
+without reading its transcript. It is the same "has it stopped working?" test `wait`
+uses, so the two agree by construction: `wait` tells you a session settled, and the
+stall marker tells you one settled a long time ago and nobody came back. A session
+parked on the resume dialog is the one exception: it reads `ready` and its recorded
+activity is hours old, but it hasn't run yet, so it is never marked stalled — `--json`
+carries `resumeDialog: true` to say why. A session parked at its usage cap is excluded
+for the same reason: `limited` means waiting on a quota reset (the row shows when it
+lifts), not hung, so it is never marked stalled either.
+
+What that does and doesn't catch, from real sessions:
+
+| Session state | Reported as | Caught? |
+| --- | --- | --- |
+| Finished its turn, sitting at an empty input box | `ready` + idle age, `⚠stalled` past the threshold | **Yes**, and it is the case the feature exists for — but only by *duration*. Under the threshold, done-20-minutes-ago and wedged-20-minutes-ago are still the same row. |
+| Parked at a usage cap | `limited` + `limitResetAt` | **Yes** — and deliberately never `⚠stalled`: it resumes on its own. |
+| Rewriting its own context | `compacting` + `compactionPercent` | **Yes** — blocked but progressing, and the percentage off the pane's own bar says whether to wait. |
+| Parked on Claude's resume dialog | `ready` + `resumeDialog: true` | **Yes** — never `⚠stalled`; nothing has run yet, so the idle age is the previous run's. |
+| Feedback survey on screen (numbered options above a live input box) | `ready` | **Yes** — a menu above a *live* input box is not a dialog; pinned as a negative test. |
+| Busy-waiting: `until [ -f /sentinel ]; do sleep 30; done`, for an hour | `busy` | **No — known gap.** The pane is genuinely active, so neither readiness nor idle age moves. A session can spin forever and look like one that is working. Detecting it needs a signal this PR doesn't have (no assistant turn despite an active pane), and is the obvious next step. |
+
+The honest summary: `⚠stalled` answers "has anything happened lately", not "is this
+finished" and not "is this making progress". It catches the session that stopped;
+it does not catch the session that is busy doing nothing.
+
 ### Orchestrator mode, one keypress away
 
 Press `O` in the Sessions view — or run `agendo launch --orchestrator "<goal>"` — to
@@ -181,8 +249,15 @@ Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `proj
 `team`, `tenant`. There are no baked-in defaults and nothing is auto-discovered, so
 set them for your own setup (see `src/config.ts` for the shape); the token is fetched
 via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
-found across your local sessions. Your selected backend is remembered in
-`~/.agendo/state.json`.
+found across your local sessions. The stall threshold (`stalledAfterMinutes`, default
+240) lives in the same file, as does `peerSocket` (see
+[Turning the socket off](#turning-the-socket-off)). Your selected backend is remembered
+in `~/.agendo/state.json`.
+
+Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
+platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
+executable to use instead, for hosts where that default isn't right (containers, WSL).
+Where nothing can be launched at all, `agendo open` still prints the full URL.
 
 ### `resumeDialogChoice`
 

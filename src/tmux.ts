@@ -264,6 +264,49 @@ export function sendDialogReveal(target: string): void {
 export type Readiness = "ready" | "busy" | "compacting" | "queued" | "dialog" | "limited" | "unknown";
 
 /**
+ * The readiness states that mean the agent is actively working right now.
+ * Canonical here (next to the type) because two unrelated features key off the
+ * same distinction: `agendo wait`'s default "still busy" predicate (see
+ * wait.ts) and the stalled-session qualifier (see idle.ts), neither of which may
+ * ever treat a session that is simply mid-turn as finished.
+ */
+const WORKING_READINESS: ReadonlySet<Readiness> = new Set<Readiness>(["busy", "compacting"]);
+
+/**
+ * States the settled test refuses, even though neither is "busy":
+ *  - `unknown` — a pane we couldn't read. Treating it as settled reports a false
+ *    success off a blank or not-yet-drawn screen: `agendo wait` would return
+ *    "done" for a session it merely failed to read, and the stall qualifier would
+ *    pass a verdict on a session it never saw. Absence of evidence that a session
+ *    is working is not evidence that it has stopped.
+ *  - `limited` — a session parked at its usage cap. It has stopped, but it is not
+ *    DONE: it resumes when the cap lifts (auto-resume) or when someone unblocks
+ *    it, and its work is still unfinished. `wait` exiting 0 there would tell an
+ *    orchestrator "finished" about work that is merely paused; the stall marker
+ *    would call it hung when it is waiting on a quota reset whose time `list`
+ *    prints right next to it. `wait` doesn't wait it out in silence — it wakes on
+ *    a capped target at once with `woke: "blocked"` and a non-zero exit — and an
+ *    explicit `--state limited` still treats the cap as the success condition.
+ */
+const NOT_SETTLED: ReadonlySet<Readiness> = new Set<Readiness>(["unknown", "limited"]);
+
+/**
+ * Whether a state is *known, settled and unblocked*: not working, not unreadable,
+ * not parked at a usage cap.
+ *
+ * Kept as one predicate with two callers — `agendo wait`'s default predicate
+ * (wait.ts) and the stalled-session qualifier (idle.ts) — rather than two
+ * lookalike rules that can drift. Both are answering the same question, "has this
+ * session stopped working in a way that means something?", and they must never
+ * disagree about it. Note `wait` also admits its synthetic `exited` state through
+ * this (neither working nor in NOT_SETTLED), which is correct: a session whose
+ * window is gone is as settled as it will ever get.
+ */
+export function isSettledReadiness(r: Readiness): boolean {
+  return !WORKING_READINESS.has(r) && !NOT_SETTLED.has(r);
+}
+
+/**
  * Real (user-typed) text on the claude input line, ignoring the `❯` marker and
  * any gray/dim *suggestion* placeholder. The TUI renders a suggestion in faint
  * (`\e[2m`) / gray, and real text in the default color — so we count only
@@ -333,15 +376,19 @@ function inputRealText(line: string): string {
  * `raw` must include SGR escapes (see `capturePane`), and `cursor` — the caret
  * captured alongside it (see `capturePaneState`) — is the second, color-blind
  * signal for "is anything typed?"; omitting it falls back to the color read alone
- * (see `inputEmpty`). Busy/dialog use specific, transient markers so scanning the
- * whole visible screen is safe: claude's prose questions don't match them, and
- * while a *finished* turn keeps a token count in
- * its result summary (`✔ Goal achieved (1m · 1 turn · 4.6k tokens)`), that
- * summary never carries the live counter's directional ↑/↓ arrow — which the
- * busy check requires — so an idle post-turn pane isn't mistaken for a live one.
+ * (see `inputEmpty`).
+ *
+ * Every marker below is read POSITIONALLY, from the region of the screen that
+ * actually carries the state it claims to prove — the compacting/busy markers from
+ * the CLI's live status region (`liveStatusLines`), the limit notice from the last
+ * content block above the box (`paneUsageLimited`), a dialog from the bottom-most
+ * content (`isDialog`). Scanning the whole visible screen was tried and is wrong:
+ * the transcript is history, so a turn that merely *quotes* a marker put an idle
+ * session into a state that `send` refuses. This mirrors `paneResumeDialogActive`
+ * (#30) and carries the same bias — a false "not ready" that blocks a send costs
+ * more than a missed detect.
  */
 export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readiness {
-  const plain = stripAnsi(raw);
   // The claude CLI's OWN startup prompt about *how* to resume this session — not
   // the agent asking anything about the work, so from a caller's point of view
   // the session is available and we report it as "ready".
@@ -361,13 +408,23 @@ export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readines
   // re-check `paneResumeDialogActive` and answer the dialog first (see
   // `answerResumeDialog`) instead of pasting on the strength of "ready".
   if (paneResumeDialogActive(raw)) return "ready";
+  // WHERE the next two checks look: the CLI's own live status region, NOT the
+  // whole screen (see liveStatusLines). Both markers below are transient facts
+  // about the current instant, and the transcript above the box is history — a
+  // session whose turn output merely *describes* a marker is not in that state.
+  // Live specimen: a session documenting agendo's own detection layer printed a
+  // comparison table whose cell read `inferred (esc to interrupt, token counter)`,
+  // and `agendo list` called the finished, idle session "busy" — which makes
+  // `send` refuse and leaves it unreachable until the text scrolls off.
+  const status = liveStatusLines(raw).join("\n");
   // Compacting the conversation — a distinct, blocking state. Must be checked
   // *before* the input-box read below: compaction shows no token counter and no
   // "esc to interrupt" hint, and leaves the box empty, so it would otherwise
   // fall through every busy/dialog check and misclassify as "ready" — letting a
   // prompt be sent mid-compaction. The spinner verb line reads
-  // `✻ Compacting conversation…` above a `▰▰▱▱ N%` progress bar.
-  if (/compacting conversation/i.test(plain)) return "compacting";
+  // `✻ Compacting conversation…` above a `▰▰▱▱ N%` progress bar — both inside the
+  // status region, directly above the box's top rule.
+  if (/compacting conversation/i.test(status)) return "compacting";
   // Actively generating — a live token/time counter (or an interrupt hint).
   // The counter always wears a directional ↑/↓ arrow (bytes flowing this turn):
   // `✢ Tinkering… (58s · ↓ 3.9k tokens)`. That arrow is the load-bearing
@@ -376,11 +433,13 @@ export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readines
   // shape (and leads with a ✔/✗ glyph + an "N turn(s)" count) but never an
   // arrow. So both checks REQUIRE the arrow: matching the bare parenthesized
   // shape alone read an idle, done-with-its-turn pane as "busy" and blocked
-  // `agendo send`.
+  // `agendo send`. The arrow is a *content* guard on top of the positional one,
+  // and still needed: the status region legitimately holds a finished turn's
+  // summary between turns.
   if (
-    /[↑↓]\s*[\d.,]+\s*k?\s*tokens?\b/i.test(plain) ||
-    /\(\s*\d[^)]*[↑↓][^)]*\btokens?\b[^)]*\)/i.test(plain) ||
-    /esc to interrupt/i.test(plain)
+    /[↑↓]\s*[\d.,]+\s*k?\s*tokens?\b/i.test(status) ||
+    /\(\s*\d[^)]*[↑↓][^)]*\btokens?\b[^)]*\)/i.test(status) ||
+    /esc to interrupt/i.test(status)
   )
     return "busy";
   // Usage/token window exhausted — the 5-hour or weekly cap. Only when the notice
@@ -764,6 +823,24 @@ interface InputBox {
   promptOffset: number;
   /** Column of the first input cell, one past the `❯ ` marker. */
   inputCol: number;
+  /** Capture line index of the box's top `─` rule (may be < 0, see inputBox). */
+  topRule: number;
+  /**
+   * Whether a second rule was found at all. False when only one was and the top had
+   * to be fabricated (`bottom - 2`), in which case the index points at whatever
+   * happens to sit two rows up — a transcript line, not a boundary. Callers that
+   * reason about the region ABOVE the box must not trust `topRule` without it.
+   *
+   * A weaker guarantee than "the box's top rule is on screen": with the real top
+   * rule scrolled off and a table drawing `─{20,}` back in the scrollback, two rules
+   * are found and this is true while `topRule` still points into the transcript.
+   * Nothing observed does that (the box sits at the bottom of the pane, so its own
+   * rule scrolls off only when the box body is taller than the screen), but the flag
+   * is the cheap half of the test, not the whole of it.
+   */
+  topRuleFound: boolean;
+  /** Capture line index of the box's bottom `─` rule. */
+  bottomRule: number;
 }
 
 /**
@@ -793,7 +870,94 @@ function inputBox(raw: string): InputBox | null {
     promptOffset,
     // `❯ ` — the marker plus the single space separating it from the input.
     inputCol: stripAnsi(lines[promptRow]).indexOf("❯") + 2,
+    topRule: top,
+    topRuleFound: rules.length >= 2,
+    bottomRule: bottom,
   };
+}
+
+/**
+ * How many contiguous lines above the input box's top rule can be the CLI's live
+ * status line, once the blanks, the right-aligned hints and the task panel between
+ * it and the box have been skipped (see liveStatusLines). One is the common case
+ * (`✢ Tinkering… (58s · ↓ 3.9k tokens)`, or the idle `✻ Churned for 11m 13s` it
+ * turns into); compaction draws two (the verb line plus its `▰▰▱▱ 42%` bar). Three
+ * leaves a line of slack without letting the walk run on into the transcript, and
+ * it truncates the far end, so the row nearest the box always survives.
+ */
+const STATUS_ABOVE_MAX_LINES = 3;
+
+/**
+ * The pane's LIVE STATUS region, ANSI-stripped and trimmed: the parts of the
+ * screen that show what the CLI is doing *right now*, as opposed to the
+ * transcript, which is history.
+ *
+ * Two disjoint bands, both anchored on the input box:
+ *
+ *  - ABOVE its top rule: the CLI's own status line — the spinner. `blockAbove`
+ *    descends from the rule past everything the TUI parks in the gap beneath that
+ *    row — blank lines, the right-aligned hints (`isBoxSideHint`), and the standing
+ *    `N tasks (…)` panel (`taskPanelLines` for the structural match, plus
+ *    `looksLikeTaskPanel` so one unrecognized row can't end the walk; its item
+ *    titles are the user's own words and must never be read as CLI state) — and
+ *    returns the run that follows. Skipping all of it is not cosmetic: every one of
+ *    those lines sits between the status row and the rule on a long session, so
+ *    collecting one would end the walk at the next blank and the live spinner above
+ *    would never be seen — a busy pane reading `ready`, the direction that lets
+ *    `send` paste into a running turn and `close` kill it.
+ *  - BELOW its bottom rule: the footer, the mode bar and the sub-agent panel
+ *    (`❯ ◯ general-purpose  Review …  5m 39s · ↓ 99.9k tokens`). Nothing below the
+ *    box is ever transcript, so the whole band counts — and it is load-bearing: a
+ *    session whose own turn has finished but whose background agent is still
+ *    running is busy, and only that band says so.
+ *
+ * Two cases fall back to returning the WHOLE capture — the pre-existing behaviour —
+ * and they are not equally free:
+ *
+ *  - No input box at all. Free: by the time this runs the one boxless "ready" (the
+ *    CLI's own resume dialog) has already been answered above, so every remaining
+ *    boxless verdict — dialog, limited, unknown, and the boxless `compacting` that
+ *    `agendo send` relies on — is un-sendable either way. Narrowing instead against
+ *    rules that may not bound a box at all (a table in scrollback draws `─` too)
+ *    would guess at a region rather than find one.
+ *  - A box whose top rule is off screen, so `inputBox` fabricated one and
+ *    `topRuleFound` is false. NOT free: that pane has a working input box and could
+ *    be perfectly ready, so scanning it whole is a live false-busy path — the thing
+ *    this change exists to remove, in the one place it is still possible. Taken
+ *    anyway because the alternative is worse: measuring a band from a fabricated
+ *    boundary reads the transcript as status, which fails the other way (a busy pane
+ *    reading ready) on a pane we cannot see enough of to check. It needs a box body
+ *    taller than the screen to happen at all.
+ *
+ * `raw` may include SGR escapes (see capturePane).
+ *
+ * Two known limits, in opposite directions. A pane whose transcript butts directly
+ * against the box — no blank, no status row between them — contributes up to
+ * STATUS_ABOVE_MAX_LINES transcript lines, so a marker QUOTED there still reads
+ * busy; that is a far narrower target than the whole screen (the capture this
+ * exists for matched ~35 lines up, inside a table) and it fails safe. Conversely, a
+ * status line pushed further from the box than the walk survives is MISSED, and
+ * that one fails dangerous — a busy pane reading `ready`. Anything unrecognized in
+ * the gap does it: more than STATUS_ABOVE_MAX_LINES rows of status line, a new hint
+ * the TUI starts drawing there, or the shapeless tail of a WRAPPED panel row on a
+ * narrow pane (pinned in the detection suite; closing it needs a real narrow-pane
+ * capture). New chrome in that gap therefore belongs in `isBoxSideHint` or
+ * `looksLikeTaskPanel`, not in the bound — widening the bound trades the miss for
+ * the false positive this exists to remove.
+ */
+function liveStatusLines(raw: string): string[] {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  const plain = lines.map((l) => stripAnsi(l).trim());
+  const box = inputBox(raw);
+  if (box === null || !box.topRuleFound) return plain;
+  const taskPanel = taskPanelLines(plain, LOOSE_TASK_PANEL_HEADER_RE);
+  const above = blockAbove(
+    plain,
+    box.topRule,
+    STATUS_ABOVE_MAX_LINES,
+    (line, i) => line === "" || isBoxSideHint(line) || taskPanel.has(i) || looksLikeTaskPanelRow(line),
+  );
+  return [...above, ...plain.slice(box.bottomRule + 1)];
 }
 
 /**
@@ -860,24 +1024,102 @@ function onlyPromptRow(box: InputBox): boolean {
 const LIMIT_ACTIVE_MAX_LINES = 12;
 
 /**
+ * The spinner's own row, in the shape it wears BETWEEN turns: a turn summary,
+ * `✻ Crunched for 0s` / `✻ Worked for 4m 54s` (the glyph and verb vary per
+ * frame/turn). Captured live on v2.1.224. Expects an ANSI-stripped, trimmed line.
+ *
+ * Chrome to one scan and content to the other, which is why it is its own
+ * predicate: `paneUsageLimited` looks for the last *conversation* block and must
+ * skip past this to find it, while `liveStatusLines` is looking for this very row —
+ * it is the same screen position the live `✢ Tinkering… (58s · ↓ 3.9k tokens)`
+ * counter occupies while a turn runs.
+ */
+function isSpinnerSummary(line: string): boolean {
+  return /^[✻✢✳✶✽·∗+*]\s+\S+\s+for\s+\d+[smhd]/.test(line);
+}
+
+/**
+ * The right-aligned hints the TUI parks in the gap between the spinner row and the
+ * box's top rule (both captured live on v2.1.224):
+ *   - the effort/mode hint: `● high · /effort`;
+ *   - the context-pressure hint: `new task? /clear to save 293k tokens` (captured
+ *     on a live limited pane, where it hid the notice from detection).
+ * Expects an ANSI-stripped, trimmed line.
+ *
+ * Chrome to BOTH scans above the box, and skipping it is load-bearing for each: it
+ * is neither conversation content nor CLI state, but it physically separates the
+ * spinner row from the box — so a scan that collected it would stop at the very
+ * next blank and never reach the row it came for.
+ */
+function isBoxSideHint(line: string): boolean {
+  return /^●\s+\S+\s+·\s+\/[\w-]+$/.test(line) || /^new task\?\s+\/clear to save\b/i.test(line);
+}
+
+/**
+ * A line SHAPED like a task-panel item row — a checkbox glyph, or the elision
+ * footer — with no header-then-run licence behind it. The unlicensed backstop to
+ * `liveStatusLines`' licensed `taskPanelLines` skip: it covers the panel whose
+ * header has scrolled off the top of the pane, where there is no header to license
+ * anything. (It deliberately does NOT test the header itself: the call site already
+ * runs `taskPanelLines` over the same lines with the same loose header, which marks
+ * every header line it could match.)
+ *
+ * Nothing ENFORCES that this only ever sees the gap between the status row and the
+ * box: when the status row is absent the walk keeps descending and applies this to
+ * the conversation, so it has to be safe there too. Hence a glyph set deliberately
+ * NARROWER than TASK_PANEL_ROW_RE's — the checkbox glyphs `◼◻◐◌☐☑` only, never
+ * `●○✔✓✗`. Those five are what ordinary turn output is bulleted with (`● Agent "…"
+ * failed`, `✔ Goal achieved (1m · 1 turn · 4.6k tokens)`), and skipping them
+ * unlicensed let the walk climb an arbitrarily long run of transcript bullets and
+ * read a marker quoted above them — the very false positive this whole change
+ * removes. `✔` is a real done-row glyph, so dropping it here costs a real skip; the
+ * loose header hands that case back positionally instead, which is the safe way to
+ * buy it (see LOOSE_TASK_PANEL_HEADER_RE). Both regressions are pinned in the
+ * detection suite.
+ */
+function looksLikeTaskPanelRow(line: string): boolean {
+  return /^[◼◻◐◌☐☑]\s+\S/.test(line) || /^…\s*\+\d+\b/.test(line);
+}
+
+/**
  * UI chrome the TUI renders between the last content block and the input box —
  * lines that carry no conversation content and so must NOT count as "the session
- * moved on" when locating the active block (all captured live on v2.1.224):
- *   - the spinner's turn summary: `✻ Crunched for 0s`, `✻ Worked for 4m 54s`
- *     (the glyph and verb vary per frame/turn);
- *   - the right-aligned effort/mode hint above the box's top rule: `● high · /effort`;
- *   - the right-aligned context-pressure hint: `new task? /clear to save 293k tokens`
- *     (captured on a live limited pane, where it hid the notice from detection).
- * Expects an ANSI-stripped, trimmed line. Deliberately narrow: a turn-output
+ * moved on" when locating the active block. Deliberately narrow: a turn-output
  * bullet (`● Build 123456 now: SUCCEEDED`) or a typed `❯ continue` is content,
  * and correctly demotes any notice above it to history.
  */
 function isPaneChrome(line: string): boolean {
-  return (
-    /^[✻✢✳✶✽·∗+*]\s+\S+\s+for\s+\d+[smhd]/.test(line) ||
-    /^●\s+\S+\s+·\s+\/[\w-]+$/.test(line) ||
-    /^new task\?\s+\/clear to save\b/i.test(line)
-  );
+  return isSpinnerSummary(line) || isBoxSideHint(line);
+}
+
+/**
+ * The contiguous block of interesting lines directly above `top`, nearest-first
+ * from the caller's point of view: descend from `top - 1`, skipping whatever `skip`
+ * rejects until something is collected, then stop at the first rejected line after
+ * that. Bounded by `max`, which truncates the FAR (upper) end — the nearest lines
+ * to the box are the ones both callers care most about.
+ *
+ * `max` bounds what is COLLECTED, not how far the descent goes: a run of skipped
+ * lines is walked through however long it is. That is what lets both callers reach
+ * past a tall task panel, and equally what makes a too-permissive `skip` dangerous —
+ * it tunnels into the transcript instead of stopping at it.
+ *
+ * Shared by the two scans that ask "what is directly above the input box?" —
+ * `paneUsageLimited` (which content block is current?) and `liveStatusLines` (what
+ * is the CLI doing?). They differ only in `skip` and `max`, and deliberately so:
+ * the spinner row is chrome to the first and the whole point of the second (see
+ * isSpinnerSummary). `plain` must be ANSI-stripped and trimmed.
+ */
+function blockAbove(plain: string[], top: number, max: number, skip: (line: string, i: number) => boolean): string[] {
+  const out: string[] = [];
+  for (let i = top - 1; i >= 0 && out.length < max; i--) {
+    if (skip(plain[i], i)) {
+      if (out.length) break; // reached the gap above the block
+      continue; // still below it — keep descending
+    }
+    out.unshift(plain[i]);
+  }
+  return out;
 }
 
 /**
@@ -886,6 +1128,30 @@ function isPaneChrome(line: string): boolean {
  * the parens so ordinary prose ("3 tasks (see below)") can't open a panel.
  */
 const TASK_PANEL_HEADER_RE = /^\d+\s+tasks?\s+\([^)]*\b(?:done|in progress|open|pending)\b[^)]*\)$/i;
+
+/**
+ * The same header with the vocabulary and the closing `)` dropped — the SHAPE only.
+ * Used solely by `liveStatusLines`, which needs to get *past* a panel rather than
+ * decide whether one exists, and which pays a fail-dangerous price for a header it
+ * fails to recognize: an unmarked panel row ends the walk before the status row and
+ * a generating pane reads `ready`. This shape survives a reworded count
+ * (`(2 completed, 3 remaining)`) and a header wrapped on a narrow pane, neither of
+ * which the strict form does.
+ *
+ * `paneUsageLimited` keeps the strict form on purpose: over-marking there hides an
+ * active limit notice, so its error has the opposite sign.
+ *
+ * The cost, stated: dropping the wording test lets PROSE open a run — a sentence
+ * like `3 tasks (one per repo):` — and the rows under it are then matched by the
+ * permissive TASK_PANEL_ROW_RE, `●` and `✔` included. A marker quoted above such a
+ * run can therefore be reached. It needs the status row to be absent, the prose line
+ * to be digit-led, and a contiguous bullet run directly beneath it with no blank
+ * between; and it fails in the false-busy direction this file accepts. Anchoring the
+ * loose form on the closing `)` would not help: that is exactly what a header
+ * wrapped on a narrow pane loses. Pinned in the detection suite as a known limit,
+ * with the two controls that close it.
+ */
+const LOOSE_TASK_PANEL_HEADER_RE = /^\d+\s+tasks?\s+\(/i;
 
 /**
  * A row *inside* an already-opened task panel: a status-glyph item line
@@ -907,13 +1173,20 @@ const TASK_PANEL_ROW_RE = /^(?:[◼◻◐◌●○☐☑✔✓✗]\s+\S|…\s*\+
  *
  * Found structurally — a header line, then the contiguous run of rows beneath it —
  * rather than by matching item glyphs anywhere on screen, so a turn-output line
- * that merely starts with one of those glyphs is still content. `lines` are
- * ANSI-stripped and trimmed.
+ * that merely starts with one of those glyphs is still content. That header is what
+ * LICENSES the permissive glyph set: `●`, `✔` and `✗` are also how ordinary turn
+ * output is bulleted, and marking them unlicensed reads the conversation as UI.
+ *
+ * `header` is which header opens a run, and both callers pass it explicitly — there
+ * is no sensible default, because the two scans need OPPOSITE strictness: a header
+ * `paneUsageLimited` wrongly accepts hides an active limit notice, while one
+ * `liveStatusLines` wrongly rejects hides a live spinner. `lines` are ANSI-stripped
+ * and trimmed.
  */
-function taskPanelLines(lines: string[]): Set<number> {
+function taskPanelLines(lines: string[], header: RegExp): Set<number> {
   const marked = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
-    if (!TASK_PANEL_HEADER_RE.test(lines[i])) continue;
+    if (!header.test(lines[i])) continue;
     marked.add(i);
     for (let j = i + 1; j < lines.length && TASK_PANEL_ROW_RE.test(lines[j]); j++) marked.add(j);
   }
@@ -985,16 +1258,13 @@ export function paneUsageLimited(raw: string): boolean {
   if (rules.length === 0) return isUsageLimited(stripAnsi(raw));
   const top = rules.length >= 2 ? rules[rules.length - 2] : rules[rules.length - 1] - 2;
   const plainLines = lines.map((l) => stripAnsi(l).trim());
-  const taskPanel = taskPanelLines(plainLines);
-  const block: string[] = [];
-  for (let i = top - 1; i >= 0 && block.length < LIMIT_ACTIVE_MAX_LINES; i--) {
-    const line = plainLines[i];
-    if (line === "" || isPaneChrome(line) || taskPanel.has(i)) {
-      if (block.length) break; // reached the gap above the collected block
-      continue; // still below the block: skip blanks and box-side chrome
-    }
-    block.unshift(line);
-  }
+  const taskPanel = taskPanelLines(plainLines, TASK_PANEL_HEADER_RE);
+  const block = blockAbove(
+    plainLines,
+    top,
+    LIMIT_ACTIVE_MAX_LINES,
+    (line, i) => line === "" || isPaneChrome(line) || taskPanel.has(i),
+  );
   return isUsageLimited(block.join(" "));
 }
 
@@ -1029,6 +1299,32 @@ export function paneResumeSafe(raw: string, cursor?: PaneCursor | null): boolean
   if (isDialog(raw)) return false;
   const input = inputBox(raw);
   return input !== null && inputEmpty(input, cursor);
+}
+
+/**
+ * The compaction progress bar's percentage — `42` for `▰▰▰▱▱▱ 42%` — or null when
+ * the pane isn't showing one. Read from the live status region (`liveStatusLines`),
+ * the same band `paneReadiness` takes the "compacting" verdict from, so a transcript
+ * that merely quotes a bar can't produce a reading.
+ *
+ * Anchored on the bar's own `▰`/`▱` blocks rather than on `%`, and that anchor is
+ * load-bearing: the status region deliberately includes everything below the input
+ * box, and the TUI's footer there is full of percentages — `29% ctx | 5h: 9% (3h 9m)
+ * | 7d: 63%` — any of which a bare `\d+%` would happily return as the compaction
+ * progress. The bar glyphs appear nowhere else.
+ *
+ * Deliberately NOT gated on the pane being compacting: callers that display it pair
+ * it with the readiness they already have (see `rowCompactionPercent` in index.tsx),
+ * which keeps this a pure read of one thing. Returns null rather than 0 when there
+ * is no bar — "no reading" and "0% done" are different claims, and a compaction that
+ * has genuinely just started does print `0%`.
+ */
+export function paneCompactionPercent(raw: string): number | null {
+  const m = liveStatusLines(raw).join("\n").match(/[▰▱]+\s*(\d{1,3})\s*%/);
+  if (!m) return null;
+  const pct = Number(m[1]);
+  // A bar that reports something impossible is a misread, not a datum.
+  return pct >= 0 && pct <= 100 ? pct : null;
 }
 
 /**

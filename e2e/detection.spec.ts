@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect } from "../src/tmux.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
 import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
@@ -1222,6 +1222,303 @@ test.describe("paneReadiness: a greyed-out autocomplete suggestion is NOT typed 
     expect(paneReadiness(empty)).toBe("ready");
     expect(paneReadiness(empty, { x: 4, y: 1 })).toBe("ready");
     expect(paneReadiness(empty, { x: 99, y: 9 })).toBe("ready");
+  });
+});
+
+// BUSY-MARKER POSITION. The busy/compacting markers used to be matched against
+// `stripAnsi(raw)` — the WHOLE visible pane — but they are facts about the CLI's
+// own live status line, not about anything in the transcript. A session whose job
+// was to document agendo's detection layer printed a comparison table containing
+// `inferred (esc to interrupt, token counter)`, and `agendo list` reported the
+// finished, idle session as "busy". `agendo send` refuses a non-ready pane, so the
+// session was unreachable until the text scrolled off — the same blocked-forever
+// failure #30 fixed by another route, and not exotic here: any session working on
+// this file prints these markers.
+//
+// busy-quoted-marker.*: verbatim `tmux capture-pane` of that pane (session
+// codex-support, 2026-08-14), sterilized (home dir → /home/user, ids zeroed) but
+// otherwise byte-for-byte — `.ansi` is `-p -e`, `-plain.txt` is `-p`, `.cursor` is
+// the `#{cursor_x} #{cursor_y}` readout taken with it.
+const QUOTED_PANE = fullPane("busy-quoted-marker.ansi");
+const QUOTED_PANE_PLAIN = fullPane("busy-quoted-marker-plain.txt");
+const QUOTED_CURSOR = (() => {
+  const m = fullPane("busy-quoted-marker.cursor").match(/cursor_x=(\d+)\s+cursor_y=(\d+)/)!;
+  return { x: Number(m[1]), y: Number(m[2]) };
+})();
+
+test.describe("paneReadiness: busy is read from the live status line, not the transcript", () => {
+  test("REAL CAPTURE: an idle pane whose turn output QUOTES 'esc to interrupt' is ready", () => {
+    // The bug, verbatim. Was: "busy".
+    expect(paneReadiness(QUOTED_PANE)).toBe("ready");
+    expect(paneReadiness(QUOTED_PANE, QUOTED_CURSOR)).toBe("ready");
+  });
+
+  test("the marker really is on that screen, and really is transcript", () => {
+    // Guards the fixture itself: if a future re-sterilization dropped the phrase,
+    // the test above would pass for the wrong reason.
+    const lines = stripAnsi(QUOTED_PANE).split("\n");
+    const marker = lines.findIndex((l) => /esc to interrupt/i.test(l));
+    expect(marker).toBeGreaterThan(-1);
+    expect(lines[marker]).toContain("│"); // inside a box-drawing table, in a table cell
+    // …and it sits far above the input box, not on the status line above it.
+    const rule = lines.findLastIndex((l) => /─{20,}/.test(l));
+    expect(rule - marker).toBeGreaterThan(30);
+    // Nothing else could have produced the verdict: no live counter anywhere.
+    expect(stripAnsi(QUOTED_PANE)).not.toMatch(/[↑↓]/);
+    expect(stripAnsi(QUOTED_PANE)).not.toMatch(/compacting conversation/i);
+  });
+
+  test("the same pane with a LIVE spinner on its status line is busy", () => {
+    // The proof that this is positional and not a deletion: put a real spinner
+    // where the CLI draws one — the line above the box, here the idle
+    // `✻ Churned for 11m 13s` summary — and the very same capture reads "busy".
+    const lines = QUOTED_PANE.split("\n");
+    // The LAST such row: the status line is by definition the one nearest the box.
+    const statusRow = lines.findLastIndex((l) => /Churned for/.test(stripAnsi(l)));
+    expect(statusRow).toBeGreaterThan(-1);
+    // Replaced in place, so every row index the caret refers to is untouched.
+    lines[statusRow] = "✢ Tinkering… (58s · ↓ 3.9k tokens · esc to interrupt)";
+    expect(paneReadiness(lines.join("\n"))).toBe("busy");
+    expect(paneReadiness(lines.join("\n"), QUOTED_CURSOR)).toBe("busy");
+  });
+
+  test("REAL CAPTURE: the color-stripped form needs the caret, and the fix holds there too", () => {
+    // Same screen, escapes discarded: the box's dim history suggestion looks like
+    // a draft to the color read, so "queued" — but never "busy".
+    expect(paneReadiness(QUOTED_PANE_PLAIN)).toBe("queued");
+    expect(paneReadiness(QUOTED_PANE_PLAIN, QUOTED_CURSOR)).toBe("ready");
+  });
+
+  // Where the marker sits is the whole question, so each band gets pinned.
+  const rule = "  ─────────────────────────────────────────";
+  const box = [rule, "  ❯ ", rule];
+  const pane = (...above: string[]) => [...above, ...box].join("\n");
+
+  test("on the status line directly above the box: busy", () => {
+    expect(paneReadiness(pane("  ✢ Tinkering… (58s · ↓ 3.9k tokens)"))).toBe("busy");
+    expect(paneReadiness(pane("  ✢ Tinkering… (esc to interrupt)"))).toBe("busy");
+  });
+
+  test("in the transcript, with the status line between it and the box: ready", () => {
+    expect(
+      paneReadiness(
+        pane(
+          "  │ status │ inferred (esc to interrupt, token counter) │ Ready │",
+          "",
+          "  ✻ Churned for 11m 13s",
+          "",
+        ),
+      ),
+    ).toBe("ready");
+  });
+
+  test("in a task-panel item title: ready — the panel is standing UI, not CLI state", () => {
+    // Item titles are the user's own words and render between the status line and
+    // the box, so they must be skipped rather than read (see taskPanelLines).
+    expect(
+      paneReadiness(
+        pane(
+          "  ✻ Churned for 11m 13s",
+          "",
+          "  3 tasks (1 done, 1 in progress, 1 open)",
+          "  ◼ Make 'esc to interrupt' positional",
+          "  ◻ Add a regression fixture",
+          "  ✔ Read the #30 resume-dialog code",
+          "",
+        ),
+      ),
+    ).toBe("ready");
+  });
+
+  test("…but a task panel does not HIDE a live spinner above it", () => {
+    // The walk skips the panel and keeps going, so the status line is still read.
+    expect(
+      paneReadiness(
+        pane(
+          "  ✢ Tinkering… (58s · ↓ 3.9k tokens)",
+          "",
+          "  3 tasks (1 done, 1 in progress, 1 open)",
+          "  ◼ Make 'esc to interrupt' positional",
+          "",
+        ),
+      ),
+    ).toBe("busy");
+  });
+
+  // The box-side hints are the reason the walk cannot simply stop at the first
+  // non-blank line it finds. Both are right-aligned into the gap between the
+  // spinner row and the box's top rule — `busy-quoted-marker-plain.txt` line 64 is
+  // the context hint, 255 columns wide — so a walk that COLLECTED one would end at
+  // the next blank and never reach the spinner two rows up. That misses a live
+  // turn, which is the direction that lets `send` paste into a running pane. Found
+  // in review, not in the field; these are the probes that failed.
+  test("a right-aligned hint between the spinner and the box does not hide it", () => {
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    for (const hint of ["  new task? /clear to save 292.8k tokens", "  ● high · /effort"]) {
+      expect(paneReadiness(pane(spinner, hint))).toBe("busy"); // no blank between
+      expect(paneReadiness(pane(spinner, "", hint))).toBe("busy"); // and with one
+      expect(paneReadiness(pane(spinner, "", hint, ""))).toBe("busy");
+    }
+  });
+
+  test("hint AND task panel together still do not hide it", () => {
+    // The realistic long-session layout: a task list, the context hint, and the
+    // spinner three skips up.
+    expect(
+      paneReadiness(
+        pane(
+          "  ✢ Tinkering… (58s · ↓ 3.9k tokens)",
+          "",
+          "  3 tasks (1 done, 1 in progress, 1 open)",
+          "  ◼ Make 'esc to interrupt' positional",
+          "",
+          "  new task? /clear to save 292.8k tokens",
+        ),
+      ),
+    ).toBe("busy");
+  });
+
+  test("a hint does not hide mid-compaction either", () => {
+    expect(
+      paneReadiness(
+        pane("  ✻ Compacting conversation…", "  ▰▰▰▱▱▱ 42%", "", "  new task? /clear to save 292.8k tokens"),
+      ),
+    ).toBe("compacting");
+  });
+
+  test("an UNRECOGNIZED task-panel row does not hide the spinner either", () => {
+    // The strict taskPanelLines marks only the contiguous run under a header it
+    // recognizes, so one odd line used to leave the whole panel looking like content
+    // and end the walk. Two things keep it going: the loose header shape, and
+    // looksLikeTaskPanelRow for a panel whose header has scrolled off entirely.
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    const rows = ["  ◼ Cache layer + eviction policy", "  ◻ UI: status, counters"];
+    // Header wording outside TASK_PANEL_HEADER_RE's vocabulary.
+    expect(paneReadiness(pane(spinner, "", "  5 tasks (2 completed, 3 remaining)", ...rows, ""))).toBe("busy");
+    // Header wrapped on a narrow pane, so its `$` anchor misses — the leading half
+    // still has the shape, so the walk gets past it.
+    expect(paneReadiness(pane(spinner, "", "  7 tasks (3 done, 1 in progress,", ...rows, ""))).toBe("busy");
+    // No header at all (scrolled off the top of the panel).
+    expect(paneReadiness(pane(spinner, "", ...rows, ""))).toBe("busy");
+  });
+
+  test("a DONE row is only skippable under a header — and the loose header gives it back", () => {
+    // `✔` is both a real done-row glyph (limit-notice-task-panel.ansi:62) and how
+    // turn output is bulleted, so it can't be skipped on shape alone without
+    // reopening the transcript tunnel. The loose header licenses it positionally
+    // instead: a panel whose count is worded outside the strict vocabulary still
+    // gets walked past, done rows and all.
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    const rows = [
+      "  ◼ Cache layer + eviction policy + write path (priority 1)",
+      "  ◻ UI: status, counters, verbose mode",
+      "  ✔ Project skeleton that builds a debug binary",
+      "  … +2 completed",
+    ];
+    expect(paneReadiness(pane(spinner, "", "  5 tasks (2 completed, 3 remaining)", ...rows, ""))).toBe("busy");
+    expect(paneReadiness(pane(spinner, "", "  3 tasks (3 finished)", "  ✔ Only a done row", ""))).toBe("busy");
+    // The strict header still works too — this is the fixture's own wording.
+    expect(paneReadiness(pane(spinner, "", "  7 tasks (3 done, 1 in progress, 3 open)", ...rows, ""))).toBe("busy");
+  });
+
+  test("compaction progress is read off the bar, not off any percent on screen", () => {
+    // The status region deliberately includes the footer BELOW the input box, and
+    // that footer is nothing but percentages — so the bar's own `▰`/`▱` blocks are
+    // what the reading is anchored on.
+    const footer = "  09:14:02 | 29% ctx | 5h: 9% (3h 9m) | 7d: 63% (81h 19m) | Opus 5";
+    const compacting = [...box, footer];
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…", "  ▰▰▰▱▱▱ 42%") + "\n" + footer)).toBe(42);
+    // A bar that has only just appeared reports 0 — a real reading, not "none".
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…", "  ▱▱▱▱▱▱ 0%"))).toBe(0);
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…", "  ▰▰▰▰▰▰ 100%"))).toBe(100);
+    // No bar drawn yet: null, so callers print nothing rather than claim 0%.
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…"))).toBeNull();
+    // The footer's percentages alone must never be mistaken for progress.
+    expect(paneCompactionPercent(compacting.join("\n"))).toBeNull();
+    // And a transcript that merely draws a bar is history, like every other marker.
+    expect(paneCompactionPercent(pane("  ▰▰▰▱▱▱ 42%", "", "  ✻ Churned for 11m 13s", ""))).toBeNull();
+  });
+
+  test("KNOWN LIMIT: prose shaped like a panel header licenses the rows under it", () => {
+    // The loose header is a shape, so a sentence starting `3 tasks (` opens a run
+    // and the permissive glyphs under it become skippable — the walk then reaches a
+    // marker quoted above. Accepted, not fixed: it needs a digit-led `N tasks (`
+    // line with NO blank and no prose before a contiguous run of glyph rows, all in
+    // the gap above the box, with a quoted marker within 3 lines above that — and
+    // real turn output puts such a sentence inside a `●` block, whose following
+    // lines are indented continuations. The error is also the cheap one: a refused
+    // `send` on an idle session, recoverable with `--force`, versus the miss the
+    // loose header bought back (`send`/`close` into a running turn).
+    const quoted = "  │ status │ inferred (esc to interrupt, token counter) │ Ready │";
+    const bullets = ["● a", "● b", "● c"];
+    expect(paneReadiness(pane(quoted, "  3 tasks (see below)", ...bullets))).toBe("busy");
+    // What the licensing actually requires — either control closes it.
+    expect(paneReadiness(pane(quoted, "  3 tasks (see below)", "", ...bullets))).toBe("ready");
+    expect(paneReadiness(pane(quoted, "  3 tasks (see below)", "  Here they are:", ...bullets))).toBe("ready");
+  });
+
+  test("KNOWN LIMIT: a WRAPPED panel line's tail is shapeless, and does end the walk", () => {
+    // Pinned, not endorsed. A continuation row is arbitrary text — `progress, 3
+    // open)` here — so nothing distinguishes it from transcript, the run stops
+    // there, and a genuinely busy pane reads "ready". Closing it means teaching
+    // taskPanelLines about wrapping, which needs a real narrow-pane capture that
+    // this repo does not have; the alternative, widening the walk by DISTANCE
+    // instead of by run, buys it back at the cost of the false positives this whole
+    // change exists to remove. Recorded here so the trade is deliberate and a
+    // future fix has a failing case to flip.
+    const spinner = "  ✢ Tinkering… (58s · ↓ 3.9k tokens)";
+    const wrapped = ["  7 tasks (3 done, 1 in", "  progress, 3 open)", "  ◼ Cache layer"];
+    expect(paneReadiness(pane(spinner, "", ...wrapped, ""))).toBe("ready");
+  });
+
+  test("a box whose top rule scrolled off falls back to scanning the whole pane", () => {
+    // With one rule, inputBox fabricates `top = bottom - 2`, which points at a
+    // transcript line, not a boundary — so there is no band to measure and the
+    // permissive read stands rather than a made-up one.
+    expect(paneReadiness(["  ✢ Tinkering… (58s · ↓ 3.9k tokens)", "  ❯ ", rule].join("\n"))).toBe("busy");
+  });
+
+  test("skipping chrome must not tunnel into the transcript", () => {
+    // `blockAbove` bounds what it COLLECTS, not how far it descends, so an
+    // over-eager skip predicate walks straight past the gap and reads history as
+    // status — the original bug, re-entered through the back door. Both blockers
+    // below must stop the walk: the chrome row the TUI normally draws…
+    const quoted = "  │ status │ inferred (esc to interrupt, token counter) │ Ready │";
+    const hint = "  new task? /clear to save 292.8k tokens";
+    expect(paneReadiness(pane(quoted, "", "  ✻ Churned for 11m 13s", "", hint))).toBe("ready");
+    // …and ordinary bulleted turn output, which wears the glyphs a task-panel row
+    // wears (`●`, `✔`, `✗`) and must NOT be skipped for it. Caught in review: with
+    // the wide glyph set, all three of these read "busy".
+    expect(paneReadiness(pane(quoted, "", "  ● Reviewed the detection layer.", "", hint))).toBe("ready");
+    expect(paneReadiness(pane(quoted, "", "  ✔ tests pass", "  ✗ lint failed", "", hint))).toBe("ready");
+    expect(paneReadiness(pane(quoted, "", ...Array.from({ length: 12 }, (_, i) => `  ● step ${i}`), "", hint))).toBe("ready");
+  });
+
+  test("below the box: busy — nothing under the input box is ever transcript", () => {
+    // Both real forms: the footer interrupt hint, and the sub-agent panel's own
+    // live counter (a finished turn waiting on a background agent is still busy).
+    expect(paneReadiness([...box, "  esc to interrupt"].join("\n"))).toBe("busy");
+    expect(paneReadiness([...box, "  ● main", "❯ ◯ general-purpose  Review  5m 39s · ↓ 99.9k tokens"].join("\n"))).toBe("busy");
+    // Pinned on the real capture too (this is what makes GHOST_PANE busy).
+    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+  });
+
+  test("typed INTO the box: queued, not busy — a draft is not a state", () => {
+    expect(paneReadiness([rule, "  ❯ why does esc to interrupt match?", rule].join("\n"))).toBe("queued");
+  });
+
+  test("compacting is positional the same way", () => {
+    expect(paneReadiness(pane("  ✻ Compacting conversation…", "  ▰▰▰▱▱▱ 42%"))).toBe("compacting");
+    expect(paneReadiness(pane("  I explained how compacting conversation works.", "", "  ✻ Churned for 2s", ""))).toBe("ready");
+  });
+
+  test("with NO input box to anchor on, the whole screen is still scanned", () => {
+    // Deliberately permissive: a boxless pane is un-sendable either way (it reads
+    // "unknown" at best), so narrowing against rules that may not be a box costs
+    // safety for nothing. Both cli.spec's boxless compacting pane and a bare
+    // spinner depend on this.
+    expect(paneReadiness("✻ Compacting conversation… (esc to interrupt)\n  ▰▰▰▱▱▱ 42%")).toBe("compacting");
+    expect(paneReadiness("  ✢ Tinkering… (58s · ↓ 3.9k tokens)")).toBe("busy");
   });
 });
 
