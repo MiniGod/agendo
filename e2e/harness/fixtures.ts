@@ -87,6 +87,11 @@ export async function materializeHome(home: string): Promise<void> {
   // worktrees under them, and code that asks "can this host a worktree" — the
   // repo picker's demotion rule, the worktree-vs-checkout default — would
   // otherwise be told they're plain folders and behave accordingly.
+  // All three are also the input to the repo FILTER: the downward scan a path
+  // context runs (`discoverGitReposUnder`) finds a repo by exactly this marker,
+  // so `agendo ~/repos` scoping to three repos — and `agendo ~/repos/appweb` to
+  // one — depends on every one of them existing. Dropping any would silently
+  // un-scope the repo-filter tests rather than fail them.
   for (const root of [p.standalone, p.appweb, p.applib]) {
     await mkdir(join(root, ".git"), { recursive: true });
   }

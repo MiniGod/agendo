@@ -13,7 +13,7 @@ import {
   type SessionKind, type Readiness, type PaneSnapshot,
 } from "./tmux.ts";
 import { formatResetTime, paneResetAt } from "./usageLimit.ts";
-import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
+import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, notRunningHint, openSession, SELF_CMD, withSelfCmdEnv, type OpenPlan } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { findPeer, sendPeerMessage } from "./peer.ts";
 import { durationLabel, idleSeconds, isStalled, resolveStalledAfterMs, shortAge } from "./idle.ts";
@@ -21,13 +21,14 @@ import { branchSync, type BranchSync } from "./gitrefs.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession, forgetRestoreTab, idBearingName } from "./restore.ts";
 import { resolveContext, normalizeCwd } from "./context.ts";
 import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
-import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "./model.ts";
-import { resolveInitialProvider } from "./provider.ts";
+import { loadModel, refreshLiveTmux, filterModelByRepos, type LoadedModel, type SessionLink } from "./model.ts";
+import { resolveInitialProvider, detectScopeProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
 import { loadState, resumeDialogChoice, peerSocketEnabled, PEER_SOCKET_ENV } from "./config.ts";
 import { takeWarnings } from "./errors.ts";
 import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
+import { discoverGitReposUnder } from "./repos.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 
@@ -36,8 +37,10 @@ const HELP = `agendo — manage claude sessions as attachable tmux windows
 Usage:
   agendo [path]                Open the launcher in its own tmux session (default:
                                 session "agendo"). With a path, scope the launcher
-                                to sessions under it (host session "agendo-<basename>").
-                                Toggle scoped↔global at runtime with the a key.
+                                to sessions under it (host session "agendo-<basename>")
+                                and narrow the work-item / PR views to the git repos
+                                found inside it. Toggle scoped↔global at runtime with
+                                the a key, the repo filter with f.
       --session, -s <name>      Override the derived host session name (e.g. on a
                                 basename collision between two paths)
   agendo --no-tmux             Open the menu inline, without a tmux session
@@ -101,15 +104,31 @@ Usage:
                                 cwd is under dir. Combines with --repo.
       --repo <name>             Only sessions in that repo — a bare name or an
                                 owner/repo slug. Worktrees count as their repo.
-  agendo list pr, prs          List your open pull requests from the active backend,
+  agendo list pr, prs [dir]    List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
-                                approvals, branch, session, title). --json for full rows.
-  agendo list issues           List issues / work items with any associated session
+                                approvals, branch, session, title). With a dir, only
+                                PRs of the git repos inside it (see --repo-filter).
+      --json                    Emit machine-readable JSON (full rows).
+      --repo-filter,            Keep / drop the repo narrowing a [dir] implies
+        --no-repo-filter        (default: on whenever a dir is given).
+  agendo list issues [dir]     List issues / work items with any associated session
        (aliases: wi,            (id, state, session, title). Vocab follows the backend:
-        work-items)             GitHub says "issue", Azure DevOps "work item".
-                                --json for full rows (id + sessions[]).
+        work-items)             GitHub says "issue", Azure DevOps "work item". With a
+                                dir, only issues of the git repos inside it — Azure
+                                DevOps work items carry no repo, so they're matched
+                                through their linked PRs (items with none are kept).
+      --json                    Emit machine-readable JSON (id + sessions[]).
+      --repo-filter,            As for list pr above.
+        --no-repo-filter
   agendo resume <id>           Headless resume of an idle session in its own tmux
-                                window (detached). <id> as for status.
+                                window (detached). <id> as for status. A missing
+                                window — closed, crashed, tmux server restarted,
+                                machine rebooted — never means the session is
+                                lost: its worktree, branch, commits and transcript
+                                are on disk, and this brings it back. Right after
+                                one it sits on claude's resume dialog and may
+                                compact, so the first \`send\` can time out waiting
+                                for an input box — retry rather than --force.
       --attach, -a              Switch/attach to it immediately (default: detached)
   agendo wait [id...]          Block until the target session(s) settle, then exit
                                 0; exit non-zero if they don't (timeout, exited,
@@ -621,15 +640,25 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   const ISSUE_SUBS = new Set(["issue", "issues", "wi", "work-item", "work-items", "workitem", "workitems"]);
   if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub))) {
     let json = false;
+    // Optional `[dir]` positional: the same path context the TUI takes, narrowing
+    // the listing to the repos found inside it. `--repo-filter`/`--no-repo-filter`
+    // override the default (on whenever a dir is given), mirroring the menu's `f`.
+    let dirArg: string | undefined;
+    let repoFilter: boolean | undefined;
     for (const a of process.argv.slice(4)) {
       if (a === "--json") json = true;
+      else if (a === "--repo-filter") repoFilter = true;
+      else if (a === "--no-repo-filter") repoFilter = false;
+      else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
       else {
         console.error(`list ${sub}: unknown argument "${a}"`);
         process.exit(1);
       }
     }
-    if (PR_SUBS.has(sub)) await runListPrs({ json });
-    else await runListIssues({ json });
+    const root = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
+    const opts = { json, filterRoot: root, repoFilter: repoFilter ?? !!root };
+    if (PR_SUBS.has(sub)) await runListPrs(opts);
+    else await runListIssues(opts);
     process.exit(0);
   }
   let json = false;
@@ -795,7 +824,11 @@ if (!process.argv.includes("--no-tmux")) {
     ctx.hostSession,
     ctx.filterRoot,
     process.cwd(),
-    [process.argv[0], process.argv[1], ...menuArgs],
+    // The menu inside tmux is the process that will actually spawn agents, so it
+    // carries our invocation forward too (`SELF_CMD_ENV`) — otherwise it would
+    // re-derive one from its own argv and hand the sessions it starts a different
+    // way of naming the same build.
+    withSelfCmdEnv([process.argv[0], process.argv[1], ...menuArgs]),
     () => restoreTabs(ctx.hostSession),
   );
   process.exit(0);
@@ -918,6 +951,12 @@ async function runStatus(
   // process, no fetch — see src/gitrefs.ts). Silent when it can't be determined.
   const sync = branchSync(s.cwd);
   if (sync) console.log(`  work:   ${describeSync(sync)}`);
+  // `○ idle` says the tmux window is gone, not that the session is. Say what to do
+  // about it here, where the caller is already looking — the `resume:` slot is free
+  // in exactly this case (the running form of the line reports the resume DIALOG).
+  if (!running) {
+    console.log(`  resume: ${SELF_CMD} resume ${shortId(s.id)}   (brings it back; worktree, branch and commits are intact)`);
+  }
   // Full, clickable links for whatever this session is working on. Vertical
   // output, so a long URL costs nothing here (unlike the `list` table).
   if (withUrls) {
@@ -1270,13 +1309,40 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   // A session reachable over its socket needs no window: it may be running
   // outside agendo entirely (a plain terminal, an editor). Requiring a tmux
   // target first would make `send` the one thing you cannot do to a session
-  // that `status` reports as running. With the socket switched off that is
-  // exactly what happens again, and the message says which it was.
+  // that `status` reports as running.
   if (!target && !peer) {
-    const why = socket.enabled
-      ? "no live tmux window and no messaging socket"
-      : `no live tmux window, and the messaging socket is disabled (${socket.source === "env" ? PEER_SOCKET_ENV : `"peerSocket": false`})`;
-    console.error(`Session ${token} is not running (${why}).`);
+    // Two different failures wear the same shape here, and they need OPPOSITE
+    // advice, so they must not share a message.
+    //
+    // With the socket on, no window and no peer means the session is genuinely
+    // not running — and #38's hint exists precisely because the bare refusal
+    // read as a death notice, so `resume` has to be named.
+    //
+    // With the socket OFF we never looked, and a session that is alive but
+    // merely unreachable must NOT be told to `resume`: that would put a second
+    // claude on one transcript, which `resume` itself refuses. So look now,
+    // diagnostically. That is consistent with the switch's scope rather than a
+    // hole in it — it stops us SPEAKING an undocumented protocol, not reading a
+    // registry file, which is the same reason `status` keeps its peer lines.
+    const unreachable = socket.enabled ? null : await findPeer((id) => shortId(id) === sid);
+    if (unreachable) {
+      const by = socket.source === "env" ? PEER_SOCKET_ENV : `"peerSocket": false in config.json`;
+      console.error(`Session ${token} IS running (pid ${unreachable.pid}), but unreachable: it has no tmux window, and the messaging socket is disabled (${by}).`);
+      console.error(
+        `  Re-enable it for one command with \`${PEER_SOCKET_ENV}=1 ${SELF_CMD} send ${token} "…"\`, or attach to it\n` +
+          `  yourself. Do NOT resume it — it is already running, and a second session on one transcript is\n` +
+          `  exactly what \`${SELF_CMD} resume\` refuses.`,
+      );
+      return finish(
+        { ok: false, route: null, reason: "socket-disabled", extra: { pid: unreachable.pid, sessionId: unreachable.sessionId } },
+        1,
+      );
+    }
+    // Genuinely gone — by either route, whatever the switch says. Describing this
+    // one as "switched off" would send the caller to unset a variable that would
+    // change nothing, instead of to the command that actually brings it back.
+    console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
+    console.error(notRunningHint(token, "then send again"));
     return finish({ ok: false, route: null, reason: "not-running" }, 1);
   }
   /** Whether step 1 actually had a dialog to answer — reported, since it means a turn started. */
@@ -1319,8 +1385,10 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     if (!settled) {
       console.error(
         `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
-          `nothing was delivered by either route (a message typed into that menu would pick an option, and queueing one ` +
-          `past an unanswered dialog would strand it). Re-check with \`${SELF_CMD} status ${token}\`.`,
+          `nothing was delivered by EITHER route (a message typed into that menu would pick an option, and queueing ` +
+          `one past an unanswered dialog would strand it — the socket does not shorten this wait). This is ordinary ` +
+          `right after a resume, where the session may compact before its input exists: WAIT AND RETRY (or raise ` +
+          `--timeout). --force cannot help — it never pastes into that menu. Re-check with \`${SELF_CMD} status ${token}\`.`,
       );
       return finish({ ok: false, route: null, reason: "no-input-box", extra: { resumeDialog: true } }, 2);
     }
@@ -1411,6 +1479,7 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
   const target = liveTargetForShortId(sid);
   if (!target) {
     console.error(`Session ${token} is not running (no live tmux window to unblock).`);
+    console.error(notRunningHint(token, "then unblock it"));
     process.exit(1);
   }
   const { raw, cursor } = capturePaneState(target);
@@ -1578,12 +1647,6 @@ function readyWidth(cells: string[]): number {
 }
 
 /**
- * Model-load options mirroring what the TUI (App.tsx) resolves: the persisted
- * backend (falling back to whichever CLI is installed) and the persisted
- * identity, if any. Used by the association-resolving `list` modes so their
- * gh/az fetch set matches what the menu would show.
- */
-/**
  * Print (and clear) anything the load reported-and-ignored. The TUI surfaces
  * these as a notice; the CLI has no such chrome, so they go to stderr — leaving
  * stdout clean for `--json`. Without this a corrupt `~/.agendo/state.json` would
@@ -1594,9 +1657,17 @@ function flushWarnings(prefix: string): void {
   for (const w of takeWarnings()) console.error(`${prefix}: ${w}`);
 }
 
-function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProvider>; identity: Identity | null } {
+/**
+ * Model-load options mirroring what the TUI (App.tsx) resolves: the persisted
+ * backend (falling back to whichever CLI is installed) and the persisted
+ * identity, if any. Used by the association-resolving `list` modes so their
+ * gh/az fetch set matches what the menu would show. `forced` is the provider a
+ * path context implies (App.tsx passes detectScopeProvider(filterRoot, …) the same
+ * way) — the tracker of the `[dir]`'s origin wins over the persisted default.
+ */
+function currentModelOptions(forced?: ProviderName | null): { provider: ProviderName; identity: Identity | null } {
   const st = loadState();
-  const provider = resolveInitialProvider(st.provider);
+  const provider = resolveInitialProvider(st.provider, forced);
   const identity: Identity | null = st.identityId
     ? { id: st.identityId, displayName: st.identityName ?? "?", uniqueName: st.identityUniqueName ?? "" }
     : null;
@@ -1885,6 +1956,36 @@ function assocSessions(sessions: AgentSession[], live: Set<string>): AssocSessio
     .map((s) => ({ id: s.id, shortId: shortId(s.id), source: s.source, running: live.has(sessionName(s)) }));
 }
 
+/** Shared options of the two resource lists (`list pr` / `list issues`). */
+interface ResourceListOptions {
+  /** Emit JSON instead of a human table. */
+  json: boolean;
+  /** Path context from the `[dir]` positional (absolute), or null for none. */
+  filterRoot: string | null;
+  /** Whether to narrow the listing to the repos inside that path context. */
+  repoFilter: boolean;
+}
+
+/**
+ * Load the model the way the menu does for a path context: the git repos found
+ * under `[dir]` widen the fetch set (so a repo there that never hosted a session
+ * is still queried), and — unless `--no-repo-filter` — narrow the work-item / PR
+ * lists to them. A dir holding no repo at all is far more likely a wrong path
+ * than an intentional "show nothing", so we say so and leave the list unfiltered.
+ * The backend is resolved from the dir too — the tracker its origin points at
+ * (or, for a plain parent folder, its repos' origins) wins over the persisted
+ * default, exactly as the menu does — otherwise we'd query one backend and filter
+ * it against the other's repo identities.
+ */
+async function loadScopedModel(opts: ResourceListOptions): Promise<LoadedModel> {
+  const scopeRepos = opts.filterRoot ? discoverGitReposUnder(opts.filterRoot) : [];
+  if (opts.filterRoot && scopeRepos.length === 0)
+    console.error(`list: no git repos found under ${opts.filterRoot} — listing everything.`);
+  const forced = opts.filterRoot ? detectScopeProvider(opts.filterRoot, scopeRepos) : null;
+  const model = await loadModel({ ...currentModelOptions(forced), scopeRepos });
+  return filterModelByRepos(model, opts.repoFilter ? model.repoScope : null);
+}
+
 /**
  * `list pr|prs`: the current identity's OPEN pull requests from the active
  * backend, each with the session working its branch (running one preferred) — an
@@ -1894,10 +1995,10 @@ function assocSessions(sessions: AgentSession[], live: Set<string>): AssocSessio
  * association, so there's no new matcher. `--json` emits the full rows (id +
  * branch + status + ci + sessions[]) for scripting.
  */
-async function runListPrs(opts: { json: boolean }): Promise<void> {
+async function runListPrs(opts: ResourceListOptions): Promise<void> {
   let model: LoadedModel;
   try {
-    model = await loadModel(currentModelOptions());
+    model = await loadScopedModel(opts);
   } catch (e) {
     flushWarnings("list pr");
     console.error(`list pr: could not load pull requests from the backend: ${(e as Error)?.message ?? e}`);
@@ -1969,10 +2070,10 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
  * (current + other + prLinked) and its live-tmux set; `--json` emits full rows
  * (id + state + sessions[]).
  */
-async function runListIssues(opts: { json: boolean }): Promise<void> {
+async function runListIssues(opts: ResourceListOptions): Promise<void> {
   let model: LoadedModel;
   try {
-    model = await loadModel(currentModelOptions());
+    model = await loadScopedModel(opts);
   } catch (e) {
     flushWarnings("list issues");
     console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);
@@ -2049,6 +2150,7 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
   const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
   if (!s) {
     console.error(`No session found for "${token}".`);
+    console.error(`  \`${SELF_CMD} list --all\` lists idle sessions as well as running ones.`);
     process.exit(1);
   }
   const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
@@ -2172,6 +2274,9 @@ async function runClose(token: string | undefined, force: boolean, verb = "close
     // Already closed / never started. The desired end state holds, so this is a
     // success — `close` is idempotent for the scripts and agents driving it.
     console.log(`○ session ${label} is not running — nothing to close.`);
+    // Idempotent success, but the caller may have expected a live session here; an
+    // indexed one can still be brought back (an unindexed id has nothing to resume).
+    if (s) console.log(`  resume:  ${SELF_CMD} resume ${label}   (its worktree, branch and commits are intact)`);
     return;
   }
   if (!managedKind(target)) {

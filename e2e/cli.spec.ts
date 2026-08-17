@@ -600,22 +600,46 @@ test("with the socket off, send refuses a busy pane again", async ({ mock }) => 
   }
 });
 
-test("with the socket off, a windowless session is unreachable again — and says which", async ({ mock }) => {
-  // The other half of "exactly today's behaviour": reaching a session that has no
-  // tmux window is a capability the socket ADDED, so switching it off has to take
-  // it away. The failure must not read as "that session isn't running" when the
-  // truth is "you turned off the only route to it".
+// ── unreachable is not the same failure as gone ──────────────────────────────
+// #38 made "is not running" point at `resume`, because the bare refusal read as a
+// death notice and cost a session its branch. The switch introduces a second way
+// to fail with no window in hand — alive, but with the only route to it turned off
+// — and the two need OPPOSITE advice: `resume` on a live session would put a
+// second claude on one transcript. So each says its own thing, and neither is
+// allowed to borrow the other's.
+
+test("with the socket off, a live windowless session says so — and does NOT say resume", async ({ mock }) => {
   const peer = await fakePeer(mock, "peer-off-windowless", "idle", STANDALONE_SESSION_ID);
   try {
     const env = { ...mock.env, AGENDO_PEER_SOCKET: "0" };
     const r = await agendoAsync(env, "send", shortIdOf(STANDALONE_SESSION_ID), "run the tests").done;
     expect(r.code).toBe(1);
+    expect(r.stderr).toContain("IS running");
     expect(r.stderr).toContain("messaging socket is disabled");
     expect(r.stderr).toContain("AGENDO_PEER_SOCKET");
+    // The reconciliation, pinned: #38's hint must NOT appear here. Following it
+    // would start a second claude on a transcript that already has one.
+    expect(r.stderr).not.toContain("It is NOT lost");
+    expect(r.stderr).toContain("Do NOT resume it");
     expect(peer.frames).toEqual([]);
   } finally {
     await peer.close();
   }
+});
+
+test("with the socket off, a session that is genuinely gone still gets the resume hint", async ({ mock }) => {
+  // The other direction, and the one that would be easy to get wrong: with the
+  // switch off it is tempting to blame the switch for every windowless failure.
+  // This session has no window and no live process, so the switch changed
+  // nothing — telling the caller to unset a variable would send them to fix
+  // something that isn't broken, instead of to the command that revives it.
+  const env = { ...mock.env, AGENDO_PEER_SOCKET: "0" };
+  const r = agendo(env, "send", CRASH_SHORT_ID, "carry on");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("is not running");
+  expect(r.stderr).toContain("It is NOT lost");
+  expect(r.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+  expect(r.stderr).not.toContain("socket is disabled");
 });
 
 test("agendo status still sees a peer with the socket switched off", async ({ mock }) => {
@@ -1188,6 +1212,12 @@ test("agendo send refuses to paste when the input box never comes back", async (
   const r = agendo(mock.env, "send", "--force", "--timeout", "1s", SHORT_ID, "run the tests");
   expect(r.status).toBe(2);
   expect(r.stderr).toContain("no input box appeared");
+  // …and it must say what to do INSTEAD of forcing. This is the ordinary state of
+  // a session in the minute after a resume (answering the dialog, then compacting),
+  // so a bare refusal reads as a broken session rather than "try again shortly".
+  const flat = stripAnsiText(r.stderr).replace(/\s+/g, " ");
+  expect(flat).toContain("WAIT AND RETRY");
+  expect(flat).toContain("--force cannot help");
   const log = await mock.tmuxLog();
   expect(log.some((argv) => argv[0] === "paste-buffer")).toBe(false);
   expect(log.some((argv) => argv[0] === "set-buffer")).toBe(false);
@@ -3498,14 +3528,76 @@ test("agendo list issues --json carries item id + associated sessions (ADO)", as
   expect(byId.get(103).sessions).toEqual([]); // no session on the docs task
 });
 
+// ── repo-scoped `list pr` / `list issues` ────────────────────────────────────
+// The `[dir]` positional is the CLI mirror of the TUI's path context: the git
+// repos found inside it (the fixture home has three under ~/repos, each with a
+// `.git` marker) narrow the listing, and --no-repo-filter opts back out. Like
+// the TUI's path-scope tests, these pin the shim's origin to ADO so the dir
+// doesn't force the GitHub backend away from the ADO fixture data.
+
+test("agendo list pr [dir] narrows to the PRs of the repos inside the dir", async ({ mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const appweb = join(mock.home, "repos", "appweb");
+  const repos = join(mock.home, "repos");
+
+  // Scoped to one repo: PR 5001 (appweb) stays, the applib orphan 6001 is gone.
+  const scoped = await agendoAsync(mock.env, "list", "pr", appweb).done;
+  expect(scoped.code).toBe(0);
+  expect(scoped.stdout).toContain("!5001");
+  expect(scoped.stdout).not.toContain("!6001");
+
+  // --no-repo-filter keeps the dir's fetch scope but shows everything again.
+  const off = await agendoAsync(mock.env, "list", "pr", appweb, "--no-repo-filter").done;
+  expect(off.code).toBe(0);
+  expect(off.stdout).toContain("!5001");
+  expect(off.stdout).toContain("!6001");
+
+  // A PARENT folder holding several repos scopes to all of them (the deep scan).
+  const parent = await agendoAsync(mock.env, "list", "pr", repos).done;
+  expect(parent.code).toBe(0);
+  expect(parent.stdout).toContain("!5001"); // appweb
+  expect(parent.stdout).toContain("!6001"); // applib
+});
+
+test("agendo list issues [dir] narrows ADO work items through their linked PRs", async ({ mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  // ADO work items carry no repo, so scoping to applib drops WI 101 (its only PR
+  // is in appweb) while the PR-less items 102/103 — no repo signal at all — stay.
+  const applib = join(mock.home, "repos", "applib");
+  const r = await agendoAsync(mock.env, "list", "issues", applib, "--json").done;
+  expect(r.code).toBe(0);
+  const ids = (JSON.parse(r.stdout) as any[]).map((i) => i.id).sort((a, b) => a - b);
+  expect(ids).toEqual([102, 103]);
+
+  // Unscoped (no dir) the full assigned set is listed, as before.
+  const all = await agendoAsync(mock.env, "list", "issues", "--json").done;
+  expect((JSON.parse(all.stdout) as any[]).map((i) => i.id).sort((a, b) => a - b)).toEqual([101, 102, 103]);
+});
+
+test("agendo list pr [dir] with no repo inside it says so and lists everything", async ({ mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const empty = join(mock.home, "no-repos-here");
+  const r = await agendoAsync(mock.env, "list", "pr", empty).done;
+  expect(r.code).toBe(0);
+  expect(r.stderr).toContain("no git repos found under");
+  // An empty scope is likelier a wrong path than "show nothing", so nothing is hidden.
+  expect(r.stdout).toContain("!5001");
+  expect(r.stdout).toContain("!6001");
+});
+
 // GitHub vocab: flip the backend, wire the fake gh with an issue and a PR that
 // closes it on the login session's branch, so the association resolves the same
 // way it does in the TUI. Repo scope comes from the local sessions' origin slug
 // (ada/appweb), matching the login session's repo.
-async function seedGitHubList(mock: {
-  setProvider: (n: "github") => Promise<void>;
-  setGhState: (s: unknown) => Promise<void>;
-}) {
+async function seedGitHubList(
+  mock: {
+    setProvider: (n: "github") => Promise<void>;
+    setGhState: (s: unknown) => Promise<void>;
+  },
+  // `false` leaves the persisted backend on ADO — for the test that proves a
+  // path context's git origin forces GitHub without any persisted choice.
+  opts: { persistProvider?: boolean } = {},
+) {
   const PR = {
     number: 401,
     title: "Wire up the login screen",
@@ -3522,7 +3614,7 @@ async function seedGitHubList(mock: {
     closingIssuesReferences: [{ number: 301 }], // links the PR to issue 301
     body: "",
   };
-  await mock.setProvider("github");
+  if (opts.persistProvider !== false) await mock.setProvider("github");
   await mock.setGhState({
     authed: true,
     user: { login: "ada", name: "Ada Lovelace" },
@@ -3578,6 +3670,22 @@ test("agendo list issues (GitHub) uses 'issue' vocab and associates the session"
   expect(iss.sessions[0].running).toBe(true);
 });
 
+// The `[dir]` resolves the BACKEND too, exactly as the TUI does (App.tsx forces
+// the provider from the path's git remote): a github.com origin under it wins
+// over the persisted ADO default. Without this the CLI would query ADO and then
+// filter those PRs against repo keys derived from a GitHub checkout — an empty
+// listing, and a different answer than the menu gives for the same path.
+test("agendo list pr [dir] forces the GitHub backend from the dir's git origin", async ({ mock }) => {
+  await seedGitHubList(mock, { persistProvider: false }); // state.json still says "ado"
+  mock.env.FAKE_GIT_ORIGIN_HOST = "github";
+  const appweb = join(mock.home, "repos", "appweb");
+
+  const r = await agendoAsync(mock.env, "list", "pr", appweb).done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("#401"); // GitHub PR 401 via gh…
+  expect(r.stdout).not.toContain("!5001"); // …not the ADO fixture's PRs
+});
+
 // ── `launch` agent-flag forwarding ───────────────────────────────────────────
 // `agendo launch` forwards a small allowlist of agent flags (--model,
 // --fallback-model) into the NEW session's argv, and rejects anything else
@@ -3593,13 +3701,25 @@ function spawnedAgentArgv(tmux: string[][]): string[] | undefined {
   return sep >= 0 ? call.slice(sep + 1) : undefined;
 }
 
+/**
+ * The agent binary a spawn argv runs. Every launched session is prefixed with an
+ * `env NAME=value …` block (the self-command, plus claude's config dir when the
+ * session has one), so the binary is the first token past those assignments.
+ */
+function agentBin(argv: string[]): string | undefined {
+  if (argv[0] !== "env") return argv[0];
+  let i = 1;
+  while (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i])) i++;
+  return argv[i];
+}
+
 test("agendo launch forwards --model into the new claude's argv", async ({ mock }) => {
   const r = agendo(mock.env, "launch", "--no-worktree", "--model", "opus", "do the thing");
   expect(r.status).toBe(0);
   expect(r.stdout).toContain("launched background session");
 
   const argv = spawnedAgentArgv(await mock.tmuxLog())!;
-  expect(argv[0]).toBe("claude");
+  expect(agentBin(argv)).toBe("claude");
   // The flag pair is forwarded verbatim, adjacent, alongside the usual autonomy
   // flags and the prompt.
   expect(argv.join(" ")).toContain("--model opus");
@@ -3615,7 +3735,7 @@ test("agendo launch forwards --model to copilot too, and keeps multi-word values
   expect(r.status).toBe(0);
 
   const argv = spawnedAgentArgv(await mock.tmuxLog())!;
-  expect(argv[0]).toBe("copilot");
+  expect(agentBin(argv)).toBe("copilot");
   const at = argv.indexOf("--model");
   expect(at).toBeGreaterThan(0);
   expect(argv[at + 1]).toBe("claude sonnet 4.5"); // still a single, unsplit token
@@ -3644,7 +3764,7 @@ test("agendo launch accepts the GNU --flag=value form for forwarded flags", asyn
   expect(r.status).toBe(0);
 
   const argv = spawnedAgentArgv(await mock.tmuxLog())!;
-  expect(argv[0]).toBe("copilot"); // `--agent=copilot` parsed too
+  expect(agentBin(argv)).toBe("copilot"); // `--agent=copilot` parsed too
   expect(argv.join(" ")).toContain("--model opus");
   expect(argv).not.toContain("--model=opus");
 
@@ -4235,4 +4355,174 @@ test("orchestrator mode survives a cold resume; an ordinary session isn't given 
   );
   expect(other).toBeTruthy();
   expect(appendedPrompt(other!)).not.toContain("ORCHESTRATOR MODE");
+});
+
+// ── a session whose window is gone is not a lost session ──────────────────────
+// A real orchestrator hit `send`'s "is not running", concluded the session could
+// not be revived, and relaunched the whole task in a fresh worktree — abandoning
+// the branch and commits the original had already made. `resume` is the answer,
+// so every refusal that reports a session as not running has to name it, and the
+// agent-facing guide has to teach it.
+
+test("agendo --llm gives `resume` its own section: a gone window is not a lost session", async ({ mock }) => {
+  const r = agendo(mock.env, "--llm");
+  expect(r.status).toBe(0);
+  // SELF_CMD-independent matches only (see the guide test above): the invocation
+  // prefix legitimately differs between a local run, a package runner and CI.
+  expect(r.stdout).toContain(" resume <id>");
+  // Phrases are matched against a whitespace-collapsed copy: the guide is hard
+  // wrapped, and where a sentence happens to break is formatting, not meaning.
+  const flat = stripAnsiText(r.stdout).replace(/\s+/g, " ");
+  // The belief to overwrite, stated as such — and every way a window can vanish,
+  // since "the tmux server restarted" is the case that reads most like death.
+  expect(flat).toContain("is GONE is NOT a lost session, and must never be relaunched from scratch");
+  expect(flat).toContain("the tmux server was restarted, the machine rebooted");
+  expect(flat).toContain("ABANDONS that branch and those commits");
+  // …and that it answers exactly the errors an agent will have just read.
+  expect(flat).toContain('This is the answer to "is not running" from `send` / `unblock` / `wait`');
+  // The nuance that makes the first send after a resume fail legitimately: retry,
+  // never --force (a paste into that menu would pick an option).
+  expect(flat).toContain("AFTER A RESUME, GIVE IT A MOMENT");
+  expect(flat).toContain("WAIT AND RETRY");
+  expect(flat).toContain("Do NOT reach for --force");
+  // `close` already promises resume brings it back, so the two must agree.
+  expect(flat).toContain('brings it back — see "Bring one back" below');
+});
+
+test("agendo --llm points at --help rather than letting an agent guess a flag", async ({ mock }) => {
+  const flat = stripAnsiText(agendo(mock.env, "--llm").stdout).replace(/\s+/g, " ");
+  expect(flat).toContain("It is not the complete flag reference");
+  expect(flat).toContain("recalling from memory rather than reading here");
+});
+
+test("send / unblock / wait name `resume` when the session isn't running", async ({ mock }) => {
+  // The crash fixture is on disk with no live window — the exact state that
+  // produced the false "it can't be revived" conclusion.
+  const send = agendo(mock.env, "send", CRASH_SHORT_ID, "carry on");
+  expect(send.status).toBe(1);
+  expect(send.stderr).toContain("is not running");
+  expect(send.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+  expect(send.stderr).toContain("It is NOT lost");
+  expect(send.stderr).toContain("Do not relaunch the work in");
+
+  const unblock = agendo(mock.env, "unblock", CRASH_SHORT_ID);
+  expect(unblock.status).toBe(1);
+  expect(unblock.stderr).toContain("is not running");
+  expect(unblock.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+
+  // `wait` names the ids that aren't running, then how to bring one back.
+  const waited = await agendoAsync(mock.env, "wait", CRASH_SHORT_ID, "--timeout", "2s").done;
+  expect(waited.code).toBe(1);
+  expect(stripAnsiText(waited.stderr)).toContain("not running (no live window)");
+  expect(stripAnsiText(waited.stderr)).toContain(" resume <id>");
+});
+
+test("status and close point an idle session at `resume` too", async ({ mock }) => {
+  const status = agendo(mock.env, "status", CRASH_SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stdout).toContain("○ idle");
+  expect(status.stdout).toContain(`resume ${CRASH_SHORT_ID}`);
+  expect(status.stdout).toContain("worktree, branch and commits are intact");
+
+  // `close` on it is a no-op success — and says the session can still come back,
+  // rather than leaving "not running" to read as gone for good.
+  const closed = agendo(mock.env, "close", CRASH_SHORT_ID);
+  expect(closed.status).toBe(0);
+  expect(closed.stdout).toContain("not running");
+  expect(closed.stdout).toContain(`resume ${CRASH_SHORT_ID}`);
+
+  // A running session's status keeps the OTHER meaning of the `resume:` slot
+  // (claude's own resume dialog) — the hint is for idle sessions only.
+  const live = agendo(mock.env, "status", SHORT_ID);
+  expect(live.stdout).toContain("● running");
+  expect(live.stdout).not.toContain(`resume ${SHORT_ID}`);
+});
+
+// ── the self-command a session is handed ──────────────────────────────────────
+// Every agent-facing string names a command to re-invoke agendo with. It must be
+// the invocation that started THIS chain (a PR build, say), not one reconstructed
+// from the package manager — which can only ever name the published release, so a
+// PR build's sessions would run the published CLI against state this build wrote.
+//
+// NEVER assert the literal derived prefix: it differs between a local run, bunx,
+// npx and CI. These tests assert the propagation instead — what gets injected,
+// that a spawned session inherits it, and that the derived value is used only
+// when nothing was propagated.
+
+/** A spec that could never be derived from the environment — only propagated. */
+const SELF_SENTINEL = "bunx github:acme/agendo#pull/99/head";
+
+/** The command the guide tells agents to run, read back off its first usage line. */
+function guideSelfCmd(stdout: string): string {
+  return stripAnsiText(stdout).match(/^Start one:\s+(.+?) launch "/m)?.[1] ?? "";
+}
+
+/** The `AGENDO_SELF_CMD` value from a spawned session's `env …` argv prefix. */
+function propagatedSelfCmd(argv: string[]): string | null {
+  const at = argv.find((t) => t.startsWith("AGENDO_SELF_CMD="));
+  return at ? at.slice("AGENDO_SELF_CMD=".length) : null;
+}
+
+test("a propagated self-command wins over anything derived from this process", async ({ mock }) => {
+  const propagated = agendo({ ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL }, "--llm");
+  expect(propagated.status).toBe(0);
+  expect(guideSelfCmd(propagated.stdout)).toBe(SELF_SENTINEL);
+
+  // Nothing propagated → the derived value. Whatever it is (that's environment-
+  // dependent, hence no literal here), it is a real command and not the sentinel.
+  const derived = agendo(mock.env, "--llm");
+  expect(guideSelfCmd(derived.stdout)).toBeTruthy();
+  expect(guideSelfCmd(derived.stdout)).not.toBe(SELF_SENTINEL);
+});
+
+test("a launched session inherits the launcher's own invocation", async ({ mock }) => {
+  const env = { ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL };
+  const r = agendo(env, "launch", "--no-worktree", "do the thing");
+  expect(r.status).toBe(0);
+
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  // It reaches the agent as an environment variable, so every command the agent
+  // itself runs — and every session IT launches — stays on this same build.
+  expect(propagatedSelfCmd(argv)).toBe(SELF_SENTINEL);
+  // …and the system prompt it is given points at the very same one, so the
+  // session can't be told one thing and handed another.
+  expect(appendedPrompt(argv)).toContain(`${SELF_SENTINEL} --llm`);
+  expect(agentBin(argv)).toBe("claude");
+});
+
+test("what agendo TELLS agents to run is exactly what it propagates to them", async ({ mock }) => {
+  // The derived case, asserted without naming the derived string: whatever this
+  // environment resolves to, the guide and the spawned session must agree — a
+  // mismatch is how a chain of sessions ends up split across two builds.
+  const guide = guideSelfCmd(agendo(mock.env, "--llm").stdout);
+  expect(guide).toBeTruthy();
+
+  const r = agendo(mock.env, "launch", "--no-worktree", "do the thing");
+  expect(r.status).toBe(0);
+  expect(propagatedSelfCmd(spawnedAgentArgv(await mock.tmuxLog())!)).toBe(guide);
+});
+
+test("a copilot launch and a resume propagate it too", async ({ mock }) => {
+  const env = { ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL };
+
+  // Copilot has no --append-system-prompt, so the env var is the ONLY way the
+  // invocation reaches a copilot session.
+  const cop = agendo(env, "launch", "--no-worktree", "--copilot", "spike it");
+  expect(cop.status).toBe(0);
+  const copArgv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(copArgv)).toBe("copilot");
+  expect(propagatedSelfCmd(copArgv)).toBe(SELF_SENTINEL);
+
+  // Resuming an existing session propagates it as well — a session brought back
+  // hours later must not silently switch to the published CLI.
+  const resumed = agendo(env, "resume", CRASH_SHORT_ID);
+  expect(resumed.status).toBe(0);
+  const argv = (await mock.tmuxLog()).find(
+    (a) => a[0] === "new-session" && a.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  )!;
+  const agentArgv = argv.slice(argv.indexOf("--", 1) + 1);
+  expect(propagatedSelfCmd(agentArgv)).toBe(SELF_SENTINEL);
+  // One `env` block, not two stacked ones — claude's config dir shares it.
+  expect(agentArgv.filter((t) => t === "env")).toHaveLength(1);
+  expect(agentBin(agentArgv)).toBe("claude");
 });

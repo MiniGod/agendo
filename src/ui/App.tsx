@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
-import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
+import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, filterModelByRepos, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
@@ -13,7 +13,15 @@ import { createWorktree, checkoutWorktree, defaultBranch, freeWorktreeBranch, wo
 import { ORCHESTRATOR_SLUG, isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
 import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../errors.ts";
-import { repoRootForCwd, bootstrapRepoRoot, ensureRepoAtTop, isGitCheckout, type RepoInfo } from "../repos.ts";
+import {
+  discoverGitReposUnder,
+  mergeRepos,
+  repoRootForCwd,
+  bootstrapRepoRoot,
+  ensureRepoAtTop,
+  isGitCheckout,
+  type RepoInfo,
+} from "../repos.ts";
 import {
   parseRepoUrl,
   repoUrlLabel,
@@ -28,7 +36,7 @@ import {
 } from "../clone.ts";
 import { isUnderRoot, normalizeCwd } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
-import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
+import { detectProviders, resolveInitialProvider, detectScopeProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
 import { homedir } from "os";
 import type {
@@ -1213,6 +1221,10 @@ export default function App({
   // view (sessions under the root) and the global view (every session). Bare
   // `agendo` has no root, so it's always effectively global.
   const [globalView, setGlobalView] = useState(false);
+  // Repo-scope toggle: with a filterRoot, `f` flips whether the work-item and PR
+  // views are narrowed to the repos found inside it. On by default when scoped
+  // (that's what asking for a path means); not persisted, like globalView.
+  const [repoFilterOn, setRepoFilterOn] = useState<boolean>(!!filterRoot);
   const [prsGrouped, setPrsGrouped] = useState(false); // PRs view: repo subgroups
   const [prSort, setPrSort] = useState<PrSort>("created"); // PRs view: sort order
   const [sessionSort, setSessionSort] = useState<SessionSort>("updated"); // Sessions view: sort order
@@ -1236,11 +1248,29 @@ export default function App({
   // its CLI is still installed, else the first installed one (see provider.ts).
   // `available` is probed once at mount and drives the provider picker.
   const [available] = useState<Set<ProviderName>>(() => detectProviders());
-  // When scoped to a path context, a github.com git remote there forces the
-  // GitHub backend, overriding the persisted default (which may be ADO). Bare
+  // The git repos inside the path context, found by walking it downward (the
+  // target itself when it's a checkout, else every repo nested under it). It
+  // picks the backend, widens the fetch scope and yields the model's repoScope,
+  // so it must NOT depend on the `f` toggle — that stays a pure display filter.
+  // Scanned once per root and process-cached; `r` bumps `rescanKey` to walk the
+  // tree again, so a repo cloned into the target after launch joins the scope
+  // (the background poll keeps the cached result — only an explicit refresh pays
+  // for a rescan).
+  const [rescanKey, setRescanKey] = useState(0);
+  const discoveredRepos = useMemo<RepoInfo[]>(
+    () => (filterRoot ? discoverGitReposUnder(filterRoot, rescanKey > 0) : []),
+    [filterRoot, rescanKey],
+  );
+  // When scoped to a path context, the tracker its git remote points at — or the
+  // remotes of the repos inside it, when the target is a plain parent folder —
+  // forces that backend, overriding the persisted default (which may be the other
+  // one, and would then filter against repo keys it can never match). Bare
   // launchers (no filterRoot) never force — they keep the persisted choice.
   const [provider, setProvider] = useState<ProviderName>(() =>
-    resolveInitialProvider(loadState().provider, filterRoot ? detectRepoProvider(filterRoot) : null),
+    resolveInitialProvider(
+      loadState().provider,
+      filterRoot ? detectScopeProvider(filterRoot, discoveredRepos) : null,
+    ),
   );
   // Per-backend auth status for the Settings page: absent ⇒ not yet probed,
   // "checking" ⇒ probe in flight, boolean ⇒ result. Refreshed each time the
@@ -1284,7 +1314,7 @@ export default function App({
       const attempts = retryAttempts();
       for (let attempt = 1; !cancelled; attempt++) {
         try {
-          const m = await loadModel({ provider, identity, hostSession });
+          const m = await loadModel({ provider, identity, hostSession, scopeRepos: discoveredRepos });
           if (cancelled) return;
           setModel(m);
           setRetrying(null);
@@ -1332,7 +1362,7 @@ export default function App({
       if (timer) clearTimeout(timer);
       wake?.();
     };
-  }, [provider, identity, reloadKey]);
+  }, [provider, identity, reloadKey, discoveredRepos]);
 
   // Tick twice a second while a retry is counting down, so the countdown on the
   // retry screen actually counts down instead of freezing on its first value.
@@ -1403,6 +1433,9 @@ export default function App({
   // the current value without re-arming the timer.
   const autoResumeRef = useRef(autoResume);
   useEffect(() => { autoResumeRef.current = autoResume; }, [autoResume]);
+  // Same, for the path context's repos — an `r` rescan can replace them.
+  const discoveredReposRef = useRef(discoveredRepos);
+  useEffect(() => { discoveredReposRef.current = discoveredRepos; }, [discoveredRepos]);
   // Per-limited-session bookkeeping for auto-resume, keyed by canonical name:
   //   • limitWindows — the frozen reset instant for the current limit window
   //     (null when no reset time was parseable, so we know not to auto-resume);
@@ -1602,12 +1635,22 @@ export default function App({
   // than none.
   const resolved = cloneUrl && cloneDest?.key === cloneUrl.key ? cloneDest : null;
 
+  // Whether the repo filter is doing anything right now: it needs a path context
+  // with at least one repo inside it (model.repoScope is null otherwise) and the
+  // `f` toggle on. Applied as a display overlay over the loaded model, so the
+  // fetched data — and every count derived from it — narrows in one place.
+  const repoFiltered = !!model?.repoScope && repoFilterOn;
+  const viewModel = useMemo<LoadedModel | null>(
+    () => (model ? filterModelByRepos(model, repoFiltered ? model.repoScope : null) : null),
+    [model, repoFiltered],
+  );
+
   const rows = useMemo(() => {
-    if (!model) return [];
-    if (view === "prs") return buildPrsRows(model, expanded, toggles, prsGrouped, prSort, activity, search.text, inScope);
-    if (view === "sessions") return buildSessionsRows(model, toggles, grouped, expanded, activity, sessionSort, search.text, inScope);
-    return buildItemsRows(model, expanded, toggles, activity, search.text, inScope);
-  }, [model, view, expanded, toggles, grouped, prsGrouped, prSort, sessionSort, activity, search.text, inScope]);
+    if (!viewModel) return [];
+    if (view === "prs") return buildPrsRows(viewModel, expanded, toggles, prsGrouped, prSort, activity, search.text, inScope);
+    if (view === "sessions") return buildSessionsRows(viewModel, toggles, grouped, expanded, activity, sessionSort, search.text, inScope);
+    return buildItemsRows(viewModel, expanded, toggles, activity, search.text, inScope);
+  }, [viewModel, view, expanded, toggles, grouped, prsGrouped, prSort, sessionSort, activity, search.text, inScope]);
   const selectableIdx = useMemo(
     () => rows.map((r, i) => (SELECTABLE.has(r.kind) ? i : -1)).filter((i) => i >= 0),
     [rows],
@@ -1699,6 +1742,9 @@ export default function App({
   // stays on the `r` / provider-change cadence; nothing here touches the network.
   // Mount-only: reads `model` via modelRef; merges via setModel so the
   // network-derived fields (items, PRs, teamMembers, sessionLinks) are preserved.
+  // `discoveredRepos` is read through a ref: an `r` rescan can replace it, and a
+  // mount-only interval closing over the old array would drop a just-cloned repo
+  // back out of the fresh-session picker on the next tick.
   useEffect(() => {
     let inFlight = false; // a slow disk scan must not overlap the next tick
     const handle = setInterval(async () => {
@@ -1708,6 +1754,11 @@ export default function App({
         const local = await loadLocalSessions();
         setModel((prev) => {
           if (!prev) return prev;
+          // The rescan's repos are session-derived only, so re-apply the same
+          // merge loadModel does — otherwise a path-discovered repo that has
+          // never hosted a session would drop out of the fresh-session picker a
+          // tick after every load.
+          const repos = mergeRepos(local.repos, discoveredReposRef.current);
           // Only re-render when something the list / readiness effect cares about
           // actually changed — an unchanged local scan is a no-op, so a stable
           // limited session doesn't thrash the readiness effect (which re-arms on
@@ -1717,7 +1768,7 @@ export default function App({
             sameLiveTmux(prev.liveTmux, local.live) &&
             sameLiveTmux(prev.livePlaceholders, local.livePlaceholders) &&
             sameLiveWindows(prev.liveWindows, local.liveWindows) &&
-            sameRepos(prev.repos, local.repos);
+            sameRepos(prev.repos, repos);
           if (unchanged) return prev;
           // Merge the fresh LOCAL half; keep the NETWORK half from the last full
           // load. NB: item.sessions / pr.sessions were associated against the OLD
@@ -1729,7 +1780,7 @@ export default function App({
           return {
             ...prev,
             sessionGroups: local.sessionGroups,
-            repos: local.repos,
+            repos,
             liveTmux: local.live,
             liveKinds: local.liveKinds,
             liveWindows: local.liveWindows,
@@ -2774,6 +2825,13 @@ export default function App({
       return setGlobalView((v) => !v);
     }
 
+    // toggle the repo filter on the work-item / PR views (only when scoped to a
+    // path — with no root there are no repos to narrow to). `f` = "filter".
+    if (input === "f" && filterRoot) {
+      setCursor(0);
+      return setRepoFilterOn((v) => !v);
+    }
+
     // toggle repo grouping (Sessions: whole view · PRs: subgroups per section)
     if (input === "g" && (view === "sessions" || view === "prs")) {
       setCursor(0);
@@ -2814,6 +2872,7 @@ export default function App({
       setNotice(null);
       setActivity(new Map()); // drop cached activity so expanded sessions refetch
       requested.current.clear();
+      setRescanKey((k) => k + 1); // re-walk the path context for new checkouts
       reload();
       return;
     }
@@ -3360,6 +3419,13 @@ export default function App({
               {scoped ? `⊙ ${hostSession}: ${homeShort(filterRoot)}` : "⊙ global — all paths"}
             </Text>
             <Text dimColor>{`  · a ${scoped ? "show all" : `rescope to ${hostSession}`}`}</Text>
+            {/* The repo filter's own state + key hint, next to the path scope's
+                so both toggles are discoverable in the same place. */}
+            <Text dimColor>
+              {discoveredRepos.length === 0
+                ? `  · f repo filter: no repos found here`
+                : `  · f repo filter: ${repoFilterOn ? `on (${discoveredRepos.length} repo${discoveredRepos.length > 1 ? "s" : ""})` : "off"}`}
+            </Text>
           </Text>
         </Box>
       ) : null}

@@ -33,31 +33,139 @@ function onPath(cmd: string): boolean {
     .some((dir) => dir && existsSync(join(dir, cmd)));
 }
 
+/** The npm/bun binary name this package installs. */
+const BIN = "agendo";
+
 /**
- * How to re-invoke this launcher from a shell — injected into agent prompts, so
- * it must keep working minutes/hours later, not just at spawn time. We pick the
- * most robust form from two generic signals, never an ephemeral absolute path:
+ * Environment variable carrying the launcher's own invocation into every session
+ * it spawns (and on into the sessions THOSE spawn). A chain of sessions therefore
+ * all drives the same build — the one the human started the chain with.
  *
- *  1. `npm_config_user_agent` is set only by an ephemeral package runner — `npx`
- *     (`npm/<version>…`) or `bunx`/`bun x` (`bun/<version>…`). Those run our bin
- *     out of a prunable cache that isn't on PATH, so embedding `argv[1]` would
- *     break after a `cache clean`. Re-invoke through the runner instead, which
- *     re-resolves `agendo` from the registry. Check bun first: its user-agent
- *     also contains a bare `npm/?`, so match npm only when followed by a digit.
- *  2. No runner UA → `argv[1]` is a stable location. If a global install
- *     (`npm i -g`, `bun add -g`, pnpm, …) put `agendo` on PATH, the bare name is
- *     the cleanest invocation — no absolute path baked in. Otherwise fall back
- *     to the literal argv (covers `bun run src/index.tsx` dev and odd layouts).
+ * Propagating beats leaving each process to work it out for itself. What survives
+ * of the original invocation is thin and runner-specific (`bunx` happens to leave
+ * its spec in `npm_lifecycle_script`; `npx` leaves only the bin name), and it is
+ * inherited indiscriminately, so a process that merely DESCENDS from a runner looks
+ * exactly like one the runner started. Nor does the environment travel by itself:
+ * a session's window is spawned by the tmux SERVER, which has whatever environment
+ * it was started with, not ours — hence an explicit `env` prefix on the argv.
+ *
+ * Getting it wrong is worse than a version mismatch: a session launched from a PR
+ * build would read its `--llm` instructions from — and run every list/send/wait/
+ * close through — the published release, against on-disk state this build wrote.
  */
-export const SELF_CMD = (() => {
-  const BIN = "agendo";
-  const ua = process.env.npm_config_user_agent ?? "";
-  if (/\bbun\//i.test(ua)) return `bunx ${BIN}`;
-  if (/\bnpm\/\d/i.test(ua)) return `npx ${BIN}`;
+export const SELF_CMD_ENV = "AGENDO_SELF_CMD";
+
+/**
+ * The literal package-runner spec this process was started from, if the runner
+ * exposes one. Measured against bun 1.3 / npm 11 rather than assumed:
+ *
+ *  - `bunx <spec>` sets `npm_lifecycle_script` to the spec EXACTLY as typed —
+ *    `github:minigod/agendo#HEAD`, `agendo@0.1.0`, a bare `agendo`. That is the
+ *    one string that reproduces this build, so it is what we reuse.
+ *  - `npx <spec>` sets it to the resolved command line instead (`"agendo"`,
+ *    quoted, with any arguments), which names the bin, not the spec — the
+ *    original is simply not recoverable there. Callers fall back to argv.
+ *
+ * Two guards, because the variable is INHERITED by every child process: a spec
+ * left behind by an unrelated runner further up the tree must not be adopted as
+ * ours. npm's command form is rejected by its whitespace/quotes, and any spec
+ * that doesn't name this package is rejected outright.
+ */
+function runnerSpec(): string | null {
+  const script = (process.env.npm_lifecycle_script ?? "").trim();
+  if (!script || /[\s"']/.test(script)) return null;
+  return script.includes(BIN) ? script : null;
+}
+
+/**
+ * `argv[1]` when it sits inside a package runner's own cache — `bunx`'s
+ * `/tmp/bunx-<uid>-<pkg>@…/` staging dir or npm's `<cache>/_npx/<hash>/`. Verified
+ * against bun 1.3 / npm 11; any other layout simply falls through to the ordinary
+ * argv branch below, which names the same build anyway.
+ *
+ * This is also what says we are REALLY running under a runner, which the
+ * environment alone cannot: `npm_config_user_agent` and `npm_lifecycle_script` are
+ * inherited by every descendant, so a plain `agendo` (or a `bun run src/index.tsx`)
+ * started from a shell inside a bunx-launched session sees both and would otherwise
+ * claim to be a build it is not.
+ */
+function runnerCacheArgv(): string | null {
+  const argv1 = process.argv[1] ?? "";
+  return /(^|\/)(bunx-[^/]*|_npx)\//.test(argv1) ? argv1 : null;
+}
+
+/**
+ * How to re-invoke this launcher from a shell when nothing was propagated to us —
+ * someone ran `agendo` themselves. Injected into agent prompts, so it must keep
+ * working minutes/hours later, not just at spawn time:
+ *
+ *  1. Running out of a package runner's cache (`npx`, `bunx`/`bun x`): reuse the
+ *     literal spec the runner was handed when it exposes one (`runnerSpec`) — that
+ *     is the only form that reproduces a non-default build such as
+ *     `github:owner/agendo#pull/8/head`. `npm_config_user_agent` names the runner
+ *     to prefix it with; check bun first, as its user-agent also contains a bare
+ *     `npm/?`, so match npm only when followed by a digit. With no spec (npx never
+ *     exposes one) fall back to the cached copy itself: a bare `npx agendo` would
+ *     re-resolve the PUBLISHED package instead of the one running.
+ *  2. Otherwise `argv[1]` is a stable location. If a global install (`npm i -g`,
+ *     `bun add -g`, pnpm, …) put `agendo` on PATH, the bare name is the cleanest
+ *     invocation — no absolute path baked in. Otherwise fall back to the literal
+ *     argv (covers `bun run src/index.tsx` dev and odd layouts).
+ */
+function derivedSelfCmd(): string {
+  const cached = runnerCacheArgv();
+  if (cached) {
+    const ua = process.env.npm_config_user_agent ?? "";
+    const runner = /\bbun\//i.test(ua) ? "bunx" : /\bnpm\/\d/i.test(ua) ? "npx" : null;
+    const spec = runnerSpec();
+    if (runner && spec) return `${runner} ${spec}`;
+    return `${process.argv[0]} ${cached}`;
+  }
   if (onPath(BIN)) return BIN;
   const argv1 = process.argv[1];
   return argv1 ? `${process.argv[0]} ${argv1}` : BIN;
-})();
+}
+
+/**
+ * The command every agent-facing string tells agents to run: what our own
+ * launcher was invoked as, propagated down (`SELF_CMD_ENV`), or derived from this
+ * process when we are the start of the chain.
+ */
+export const SELF_CMD = process.env[SELF_CMD_ENV]?.trim() || derivedSelfCmd();
+
+/**
+ * The next step after any "session is not running" refusal — every command that
+ * needs a live tmux window prints it (`send`, `unblock`, `wait`).
+ *
+ * It exists because the bare refusal reads as a death notice: an orchestrator that
+ * hit it concluded the session could not be revived and relaunched the whole task
+ * in a fresh worktree, abandoning the branch and commits the original had already
+ * made. `resume` is the one command that answers it, so the refusal has to name it.
+ *
+ * `then` completes "…brings the session back, <then>" with whatever the caller was
+ * trying to do.
+ */
+export function notRunningHint(token: string, then: string): string {
+  return [
+    `  It is NOT lost: its worktree, branch, commits and transcript are all still on disk.`,
+    `  Bring it back with \`${SELF_CMD} resume ${token}\`, ${then}. Do not relaunch the work in`,
+    `  a new session — that abandons this one's branch and commits.`,
+  ].join("\n");
+}
+
+/**
+ * Prefix `argv` with the `env` assignments a spawned session needs. tmux execs
+ * the argv directly (no shell), so `env` is how a variable reaches the agent —
+ * and from the agent, every command it runs.
+ *
+ * `SELF_CMD` always rides along, so the session drives the same build we are.
+ * Extra vars (claude's config dir) are merged into the same prefix rather than
+ * stacking a second `env`.
+ */
+export function withSelfCmdEnv(argv: string[], vars: Record<string, string> = {}): string[] {
+  const assignments = Object.entries({ [SELF_CMD_ENV]: SELF_CMD, ...vars }).map(([k, v]) => `${k}=${v}`);
+  return ["env", ...assignments, ...argv];
+}
 
 /**
  * Injected into every claude we spawn. Rather than teach claude the tmux /
@@ -89,6 +197,10 @@ export function llmGuide(): string {
     "launch freely, no explicit per-unit request needed. (Your own instructions say so;",
     "nothing here can put you in that mode.)",
     "",
+    "This guide is the WORKFLOW — which command to reach for, and what each one guarantees.",
+    `It is not the complete flag reference: run \`${SELF_CMD} --help\` before using a flag you`,
+    "are recalling from memory rather than reading here, and don't assume one exists.",
+    "",
     `Start one:    ${SELF_CMD} launch "<task prompt>"`,
     "  Creates an isolated git worktree, runs a new agent there in an attachable tmux",
     "  window, runs unattended (auto/autopilot mode), and prints its session id.",
@@ -108,6 +220,8 @@ export function llmGuide(): string {
     // and the sessions it launches are meant to implement, not to orchestrate.
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
+    "  --all additionally lists idle ones: not running, but still on disk and revivable",
+    "  with `resume` (below). A session missing from a plain `list` is not a lost session.",
     "  One at its usage limit reads \"limited <time>\" — when it comes back. Same instant",
     `  as an ISO 8601 limitResetAt field in ${SELF_CMD} list --json.`,
     "  It lists EVERY session on the machine, so when you only care about one project",
@@ -153,8 +267,13 @@ export function llmGuide(): string {
     "  the dialog itself (config resumeDialogChoice), waits for the input box, then",
     "  delivers. Answering it is always keystrokes — the socket can't do it, since a frame",
     "  arrives as a peer message the receiver won't take as the answer to a prompt — so if",
-    "  that box never appears, send fails WITHOUT delivering by either route, and --force",
+    "  that box never appears, send fails WITHOUT delivering by EITHER route, and --force",
     "  will not change that (pasting into the menu would pick an option) — retry, or attach.",
+    "  The socket does not shorten that wait: it replaces the DELIVERY step only, never the",
+    "  dialog step, so the retry advice under `resume` below applies exactly as written.",
+    "  \"Session <id> is not running\" is not a dead end either: `resume` it (below), then send.",
+    "  (A session that IS running but has the socket switched off says so instead, and names",
+    "  the switch — don't `resume` that one, it is already alive.)",
     "  It always NAMES the route: \"queued via socket\" means the message is sitting in that",
     "  session's queue and may not be read for a while; \"pasted into pane\" means it is on",
     "  screen now, and the pane had to be idle to accept it. Do not assume which you got —",
@@ -198,9 +317,28 @@ export function llmGuide(): string {
     `Close it:     ${SELF_CMD} close <id>`,
     "  Ends the session by killing ONLY its tmux window. Its git worktree, branch and",
     "  commits are guaranteed untouched on disk, so nothing is lost and `resume <id>`",
-    "  brings it back. Refuses a session with work in flight (--force to override).",
+    "  brings it back — see \"Bring one back\" below. Refuses a session with work in flight",
+    "  (--force to override).",
     "  Use this instead of `tmux kill-window`/`kill-session` — never hand-roll a kill.",
     "  A `wait` on a session you close ends at once, reporting it as \"exited\".",
+    "",
+    `Bring one back: ${SELF_CMD} resume <id>`,
+    "  A session whose tmux window is GONE is NOT a lost session, and must never be",
+    "  relaunched from scratch. That holds however the window went away: you closed it, the",
+    "  agent exited, the tmux server was restarted, the machine rebooted. Its git worktree,",
+    "  branch and commits are on disk and its transcript is in the agent's own history, so",
+    "  `resume` starts it again in a fresh detached tmux window, where it picks up where it",
+    "  left off. Relaunching the work in a new worktree instead ABANDONS that branch and",
+    "  those commits — reach for `resume` first, every time. (--attach switches to it now,",
+    "  the way `launch --attach` does.)",
+    "  This is the answer to \"is not running\" from `send` / `unblock` / `wait`, and to a",
+    "  session that `wait` reported \"exited\". Find ids for idle sessions with `list --all`.",
+    "  AFTER A RESUME, GIVE IT A MOMENT. The agent comes back on claude's own resume dialog",
+    "  and may compact before its input box exists, so the first `send` can legitimately",
+    "  fail with \"answered claude's resume dialog but no input box appeared within <n>s\".",
+    "  Nothing was delivered and nothing is broken: WAIT AND RETRY (a minute is usually",
+    "  enough; --timeout <dur> raises the ceiling). Do NOT reach for --force — it cannot",
+    "  paste into that menu by design, since the message would pick a menu option instead.",
     "",
     "The <id> is printed when you launch. Background sessions you start carry these same",
     "instructions, so they can launch and coordinate their own background sessions too.",
@@ -284,7 +422,7 @@ export function resumeArgv(s: AgentSession): string[] {
       const cmd = withLauncherPrompt(["claude", "--resume", s.id], isOrchestratorSession(s.id));
       // Point claude at the config dir the session lives in, so the right
       // subscription/profile (e.g. ~/.claude vs ~/.claude-work) finds it.
-      return s.configDir ? ["env", `CLAUDE_CONFIG_DIR=${s.configDir}`, ...cmd] : cmd;
+      return withSelfCmdEnv(cmd, s.configDir ? { CLAUDE_CONFIG_DIR: s.configDir } : {});
     }
     case "copilot":
       // Copilot CLI resumes by session id. `--resume` takes an *optional* value
@@ -292,10 +430,12 @@ export function resumeArgv(s: AgentSession): string[] {
       // space-separated `--resume <id>` would be parsed as a positional prompt,
       // not the session to resume. The tmux window is already created in the
       // session's cwd (openTarget passes `-c cwd`), and Copilot keeps all state
-      // under ~/.copilot, so no extra env/dir wiring is needed. There's no
-      // Copilot equivalent of claude's `--append-system-prompt`, so the launcher
-      // system prompt is intentionally omitted for Copilot resumes.
-      return ["copilot", `--resume=${s.id}`];
+      // under ~/.copilot, so no extra dir wiring is needed. There's no Copilot
+      // equivalent of claude's `--append-system-prompt`, so the launcher system
+      // prompt is intentionally omitted for Copilot resumes — but the
+      // self-command still propagates, so any agendo the session runs by hand is
+      // the build that spawned it.
+      return withSelfCmdEnv(["copilot", `--resume=${s.id}`]);
   }
 }
 
@@ -331,6 +471,8 @@ interface FreshArgvOptions {
  *    points rather than silently degraded here.
  * Any `forwardArgv` (allowlisted flags from `agendo launch`) goes last among the
  * flags, so an explicit `--model` wins over anything the defaults might set.
+ * Either way the argv is prefixed with our `env` block, so the new session
+ * inherits the invocation that started it (`SELF_CMD_ENV`).
  */
 function freshArgv(agent: AgentSource, opts: FreshArgvOptions = {}): string[] {
   if (agent === "copilot") {
@@ -339,14 +481,14 @@ function freshArgv(agent: AgentSource, opts: FreshArgvOptions = {}): string[] {
     if (opts.autonomy) argv.push(...COPILOT_AUTONOMY_ARGV);
     if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
     if (opts.prompt) argv.push("--interactive", opts.prompt);
-    return argv;
+    return withSelfCmdEnv(argv);
   }
   const argv = ["claude"];
   if (opts.sessionId) argv.push("--session-id", opts.sessionId);
   if (opts.autonomy) argv.push(...AUTONOMY_ARGV);
   if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
   if (opts.prompt) argv.push(opts.prompt);
-  return withLauncherPrompt(argv, opts.orchestrator);
+  return withSelfCmdEnv(withLauncherPrompt(argv, opts.orchestrator));
 }
 
 export interface OpenPlan {
