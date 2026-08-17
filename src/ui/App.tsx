@@ -4,7 +4,7 @@ import { execFile } from "child_process";
 import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
+import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { formatResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog } from "../usageLimit.ts";
 import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
@@ -341,7 +341,7 @@ type Activity = SessionActivity | "loading" | "error";
 
 // A running session's live pane snapshot: input readiness + how many background
 // shells (e.g. a monitor loop) it has going. Polled together from one capture.
-interface PaneState { readiness: Readiness; shells: number; resetAt?: number | null }
+interface PaneState { readiness: Readiness; shells: number; resetAt?: number | null; compactionPercent?: number | null }
 
 function stateColor(state: string): string {
   const s = state.toLowerCase();
@@ -983,18 +983,31 @@ function PrRow({
 const KIND_BADGE: Partial<Record<SessionKind, string>> = { background: "bg", new: "new" };
 
 // How a running session's input pane reads right now, as a colored trailing tag.
-// `busy` = mid-turn; `dialog` = waiting on a prompt/choice (wants you); `ready` =
-// idle and attachable. `undefined` (not yet sampled / unknown) keeps the plain
+// `busy` = mid-turn; `compacting` = rewriting its own context, blocked but making
+// progress; `dialog` = waiting on a prompt/choice (wants you); `ready` = idle and
+// attachable. `undefined` (not yet sampled / unknown) keeps the plain
 // "running → attach" so a row never looks stalled before the first poll lands.
+//
+// `compacting` used to fall through to that default and render as the green
+// "running → attach", i.e. a blocked session looked idle and attachable — the one
+// state the CLI's readiness column reported and the menu did not.
 function runningStatus(r: Readiness | undefined): { label: string; color: string } {
   switch (r) {
     case "ready": return { label: "ready → attach", color: "green" };
     case "busy": return { label: "busy…", color: "yellow" };
+    case "compacting": return { label: "compacting…", color: "yellow" };
     case "queued": return { label: "queued", color: "cyan" };
     case "dialog": return { label: "needs input", color: "magenta" };
     case "limited": return { label: "usage limit", color: "red" };
     default: return { label: "running → attach", color: "green" };
   }
+}
+
+// Trailing detail for a compacting row: how far the progress bar has got. Absent
+// when the pane isn't drawing one yet — the bar appears a beat after the verb line,
+// and " · 0%" would be a claim we can't make from a screen that hasn't said it.
+function compactionSuffix(percent: number | null | undefined): string {
+  return percent == null ? "" : ` · ${percent}%`;
 }
 
 // Trailing detail for a usage-limited row: the reset time (local clock) when we
@@ -1045,7 +1058,7 @@ function SessionRow({
         <Text>{session.title.replace(/\s+/g, " ").slice(0, 50)}</Text>
         {link ? <Text color={selected ? "black" : "magenta"}>{`  ${link}`}</Text> : null}
         <Text dimColor={!selected}>{`  ${timeAgo(displayTime)}`}</Text>
-        {status ? <Text color={selected ? "black" : status.color}>{`  (${status.label}${pane?.readiness === "limited" ? limitSuffix(pane.resetAt) : ""})`}</Text> : null}
+        {status ? <Text color={selected ? "black" : status.color}>{`  (${status.label}${pane?.readiness === "limited" ? limitSuffix(pane.resetAt) : pane?.readiness === "compacting" ? compactionSuffix(pane.compactionPercent) : ""})`}</Text> : null}
         {shells > 0 ? <Text color={selected ? "black" : "blue"}>{`  ⛁ ${shells} shell${shells > 1 ? "s" : ""}`}</Text> : null}
         {placeholder ? <Text color={selected ? "black" : "gray"} dimColor={!selected}>{"  restored · press to resume"}</Text> : null}
       </Text>
@@ -1831,7 +1844,14 @@ export default function App({
           resumeFired.current.delete(canon);
           dialogRevealed.current.delete(canon);
         }
-        next.set(canon, { readiness, shells: paneShells(raw), resetAt });
+        next.set(canon, {
+          readiness,
+          shells: paneShells(raw),
+          resetAt,
+          // Read from the same snapshot as the readiness it belongs to, so the
+          // percent shown can never be a different frame's than the state word.
+          compactionPercent: readiness === "compacting" ? paneCompactionPercent(raw) : null,
+        });
       }
       // A window that vanished between reloads leaves stale bookkeeping; prune it.
       for (const canon of [...limitWindows.current.keys()]) if (!windows.has(canon)) limitWindows.current.delete(canon);
@@ -1841,7 +1861,13 @@ export default function App({
         const same =
           prev.size === next.size &&
           [...next].every(
-            ([k, v]) => prev.get(k)?.readiness === v.readiness && prev.get(k)?.shells === v.shells && prev.get(k)?.resetAt === v.resetAt,
+            ([k, v]) =>
+              prev.get(k)?.readiness === v.readiness &&
+              prev.get(k)?.shells === v.shells &&
+              prev.get(k)?.resetAt === v.resetAt &&
+              // Load-bearing: without it the map is judged "same" for the whole
+              // compaction and the percent freezes at whatever the first poll saw.
+              prev.get(k)?.compactionPercent === v.compactionPercent,
           );
         return same ? prev : next;
       });

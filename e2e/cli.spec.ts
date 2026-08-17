@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { stripAnsi } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { BUSY_PANE, CODEX_SESSION_ID, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { BUSY_PANE, CODEX_SESSION_ID, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
@@ -1545,6 +1545,49 @@ test("agendo list shows when a limited session's limit resets (locale-formatted 
   // A session that isn't limited reports null, not a stale/placeholder value.
   const crash = rows.find((x) => x.shortId === CRASH_SHORT_ID);
   expect(crash.limitResetAt).toBeNull();
+});
+
+test("agendo list/status show how far a compacting session has got", async ({ mock }) => {
+  // Compaction is blocking but PROGRESSING, and the pane says by how much — the
+  // difference between "wait" and "stuck" for anyone reading the list. Same shape
+  // as the limited row's reset time: appended to the readiness word, and carried
+  // machine-readable in --json.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: COMPACTING_PANE } });
+
+  const list = agendo(mock.env, "list");
+  expect(list.status).toBe(0);
+  expect(list.stdout).toMatch(/compacting 42% {2}\S/); // and the column stays aligned
+
+  const status = agendo(mock.env, "status", SHORT_ID);
+  expect(status.status).toBe(0);
+  expect(status.stdout).toContain("compacting 42%");
+
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as any[];
+  const login = rows.find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("compacting");
+  expect(login.compactionPercent).toBe(42);
+  // A session that isn't compacting reports null, not a stale/placeholder value.
+  expect(rows.find((x) => x.shortId === CRASH_SHORT_ID).compactionPercent).toBeNull();
+});
+
+test("a compacting pane with no progress bar yet reads plain 'compacting'", async ({ mock }) => {
+  // The bar appears a beat after the verb line. Printing " 0%" there would be a
+  // claim the screen has not made — the same rule the limited row follows when its
+  // reset time is unreadable.
+  const noBar = COMPACTING_PANE.split("\n").filter((l) => !l.includes("▰")).join("\n");
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: noBar } });
+
+  const list = agendo(mock.env, "list");
+  expect(list.status).toBe(0);
+  expect(list.stdout).toContain("compacting");
+  expect(list.stdout).not.toMatch(/compacting\s+\d+%/);
+
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  const login = (JSON.parse(r.stdout) as any[]).find((x) => x.shortId === SHORT_ID);
+  expect(login.readiness).toBe("compacting");
+  expect(login.compactionPercent).toBeNull();
 });
 
 test("agendo list renders a limited session with no parseable reset time as plain 'limited'", async ({ mock }) => {

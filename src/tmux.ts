@@ -1087,6 +1087,17 @@ function onlyPromptRow(box: InputBox): boolean {
 // (`codexLiveStatus`) rather than from anywhere in the pane, for exactly the
 // reason the claude side moved that way in #33.
 //
+// Known limitation, deliberate: codex compaction is not a state of its own here.
+// `codexReadiness` never returns "compacting", so a compacting codex pane reads
+// "busy" off its run-state field — blocked, which is the answer that matters, but
+// without the progress `paneCompactionPercent` gives a claude pane (#34). Both of
+// that function's callers gate on `readiness === "compacting"`, so it is never
+// reached with a codex capture and never measures codex's bar with claude's
+// rule-anchored region. Closing this needs a real capture of codex mid-compaction
+// to calibrate against; guessing at the marker would be the fail-dangerous
+// direction, since a wrong "compacting" is still un-sendable but a wrong percent
+// would be a claim the screen never made.
+//
 // Why scrape at all, when claude gets read over its control socket: codex has no
 // per-process socket to connect to. It does have a local control plane — an
 // [experimental] `codex app-server daemon`, WebSocket JSON-RPC over
@@ -1566,6 +1577,32 @@ export function paneResumeSafe(raw: string, cursor?: PaneCursor | null): boolean
   if (isDialog(raw)) return false;
   const input = inputBox(raw);
   return input !== null && inputEmpty(input, cursor);
+}
+
+/**
+ * The compaction progress bar's percentage — `42` for `▰▰▰▱▱▱ 42%` — or null when
+ * the pane isn't showing one. Read from the live status region (`liveStatusLines`),
+ * the same band `paneReadiness` takes the "compacting" verdict from, so a transcript
+ * that merely quotes a bar can't produce a reading.
+ *
+ * Anchored on the bar's own `▰`/`▱` blocks rather than on `%`, and that anchor is
+ * load-bearing: the status region deliberately includes everything below the input
+ * box, and the TUI's footer there is full of percentages — `29% ctx | 5h: 9% (3h 9m)
+ * | 7d: 63%` — any of which a bare `\d+%` would happily return as the compaction
+ * progress. The bar glyphs appear nowhere else.
+ *
+ * Deliberately NOT gated on the pane being compacting: callers that display it pair
+ * it with the readiness they already have (see `rowCompactionPercent` in index.tsx),
+ * which keeps this a pure read of one thing. Returns null rather than 0 when there
+ * is no bar — "no reading" and "0% done" are different claims, and a compaction that
+ * has genuinely just started does print `0%`.
+ */
+export function paneCompactionPercent(raw: string): number | null {
+  const m = liveStatusLines(raw).join("\n").match(/[▰▱]+\s*(\d{1,3})\s*%/);
+  if (!m) return null;
+  const pct = Number(m[1]);
+  // A bar that reports something impossible is a misread, not a datum.
+  return pct >= 0 && pct <= 100 ? pct : null;
 }
 
 /**

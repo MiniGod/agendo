@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { reconcileLive } from "../src/model.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect } from "../src/tmux.ts";
+import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
 import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
@@ -1464,6 +1464,24 @@ test.describe("paneReadiness: busy is read from the live status line, not the tr
     expect(paneReadiness(pane(spinner, "", "  3 tasks (3 finished)", "  ✔ Only a done row", ""))).toBe("busy");
     // The strict header still works too — this is the fixture's own wording.
     expect(paneReadiness(pane(spinner, "", "  7 tasks (3 done, 1 in progress, 3 open)", ...rows, ""))).toBe("busy");
+  });
+
+  test("compaction progress is read off the bar, not off any percent on screen", () => {
+    // The status region deliberately includes the footer BELOW the input box, and
+    // that footer is nothing but percentages — so the bar's own `▰`/`▱` blocks are
+    // what the reading is anchored on.
+    const footer = "  09:14:02 | 29% ctx | 5h: 9% (3h 9m) | 7d: 63% (81h 19m) | Opus 5";
+    const compacting = [...box, footer];
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…", "  ▰▰▰▱▱▱ 42%") + "\n" + footer)).toBe(42);
+    // A bar that has only just appeared reports 0 — a real reading, not "none".
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…", "  ▱▱▱▱▱▱ 0%"))).toBe(0);
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…", "  ▰▰▰▰▰▰ 100%"))).toBe(100);
+    // No bar drawn yet: null, so callers print nothing rather than claim 0%.
+    expect(paneCompactionPercent(pane("  ✻ Compacting conversation…"))).toBeNull();
+    // The footer's percentages alone must never be mistaken for progress.
+    expect(paneCompactionPercent(compacting.join("\n"))).toBeNull();
+    // And a transcript that merely draws a bar is history, like every other marker.
+    expect(paneCompactionPercent(pane("  ▰▰▰▱▱▱ 42%", "", "  ✻ Churned for 11m 13s", ""))).toBeNull();
   });
 
   test("KNOWN LIMIT: prose shaped like a panel header licenses the rows under it", () => {
