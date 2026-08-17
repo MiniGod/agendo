@@ -27,7 +27,7 @@ import { SessionIndex } from "./sessions.ts";
 import { refreshLiveTmux } from "./model.ts";
 import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
 import { printJson } from "./output.ts";
-import { SELF_CMD } from "./launch.ts";
+import { notRunningHint, SELF_CMD } from "./launch.ts";
 import type { AgentSession } from "./types.ts";
 
 /**
@@ -345,6 +345,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
   }
   if (o.ids.length && notRunning.length) {
     console.error(`wait: not running (no live window): ${notRunning.map((s) => shortId(s.id)).join(", ")}`);
+    console.error(notRunningHint("<id>", "then wait on it again"));
     return 1;
   }
   if (targets.length === 0) {

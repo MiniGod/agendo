@@ -117,6 +117,7 @@ e2e/
     test.ts        Playwright fixtures (`mock`, `launch`)
   fakebin/         fake az / tmux / git / claude / xdg-open executables
   launcher.spec.ts behavioral tests (navigation, flows, side effects)
+  placeholder.spec.ts  the PAUSED tab's own script (resume / q-Esc close / re-pause)
   screenshots.spec.ts          styled-grid snapshot tests for every view
   screenshots.spec.ts-snapshots/  committed snapshot baselines
   screenshots/     non-asserted PNG artifacts for eyeballing (gitignored)
