@@ -4,7 +4,7 @@ import { getProvider } from "./provider.ts";
 import { SessionIndex } from "./sessions.ts";
 import { liveTargets, liveManagedPaths, sessionName, managedKind, type SessionKind } from "./tmux.ts";
 import { captureRestore, resolveWindowSession } from "./restore.ts";
-import { discoverRepos, repoRootForCwd, type RepoInfo } from "./repos.ts";
+import { discoverRepos, mergeRepos, repoRootForCwd, repoScopeKeys, type RepoInfo } from "./repos.ts";
 import { basename } from "path";
 import type {
   AgentSession,
@@ -63,8 +63,17 @@ export interface LoadedModel {
    * lets the Sessions view badge them as restored-but-unopened.
    */
   livePlaceholders: Set<string>;
-  /** Repos ranked by session count, for the fresh-session repo picker. */
+  /** Repos ranked by session count, for the fresh-session repo picker. Includes
+   *  the repos found under the launcher's path context, so a freshly-cloned repo
+   *  that never hosted a session is still offered. */
   repos: RepoInfo[];
+  /**
+   * Match set for repo-scoped filtering of the work-item / PR views: every
+   * identifier (slug, repo name, directory basename) of the repos found under
+   * the launcher's path context, or `null` when there is no path context (or no
+   * repo inside it) — in which case filtering is inert. See prInRepoScope.
+   */
+  repoScope: Set<string> | null;
   /** All local sessions grouped by their worktree's main repo (Sessions view). */
   sessionGroups: RepoSessions[];
   /**
@@ -92,6 +101,14 @@ export interface LoadModelOptions {
    * path-scoped launcher passes its own host session so restore stays isolated.
    */
   hostSession?: string;
+  /**
+   * The git repos found under the launcher's path context (repos.ts'
+   * `discoverGitReposUnder`). They widen the fetch scope — backends that query
+   * per repo (GitHub) must see a repo inside the target even if no session ever
+   * ran there — and produce `LoadedModel.repoScope`, the display filter. Absent
+   * / empty ⇒ no path context, so nothing is scoped.
+   */
+  scopeRepos?: RepoInfo[];
 }
 
 export function isRunning(s: AgentSession, live: Set<string>): boolean {
@@ -198,6 +215,57 @@ export const prKey = (pr: Pick<PullRequest, "repositoryId" | "id">): string =>
 export const itemKey = (it: Pick<WorkItem, "project" | "id">): string =>
   `${it.project}:${it.id}`;
 
+// ── repo scope: keeping only what belongs to the path context's repos ─────────
+// One pure predicate per list, shared by the TUI and the CLI (as isUnderRoot is
+// for the session path filter) so the two can never disagree about what's in
+// scope. A null scope means "not filtering" and passes everything.
+
+/** Whether a PR belongs to one of the in-scope repos. Both backends carry a repo
+ *  identity on the PR: GitHub's `repositoryId` is the `owner/repo` slug, ADO's
+ *  `repositoryName` is the repo's display name (its id is an opaque guid). */
+export function prInRepoScope(pr: PullRequest, scope: Set<string> | null): boolean {
+  if (!scope) return true;
+  return scope.has(pr.repositoryId.toLowerCase()) || scope.has((pr.repositoryName ?? "").toLowerCase());
+}
+
+/**
+ * Whether a work item belongs to one of the in-scope repos. Exact on GitHub —
+ * `project` is the issue's `owner/repo` slug. Azure DevOps work items have NO
+ * repo field at all (`project` is the ADO *team project*), so their only repo
+ * signal is transitive, through the PRs linked to them: an item with linked PRs
+ * is in scope iff one of them is, and an item with no PR yet carries no signal
+ * and is deliberately KEPT (dropping the whole PR-less backlog would hide the
+ * work the user opened the launcher to start).
+ */
+export function itemInRepoScope(
+  it: WorkItem,
+  provider: ProviderName,
+  scope: Set<string> | null,
+): boolean {
+  if (!scope) return true;
+  if (provider === "github") return scope.has(it.project.toLowerCase());
+  if (it.prs.length === 0) return true;
+  return it.prs.some((pr) => prInRepoScope(pr, scope));
+}
+
+/** The model with its work-item and PR lists narrowed to the in-scope repos.
+ *  Purely a display filter — the local session views (and the tmux state they
+ *  read) are untouched, and a null scope returns the model as-is. */
+export function filterModelByRepos(model: LoadedModel, scope: Set<string> | null): LoadedModel {
+  if (!scope) return model;
+  const item = (it: WorkItem) => itemInRepoScope(it, model.provider, scope);
+  const pr = (p: PullRequest) => prInRepoScope(p, scope);
+  return {
+    ...model,
+    current: model.current.filter(item),
+    other: model.other.filter(item),
+    prLinked: model.prLinked.filter(item),
+    linkedPrs: model.linkedPrs.filter(pr),
+    reviewPrs: model.reviewPrs.filter(pr),
+    orphanPrs: model.orphanPrs.filter(pr),
+  };
+}
+
 /** Sort helper shared by the session groupings: most-recently-used first. */
 const byLastUsedDesc = (a: AgentSession, b: AgentSession) =>
   b.lastUsed.getTime() - a.lastUsed.getTime();
@@ -254,8 +322,15 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   // the cheap, network-free local scan the App also polls on its own (see
   // loadLocalSessions) — reused here so the local half is computed one way.
   const [me, local] = await Promise.all([provider.getMe(), loadLocalSessions()]);
-  const { index, repos } = local;
+  const { index } = local;
   const identity = opts.identity ?? me;
+  // Fetch scope: the session-derived repos plus any repo found under the path
+  // context, so a backend that queries per repo (GitHub) also covers a repo
+  // inside the target that has never hosted a session. Unconditional — the
+  // repo *filter* below is display-only, so toggling it never refetches.
+  const scopeRepos = opts.scopeRepos ?? [];
+  const repos = mergeRepos(local.repos, scopeRepos);
+  const repoScope = scopeRepos.length > 0 ? repoScopeKeys(scopeRepos) : null;
   const ctx = { identity, repos };
   const [{ items, currentIterationPath }, activePRs, reviewPRs, teamMembers] =
     await Promise.all([
@@ -424,6 +499,7 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     liveWindows,
     livePlaceholders,
     repos,
+    repoScope,
     sessionGroups,
     sessionLinks,
     me,

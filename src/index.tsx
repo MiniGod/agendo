@@ -20,13 +20,13 @@ import { branchSync, type BranchSync } from "./gitrefs.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession, forgetRestoreTab, idBearingName } from "./restore.ts";
 import { resolveContext, normalizeCwd } from "./context.ts";
 import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
-import { loadModel, refreshLiveTmux, type LoadedModel, type SessionLink } from "./model.ts";
-import { resolveInitialProvider } from "./provider.ts";
+import { loadModel, refreshLiveTmux, filterModelByRepos, type LoadedModel, type SessionLink } from "./model.ts";
+import { resolveInitialProvider, detectScopeProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
 import { loadState, resumeDialogChoice } from "./config.ts";
 import { takeWarnings } from "./errors.ts";
 import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
-import { repoRootForCwd } from "./repos.ts";
+import { discoverGitReposUnder, repoRootForCwd } from "./repos.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
 import { AGENTS } from "./types.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
@@ -37,8 +37,10 @@ const HELP = `agendo — manage claude sessions as attachable tmux windows
 Usage:
   agendo [path]                Open the launcher in its own tmux session (default:
                                 session "agendo"). With a path, scope the launcher
-                                to sessions under it (host session "agendo-<basename>").
-                                Toggle scoped↔global at runtime with the a key.
+                                to sessions under it (host session "agendo-<basename>")
+                                and narrow the work-item / PR views to the git repos
+                                found inside it. Toggle scoped↔global at runtime with
+                                the a key, the repo filter with f.
       --session, -s <name>      Override the derived host session name (e.g. on a
                                 basename collision between two paths)
   agendo --no-tmux             Open the menu inline, without a tmux session
@@ -106,13 +108,22 @@ Usage:
                                 cwd is under dir. Combines with --repo.
       --repo <name>             Only sessions in that repo — a bare name or an
                                 owner/repo slug. Worktrees count as their repo.
-  agendo list pr, prs          List your open pull requests from the active backend,
+  agendo list pr, prs [dir]    List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
-                                approvals, branch, session, title). --json for full rows.
-  agendo list issues           List issues / work items with any associated session
+                                approvals, branch, session, title). With a dir, only
+                                PRs of the git repos inside it (see --repo-filter).
+      --json                    Emit machine-readable JSON (full rows).
+      --repo-filter,            Keep / drop the repo narrowing a [dir] implies
+        --no-repo-filter        (default: on whenever a dir is given).
+  agendo list issues [dir]     List issues / work items with any associated session
        (aliases: wi,            (id, state, session, title). Vocab follows the backend:
-        work-items)             GitHub says "issue", Azure DevOps "work item".
-                                --json for full rows (id + sessions[]).
+        work-items)             GitHub says "issue", Azure DevOps "work item". With a
+                                dir, only issues of the git repos inside it — Azure
+                                DevOps work items carry no repo, so they're matched
+                                through their linked PRs (items with none are kept).
+      --json                    Emit machine-readable JSON (id + sessions[]).
+      --repo-filter,            As for list pr above.
+        --no-repo-filter
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status. A missing
                                 window — closed, crashed, tmux server restarted,
@@ -616,15 +627,25 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   const ISSUE_SUBS = new Set(["issue", "issues", "wi", "work-item", "work-items", "workitem", "workitems"]);
   if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub))) {
     let json = false;
+    // Optional `[dir]` positional: the same path context the TUI takes, narrowing
+    // the listing to the repos found inside it. `--repo-filter`/`--no-repo-filter`
+    // override the default (on whenever a dir is given), mirroring the menu's `f`.
+    let dirArg: string | undefined;
+    let repoFilter: boolean | undefined;
     for (const a of process.argv.slice(4)) {
       if (a === "--json") json = true;
+      else if (a === "--repo-filter") repoFilter = true;
+      else if (a === "--no-repo-filter") repoFilter = false;
+      else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
       else {
         console.error(`list ${sub}: unknown argument "${a}"`);
         process.exit(1);
       }
     }
-    if (PR_SUBS.has(sub)) await runListPrs({ json });
-    else await runListIssues({ json });
+    const root = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
+    const opts = { json, filterRoot: root, repoFilter: repoFilter ?? !!root };
+    if (PR_SUBS.has(sub)) await runListPrs(opts);
+    else await runListIssues(opts);
     process.exit(0);
   }
   let json = false;
@@ -1414,12 +1435,6 @@ function readyWidth(cells: string[]): number {
 }
 
 /**
- * Model-load options mirroring what the TUI (App.tsx) resolves: the persisted
- * backend (falling back to whichever CLI is installed) and the persisted
- * identity, if any. Used by the association-resolving `list` modes so their
- * gh/az fetch set matches what the menu would show.
- */
-/**
  * Print (and clear) anything the load reported-and-ignored. The TUI surfaces
  * these as a notice; the CLI has no such chrome, so they go to stderr — leaving
  * stdout clean for `--json`. Without this a corrupt `~/.agendo/state.json` would
@@ -1430,9 +1445,17 @@ function flushWarnings(prefix: string): void {
   for (const w of takeWarnings()) console.error(`${prefix}: ${w}`);
 }
 
-function currentModelOptions(): { provider: ReturnType<typeof resolveInitialProvider>; identity: Identity | null } {
+/**
+ * Model-load options mirroring what the TUI (App.tsx) resolves: the persisted
+ * backend (falling back to whichever CLI is installed) and the persisted
+ * identity, if any. Used by the association-resolving `list` modes so their
+ * gh/az fetch set matches what the menu would show. `forced` is the provider a
+ * path context implies (App.tsx passes detectScopeProvider(filterRoot, …) the same
+ * way) — the tracker of the `[dir]`'s origin wins over the persisted default.
+ */
+function currentModelOptions(forced?: ProviderName | null): { provider: ProviderName; identity: Identity | null } {
   const st = loadState();
-  const provider = resolveInitialProvider(st.provider);
+  const provider = resolveInitialProvider(st.provider, forced);
   const identity: Identity | null = st.identityId
     ? { id: st.identityId, displayName: st.identityName ?? "?", uniqueName: st.identityUniqueName ?? "" }
     : null;
@@ -1722,6 +1745,36 @@ function assocSessions(sessions: AgentSession[], live: Set<string>): AssocSessio
     .map((s) => ({ id: s.id, shortId: shortId(s.id), source: s.source, running: live.has(sessionName(s)) }));
 }
 
+/** Shared options of the two resource lists (`list pr` / `list issues`). */
+interface ResourceListOptions {
+  /** Emit JSON instead of a human table. */
+  json: boolean;
+  /** Path context from the `[dir]` positional (absolute), or null for none. */
+  filterRoot: string | null;
+  /** Whether to narrow the listing to the repos inside that path context. */
+  repoFilter: boolean;
+}
+
+/**
+ * Load the model the way the menu does for a path context: the git repos found
+ * under `[dir]` widen the fetch set (so a repo there that never hosted a session
+ * is still queried), and — unless `--no-repo-filter` — narrow the work-item / PR
+ * lists to them. A dir holding no repo at all is far more likely a wrong path
+ * than an intentional "show nothing", so we say so and leave the list unfiltered.
+ * The backend is resolved from the dir too — the tracker its origin points at
+ * (or, for a plain parent folder, its repos' origins) wins over the persisted
+ * default, exactly as the menu does — otherwise we'd query one backend and filter
+ * it against the other's repo identities.
+ */
+async function loadScopedModel(opts: ResourceListOptions): Promise<LoadedModel> {
+  const scopeRepos = opts.filterRoot ? discoverGitReposUnder(opts.filterRoot) : [];
+  if (opts.filterRoot && scopeRepos.length === 0)
+    console.error(`list: no git repos found under ${opts.filterRoot} — listing everything.`);
+  const forced = opts.filterRoot ? detectScopeProvider(opts.filterRoot, scopeRepos) : null;
+  const model = await loadModel({ ...currentModelOptions(forced), scopeRepos });
+  return filterModelByRepos(model, opts.repoFilter ? model.repoScope : null);
+}
+
 /**
  * `list pr|prs`: the current identity's OPEN pull requests from the active
  * backend, each with the session working its branch (running one preferred) — an
@@ -1731,10 +1784,10 @@ function assocSessions(sessions: AgentSession[], live: Set<string>): AssocSessio
  * association, so there's no new matcher. `--json` emits the full rows (id +
  * branch + status + ci + sessions[]) for scripting.
  */
-async function runListPrs(opts: { json: boolean }): Promise<void> {
+async function runListPrs(opts: ResourceListOptions): Promise<void> {
   let model: LoadedModel;
   try {
-    model = await loadModel(currentModelOptions());
+    model = await loadScopedModel(opts);
   } catch (e) {
     flushWarnings("list pr");
     console.error(`list pr: could not load pull requests from the backend: ${(e as Error)?.message ?? e}`);
@@ -1806,10 +1859,10 @@ async function runListPrs(opts: { json: boolean }): Promise<void> {
  * (current + other + prLinked) and its live-tmux set; `--json` emits full rows
  * (id + state + sessions[]).
  */
-async function runListIssues(opts: { json: boolean }): Promise<void> {
+async function runListIssues(opts: ResourceListOptions): Promise<void> {
   let model: LoadedModel;
   try {
-    model = await loadModel(currentModelOptions());
+    model = await loadScopedModel(opts);
   } catch (e) {
     flushWarnings("list issues");
     console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);

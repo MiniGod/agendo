@@ -142,23 +142,43 @@ full live set.
 ### Provider detection from the git remote
 
 When the context is a path (a `filterRoot`), the launcher inspects that path's
-git `origin` remote and **forces the GitHub backend** when the origin host is
-github.com — handling both SSH (`git@github.com:owner/repo`) and HTTPS
-(`https://github.com/owner/repo`) forms. This overrides the persisted/default
-provider (which may be Azure DevOps), so opening `agendo .` inside a GitHub
-checkout lands you on the GitHub backend without a manual toggle.
+git `origin` remote and **forces the backend that tracker implies** — GitHub for
+a github.com origin, Azure DevOps for `dev.azure.com` / `ssh.dev.azure.com` /
+`*.visualstudio.com` — handling both the SSH (`git@github.com:owner/repo`,
+`git@ssh.dev.azure.com:v3/org/proj/repo`) and HTTPS
+(`https://github.com/owner/repo`, `https://dev.azure.com/org/proj/_git/repo`)
+forms. This overrides the persisted/default provider, so opening `agendo .`
+inside a checkout lands you on the right backend without a manual toggle. When
+the target is a plain parent folder with no remote of its own,
+`detectScopeProvider` asks the repos found inside it instead, taking the first one
+that names a known backend.
 
-The override is deliberately **one-directional**: `detectRepoProvider` returns
-`"github"` or `null` — never `"ado"`. An ADO remote (`dev.azure.com` /
-`*.visualstudio.com`), any other host, a repo with no `origin`, or a non-repo
-path all yield `null`, leaving the configured default untouched. It is also
-gated on the `gh` CLI being installed (via `resolveInitialProvider`'s `forced`
-argument) so a GitHub repo without `gh` falls back rather than stranding the
-launcher on an unauthenticatable backend.
+**Known limitation — first match wins.** A target folder that holds repos from
+more than one tracker resolves to whichever repo the downward walk reaches first
+(name order). Everything from the other tracker is then filtered against scope
+keys it cannot match, so those items and PRs disappear from the views. This is
+**accepted, not guaranteed correct**: agendo is not meant to be pointed at a
+parent that mixes trackers, and mix detection, majority voting or per-repo
+backends would all cost more complexity than the case is worth. Point it at a
+folder whose repos share a tracker, or scope to the individual repo. `f` also
+turns the narrowing off if you land in that situation and want the full lists
+back.
+
+Detection has to run **both ways** now that a path context also filters the
+work-item / PR lists: the scope keys are derived from the same remotes, so a
+persisted GitHub default pointed at an ADO folder would query GitHub and then
+filter it against bare ADO repo names — matching nothing, and silently emptying
+the view.
+
+Any other host, a repo with no `origin`, or a non-repo path all yield `null`,
+leaving the configured default untouched. Forcing is also gated on the target
+backend's CLI being installed (via `resolveInitialProvider`'s `forced` argument)
+so a GitHub repo without `gh` (or an ADO one without `az`) falls back rather than
+stranding the launcher on an unauthenticatable backend.
 
 **Precedence:** the git-remote detection overrides the persisted default. There
 is no explicit per-invocation provider flag today; the persisted `state.json`
-provider is the "configured default" that a GitHub remote overrides. Bare
+provider is the "configured default" that a detected remote overrides. Bare
 `agendo` (no `filterRoot`) never runs detection — it keeps the persisted choice.
 
 ### Global toggle
@@ -167,6 +187,59 @@ provider is the "configured default" that a GitHub remote overrides. Bare
 (`g` stays bound to repo-grouping in the Sessions/PRs views, unchanged — hence
 `a` = "all" rather than the originally-sketched `g`.) The toggle is only active
 when a `filterRoot` exists; bare `agendo` is already global.
+
+### Repo filter (work items / PRs)
+
+The path filter above scopes *sessions* by cwd. A path context also scopes the
+**backend data**: the launcher resolves the path to git checkouts
+(`discoverGitReposUnder`, `src/repos.ts` — the checkout the path belongs to when
+there is one (itself, its enclosing repo when the path sits below a repo root, or
+the main repo when it's a worktree), else every repo nested under it, skipping
+dot-directories, worktrees and `node_modules`, never following symlinks) and
+narrows the work-item and PR views to those repos.
+
+The discovered repos are also **unioned into the fetch scope** (`ctx.repos`), so
+a backend that queries per repo (GitHub) covers a repo inside the target even if
+no session ever ran there. That union is unconditional, which keeps the filter a
+pure display overlay: toggling it never refetches.
+
+Matching (`repoScopeKeys` → `prInRepoScope` / `itemInRepoScope`, shared by the
+TUI and `agendo list pr|issues`):
+
+- Each repo contributes the identifier its `origin` remote says a backend uses
+  for it: a github.com remote contributes **only** the `owner/repo` slug (never
+  the bare repo name — that would let a fork under another owner match through
+  `PullRequest.repositoryName`), an Azure DevOps remote contributes the repo
+  name (`…/_git/<repo>` over https, `v3/<org>/<project>/<repo>` over ssh). The
+  directory basename is used **only as a fallback**, when neither remote form
+  matched (no `origin`, or an unrecognized host).
+- **PRs** carry a repo identity on both backends (`repositoryId` is a slug on
+  GitHub, a guid on ADO; `repositoryName` is the display name), so PR filtering
+  is exact.
+- **GitHub issues** carry their `owner/repo` slug in `project` → exact.
+- **ADO work items have no repo at all** (`project` is the *team project*), so
+  they match transitively through their linked PRs. An item with no PR yet has
+  no repo signal and is deliberately **kept** — dropping the whole PR-less
+  backlog would hide the work the user opened the launcher to start.
+
+Toggle: **`f`** ("filter"), on by default whenever a `filterRoot` exists, not
+persisted (like `globalView`). It is independent of `a`: `a` scopes sessions by
+path, `f` scopes items/PRs by repo. Both are advertised on the scope line. A
+path with no repo inside it leaves the filter inert (and says so) rather than
+emptying the views — an empty scope is likelier a wrong path than an intent.
+
+The scan is cached per target for the process lifetime. `r` (refresh) passes
+`fresh`, re-walking the tree so a repo cloned into the target *after* launch
+joins the scope without a restart; the background live-session poll keeps the
+cached result, so only an explicit refresh pays for a rescan.
+
+CLI mirror: `agendo list pr [dir]` / `agendo list issues [dir]`, with
+`--repo-filter` / `--no-repo-filter` overriding the "on when a dir is given"
+default. The `[dir]` picks the **backend** the same way the menu does
+(`detectScopeProvider`), so the tracker its origin points at wins over the
+persisted default — otherwise the CLI would query one backend and filter it
+against the other's repo identities, and show something different than the TUI at
+that path.
 
 ### Host session name collisions
 

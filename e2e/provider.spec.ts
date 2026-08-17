@@ -14,9 +14,17 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vocab } from "../src/vocab.ts";
-import { detectProviders, resolveInitialProvider, detectRepoProvider, PROVIDER_INFO, getProvider } from "../src/provider.ts";
+import {
+  detectProviders,
+  resolveInitialProvider,
+  detectRepoProvider,
+  detectScopeProvider,
+  PROVIDER_INFO,
+  getProvider,
+} from "../src/provider.ts";
 import { parseGithubRemote, githubIssueUrl, githubPullRequestUrl } from "../src/github.ts";
 import { adoPullRequestUrl, adoWorkItemUrl } from "../src/ado.ts";
+import type { RepoInfo } from "../src/repos.ts";
 
 test.describe("vocab: per-backend UI terminology", () => {
   test("ADO speaks work-items / sprint / '!' PRs", () => {
@@ -89,6 +97,33 @@ function withGitOrigin(origin: string | null, fn: () => void): void {
   }
 }
 
+// Like withGitOrigin, but the stub `git` answers per `-C <path>`: listed paths
+// print their origin, anything else exits non-zero (no remote / not a repo).
+// detectScopeProvider needs that — its whole point is a parent folder with no
+// remote of its own whose repos do have one.
+function withGitOrigins(origins: Record<string, string>, fn: () => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "agendo-provider-"));
+  writeFileSync(join(dir, "which"), `#!/bin/sh\n[ -e "${dir}/$1" ] && exit 0 || exit 1\n`);
+  chmodSync(join(dir, "which"), 0o755);
+  for (const cli of ["gh", "az"]) {
+    writeFileSync(join(dir, cli), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, cli), 0o755);
+  }
+  const cases = Object.entries(origins)
+    .map(([p, url]) => `    "${p}") echo "${url}"; exit 0;;`)
+    .join("\n");
+  const git = `#!/bin/sh\ncase "$*" in\n  *"remote get-url origin"*)\n  case "$2" in\n${cases}\n  esac\n  exit 1;;\nesac\nexit 0\n`;
+  writeFileSync(join(dir, "git"), git);
+  chmodSync(join(dir, "git"), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+
 // Run `fn` with process.env.PATH pointed only at a fake bin dir, then restore it.
 // detectProviders reads PATH at call time, so swapping it is enough.
 function withPath(installed: string[], fn: () => void): void {
@@ -139,7 +174,7 @@ test.describe("detectProviders / resolveInitialProvider: which backend boots", (
   });
 });
 
-test.describe("detectRepoProvider: force GitHub from a path context's git remote", () => {
+test.describe("detectRepoProvider: force the backend from a path context's git remote", () => {
   test("a github.com origin → github (both HTTPS and SSH forms)", () => {
     withGitOrigin("https://github.com/ada/appweb.git", () =>
       expect(detectRepoProvider("/repo")).toBe("github"),
@@ -159,30 +194,121 @@ test.describe("detectRepoProvider: force GitHub from a path context's git remote
     );
   });
 
-  test("an Azure DevOps origin → null (leave the configured default untouched)", () => {
+  test("an Azure DevOps origin → ado (HTTPS, SSH and the legacy visualstudio.com forms)", () => {
+    // Detection has to run both ways: a persisted GitHub default pointed at an
+    // ADO target would filter ADO PRs against `owner/repo` slugs and show nothing.
     withGitOrigin("https://dev.azure.com/innovamps/proj/_git/appweb", () =>
-      expect(detectRepoProvider("/repo")).toBeNull(),
+      expect(detectRepoProvider("/repo")).toBe("ado"),
     );
     withGitOrigin("git@ssh.dev.azure.com:v3/innovamps/proj/appweb", () =>
-      expect(detectRepoProvider("/repo")).toBeNull(),
+      expect(detectRepoProvider("/repo")).toBe("ado"),
     );
     withGitOrigin("https://innovamps.visualstudio.com/proj/_git/appweb", () =>
-      expect(detectRepoProvider("/repo")).toBeNull(),
+      expect(detectRepoProvider("/repo")).toBe("ado"),
+    );
+    withGitOrigin("git@vs-ssh.visualstudio.com:v3/innovamps/proj/appweb", () =>
+      expect(detectRepoProvider("/repo")).toBe("ado"),
     );
   });
 
-  test("a look-alike host is not mistaken for github.com", () => {
-    // The host must be exactly github.com, delimited — not a substring.
+  test("a look-alike host is not mistaken for either backend", () => {
+    // The host must be exactly the real one, delimited — not a substring.
     withGitOrigin("https://evilgithub.com/ada/appweb.git", () =>
       expect(detectRepoProvider("/repo")).toBeNull(),
     );
     withGitOrigin("https://github.com.example.org/ada/appweb.git", () =>
       expect(detectRepoProvider("/repo")).toBeNull(),
     );
+    withGitOrigin("https://evilvisualstudio.com/proj/_git/appweb", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+    withGitOrigin("https://dev.azure.com.example.org/org/proj/_git/appweb", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
+  });
+
+  test("an unrelated host → null (leave the configured default untouched)", () => {
+    withGitOrigin("git@gitlab.com:ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBeNull(),
+    );
   });
 
   test("no origin remote / not a git repo → null", () => {
     withGitOrigin(null, () => expect(detectRepoProvider("/repo")).toBeNull());
+  });
+});
+
+test.describe("detectScopeProvider: a parent folder inherits its repos' tracker", () => {
+  const repo = (root: string): RepoInfo => ({ root, name: root, total: 0, claude: 0, copilot: 0, codex: 0 });
+
+  test("a folder with no origin of its own is decided by the repos inside it", () => {
+    // The plain parent folder itself has no remote, so detectRepoProvider alone
+    // returns null — a persisted ADO default would stay put and then be filtered
+    // against GitHub-derived repo keys (a half-empty ADO view).
+    withGitOrigins({ "/parent/appweb": "git@github.com:ada/appweb.git" }, () => {
+      expect(detectRepoProvider("/parent")).toBeNull();
+      expect(detectScopeProvider("/parent", [repo("/parent/appweb")])).toBe("github");
+    });
+  });
+
+  test("no repos inside → null (nothing to infer from, keep the default)", () => {
+    withGitOrigins({ "/parent/appweb": "git@github.com:ada/appweb.git" }, () =>
+      expect(detectScopeProvider("/parent", [])).toBeNull(),
+    );
+  });
+
+  test("ADO repos inside force ADO (the mirror case, not one-directional)", () => {
+    withGitOrigins({ "/parent/appweb": "https://dev.azure.com/innovamps/proj/_git/appweb" }, () =>
+      expect(detectScopeProvider("/parent", [repo("/parent/appweb")])).toBe("ado"),
+    );
+  });
+
+  test("a repo with no usable origin doesn't veto the ones that have one", () => {
+    // Repos come in name order, so a scratch `git init` (or a clone from some
+    // unrelated host) can sort first. Consulting only that one would report
+    // "nothing to infer" and leave the persisted default in place — while the
+    // scope keys still come from the GitHub clones, filtering the view empty.
+    withGitOrigins({ "/parent/zz-appweb": "git@github.com:ada/appweb.git" }, () => {
+      expect(detectRepoProvider("/parent/aaa-scratch")).toBeNull(); // no origin
+      expect(
+        detectScopeProvider("/parent", [repo("/parent/aaa-scratch"), repo("/parent/zz-appweb")]),
+      ).toBe("github");
+    });
+    withGitOrigins(
+      {
+        "/parent/aaa-scratch": "git@gitlab.com:ada/scratch.git", // known host, unknown backend
+        "/parent/zz-appweb": "https://dev.azure.com/innovamps/proj/_git/appweb",
+      },
+      () =>
+        expect(
+          detectScopeProvider("/parent", [repo("/parent/aaa-scratch"), repo("/parent/zz-appweb")]),
+        ).toBe("ado"),
+    );
+  });
+
+  test("repos in scope but none of them recognizable → null, never the path", () => {
+    // The enclosing-checkout hazard again: if no repo can answer we still don't
+    // fall back to `git -C <parent>`, which would report the dotfiles repo.
+    withGitOrigins({ "/parent": "git@github.com:ada/dotfiles.git" }, () =>
+      expect(detectScopeProvider("/parent", [repo("/parent/scratch")])).toBeNull(),
+    );
+  });
+
+  test("the discovered repos outvote an enclosing checkout's origin", () => {
+    // `git -C <parent>` answers from whatever checkout *encloses* the parent — a
+    // $HOME tracked as dotfiles on GitHub, say — even though the repos actually
+    // in scope are ADO. Letting that win would force GitHub and then filter the
+    // ADO views against slugs their bare repo names can never match (empty view).
+    withGitOrigins(
+      {
+        "/parent": "git@github.com:ada/dotfiles.git",
+        "/parent/appweb": "https://dev.azure.com/innovamps/proj/_git/appweb",
+      },
+      () => {
+        expect(detectRepoProvider("/parent")).toBe("github");
+        expect(detectScopeProvider("/parent", [repo("/parent/appweb")])).toBe("ado");
+      },
+    );
   });
 });
 
@@ -221,9 +347,14 @@ test.describe("resolveInitialProvider: a repo-detected provider overrides the de
     withPath(["gh", "az"], () => expect(resolveInitialProvider("ado", null)).toBe("ado"));
   });
 
+  test("a forced ado overrides a persisted github when az is installed", () => {
+    withPath(["gh", "az"], () => expect(resolveInitialProvider("github", "ado")).toBe("ado"));
+  });
+
   test("a forced provider whose CLI is missing falls back (never strands the user)", () => {
     // github detected but gh not installed → don't force; keep the working default.
     withPath(["az"], () => expect(resolveInitialProvider("ado", "github")).toBe("ado"));
+    withPath(["gh"], () => expect(resolveInitialProvider("github", "ado")).toBe("github"));
   });
 });
 

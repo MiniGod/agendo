@@ -97,6 +97,66 @@ test("path scope: agendo <path> filters sessions; 'a' toggles global", async ({ 
   expect(screen).not.toContain("applib (1)");
 });
 
+// A path-scoped launcher also narrows the WORK ITEM / PR views to the git repos
+// found inside the path (here: the appweb checkout itself), and `f` toggles that
+// filter off. The fixture's PRs span two repos — 5001/7002 in appweb, 6001/7001
+// in applib — so scoping hides exactly the applib ones until the toggle.
+test("path scope: PRs narrow to the repos inside the path; 'f' toggles the filter", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado"; // keep the ADO backend (fixture data)
+  const appweb = join(mock.home, "repos", "appweb");
+  const wt = await launch({ args: [appweb], cols: 160, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  wt.write("2"); // PRs view
+  let screen = await wt.waitForText("Awaiting your review");
+
+  // Scoped: the footer advertises the filter + what it found, and the applib PRs
+  // (orphan 6001 "Experiment spike", review 7001 "Refactor the parser") are gone.
+  expect(screen).toContain("f repo filter: on (1 repo)");
+  expect(screen).toContain("Add login screen"); // PR 5001, appweb → kept
+  expect(screen).toContain("Speed up startup"); // PR 7002, appweb → kept
+  expect(screen).not.toContain("Experiment spike");
+  expect(screen).not.toContain("Refactor the parser");
+
+  // `f` turns it off: the applib PRs come back and the hint flips.
+  wt.write("f");
+  screen = await wt.waitForText("Experiment spike");
+  expect(screen).toContain("f repo filter: off");
+  expect(screen).toContain("Refactor the parser");
+
+  // …and back on again.
+  wt.write("f");
+  screen = await wt.waitForText("f repo filter: on (1 repo)");
+  expect(screen).not.toContain("Experiment spike");
+});
+
+// A repo found under the path context but with no sessions yet (a fresh clone) is
+// still offered as a worktree target — and STAYS offered. The background local
+// rescan (every LIVE_POLL_MS) recomputes repos from sessions alone, so it has to
+// re-merge the path-discovered ones or the fresh clone would blink out of the
+// picker a couple of seconds after every load.
+test("path scope: a session-less repo under the path stays in the fresh-session picker", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado"; // keep the ADO backend (fixture data)
+  // A clone that has never hosted a session: only discoverGitReposUnder sees it.
+  await mkdir(join(mock.home, "repos", "freshclone", ".git"), { recursive: true });
+  const wt = await launch({ args: [join(mock.home, "repos")], cols: 160, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+
+  await wt.press(KEY.enter); // expand WI 101
+  await wt.waitForText("+ start a fresh session…");
+  await wt.press(KEY.down); // onto the session row
+  await wt.press(KEY.down); // onto "+ start a fresh session…"
+  await wt.press(KEY.enter); // → agent picker
+  await wt.waitForText("Which agent should run this session?");
+  await wt.press(KEY.enter); // pick Claude → repo picker
+  expect(await wt.waitForText("Pick a repo to create the worktree in")).toContain("freshclone");
+
+  // Past two rescan ticks it must still be there (the regression dropped it on
+  // the first tick, then flapped back only on a manual `r`).
+  await new Promise((r) => setTimeout(r, 5000));
+  expect(await wt.screen()).toContain("freshclone");
+});
+
 // When the path context is a github.com repo, the launcher FORCES the GitHub
 // backend even though the persisted default is ADO — proving provider detection
 // from the git remote overrides the configured default for a path context.
