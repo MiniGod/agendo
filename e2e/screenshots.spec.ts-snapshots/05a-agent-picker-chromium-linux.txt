@@ -3,3 +3,4 @@ Which agent should run this session?  ·  ↑/↓ move · enter select · esc ba
 
 ❯ ⟨black,bg:cyan⟩Claude    ⟨black,bg:cyan,bold⟩  claude --session-id …⟨black,bg:cyan⟩
   Copilot   ⟨bold⟩  copilot --session-id …⟨bold,dim⟩
+  Codex     ⟨bold⟩  codex … (assigns its own session id)⟨bold,dim⟩

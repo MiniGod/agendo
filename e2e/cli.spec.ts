@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { stripAnsi } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { BUSY_PANE, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { BUSY_PANE, CODEX_SESSION_ID, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
@@ -680,6 +680,22 @@ test("agendo list [dir] scopes the listing to sessions under the dir", async ({ 
   expect(inApplib.status).toBe(0);
   expect(inApplib.stdout).toContain("Experiment spike");
   expect(inApplib.stdout).not.toContain("Implement login form");
+});
+
+test("agendo list --all indexes codex rollouts, skipping its sub-agent threads", async ({ mock }) => {
+  // The codex fixture is a `sessions/<Y>/<M>/<D>/rollout-<ts>-<uuid>.jsonl` pair:
+  // one real thread and one `thread_source: subagent` thread beside it. Only the
+  // former is a session anyone can resume, so only it may be listed.
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as { id: string; source: string; branch: string | null; title: string }[];
+
+  const codex = rows.filter((s) => s.source === "codex");
+  expect(codex.map((s) => s.id)).toEqual([CODEX_SESSION_ID]);
+  // Title = the first real user turn, with the IDE preamble stripped off its
+  // front and the injected <environment_context> turn skipped entirely.
+  expect(codex[0].title).toBe("Tidy up the util helpers");
+  expect(codex[0].branch).toBe("draft/codex-tidy");
 });
 
 // ── idle age + the stalled qualifier ─────────────────────────────────────────
@@ -3168,6 +3184,46 @@ test("agendo launch fails when a forwarded flag has no value", async ({ mock }) 
   expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
 });
 
+test("agendo launch --codex spawns codex with the sandboxed autonomy flags and no --session-id", async ({ mock }) => {
+  const r = agendo(mock.env, "launch", "--no-worktree", "--codex", "--model", "gpt-5.6", "tidy the helpers");
+  expect(r.status).toBe(0);
+
+  const argv = spawnedAgentArgv(await mock.tmuxLog())!;
+  // By NAME, not by position: every spawn is prefixed with an `env NAME=value …`
+  // block, so `argv[0]` is `env`, not the binary (see agentBin).
+  expect(agentBin(argv)).toBe("codex");
+  // Unattended the way claude's auto mode is: each approval is decided by
+  // codex's own classifier instead of being asked. The flag implies the
+  // workspace-write sandbox, so `--sandbox` is redundant — and the two flags
+  // that would drop the review or the sandbox entirely stay off.
+  expect(argv).toContain("--approve-for-me");
+  expect(argv).not.toContain("--sandbox");
+  expect(argv).not.toContain("--ask-for-approval");
+  expect(argv).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(argv.join(" ")).toContain("--model gpt-5.6");
+  // Codex has no --session-id; the prompt is a bare positional and must come
+  // last, after every flag, or it'd be read as a flag's value.
+  expect(argv).not.toContain("--session-id");
+  expect(argv[argv.length - 1]).toBe("tidy the helpers");
+
+  // Since codex mints its own id, the window carries a tagged id-less name and
+  // no session id is claimed up front.
+  const call = [...(await mock.tmuxLog())].reverse().find((a) => a[0] === "new-session" || a[0] === "new-window")!;
+  expect(call.join(" ")).toContain("cl-bg-codex-");
+  expect(r.stdout).toContain("codex assigns its own id");
+});
+
+test("agendo launch rejects --fallback-model for codex, and an unknown --agent value", async ({ mock }) => {
+  const bad = agendo(mock.env, "launch", "--no-worktree", "--agent", "codex", "--fallback-model", "sonnet", "go");
+  expect(bad.status).toBe(1);
+  expect(bad.stderr).toContain("--fallback-model isn't supported by --agent codex");
+
+  const unknown = agendo(mock.env, "launch", "--no-worktree", "--agent", "cursor", "go");
+  expect(unknown.status).toBe(1);
+  expect(unknown.stderr).toContain("claude, copilot, codex");
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+});
+
 test("agendo launch rejects unknown dashed flags instead of folding them into the prompt", async ({ mock }) => {
   // A typo'd flag used to become prompt text ("--modle opus do the thing"); now
   // it's a clean error naming what may be forwarded.
@@ -3901,4 +3957,33 @@ test("a copilot launch and a resume propagate it too", async ({ mock }) => {
   // One `env` block, not two stacked ones — claude's config dir shares it.
   expect(agentArgv.filter((t) => t === "env")).toHaveLength(1);
   expect(agentBin(agentArgv)).toBe("claude");
+});
+
+test("a codex launch and a codex resume propagate it too", async ({ mock }) => {
+  const env = { ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL };
+
+  // Like copilot, codex has no --append-system-prompt, so the env var is the
+  // ONLY route the invocation takes into a codex session. Without it a codex
+  // session cannot self-manage at all: every list/send/wait/close it runs would
+  // go through whatever `agendo` happens to be on PATH.
+  const fresh = agendo(env, "launch", "--no-worktree", "--codex", "spike it");
+  expect(fresh.status).toBe(0);
+  const freshArgv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(freshArgv)).toBe("codex");
+  expect(propagatedSelfCmd(freshArgv)).toBe(SELF_SENTINEL);
+  // The `env` prefix must not disturb codex's argv shape: its prompt is a bare
+  // positional and still has to be the LAST token.
+  expect(freshArgv[freshArgv.length - 1]).toBe("spike it");
+
+  // And on the way back. `codex resume <id>` is a subcommand plus a positional,
+  // so the prefix wraps the whole thing rather than splitting it.
+  const resumed = agendo(env, "resume", CODEX_SESSION_ID);
+  expect(resumed.status).toBe(0);
+  const codexArgv = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(codexArgv)).toBe("codex");
+  expect(propagatedSelfCmd(codexArgv)).toBe(SELF_SENTINEL);
+  expect(codexArgv.filter((t) => t === "env")).toHaveLength(1);
+  // Resume is `codex resume <uuid>` — never `--resume=`, and never the bare
+  // `codex resume` that would open codex's interactive picker.
+  expect(codexArgv.slice(codexArgv.indexOf("codex"))).toEqual(["codex", "resume", CODEX_SESSION_ID]);
 });

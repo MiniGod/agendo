@@ -239,7 +239,7 @@ test.describe("detectRepoProvider: force the backend from a path context's git r
 });
 
 test.describe("detectScopeProvider: a parent folder inherits its repos' tracker", () => {
-  const repo = (root: string): RepoInfo => ({ root, name: root, total: 0, claude: 0, copilot: 0 });
+  const repo = (root: string): RepoInfo => ({ root, name: root, total: 0, claude: 0, copilot: 0, codex: 0 });
 
   test("a folder with no origin of its own is decided by the repos inside it", () => {
     // The plain parent folder itself has no remote, so detectRepoProvider alone

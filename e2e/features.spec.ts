@@ -8,7 +8,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect, KEY } from "./harness/test.ts";
-import { sessionName, RUNNING_TARGET, LOGIN_SESSION_ID, CRASH_SESSION_ID, COPILOT_SESSION_ID } from "./harness/fixtures.ts";
+import { sessionName, RUNNING_TARGET, LOGIN_SESSION_ID, CRASH_SESSION_ID, COPILOT_SESSION_ID, CODEX_SESSION_ID } from "./harness/fixtures.ts";
 import type { MockEnv } from "./harness/mockEnv.ts";
 import type { WebTerminal } from "./harness/wterm.ts";
 
@@ -21,6 +21,24 @@ async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 8000): Promise<
     await new Promise((r) => setTimeout(r, 80));
   }
   throw new Error(`waitUntil timed out after ${timeoutMs}ms`);
+}
+
+/**
+ * The agent command inside a tmux spawn argv: past the `--` separator, then past
+ * the `env NAME=value …` prefix every launch and resume now carries (the
+ * self-command, plus claude's config dir when the session has one).
+ *
+ * Read by NAME rather than by position on purpose — an assertion that indexes
+ * into the raw argv, or matches it whole, silently starts describing the env
+ * block instead of the command the moment another variable is added to it.
+ */
+function spawnedAgent(argv: string[]): string[] {
+  const sep = argv.indexOf("--", 1);
+  const cmd = sep >= 0 ? argv.slice(sep + 1) : [];
+  if (cmd[0] !== "env") return cmd;
+  let i = 1;
+  while (i < cmd.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(cmd[i])) i++;
+  return cmd.slice(i);
 }
 
 test("identity switcher: switching to a teammate reloads their work items", async ({ launch }) => {
@@ -209,6 +227,36 @@ test("resuming a Copilot session launches copilot (native support)", async ({ la
         argv.includes(copilotTarget) &&
         argv.includes("copilot") &&
         argv.some((a) => a === `--resume=${COPILOT_SESSION_ID}`),
+    );
+  });
+});
+
+test("resuming a Codex session launches `codex resume <id>`", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  // The codex session's title comes from the first real user turn — the injected
+  // environment block and the IDE preamble around it are stripped — so searching
+  // for it also proves the title extraction.
+  await wt.press("/");
+  await wt.press("Tidy up the util", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press(KEY.enter);
+
+  const codexTarget = sessionName("codex", CODEX_SESSION_ID);
+  await waitUntil(async () => {
+    const log = await mock.tmuxLog();
+    return log.some(
+      (argv) =>
+        argv[0] === "new-session" &&
+        argv.includes(codexTarget) &&
+        // `resume` is a subcommand and the id a positional — not `--resume=<id>`,
+        // and not the bare `codex resume` that opens codex's own picker.
+        spawnedAgent(argv).join(" ") === `codex resume ${CODEX_SESSION_ID}`,
     );
   });
 });

@@ -3,18 +3,32 @@
 /** Which backend the launcher talks to (Azure DevOps or GitHub). */
 export type ProviderName = "ado" | "github";
 
-export type AgentSource = "claude" | "copilot";
+/**
+ * Every agent the launcher can run, in display / validation order. The union is
+ * derived from this array so a new agent can't be added to one and missed in the
+ * other (the CLI's `--agent` check and the TUI picker both read the array).
+ */
+export const AGENTS = ["claude", "copilot", "codex"] as const;
 
-/** A resumable agent session discovered on disk (Claude Code or Copilot CLI). */
+export type AgentSource = (typeof AGENTS)[number];
+
+/** A resumable agent session discovered on disk (Claude Code, Copilot or Codex CLI). */
 export interface AgentSession {
-  /** Stable id used to resume: Claude sessionId / Copilot session dir id. */
+  /**
+   * Stable id used to resume: Claude sessionId / Copilot session dir id /
+   * Codex thread id (the UUID in its `rollout-…-<id>.jsonl` filename).
+   */
   id: string;
   source: AgentSource;
   /** Working directory the session ran in (where resume must be invoked). */
   cwd: string;
   /** git branch the session was last on, if known. */
   branch?: string;
-  /** Repository identifier (Copilot stores "org/project/repo"). */
+  /**
+   * Repository identifier. Copilot stores "org/project/repo"; Codex records the
+   * `origin` remote URL, which we reduce to an `owner/repo` slug (GitHub) or a
+   * bare repo name, so both live in the same identity domain (see sessionInScope).
+   */
   repository?: string;
   /** Human-friendly title for the session. */
   title: string;
@@ -35,14 +49,15 @@ export interface AgentSession {
   /**
    * On-disk location used to load the session's recent activity on demand
    * (when its row is expanded). Claude: the `<id>.jsonl` log file. Copilot:
-   * the session-state directory (which holds `events.jsonl`).
+   * the session-state directory (which holds `events.jsonl`). Codex: the
+   * `rollout-…-<id>.jsonl` file.
    */
   logPath?: string;
   /**
    * Claude Workflow runs launched by this session (multi-agent orchestrations
    * started via the Workflow tool), in launch order. Extracted from the
    * transcript during indexing; absent when none were launched (always for
-   * Copilot). Details (agent progress, phases) load on demand — see workflows.ts.
+   * Copilot and Codex). Details (agent progress, phases) load on demand — see workflows.ts.
    */
   workflows?: WorkflowRef[];
 }
