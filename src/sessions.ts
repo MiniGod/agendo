@@ -5,38 +5,28 @@
 // more agent types can be added later. Both index their on-disk sessions and
 // both resume natively (Claude via `claude --resume`, Copilot via
 // `copilot --resume=<id>`); see launch.ts:resumeArgv.
-import { readdir, readFile, stat } from "fs/promises";
-import { join } from "path";
+import { existsSync } from "fs";
+import { readdir, readFile, realpath, stat } from "fs/promises";
+import { spawnSync } from "child_process";
+import { basename, join } from "path";
 import { homedir } from "os";
-import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus } from "./types.ts";
+import { repoRootForCwd } from "./repos.ts";
+import { parseJsonLine } from "./errors.ts";
+import { parseGithubRemote } from "./github.ts";
+import type { ActionLine, AgentSession, AgentSource, SessionActivity, TaskItem, TaskStatus, WorkflowRef } from "./types.ts";
+import { rebaseWorkflowPaths, WorkflowScan } from "./workflows.ts";
+import { dedupeProfiles, discoverProfiles } from "./profiles.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");
 
 // Claude config dirs to scan. The user may run multiple subscriptions/profiles,
-// each with its own ~/.claude* dir (e.g. ~/.claude and ~/.claude-work). We scan
-// every ~/.claude*/projects we find and remember which config dir each came
-// from (needed to set CLAUDE_CONFIG_DIR on resume). stat() follows symlinks, so
-// ~/.claude pointing into a dotfiles repo works, and non-dirs like
-// ~/.claude.json are skipped (no projects subdir).
-async function claudeBaseDirs(): Promise<{ projects: string; configDir: string }[]> {
-  const home = homedir();
-  let entries: string[];
-  try {
-    entries = await readdir(home);
-  } catch {
-    return [];
-  }
-  const out: { projects: string; configDir: string }[] = [];
-  await Promise.all(
-    entries.map(async (e) => {
-      if (!e.startsWith(".claude")) return;
-      const configDir = join(home, e);
-      const projects = join(configDir, "projects");
-      const st = await stat(projects).catch(() => null);
-      if (st?.isDirectory()) out.push({ projects, configDir });
-    }),
-  );
-  return out;
+// each with its own ~/.claude* dir (e.g. ~/.claude and ~/.claude-work); we
+// remember which config dir each session came from (needed to set
+// CLAUDE_CONFIG_DIR on resume). Discovery — and the realpath dedupe that stops a
+// store symlinked between two profiles from being walked twice — lives in
+// profiles.ts, which also owns moving a session between them.
+function claudeBaseDirs(): Promise<{ projects: string; configDir: string }[]> {
+  return discoverProfiles().then(dedupeProfiles);
 }
 
 interface SessionProvider {
@@ -67,7 +57,7 @@ const BASE_BRANCHES = new Set(["master", "main"]);
 
 async function parseClaudeMeta(
   filePath: string,
-): Promise<{ cwd?: string; branch?: string; title?: string; createdAt?: Date } | null> {
+): Promise<{ cwd?: string; branch?: string; title?: string; createdAt?: Date; workflows?: WorkflowRef[] } | null> {
   let raw: string;
   try {
     raw = await readFile(filePath, "utf-8");
@@ -90,15 +80,16 @@ async function parseClaudeMeta(
   // worktree branch), or a brief mid-session switch back to master, from winning.
   let lastNonBase: string | undefined;
   let lastAnyBranch: string | undefined;
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  // Workflow runs ride the same line walk (and thus the same parse cache) —
+  // launches and completion notifications are both transcript records.
+  const workflows = new WorkflowScan();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    // Skips are recorded as `<path>:<line>` warnings, except on the final line —
+    // a live agent's half-written trailing record is normal, not corruption.
+    const e: Record<string, any> | null = parseJsonLine(t, filePath, i + 1, { isLast: i === lines.length - 1 });
     if (!e || typeof e !== "object") continue;
     if (!cwd && e.cwd) cwd = e.cwd;
     if (!createdAt && e.timestamp) {
@@ -112,9 +103,10 @@ async function parseClaudeMeta(
     if (e.type === "custom-title" && e.customTitle) customTitle = e.customTitle;
     else if (e.type === "ai-title" && e.aiTitle) aiTitle = e.aiTitle;
     else if (e.type === "agent-name" && e.agentName) agentName = e.agentName;
+    workflows.record(e);
   }
   const branch = lastNonBase ?? lastAnyBranch;
-  return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt };
+  return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt, workflows: workflows.finish() };
 }
 
 // Per-transcript parse cache, keyed by absolute .jsonl path. Parsing a Claude
@@ -203,6 +195,11 @@ const claudeProvider: SessionProvider = {
                   createdAt: meta.createdAt,
                   configDir,
                   logPath: filePath,
+                  // A workflow run records its dirs as ABSOLUTE paths inside the
+                  // transcript, so anything that relocates the session (a profile
+                  // move, a renamed config dir) would leave them dangling. Re-anchor
+                  // them on the transcript we just read, which cannot go stale.
+                  workflows: meta.workflows && rebaseWorkflowPaths(meta.workflows, join(dirPath, id), id),
                 };
                 claudeParseCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, session });
                 sessions.push(session);
@@ -286,16 +283,18 @@ export class SessionIndex {
   static async build(): Promise<SessionIndex> {
     const idx = new SessionIndex();
     const lists = await Promise.all(PROVIDERS.map((p) => p.index()));
-    // Dedupe by source:id — the same session file can be discovered more than
-    // once when two scanned config dirs resolve to the same place (e.g. a
-    // symlinked ~/.claude). Keep the most-recently-used copy so it isn't listed
-    // (or keyed in the UI) twice.
+    // Dedupe by source:id — the same session can be discovered more than once
+    // when a user has symlinked pieces of one profile's store into another (a
+    // single `<id>.jsonl`, an `<enc-cwd>/` dir; a symlinked `projects/` or
+    // `~/.claude` is already collapsed upstream by dedupeProfiles). A duplicate's
+    // filename — hence its id — is necessarily the same, so the id key catches
+    // every alias. Which copy survives is decided in preferredDuplicate.
     const byId = new Map<string, AgentSession>();
     for (const list of lists) {
       for (const s of list) {
         const key = `${s.source}:${s.id}`;
         const prev = byId.get(key);
-        if (!prev || s.lastUsed.getTime() > prev.lastUsed.getTime()) byId.set(key, s);
+        byId.set(key, prev ? await preferredDuplicate(prev, s) : s);
       }
     }
     for (const s of byId.values()) {
@@ -322,11 +321,162 @@ export class SessionIndex {
    * working directory (e.g. branch `worktree-…-231938`, worktree dir `…-231938`).
    * Used to surface sessions for items that have no PR to match on. The digit
    * boundaries prevent #231938 from matching e.g. 1231938 or 2319380.
+   *
+   * `repo` (optional) scopes the match to the item's own repository. It's needed
+   * for backends whose item ids are small and collide across repos: a GitHub
+   * issue #2 would otherwise match a branch/cwd like `app2` or `v2-fixes`, and a
+   * repoA #7 would match an unrelated repoB #7. Pass the item's `owner/repo` slug
+   * (or bare repo name) to require the session to live in that repo. ADO ids are
+   * globally unique, so it passes null and the match stays unscoped (unchanged).
+   *
+   * Passing a slug makes this resolve each candidate session's checkout to its
+   * own `owner/repo` via `git remote get-url origin` (see sessionInScope) —
+   * memoized per repo root, but still a process spawn on the first sighting of
+   * a root. Keep it off hot polling paths; the unscoped call never shells out.
    */
-  forWorkItem(id: number): AgentSession[] {
+  forWorkItem(id: number, repo?: string | null): AgentSession[] {
     const re = new RegExp(`(^|[^0-9])${id}([^0-9]|$)`);
-    return this.all.filter((s) => (s.branch && re.test(s.branch)) || re.test(s.cwd));
+    const scope = repo ? repoScope(repo) : null;
+    return this.all.filter((s) => {
+      if (scope && !sessionInScope(s, scope)) return false;
+      return (s.branch && re.test(s.branch)) || re.test(s.cwd);
+    });
   }
+}
+
+/**
+ * Which of two entries for the SAME session id to keep.
+ *
+ * Prefer the REALPATH OWNER — the one whose transcript path needs no symlink
+ * traversal — so a session symlinked from profile B into profile A is attributed
+ * to the profile that actually holds the bytes, and `CLAUDE_CONFIG_DIR` on resume
+ * points there. When ownership can't decide it (neither owns the path because the
+ * profile dir itself is a symlink, or both do because they're genuinely separate
+ * files that happen to share an id) fall back to the most-recently-used, which is
+ * the pre-existing tie-break.
+ *
+ * Only reached on an actual collision, so the realpath syscalls cost nothing on
+ * the overwhelmingly common no-duplicates path.
+ */
+async function preferredDuplicate(a: AgentSession, b: AgentSession): Promise<AgentSession> {
+  const [aOwns, bOwns] = await Promise.all([ownsLogPath(a), ownsLogPath(b)]);
+  if (aOwns !== bOwns) return aOwns ? a : b;
+  return b.lastUsed.getTime() > a.lastUsed.getTime() ? b : a;
+}
+
+/** Whether a session's transcript path reaches the file without a symlink hop. */
+async function ownsLogPath(s: AgentSession): Promise<boolean> {
+  if (!s.logPath) return false;
+  return (await realpath(s.logPath).catch(() => null)) === s.logPath;
+}
+
+// ── Repo scoping for forWorkItem ─────────────────────────────────────────────
+// The scope comparison must happen in ONE identity domain. The obvious-looking
+// shortcut — compare the wanted repo's bare name against the basename of the
+// session's checkout directory — silently mixes two domains: a REMOTE repo name
+// and a LOCAL directory name. Those agree only when the clone happens to be
+// named after the remote (`owner/web-app` cloned into `~/projects/frontend`, a
+// second checkout `~/git/agendo-copy`, or a worktree outside
+// `<root>/.claude/worktrees/` that repos.ts resolves to its own dir all break
+// it), and even when they do agree the owner is thrown away, so a fork
+// (`alice/tool` vs `bob/tool`) still cross-matches. So we resolve BOTH sides to
+// `owner/repo` slugs via the `origin` remote whenever we can, and only fall back
+// to bare-name comparison when a side has no resolvable GitHub slug.
+
+/** A repo identifier reduced to both comparison forms: the full lowercased
+ *  `owner/repo` slug (null when the caller passed a bare name) and the bare
+ *  lowercased repo name (always present, used as the fallback domain). */
+interface RepoScope {
+  slug: string | null;
+  bare: string;
+}
+
+function repoScope(repo: string): RepoScope {
+  const r = repo.trim().toLowerCase();
+  return { slug: r.includes("/") ? r : null, bare: bareRepoName(r) };
+}
+
+/** Reduce a repo identifier (an `owner/repo` slug or a bare name) to its bare,
+ *  lowercased repo name, for repo-scoped matching. */
+function bareRepoName(repo: string): string {
+  return (repo.includes("/") ? repo.split("/").pop()! : repo).toLowerCase();
+}
+
+// Repo root → lowercased `owner/repo` slug (or null when the root has no
+// resolvable github.com origin). Mirrors repoRef()'s cache in github.ts and
+// exists for the same reason, only more acutely: forWorkItem runs once per work
+// item inside loadModel and walks EVERY indexed session, so without memoization
+// a single refresh would re-spawn `git` hundreds of times. A repo root's origin
+// doesn't move under us during a process lifetime, so a plain unbounded Map
+// keyed by root (not by cwd — worktrees of one repo share a root) is enough.
+// NOTE: nothing on the fast paths (SessionIndex.build, loadLocalSessions) may
+// reach this. The two entry points are the repo-scoped forWorkItem call and
+// `repoScopeFilter` (the CLI's `--repo` selector) — and both only get here when
+// the WANTED repo is a full `owner/repo` slug, so the common bare-name case
+// still costs no process spawn at all.
+const rootSlugCache = new Map<string, string | null>();
+
+function repoSlugForRoot(root: string): string | null {
+  const cached = rootSlugCache.get(root);
+  if (cached !== undefined) return cached;
+  let slug: string | null = null;
+  // existsSync first: we routinely index sessions whose cwd is long gone
+  // (deleted worktrees, moved checkouts), and `git -C <missing>` would cost a
+  // doomed process spawn each. A missing root simply has no slug → fallback.
+  if (existsSync(root)) {
+    const r = spawnSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf-8" });
+    if (r.status === 0) {
+      const parsed = parseGithubRemote(r.stdout);
+      if (parsed) slug = `${parsed.owner}/${parsed.repo}`.toLowerCase();
+    }
+  }
+  rootSlugCache.set(root, slug);
+  return slug;
+}
+
+// One candidate identity (the session's checkout, or Copilot's recorded
+// `repository`) against the wanted scope: full slugs when BOTH sides have one,
+// bare names otherwise. Comparing slugs is what rejects same-named forks;
+// falling back to bare names is what keeps non-GitHub, remote-less, and
+// no-longer-on-disk checkouts matching at all.
+function identityMatches(scope: RepoScope, slug: string | null, bare: string): boolean {
+  return scope.slug && slug ? slug === scope.slug : bare === scope.bare;
+}
+
+/**
+ * The reusable form of the match below, for the CLI's `--repo` selector
+ * (`agendo list/status/wait --repo <name>`): parse the wanted repo ONCE and hand
+ * back a predicate. Sharing it with `forWorkItem` is the point — a `--repo` that
+ * disagreed with the work-item↔session join about which sessions live in a repo
+ * would be its own bug class.
+ *
+ * `repo` is a bare name or an `owner/repo` slug; the slug form makes this shell
+ * out to `git remote get-url origin` once per repo root (memoized), so prefer
+ * the bare name on hot paths.
+ */
+export function repoScopeFilter(repo: string): (s: AgentSession) => boolean {
+  const scope = repoScope(repo);
+  return (s) => sessionInScope(s, scope);
+}
+
+/** Whether a session belongs to the wanted repo, for the repo-scoped
+ *  work-item↔session join. */
+function sessionInScope(s: AgentSession, scope: RepoScope): boolean {
+  const root = repoRootForCwd(s.cwd);
+  // Only shell out when the wanted repo is a full slug: against a bare wanted
+  // name there is no owner to compare, so the resolution could not change the
+  // answer and the git call would be pure waste.
+  const rootSlug = scope.slug ? repoSlugForRoot(root) : null;
+  if (identityMatches(scope, rootSlug, basename(root).toLowerCase())) return true;
+  // Copilot records the remote repo it was launched against, which is already in
+  // the remote domain — no git call needed, and it's the only signal for a
+  // Copilot session whose cwd no longer exists.
+  if (s.repository) {
+    const recorded = s.repository.trim().toLowerCase();
+    const slug = recorded.includes("/") ? recorded : null;
+    if (identityMatches(scope, slug, bareRepoName(recorded))) return true;
+  }
+  return false;
 }
 
 // ── On-demand activity (recent action lines) ────────────────────────────────
@@ -475,6 +625,13 @@ function claudeAction(b: any, ts: Date, full = false): ActionLine | null {
       detail = at + (inp.description ?? "");
       break;
     }
+    // A Workflow launch's input is a whole orchestration script — dumping its
+    // first value would spray code into the one-liner. Prefer the workflow's
+    // name / script path; run identity + progress live in the workflows
+    // section (see workflows.ts), not the action log.
+    case "Workflow":
+      detail = inp.name ?? (typeof inp.scriptPath === "string" ? shortPath(inp.scriptPath) : "(inline script)");
+      break;
     case "TaskCreate":
       detail = inp.subject ?? inp.title ?? "";
       break;
@@ -505,15 +662,11 @@ async function loadClaudeActivity(path?: string, full = false): Promise<SessionA
   // fallback for des-workflow sessions that never call TodoWrite.
   let latestTodos: TaskItem[] | null = null;
   const replay: TaskReplay = { map: new Map(), order: [], created: 0 };
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    const e: Record<string, any> | null = parseJsonLine(t, path, i + 1, { isLast: i === lines.length - 1 });
     // JSON.parse("null")/"42"/"\"x\"" succeed but aren't records — skip them so a
     // stray primitive line can't crash the field access below.
     if (!e || typeof e !== "object") continue;
@@ -521,8 +674,10 @@ async function loadClaudeActivity(path?: string, full = false): Promise<SessionA
     if (e.type === "user") {
       const txt = userText(e.message?.content);
       // A genuine new human prompt (not a tool_result) starts a fresh turn, so
-      // the previous turn's answer is no longer "the final response".
-      if (txt) {
+      // the previous turn's answer is no longer "the final response". Injected
+      // task-notifications (background agent/workflow completions) are user-typed
+      // records but not human prompts — they must not clobber either field.
+      if (txt && !txt.startsWith("<task-notification>")) {
         lastPrompt = full ? txt : txt.slice(0, 200);
         finalResponse = undefined;
       }
@@ -607,24 +762,21 @@ function copilotAction(tr: any, ts: Date, full = false): ActionLine {
 
 async function loadCopilotActivity(dir?: string, full = false): Promise<SessionActivity> {
   if (!dir) return { actions: [] };
+  const eventsPath = join(dir, "events.jsonl");
   let raw: string;
   try {
-    raw = await readFile(join(dir, "events.jsonl"), "utf-8");
+    raw = await readFile(eventsPath, "utf-8");
   } catch {
     return { actions: [] };
   }
   const actions: ActionLine[] = [];
   let lastPrompt: string | undefined;
   let finalResponse: string | undefined;
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
     if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      continue;
-    }
+    const e: Record<string, any> | null = parseJsonLine(t, eventsPath, i + 1, { isLast: i === lines.length - 1 });
     if (!e || typeof e !== "object") continue;
     const ts = e.timestamp ? new Date(e.timestamp) : new Date(0);
     const data = e.data ?? {};

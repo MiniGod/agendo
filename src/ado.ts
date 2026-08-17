@@ -4,6 +4,8 @@
 // request a token scoped to the configured tenant.
 import { spawn, spawnSync } from "child_process";
 import { loadConfig, type Config } from "./config.ts";
+import { httpError, networkError, readJsonResponse, scrub, snippetOf } from "./errors.ts";
+import type { EntityUrls } from "./provider.ts";
 import type {
   Identity,
   PullRequest,
@@ -17,14 +19,52 @@ const cfg: Config = loadConfig();
 // Base URLs are overridable via env so an integration test can point the whole
 // REST layer at a local mock server without patching production defaults. In
 // normal use neither var is set and we talk to the real Azure DevOps hosts.
-const BASE = (process.env.ADO_BASE_URL ?? `https://dev.azure.com/${cfg.org}`).replace(/\/$/, "");
+const BASE = (process.env.ADO_BASE_URL ?? `https://dev.azure.com/${encodeURIComponent(cfg.org)}`).replace(/\/$/, "");
 const VSSPS = (process.env.ADO_VSSPS_URL ?? "https://app.vssps.visualstudio.com").replace(/\/$/, "");
-const GRAPH = (process.env.ADO_GRAPH_URL ?? `https://vssps.dev.azure.com/${cfg.org}`).replace(/\/$/, "");
+const GRAPH = (process.env.ADO_GRAPH_URL ?? `https://vssps.dev.azure.com/${encodeURIComponent(cfg.org)}`).replace(/\/$/, "");
 const API = "api-version=7.1";
 
-// Org-level work-item URL — resolves to the item in its own project regardless
-// of which project it lives in, so it works for items outside cfg.project too.
-const workItemUrl = (id: number) => `${BASE}/_workitems/edit/${id}`;
+// ── Canonical web URLs ────────────────────────────────────────────────────────
+// The one place ADO entity links are built. `base` is the org/collection root —
+// `https://dev.azure.com/<org>`, a legacy `https://<org>.visualstudio.com`, or
+// whatever ADO_BASE_URL points at (self-hosted / proxied / the e2e mock) — so
+// every host shape falls out of the same two functions. Both are pure so they
+// can be pinned in tests without touching the module's configured base.
+
+/** Drop trailing slashes so a base joins cleanly onto a path. */
+const trimBase = (base: string) => base.replace(/\/+$/, "");
+
+/**
+ * Web URL of a work item (the Boards details/edit page). Org-level on purpose:
+ * it resolves the item in whichever project owns it, so it's correct for items
+ * outside `cfg.project` too.
+ */
+export function adoWorkItemUrl(base: string, id: number): string {
+  return `${trimBase(base)}/_workitems/edit/${id}`;
+}
+
+/**
+ * Web URL of a pull request. `project` and `repo` are raw names, percent-encoded
+ * here — ADO project names routinely contain spaces, and a repo name may too, so
+ * interpolating them unescaped yields a link that 404s.
+ */
+export function adoPullRequestUrl(base: string, project: string, repo: string, id: number): string {
+  return `${trimBase(base)}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}/pullrequest/${id}`;
+}
+
+/** Entity URLs for the configured org (see Provider.urls). Derived from the
+ *  configured org/project and ADO_BASE_URL — never re-parsed from a git remote. */
+export const urls: EntityUrls = {
+  workItem: (ref) => adoWorkItemUrl(BASE, ref.id),
+  // ADO accepts either the repo's name or its guid in the path; prefer the name
+  // (readable, and what the web UI itself links to), falling back to the guid.
+  // A PR link is repo-scoped with no repo-less form, so a reference carrying
+  // neither yields null rather than `…/_git//pullrequest/<id>`, which 404s.
+  pullRequest: (ref) => {
+    const repo = ref.repositoryName || ref.repositoryId;
+    return repo ? adoPullRequestUrl(BASE, cfg.project, repo, ref.id) : null;
+  },
+};
 
 // ── Token (cached for the process lifetime, refreshed before expiry) ──────────
 let cachedToken: { value: string; expiresAt: number } | null = null;
@@ -75,16 +115,70 @@ export function checkAuth(): Promise<boolean> {
 }
 
 // ── Low-level fetch ───────────────────────────────────────────────────────────
-async function adoGet(path: string): Promise<any> {
+/** Bearer token(s) to scrub from any error text we surface. The Authorization
+ *  header is never echoed; this covers a URL or response body that happens to
+ *  contain the same string. */
+function tokenSecrets(): string[] {
+  return cachedToken ? [cachedToken.value] : [];
+}
+
+/**
+ * One request, with every failure mode carrying its context:
+ *   • no response at all (DNS / refused / TLS / timeout) → tagged retryable
+ *   • an error status → the status rides on the error, so the UI's auto-retry
+ *     can tell a 503 (worth another go) from a 401/404 (never will be), plus a
+ *     body excerpt: ADO puts the actual explanation there ("VS403496: The team
+ *     … does not exist"), and a URL with a bare "404 Not Found" is undiagnosable
+ *   • a 2xx whose body isn't JSON → the method, URL, status and a short body
+ *     excerpt, so an ADO auth redirect to an HTML sign-in page reads as one
+ *     instead of as the runtime's bare "Failed to parse JSON".
+ * Every echoed string is scrubbed of the bearer token; the Authorization header
+ * is never included at all.
+ */
+async function adoFetch(
+  method: "GET" | "POST",
+  url: string,
+  init: RequestInit,
+  opts: { allow404?: boolean } = {},
+): Promise<any> {
+  const secrets = tokenSecrets();
+  const safeUrl = scrub(url, secrets);
+  let r: Response;
+  try {
+    r = await fetch(url, init);
+  } catch (cause) {
+    throw networkError(`ADO ${method} ${safeUrl}`, cause);
+  }
+  // A tolerated 404 is an ABSENT RESOURCE, i.e. a successful answer of "there
+  // isn't one" — so it returns before any error is built, and the auto-retry
+  // never sees it. That ordering matters: a 404 is permanent, so retrying the
+  // no-sprints case would loop uselessly, which is the bug #21 fixed.
+  if (r.status === 404 && opts.allow404) return null;
+  if (!r.ok) {
+    // Also drains the body, so the connection returns to the pool.
+    const body = await r.text().catch(() => "");
+    const detail = body ? ` (${snippetOf(body, secrets)})` : "";
+    throw httpError(`ADO ${method} ${safeUrl} -> ${r.status} ${r.statusText}${detail}`, r.status);
+  }
+  return readJsonResponse(r, method, url, secrets);
+}
+
+/**
+ * GET an ADO endpoint as JSON. `path` may be an absolute URL (the VSSPS/Graph
+ * hosts) or a path appended to BASE.
+ *
+ * `allow404` lets a call site treat "not found" as an absent resource,
+ * resolving to `null` instead of throwing. It's opt-in per call: on most
+ * endpoints a 404 means a bad project/team/id and must surface as an error.
+ */
+async function adoGet(path: string, opts: { allow404?: boolean } = {}): Promise<any> {
   const url = path.startsWith("http") ? path : `${BASE}/${path}`;
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
-  if (!r.ok) throw new Error(`ADO GET ${url} -> ${r.status} ${r.statusText}`);
-  return r.json();
+  return adoFetch("GET", url, { headers: { Authorization: `Bearer ${getToken()}` } }, opts);
 }
 
 async function adoPost(path: string, body: unknown): Promise<any> {
   const url = `${BASE}/${path}`;
-  const r = await fetch(url, {
+  return adoFetch("POST", url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${getToken()}`,
@@ -92,17 +186,20 @@ async function adoPost(path: string, body: unknown): Promise<any> {
     },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`ADO POST ${url} -> ${r.status} ${r.statusText}`);
-  return r.json();
 }
 
 // ── Current iteration for the configured team ─────────────────────────────────
+// A team that has never configured any sprints 404s here instead of returning an
+// empty `value` — both mean "no current iteration", so a 404 is tolerated. Left
+// as an error it would fail the whole model load and strand the interactive
+// launcher on its "press r to retry" screen, which never recovers (the same 404
+// comes back every time).
 export async function getCurrentIterationPath(): Promise<string | null> {
   const path =
     `${encodeURIComponent(cfg.project)}/${encodeURIComponent(cfg.team)}` +
     `/_apis/work/teamsettings/iterations?$timeframe=current&${API}`;
-  const data = await adoGet(path);
-  return data.value?.[0]?.path ?? null;
+  const data = await adoGet(path, { allow404: true });
+  return data?.value?.[0]?.path ?? null;
 }
 
 // ── Work items assigned to a person, not closed ───────────────────────────────
@@ -196,12 +293,33 @@ function mapPr(pr: any): PullRequest {
     ci,
     createdDate,
     updatedDate: createdDate, // refined to the last pushed iteration during enrichment
-    url: `${BASE}/${encodeURIComponent(cfg.project)}/_git/${pr.repository?.name ?? repoId}/pullrequest/${pr.pullRequestId}`,
+    // Through `urls`, not the raw builder, so the provider-level entry point is
+    // the one the app actually exercises. "" means the payload carried no repo
+    // at all (never seen from the real API) — callers read a falsy url as "no
+    // link" rather than opening something that 404s.
+    url:
+      urls.pullRequest({
+        id: pr.pullRequestId,
+        repositoryId: repoId,
+        repositoryName: pr.repository?.name,
+      }) ?? "",
     ...votes,
   };
 }
 
+// Dedups repeated getPullRequest calls *within one model load* (a PR linked to
+// several work items is fetched once). It must NOT survive across loads: a PR's
+// status/approvals/isDraft/title are mutable, and only ci/updatedDate get
+// refreshed by enrichPrCI — so a completed PR would stay frozen "active" in the
+// linked view while vanishing from the orphan view. loadModel calls clearPrCache
+// (via Provider.beginLoad) at the start of every reload to keep it a per-load cache.
 const prCache = new Map<string, PullRequest>();
+
+/** Drop the per-load PR cache so the next fetch re-reads mutable PR fields.
+ *  Called at the start of each model reload (see Provider.beginLoad). */
+export function clearPrCache(): void {
+  prCache.clear();
+}
 
 async function getPullRequest(repoId: string, prId: number): Promise<PullRequest | null> {
   const key = `${repoId}:${prId}`;
@@ -585,7 +703,7 @@ export async function mapRawWorkItem(
     project: f["System.TeamProject"] ?? "",
     inCurrentSprint: !!currentIterationPath && iterationPath === currentIterationPath,
     prs,
-    url: workItemUrl(id),
+    url: urls.workItem({ id }) ?? "",
   };
 }
 

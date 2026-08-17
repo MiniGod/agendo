@@ -38,6 +38,72 @@ export interface AgentSession {
    * the session-state directory (which holds `events.jsonl`).
    */
   logPath?: string;
+  /**
+   * Claude Workflow runs launched by this session (multi-agent orchestrations
+   * started via the Workflow tool), in launch order. Extracted from the
+   * transcript during indexing; absent when none were launched (always for
+   * Copilot). Details (agent progress, phases) load on demand — see workflows.ts.
+   */
+  workflows?: WorkflowRef[];
+}
+
+// ── Claude Workflow runs ─────────────────────────────────────────────────────
+// A "workflow" is Claude Code's Workflow tool: a background multi-agent
+// orchestration. Its lifecycle leaves three traces we read (never write):
+//   1. the launch tool_result in the session transcript (structured
+//      `toolUseResult` with taskType "local_workflow") — identity + paths,
+//   2. a `<task-notification>` user message in the transcript when it finishes,
+//   3. run files under `<sessionDir>/subagents/workflows/<runId>/` (journal +
+//      per-agent transcripts) and the script under
+//      `<sessionDir>/workflows/scripts/` — progress + phase metadata.
+
+/** One phase declared in a workflow script's `meta.phases`. */
+export interface WorkflowPhase {
+  title: string;
+  detail?: string;
+  model?: string;
+}
+
+/** A workflow run as recorded in the session transcript (cheap, index-time). */
+export interface WorkflowRef {
+  /** Run id (`wf_…`) — stable across resumes of the same run. */
+  runId: string;
+  /** Background-task id the completion notification references. */
+  taskId?: string;
+  /** Workflow name from the script's meta. */
+  name: string;
+  /** One-line summary reported at launch. */
+  summary?: string;
+  /** Directory holding journal.jsonl + per-agent transcripts. */
+  transcriptDir?: string;
+  /** The persisted workflow script (carries the meta literal). */
+  scriptPath?: string;
+  launchedAt?: Date;
+  /** Raw `<status>` from the completion task-notification, if one arrived. */
+  notifiedStatus?: string;
+}
+
+/**
+ * Effective run state. "interrupted" = never notified as finished, but the
+ * session that ran it has no live tmux window — workflows run in-process, so
+ * the run died with the session.
+ */
+export type WorkflowStatus = "running" | "completed" | "failed" | "stopped" | "interrupted";
+
+/** On-demand detail for one run, read from its files (see loadWorkflowDetails). */
+export interface WorkflowDetails {
+  /** Agents spawned so far (unique `started` events in the journal). */
+  agentsStarted: number;
+  /** Agents finished (unique `result` events in the journal). */
+  agentsDone: number;
+  /** Most recent write in the run's transcript dir (activity heartbeat). */
+  lastActivity?: Date;
+  /** Description from the script's meta (fallback when the ref has no summary). */
+  description?: string;
+  /** Phases declared in the script's meta, in order. */
+  phases?: WorkflowPhase[];
+  /** Agent count per model (from per-agent meta files), e.g. { sonnet: 2 }. */
+  modelCounts?: Record<string, number>;
 }
 
 /** One recent action in a session's log (a tool call, a model message, …). */
@@ -125,6 +191,12 @@ export interface PullRequest {
   createdDate: number;
   /** Last-update time (epoch ms) — last pushed iteration; enrichment fills it. */
   updatedDate: number;
+  /**
+   * Web URL of the pull request, built by the backend's canonical URL builder
+   * (see Provider.urls). Empty string when the backend payload carried no
+   * repository to scope the link to — every consumer must read `""` as "no
+   * link" rather than opening or handing over a half-built URL.
+   */
   url: string;
 }
 
@@ -188,6 +260,7 @@ export interface WorkItem {
   prs: PullRequest[];
   /** Sessions whose branch matches one of this item's PR branches. */
   sessions: AgentSession[];
-  /** Web URL of the work item (the Boards details/edit page). */
+  /** Web URL of the work item (the Boards details/edit page), from the backend's
+   *  canonical URL builder. `""` means "no link" — see PullRequest.url. */
   url: string;
 }

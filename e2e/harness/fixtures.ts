@@ -80,14 +80,90 @@ export async function materializeHome(home: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   await writeFile(join(stateDir, "state.json"), JSON.stringify({ provider: "ado" }, null, 2));
 
-  // `.git` markers so repoRootForCwd resolves the standalone session's repo, and
-  // so the three repos under ~/repos are found by the downward scan a path
-  // context runs (discoverGitReposUnder) — the repo filter's input.
-  for (const root of [p.appweb, p.applib, p.standalone]) {
+  // `.git` markers. standalone's is what makes repoRootForCwd's walk-up resolve
+  // its session at all; appweb's and applib's are not needed for that (their
+  // sessions live in `<root>/.claude/worktrees/…`, which resolves by pattern),
+  // but they are needed for the fixtures to be HONEST: these are checkouts with
+  // worktrees under them, and code that asks "can this host a worktree" — the
+  // repo picker's demotion rule, the worktree-vs-checkout default — would
+  // otherwise be told they're plain folders and behave accordingly.
+  // All three are also the input to the repo FILTER: the downward scan a path
+  // context runs (`discoverGitReposUnder`) finds a repo by exactly this marker,
+  // so `agendo ~/repos` scoping to three repos — and `agendo ~/repos/appweb` to
+  // one — depends on every one of them existing. Dropping any would silently
+  // un-scope the repo-filter tests rather than fail them.
+  for (const root of [p.standalone, p.appweb, p.applib]) {
     await mkdir(join(root, ".git"), { recursive: true });
   }
 
+  // Real `.git` REF FILES (no git binary involved) for the unpushed-work signal
+  // in `agendo status` / `list --json`, which reads them directly rather than
+  // spawning git (see src/gitrefs.ts).
+  //
+  //  • standalone: a plain checkout on `main` with a CONFIGURED origin upstream,
+  //    in sync — and the remote ref is PACKED, the normal state right after a
+  //    clone, so the packed-refs fallback is exercised too.
+  //  • appweb's `login` LINKED WORKTREE: the layout every agendo session actually
+  //    uses — the worktree's `.git` is a FILE pointing at
+  //    <repo>/.git/worktrees/login, which holds its own HEAD plus a `commondir`
+  //    back to the shared refs. feature/login has no configured upstream and no
+  //    origin/feature/login ref → the hedged "unpushed, or tracking another
+  //    remote" case, and the "parked mid-task" story.
+  //    appweb's config carries a section for a DIFFERENT branch, so a parser that
+  //    matched sections loosely would hand feature/login someone else's upstream.
+  //  • applib is a COMPLETE repo (HEAD + a ref) whose `experiment` worktree dir
+  //    deliberately does NOT exist — the copilot session points at a deleted
+  //    worktree, the routine post-merge state. The ref lookup must report
+  //    "unknown" for it and must NOT walk up and describe applib's own master as
+  //    if it were that session's branch.
+  const SHA_MAIN = "1111111111111111111111111111111111111111";
+  const SHA_LOGIN = "2222222222222222222222222222222222222222";
+  const SHA_APPLIB = "5555555555555555555555555555555555555555";
+  await mkdir(join(p.applib, ".git", "refs", "heads"), { recursive: true });
+  await writeFile(join(p.applib, ".git", "HEAD"), "ref: refs/heads/master\n");
+  await writeFile(join(p.applib, ".git", "refs", "heads", "master"), `${SHA_APPLIB}\n`);
+  await mkdir(join(p.standalone, ".git", "refs", "heads"), { recursive: true });
+  await writeFile(join(p.standalone, ".git", "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(p.standalone, ".git", "refs", "heads", "main"), `${SHA_MAIN}\n`);
+  await writeFile(
+    join(p.standalone, ".git", "packed-refs"),
+    `# pack-refs with: peeled fully-peeled sorted \n${SHA_MAIN} refs/remotes/origin/main\n`,
+  );
+  await writeFile(
+    join(p.standalone, ".git", "config"),
+    ['[branch "main"]', "\tremote = origin", "\tmerge = refs/heads/main", ""].join("\n"),
+  );
+
+  await mkdir(join(p.appweb, ".git", "refs", "heads", "feature"), { recursive: true });
+  await writeFile(join(p.appweb, ".git", "HEAD"), "ref: refs/heads/master\n");
+  await writeFile(join(p.appweb, ".git", "refs", "heads", "feature", "login"), `${SHA_LOGIN}\n`);
+  // The only branch section is for `master` — feature/login deliberately has none,
+  // so a lookup that matched sections loosely would report master's upstream as
+  // login's and turn "unknown" into a confident wrong answer.
+  await writeFile(
+    join(p.appweb, ".git", "config"),
+    ['[branch "master"]', "\tremote = origin", "\tmerge = refs/heads/master", ""].join("\n"),
+  );
+  // NB: only `login` gets a worktree dir. p.crashCwd must stay ABSENT — the
+  // placeholder-tab tests in features.spec.ts are about a tab whose directory is
+  // gone, and materializing it here would quietly disarm them.
+  {
+    const wtGitDir = join(p.appweb, ".git", "worktrees", "login");
+    await mkdir(wtGitDir, { recursive: true });
+    await writeFile(join(wtGitDir, "HEAD"), "ref: refs/heads/feature/login\n");
+    await writeFile(join(wtGitDir, "commondir"), "../..\n");
+    await mkdir(p.loginCwd, { recursive: true });
+    await writeFile(join(p.loginCwd, ".git"), `gitdir: ${wtGitDir}\n`);
+  }
+
   const projects = join(home, ".claude", "projects");
+
+  // A SECOND Claude config profile, deliberately empty of sessions. Profiles are
+  // the union of `~/.claude*` dirs that have a `projects/` subdir — not just the
+  // ones already holding sessions — so this is what gives the "move to another
+  // profile" picker somewhere to move TO. Empty on purpose: it adds a
+  // destination without perturbing any session count in the other specs.
+  await mkdir(join(home, ".claude-work", "projects"), { recursive: true });
 
   // 1) login session — running. Its gitBranch DELIBERATELY progresses across the
   // log: it starts on the base branch `master`, spends most records on an interim
@@ -122,8 +198,48 @@ export async function materializeHome(home: string): Promise<void> {
         { content: "Add validation", activeForm: "Adding validation", status: "in_progress" },
         { content: "Wire up the submit handler", activeForm: "Wiring up the submit handler", status: "pending" },
       ] } }] }, timestamp: "2026-06-20T10:00:27.000Z" },
+      // A Workflow-tool launch with NO completion notification: on the RUNNING
+      // session this must surface as a running workflow (status/list ◆ marker).
+      // The structured toolUseResult mirrors a real launch record verbatim.
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_wf_login", name: "Workflow", input: {} }] }, timestamp: "2026-06-20T10:00:28.000Z" },
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_wf_login", content: "Workflow launched in background. Task ID: wtask-login" }] }, toolUseResult: { status: "async_launched", taskId: "wtask-login", taskType: "local_workflow", workflowName: "login-hardening", runId: "wf_login01", summary: "Harden the login flow end-to-end", transcriptDir: join(loginDir, LOGIN_SESSION_ID, "subagents", "workflows", "wf_login01"), scriptPath: join(loginDir, LOGIN_SESSION_ID, "workflows", "scripts", "login-hardening-wf_login01.js") }, timestamp: "2026-06-20T10:00:29.000Z" },
       { type: "assistant", message: { content: [{ type: "text", text: "Done — login form added with validation. " + "x".repeat(400) }] }, cwd: p.loginCwd, gitBranch: "feature/login", timestamp: "2026-06-20T10:00:30.000Z" },
     ]),
+  );
+
+  // The login workflow's run files: a journal with 2 agents spawned / 1 done
+  // (drives "1/2 agents done"), per-agent meta (drives the model tally), and
+  // the persisted script whose meta literal drives the phases line.
+  const loginWfDir = join(loginDir, LOGIN_SESSION_ID, "subagents", "workflows", "wf_login01");
+  await mkdir(loginWfDir, { recursive: true });
+  await writeFile(
+    join(loginWfDir, "journal.jsonl"),
+    jsonl([
+      { type: "started", key: "v2:aaa", agentId: "agent-one" },
+      { type: "result", key: "v2:aaa", agentId: "agent-one", result: "research done" },
+      { type: "started", key: "v2:bbb", agentId: "agent-two" },
+    ]),
+  );
+  await writeFile(join(loginWfDir, "agent-one.meta.json"), JSON.stringify({ agentType: "workflow-subagent", spawnDepth: 1, model: "sonnet" }));
+  await writeFile(join(loginWfDir, "agent-two.meta.json"), JSON.stringify({ agentType: "workflow-subagent", spawnDepth: 1, model: "opus" }));
+  const loginScriptsDir = join(loginDir, LOGIN_SESSION_ID, "workflows", "scripts");
+  await mkdir(loginScriptsDir, { recursive: true });
+  await writeFile(
+    join(loginScriptsDir, "login-hardening-wf_login01.js"),
+    [
+      "export const meta = {",
+      "  name: 'login-hardening',",
+      "  description: 'Harden the login flow end-to-end',",
+      "  phases: [",
+      "    { title: 'Research', detail: 'map the login flow', model: 'sonnet' },",
+      "    { title: 'Develop', model: 'opus' },",
+      "  ],",
+      "}",
+      "phase('Research')",
+      "const r = await agent('map the login flow')",
+      "return r",
+      "",
+    ].join("\n"),
   );
 
   // 2) crash session — branch embeds work-item id 102 (no PR on that item).
@@ -148,6 +264,23 @@ export async function materializeHome(home: string): Promise<void> {
       { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "1", status: "completed" } }] }, timestamp: "2026-06-19T09:00:11.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "2", status: "active" } }] }, timestamp: "2026-06-19T09:00:12.000Z" },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "TaskUpdate", input: { taskId: "3", status: "deleted" } }] }, timestamp: "2026-06-19T09:00:13.000Z" },
+      // A workflow that RAN TO COMPLETION: launch + the `<task-notification>`
+      // user message naming its taskId. Must surface as completed even though
+      // this session is idle (a notification beats the liveness fallback).
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_wf_crash", name: "Workflow", input: {} }] }, timestamp: "2026-06-19T09:00:14.000Z" },
+      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_wf_crash", content: "Workflow launched in background. Task ID: wtask-crash" }] }, toolUseResult: { status: "async_launched", taskId: "wtask-crash", taskType: "local_workflow", workflowName: "crash-triage", runId: "wf_crash01", summary: "Triage the startup crash across subsystems", transcriptDir: join(crashDir, CRASH_SESSION_ID, "subagents", "workflows", "wf_crash01"), scriptPath: join(crashDir, CRASH_SESSION_ID, "workflows", "scripts", "crash-triage-wf_crash01.js") }, timestamp: "2026-06-19T09:00:15.000Z" },
+      { type: "user", message: { role: "user", content: "<task-notification>\n<task-id>wtask-crash</task-id>\n<status>completed</status>\n<summary>Workflow \"crash-triage\" finished</summary>\n</task-notification>" }, timestamp: "2026-06-19T09:20:00.000Z" },
+    ]),
+  );
+
+  // The crash workflow's journal: one agent spawned and finished (1/1 done).
+  const crashWfDir = join(crashDir, CRASH_SESSION_ID, "subagents", "workflows", "wf_crash01");
+  await mkdir(crashWfDir, { recursive: true });
+  await writeFile(
+    join(crashWfDir, "journal.jsonl"),
+    jsonl([
+      { type: "started", key: "v2:ccc", agentId: "agent-solo" },
+      { type: "result", key: "v2:ccc", agentId: "agent-solo", result: "triage done" },
     ]),
   );
 
@@ -210,6 +343,34 @@ const READY_PANE = [
   "  ❯ ",
   "  ─────────────────────────────────────────────",
   "  ? for shortcuts",
+].join("\n");
+
+/** A mid-generation claude TUI. The live token counter's directional ↑ arrow is
+ *  the signal `paneReadiness` keys on, so this classifies as "busy" — not
+ *  sendable, not settled. Shared by every spec/driver that needs a session to
+ *  keep working while something else is asserted around it. */
+export const BUSY_PANE = [
+  "  ● Implement login form",
+  "  ⠋ Working… (12s · ↑ 2.1k tokens)",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+].join("\n");
+
+/** A claude TUI mid-compaction: the verb line and its progress bar on the status
+ *  row above an (empty) input box. Classifies as "compacting" — blocked, but
+ *  progressing, and `paneCompactionPercent` reads 42 off the bar. The footer below
+ *  the box carries percentages of its own on purpose: they are inside the same
+ *  status region, so this pins that the bar's glyphs are what the percent is
+ *  anchored on. */
+export const COMPACTING_PANE = [
+  "  ● Implement login form",
+  "  ✻ Compacting conversation…",
+  "  ▰▰▰▱▱▱ 42%",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+  "  09:14:02 | 29% ctx | 5h: 9% (3h 9m) | 7d: 63% (81h 19m) | Opus 5",
 ].join("\n");
 
 export const tmuxState = {

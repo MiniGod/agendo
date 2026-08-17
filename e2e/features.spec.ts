@@ -4,9 +4,13 @@
 // placeholders, and the Settings page / backend picker (the GitHub-provider
 // work). Same fully-mocked harness as launcher.spec.ts — every assertion is on
 // what the browser-rendered TUI actually shows, or on what the launcher spawned.
+import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect, KEY } from "./harness/test.ts";
 import { sessionName, RUNNING_TARGET, LOGIN_SESSION_ID, CRASH_SESSION_ID, COPILOT_SESSION_ID } from "./harness/fixtures.ts";
+import type { MockEnv } from "./harness/mockEnv.ts";
+import type { WebTerminal } from "./harness/wterm.ts";
 
 // Poll an async predicate until true or fail (for effects that land in the
 // fake-bin logs slightly after a keystroke).
@@ -81,6 +85,30 @@ test("PR view groups by repo on demand", async ({ launch }) => {
   expect(screen).toMatch(/▸ appweb \(\d+\)/);
   expect(screen).toMatch(/▸ applib \(\d+\)/);
   expect(screen).not.toContain("Refactor the parser"); // hidden in a collapsed group
+});
+
+test("PR view re-reads mutable PR state on refresh — a completed PR drops out (G2)", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("2"); // PR view
+  // PR 5001 ("Add login screen") is linked to WI 101 → under "PRs on your work items".
+  await wt.waitForText("PRs on your work items");
+  let screen = await wt.waitForText("Add login screen");
+  expect(screen).toContain("!5001");
+
+  // The PR completes server-side. Its status lives behind ADO's per-load PR
+  // cache, which used to freeze at "active" for the whole process — so a reload
+  // kept showing it as an in-flight linked PR (while it vanished from orphans).
+  mock.setAdoPr(5001, { status: "completed" });
+  await wt.press("r"); // manual reload → loadModel → clearPrCache (the fix)
+
+  // With the cache invalidated on reload, the completed PR is re-read and hidden
+  // (the linked view is only about work still in flight).
+  await waitUntil(async () => !(await wt.screen()).includes("Add login screen"), 15000);
+  screen = await wt.screen();
+  expect(screen).not.toContain("Add login screen");
+  expect(screen).not.toContain("!5001");
 });
 
 test("sessions view sort toggles between updated and created", async ({ launch }) => {
@@ -241,6 +269,229 @@ test("a session under a legacy tmux window attaches to it without duplicating", 
   });
   const log = await mock.tmuxLog();
   expect(log.some((argv) => argv[0] === "new-session" && argv.includes(canonical))).toBe(false);
+});
+
+test("move a session to another Claude profile — picker + move, and a refusal while it runs", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  // The login session is LIVE in tmux. agendo can't establish that a running
+  // claude is safely idle (nor gracefully exit it), so `m` refuses outright
+  // rather than move files out from under it.
+  await wt.press("/");
+  await wt.press("login", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down); // focus the result
+  await wt.press("m");
+  expect(await wt.waitForText("before moving it to another profile")).toContain("Implement login form");
+
+  // The crash session isn't running, so the picker opens: the profile it lives
+  // in is shown but not offered, and the (session-less) second profile is.
+  await wt.press(KEY.escape); // cancel the search
+  await wt.press("/");
+  await wt.press("crash", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press("m");
+  const picker = await wt.waitForText("Move to another Claude profile");
+  expect(picker).toContain("Investigate startup crash");
+  expect(picker).toMatch(/\.claude\s+lives here now/);
+  expect(picker).toMatch(/\.claude-work\s+move here/);
+
+  // Enter moves it: the transcript (and its sidecar dir) land under the target
+  // profile's projects/, keeping the encoded-cwd dir name.
+  await wt.press(KEY.enter);
+  expect(await wt.waitForText("Moved", 20000)).toContain(".claude-work");
+  await waitUntil(async () =>
+    existsSync(join(mock.home, ".claude-work", "projects", "appweb-crash", `${CRASH_SESSION_ID}.jsonl`)) &&
+    !existsSync(join(mock.home, ".claude", "projects", "appweb-crash", `${CRASH_SESSION_ID}.jsonl`)),
+  );
+
+  // …and the reloaded session now reports the new profile in its meta lines.
+  await wt.press(KEY.right); // expand the session row
+  expect(await wt.waitForText("profile", 20000)).toContain(".claude-work");
+});
+
+test("a session resumed while the profile picker is open is not moved out from under it", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  // Open the picker for the idle crash session.
+  await wt.press("/");
+  await wt.press("crash", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press("m");
+  await wt.waitForText("Move to another Claude profile");
+
+  // …then it gets resumed behind the launcher's back while the picker sits open
+  // (a keypress in a restore-placeholder tab from another tmux client, a second
+  // agendo). The refusal is the whole safety story for a live agent, so it has to
+  // be re-derived from tmux at commit time, not trusted from when the picker opened.
+  const crashTarget = sessionName("claude", CRASH_SESSION_ID);
+  await mock.setTmuxState({
+    sessions: [RUNNING_TARGET, crashTarget],
+    windows: [],
+    panes: [
+      { session: RUNNING_TARGET, window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+      { session: crashTarget, window: crashTarget, cwd: "/run/crash", placeholder: false },
+    ],
+    captures: {},
+  });
+
+  await wt.press(KEY.enter);
+  expect(await wt.waitForText("started running")).toContain("Investigate startup crash");
+  // Not a single file moved.
+  const rel = ["projects", "appweb-crash", `${CRASH_SESSION_ID}.jsonl`];
+  expect(existsSync(join(mock.home, ".claude", ...rel))).toBe(true);
+  expect(existsSync(join(mock.home, ".claude-work", ...rel))).toBe(false);
+});
+
+// ── moving a session that has a restored-but-unopened tab on screen ──────────
+// tmux bakes a placeholder's resume command into the pane's script when the
+// window is created, so a move that only rewrites the saved snapshot leaves the
+// VISIBLE tab resuming against the profile the session just left. Rebuilding it
+// means killing and respawning a window, which is the highest-blast-radius thing
+// in this feature — hence one test per guard.
+const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+const CRASH_TAB_CWD = (home: string) => join(home, "repos", "appweb", ".claude", "worktrees", "fix-crash-102");
+
+/**
+ * Give the crash session a saved restore tab plus the tmux state backing it,
+ * boot the launcher, and open the profile picker on that session — the common
+ * prelude of the three tests below, which differ only in the state they set up.
+ */
+async function pickerOnCrashSession(
+  launch: (opts?: { cols?: number; rows?: number; args?: string[] }) => Promise<WebTerminal>,
+  mock: MockEnv,
+  state: { tabCwd: string; tabArgv: string[]; windows: unknown[]; panes: unknown[] },
+): Promise<WebTerminal> {
+  await mkdir(join(mock.home, ".agendo", "restore"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "restore", "agendo.json"),
+    JSON.stringify({
+      tabs: [
+        { name: CRASH_TARGET, cwd: state.tabCwd, title: "Investigate startup crash", argv: state.tabArgv },
+      ],
+    }),
+  );
+  await mock.setTmuxState({
+    sessions: [RUNNING_TARGET, "agendo"],
+    windows: state.windows,
+    panes: [{ session: RUNNING_TARGET, window: RUNNING_TARGET, cwd: "/run/login", placeholder: false }, ...state.panes],
+    captures: {},
+  });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+  await wt.press("/");
+  await wt.press("crash", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press("m");
+  await wt.waitForText("Move to another Claude profile");
+  await wt.press(KEY.enter);
+  return wt;
+}
+
+/**
+ * Did the launcher kill the crash session's window in the launcher host session?
+ *
+ * BOTH halves of the `session:window` target are `=`-pinned. The `=` is
+ * per-component (man tmux), so pinning only the session leaves the window half
+ * resolvable by prefix/fnmatch — and managed names nest (`cl-pr-5` ⊂ `cl-pr-50`),
+ * which is how a kill lands on the wrong tab of the same launcher.
+ */
+const CRASH_WINDOW_TARGET = `=agendo:=${CRASH_TARGET}`;
+const killedCrashWindow = (log: string[][]) =>
+  log.some((a) => a[0] === "kill-window" && a.includes(CRASH_WINDOW_TARGET));
+
+test("moving a session rebuilds its restored-but-unopened tab against the new profile", async ({ launch, mock }) => {
+  const cwd = CRASH_TAB_CWD(mock.home);
+  await mkdir(cwd, { recursive: true }); // the tab's dir must exist — see the guard test below
+  const wt = await pickerOnCrashSession(launch, mock, {
+    tabCwd: cwd,
+    tabArgv: ["env", `CLAUDE_CONFIG_DIR=${join(mock.home, ".claude")}`, "claude", "--resume", CRASH_SESSION_ID],
+    // A real window in the launcher's host session, flagged as an unloaded placeholder.
+    windows: [{ session: "agendo", index: 1, window: CRASH_TARGET, cwd, placeholder: true }],
+    panes: [{ session: "agendo", window: CRASH_TARGET, cwd, placeholder: true }],
+  });
+
+  // The notice says so explicitly, so the rebuilt tab isn't a silent side effect.
+  expect(await wt.waitForText("restored tab repointed", 20000)).toContain("Moved");
+
+  // The old window is killed and an equivalent one respawned carrying the NEW
+  // profile — a placeholder pane's command can't be amended in place.
+  await waitUntil(async () => {
+    const log = await mock.tmuxLog();
+    const killed = log.findIndex((a) => a[0] === "kill-window" && a.includes(CRASH_WINDOW_TARGET));
+    const spawned = log.findIndex(
+      (a) =>
+        a[0] === "new-window" &&
+        a.includes(CRASH_TARGET) &&
+        a.some((tok) => tok.includes(`CLAUDE_CONFIG_DIR=${join(mock.home, ".claude-work")}`)),
+    );
+    return killed >= 0 && spawned > killed;
+  });
+  // …and no respawn still carries the profile the session left.
+  const log = await mock.tmuxLog();
+  expect(
+    log.some((a) => a[0] === "new-window" && a.some((t) => t.includes(`CLAUDE_CONFIG_DIR=${join(mock.home, ".claude")} `))),
+  ).toBe(false);
+});
+
+test("a placeholder tab whose directory is gone is left alone, not killed without a replacement", async ({ launch, mock }) => {
+  // Same setup, minus the tab's working directory (a pruned worktree).
+  // `new-window -c <gone>` fails and tmuxQuiet swallows the error, so killing
+  // first would destroy a visible tab and put nothing back — as a side effect of
+  // a move that otherwise SUCCEEDED. Leaving the stale tab is strictly better.
+  const cwd = CRASH_TAB_CWD(mock.home); // deliberately never created
+  const wt = await pickerOnCrashSession(launch, mock, {
+    tabCwd: cwd,
+    tabArgv: ["claude", "--resume", CRASH_SESSION_ID],
+    windows: [{ session: "agendo", index: 1, window: CRASH_TARGET, cwd, placeholder: true }],
+    panes: [{ session: "agendo", window: CRASH_TARGET, cwd, placeholder: true }],
+  });
+
+  // The move still lands…
+  const notice = await wt.waitForText("Moved", 20000);
+  expect(existsSync(join(mock.home, ".claude-work", "projects", "appweb-crash", `${CRASH_SESSION_ID}.jsonl`))).toBe(true);
+  // …but the tab was not touched, and the notice doesn't claim it was.
+  expect(notice).not.toContain("restored tab repointed");
+  expect(killedCrashWindow(await mock.tmuxLog())).toBe(false);
+});
+
+test("the placeholder flag authorizing a kill is read from THIS host session, not a same-named window elsewhere", async ({ launch, mock }) => {
+  // The same session is tabbed in two launchers. In ours the tab has already been
+  // woken into a real agent (flag cleared); in the OTHER launcher it's still a
+  // dormant placeholder. Reading the flag from a global window list would let the
+  // other launcher's flag authorize killing the live window in ours.
+  const cwd = CRASH_TAB_CWD(mock.home);
+  await mkdir(cwd, { recursive: true });
+  const wt = await pickerOnCrashSession(launch, mock, {
+    tabCwd: cwd,
+    tabArgv: ["env", `CLAUDE_CONFIG_DIR=${join(mock.home, ".claude")}`, "claude", "--resume", CRASH_SESSION_ID],
+    windows: [
+      { session: "agendo", index: 1, window: CRASH_TARGET, cwd, placeholder: false }, // ours: woken
+      { session: "agendo-other", index: 1, window: CRASH_TARGET, cwd, placeholder: true }, // theirs: dormant
+    ],
+    // Only the other launcher's pane is reported, so the session still reads as
+    // not-running and the move itself is allowed to proceed.
+    panes: [{ session: "agendo-other", window: CRASH_TARGET, cwd, placeholder: true }],
+  });
+
+  const notice = await wt.waitForText("Moved", 20000);
+  expect(notice).not.toContain("restored tab repointed");
+  expect(killedCrashWindow(await mock.tmuxLog())).toBe(false);
 });
 
 test("settings page shows the backend + per-provider auth, and opens the backend picker", async ({ launch }) => {

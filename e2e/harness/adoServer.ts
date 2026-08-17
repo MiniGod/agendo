@@ -25,12 +25,64 @@ export interface AdoServer {
   requests: string[]; // "METHOD pathname" for each handled request
   /** Bodies of every POST, keyed by path suffix match — for WIQL assertions. */
   wiqlQueries: string[];
+  /** Patch a PR's fields at runtime (merged over the fixture on every response),
+   *  so a test can flip status/isDraft/title between reloads to prove the app
+   *  re-reads mutable PR state rather than serving a frozen cache. */
+  setPr(id: number, patch: Record<string, unknown>): void;
+  /** Force the response for every request whose path matches — fault injection
+   *  for backend states the fixtures can't express, e.g. an endpoint that 404s
+   *  for a team with no sprints configured. Checked before routing, for any
+   *  method. Re-registering a path replaces the earlier rule, so a test can flip
+   *  a fault back off between reloads. `body` is JSON-encoded; for a body that
+   *  is deliberately NOT valid JSON, use setRaw. */
+  setResponse(match: RegExp, response: { status?: number; body?: unknown }): void;
+  /**
+   * setResponse's lower level: the body is written VERBATIM, so it can be
+   * invalid JSON on purpose — an HTML sign-in page served with a 2xx is what an
+   * expired ADO auth actually looks like, and it's the shape that produces a
+   * bare "Failed to parse JSON".
+   *
+   * `times` bounds how many matching requests the fault applies to (default:
+   * every one), which is how a test makes a load fail once and succeed on the
+   * launcher's automatic retry; `delayMs` holds the response back so a slow
+   * backend — and thus an in-flight retry attempt — is observable.
+   */
+  setRaw(match: RegExp, response: RawFault): void;
   close(): Promise<void>;
+}
+
+export interface RawFault {
+  status?: number;
+  /** Written verbatim — deliberately not JSON-encoded. */
+  body?: string;
+  contentType?: string;
+  /** How many matching requests to fault; omit for all of them. */
+  times?: number;
+  /** Hold the response this long before sending it. Makes a slow backend
+   *  observable — e.g. so an in-flight retry attempt stays on screen long
+   *  enough to assert on. */
+  delayMs?: number;
 }
 
 export async function startAdoServer(): Promise<AdoServer> {
   const requests: string[] = [];
   const wiqlQueries: string[] = [];
+  // Runtime PR overrides, merged over the fixture PR on every single-PR / list
+  // response. In-memory (same process as the test), so a mutation is visible to
+  // the child launcher's very next request.
+  const prOverrides = new Map<number, Record<string, unknown>>();
+  const withOverride = (pr: any): any =>
+    pr && prOverrides.has(pr.pullRequestId) ? { ...pr, ...prOverrides.get(pr.pullRequestId) } : pr;
+  // Forced responses (see setRaw / setResponse), tried against the request path
+  // newest-first so a later registration overrides an earlier one.
+  const faults: {
+    match: RegExp;
+    status: number;
+    body: string;
+    contentType: string;
+    left: number;
+    delayMs: number;
+  }[] = [];
 
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -46,6 +98,20 @@ export async function startAdoServer(): Promise<AdoServer> {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: `unmocked path: ${path}` }));
     };
+
+    // Fault injection wins over every route below.
+    const fault = faults.find((f) => f.left > 0 && f.match.test(path));
+    if (fault) {
+      fault.left--;
+      req.resume(); // discard any request body — nothing below will read it
+      const send = () => {
+        res.writeHead(fault.status, { "Content-Type": fault.contentType });
+        res.end(fault.body);
+      };
+      if (fault.delayMs > 0) setTimeout(send, fault.delayMs).unref();
+      else send();
+      return;
+    }
 
     // ── identity / project metadata ──
     if (/_apis\/profile\/profiles\/me$/i.test(path)) return json(ADO.profile);
@@ -82,13 +148,16 @@ export async function startAdoServer(): Promise<AdoServer> {
     if (itersOfPr) return json(resolvePrIterations(Number(itersOfPr[1])));
     const prMatch = path.match(/_apis\/git\/repositories\/([^/]+)\/pullRequests\/(\d+)$/i);
     if (prMatch) {
-      const pr = resolveSinglePr(prMatch[1], Number(prMatch[2]));
+      const pr = withOverride(resolveSinglePr(prMatch[1], Number(prMatch[2])));
       if (pr) return json(pr);
       res.writeHead(404).end("no such PR");
       return;
     }
     // Active PRs by creator or reviewer (same path; distinguished by query).
-    if (/_apis\/git\/pullrequests$/i.test(path)) return json(resolvePullRequests(q));
+    if (/_apis\/git\/pullrequests$/i.test(path)) {
+      const { value } = resolvePullRequests(q);
+      return json({ value: value.map(withOverride) });
+    }
 
     // ── CI / merge-gate policy + build results ──
     if (/_apis\/policy\/evaluations$/i.test(path)) {
@@ -114,6 +183,32 @@ export async function startAdoServer(): Promise<AdoServer> {
     graphUrl: `${origin}/acme`,
     requests,
     wiqlQueries,
+    setPr: (id, patch) => prOverrides.set(id, { ...prOverrides.get(id), ...patch }),
+    setRaw: (match, response) =>
+      faults.unshift({
+        // Drop /g and /y: `test` on a sticky regex advances lastIndex, so the
+        // same rule would only match every other request.
+        match: new RegExp(match.source, match.flags.replace(/[gy]/g, "")),
+        status: response.status ?? 200,
+        body: response.body ?? "",
+        contentType: response.contentType ?? "application/json",
+        left: response.times ?? Number.POSITIVE_INFINITY,
+        delayMs: response.delayMs ?? 0,
+      }),
+    // The JSON-encoding wrapper over setRaw, so both fault injectors share one
+    // rule list and one match/precedence rule rather than racing each other.
+    setResponse: (match, response) => {
+      const status = response.status ?? 200;
+      const body = "body" in response ? response.body : { error: `forced ${status}` };
+      faults.unshift({
+        match: new RegExp(match.source, match.flags.replace(/[gy]/g, "")),
+        status,
+        body: JSON.stringify(body),
+        contentType: "application/json",
+        left: Number.POSITIVE_INFINITY,
+        delayMs: 0,
+      });
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

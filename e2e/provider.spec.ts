@@ -20,7 +20,10 @@ import {
   detectRepoProvider,
   detectScopeProvider,
   PROVIDER_INFO,
+  getProvider,
 } from "../src/provider.ts";
+import { parseGithubRemote, githubIssueUrl, githubPullRequestUrl } from "../src/github.ts";
+import { adoPullRequestUrl, adoWorkItemUrl } from "../src/ado.ts";
 import type { RepoInfo } from "../src/repos.ts";
 
 test.describe("vocab: per-backend UI terminology", () => {
@@ -182,6 +185,13 @@ test.describe("detectRepoProvider: force the backend from a path context's git r
     withGitOrigin("ssh://git@github.com/ada/appweb.git", () =>
       expect(detectRepoProvider("/repo")).toBe("github"),
     );
+    // GitHub's SSH-over-HTTPS host with an explicit port, and a capitalized host.
+    withGitOrigin("ssh://git@ssh.github.com:443/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
+    withGitOrigin("https://GitHub.com/ada/appweb.git", () =>
+      expect(detectRepoProvider("/repo")).toBe("github"),
+    );
   });
 
   test("an Azure DevOps origin → ado (HTTPS, SSH and the legacy visualstudio.com forms)", () => {
@@ -302,6 +312,32 @@ test.describe("detectScopeProvider: a parent folder inherits its repos' tracker"
   });
 });
 
+test.describe("parseGithubRemote: origin URL → owner/repo (host-anchored, port-aware)", () => {
+  test("SSH and HTTPS forms, with and without .git / trailing slash", () => {
+    expect(parseGithubRemote("git@github.com:ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com/ada/appweb")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("ssh://git@github.com/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com/ada/appweb/")).toEqual({ owner: "ada", repo: "appweb" });
+  });
+
+  test("REGRESSION: SSH-over-HTTPS with a port → owner is the org, not the port", () => {
+    // `ssh://git@ssh.github.com:443/owner/repo` used to parse owner="443".
+    expect(parseGithubRemote("ssh://git@ssh.github.com:443/ada/appweb")).toEqual({ owner: "ada", repo: "appweb" });
+    expect(parseGithubRemote("https://github.com:443/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+  });
+
+  test("case-insensitive host", () => {
+    expect(parseGithubRemote("https://GitHub.com/ada/appweb.git")).toEqual({ owner: "ada", repo: "appweb" });
+  });
+
+  test("look-alike hosts are rejected (null), not silently mis-parsed", () => {
+    expect(parseGithubRemote("https://mygithub.com/ada/appweb.git")).toBeNull();
+    expect(parseGithubRemote("https://github.com.evil.org/ada/appweb.git")).toBeNull();
+    expect(parseGithubRemote("git@gitlab.com:ada/appweb.git")).toBeNull();
+  });
+});
+
 test.describe("resolveInitialProvider: a repo-detected provider overrides the default", () => {
   test("a forced github overrides a persisted ado when gh is installed", () => {
     withPath(["gh", "az"], () => expect(resolveInitialProvider("ado", "github")).toBe("github"));
@@ -319,5 +355,108 @@ test.describe("resolveInitialProvider: a repo-detected provider overrides the de
     // github detected but gh not installed → don't force; keep the working default.
     withPath(["az"], () => expect(resolveInitialProvider("ado", "github")).toBe("ado"));
     withPath(["gh"], () => expect(resolveInitialProvider("github", "ado")).toBe("github"));
+  });
+});
+
+// ── Canonical entity URLs ────────────────────────────────────────────────────
+// The one place PR / work-item links are built (Provider.urls, implemented by
+// ado.ts + github.ts). Hand-assembled links are a bug factory — ADO alone has
+// three live host shapes and work-item URLs differ from PR URLs — so the exact
+// strings are pinned here for every shape, including the percent-encoding that
+// ADO project names (frequently containing spaces) depend on.
+test.describe("entity URLs: Azure DevOps", () => {
+  const DEV_AZURE = "https://dev.azure.com/innovamps";
+  const LEGACY = "https://innovamps.visualstudio.com";
+
+  test("dev.azure.com form: work item + pull request", () => {
+    // Work-item links are ORG-level (no project segment) so they resolve for an
+    // item in any project; PR links are project + repo scoped.
+    expect(adoWorkItemUrl(DEV_AZURE, 234309)).toBe(
+      "https://dev.azure.com/innovamps/_workitems/edit/234309",
+    );
+    expect(adoPullRequestUrl(DEV_AZURE, "MC", "mc-applications", 72031)).toBe(
+      "https://dev.azure.com/innovamps/MC/_git/mc-applications/pullrequest/72031",
+    );
+  });
+
+  test("legacy visualstudio.com form keeps the same paths under a different host", () => {
+    expect(adoWorkItemUrl(LEGACY, 226140)).toBe(
+      "https://innovamps.visualstudio.com/_workitems/edit/226140",
+    );
+    expect(adoPullRequestUrl(LEGACY, "MC", "mc-applications", 76896)).toBe(
+      "https://innovamps.visualstudio.com/MC/_git/mc-applications/pullrequest/76896",
+    );
+  });
+
+  test("a custom base (self-hosted / proxied, i.e. ADO_BASE_URL) is honoured verbatim", () => {
+    const onPrem = "https://tfs.example.com/tfs/DefaultCollection";
+    expect(adoWorkItemUrl(onPrem, 12)).toBe(
+      "https://tfs.example.com/tfs/DefaultCollection/_workitems/edit/12",
+    );
+    expect(adoPullRequestUrl(onPrem, "Widgets", "appweb", 5001)).toBe(
+      "https://tfs.example.com/tfs/DefaultCollection/Widgets/_git/appweb/pullrequest/5001",
+    );
+  });
+
+  test("a trailing slash on the base never doubles up", () => {
+    expect(adoWorkItemUrl("https://dev.azure.com/innovamps/", 7)).toBe(
+      "https://dev.azure.com/innovamps/_workitems/edit/7",
+    );
+    expect(adoPullRequestUrl("https://dev.azure.com/innovamps//", "MC", "repo", 7)).toBe(
+      "https://dev.azure.com/innovamps/MC/_git/repo/pullrequest/7",
+    );
+  });
+
+  test("project / repo names with spaces or non-ASCII are percent-encoded", () => {
+    // ADO project names very often contain spaces; unescaped they produce a link
+    // that 404s (or silently truncates at the space when pasted into a chat).
+    expect(adoPullRequestUrl(DEV_AZURE, "Marel Innova", "hmi framework", 42)).toBe(
+      "https://dev.azure.com/innovamps/Marel%20Innova/_git/hmi%20framework/pullrequest/42",
+    );
+    expect(adoPullRequestUrl(DEV_AZURE, "Ísland", "þjónusta", 9)).toBe(
+      "https://dev.azure.com/innovamps/%C3%8Dsland/_git/%C3%BEj%C3%B3nusta/pullrequest/9",
+    );
+    // A `/` inside a name must be escaped too — it would otherwise invent a path
+    // segment and point the link at a different repo entirely.
+    expect(adoPullRequestUrl(DEV_AZURE, "A/B", "repo", 1)).toBe(
+      "https://dev.azure.com/innovamps/A%2FB/_git/repo/pullrequest/1",
+    );
+  });
+});
+
+test.describe("entity URLs: GitHub", () => {
+  test("pull request + issue for an owner/repo slug", () => {
+    expect(githubPullRequestUrl("MiniGod/agendo", 13)).toBe("https://github.com/MiniGod/agendo/pull/13");
+    expect(githubIssueUrl("MiniGod/agendo", 16)).toBe("https://github.com/MiniGod/agendo/issues/16");
+  });
+
+  test("slug segments are percent-encoded, but the owner/repo separator survives", () => {
+    expect(githubPullRequestUrl("Ada Lovelace/app web", 1)).toBe(
+      "https://github.com/Ada%20Lovelace/app%20web/pull/1",
+    );
+    expect(githubIssueUrl("ada/þjónusta", 2)).toBe("https://github.com/ada/%C3%BEj%C3%B3nusta/issues/2");
+  });
+
+  test("the provider exposes the builders, and returns null without a repo scope", () => {
+    // GitHub numbers issues and PRs per repo, so a reference with no slug has no
+    // URL at all — null, never a plausible-looking link to the wrong repo.
+    const { urls } = getProvider("github");
+    expect(urls.pullRequest({ id: 401, repositoryId: "ada/appweb" })).toBe(
+      "https://github.com/ada/appweb/pull/401",
+    );
+    expect(urls.workItem({ id: 301, project: "ada/appweb" })).toBe(
+      "https://github.com/ada/appweb/issues/301",
+    );
+    expect(urls.pullRequest({ id: 401, repositoryId: "" })).toBeNull();
+    expect(urls.workItem({ id: 301 })).toBeNull();
+  });
+
+  test("Azure DevOps exposes its builders through the same interface", () => {
+    // Wiring check only: the ADO builders read the module's configured org /
+    // project / ADO_BASE_URL, which the pure-function tests above pin exactly.
+    const { urls } = getProvider("ado");
+    expect(urls.workItem({ id: 234309 })).toContain("/_workitems/edit/234309");
+    expect(urls.pullRequest({ id: 72031, repositoryId: "guid", repositoryName: "mc-applications" }))
+      .toContain("/_git/mc-applications/pullrequest/72031");
   });
 });

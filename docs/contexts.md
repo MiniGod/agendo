@@ -40,10 +40,54 @@ with `./launch` or `-s`.
 
 `agendo list [dir]` / `agendo ls [dir]` accept the same optional path and filter
 the running-session listing to sessions whose cwd is under the resolved dir
-(`isUnderRoot`), so the CLI mirrors the TUI's scoping. `agendo status <id>` and
-`agendo send <id> …` operate on a specific session id, so they stay global
-lookups (a path filter there would only get in the way). `agendo launch` already
-runs in `cwd`.
+(`isUnderRoot`), so the CLI mirrors the TUI's scoping. `agendo launch` already
+runs in `cwd`, and `agendo send <id> …` acts on one specific session, so neither
+takes a scope.
+
+### Scope selectors on the CLI (`--path` / `--repo`)
+
+`src/scope.ts` generalizes that `[dir]` filter into the selector pair `list`,
+`status` and `wait` share, so the three can't drift into different ideas of
+"in this repo":
+
+| flag | meaning |
+| --- | --- |
+| `--path <dir>` | the session's cwd is `<dir>` or under it (`isUnderRoot`, segment-aware — `/x/repo` never matches `/x/repo-other`) |
+| `--repo <name>` | the session's checkout belongs to that repo — `repoScopeFilter` in `sessions.ts`, the *same* matcher as the work-item↔session join, so `owner/repo` slugs beat same-named forks and a worktree resolves to its parent repo |
+
+Both are optional and AND-ed. On `list` they apply to every mode (plain, `--all`,
+`--json`, `--pr`/`--issue` queries); `--path` is the flag spelling of the `[dir]`
+positional. `list` and `status` parse and apply them in the CLI entrypoint;
+`wait` owns its whole argv tail (`parseWaitArgs` in `src/wait.ts`), so it parses
+them there and carries the resolved `SessionScope` on `WaitOptions` — one shared
+`scope.ts` predicate either way.
+
+A scope **narrows every other selector rather than competing with one**, which is
+the invariant that makes it trustworthy: `wait --all --repo X` waits on the
+sessions in X, not on all of them (the precedence *among* `wait`'s own selectors
+is untouched — `--all` still overrides `--prefix`), and an explicit
+`wait <id> --repo X` / `status <id> --repo X` refuses an id that isn't in X
+instead of quietly answering for it. So on `status` and `wait` an `<id>` still
+names the session — the scope
+narrows the set it is resolved *against*, so an orchestrator polling one repo
+can't be handed a same-short-id session from another project, and the "no session
+found" message names the scope that excluded it. `status` additionally declines
+its live-window fallback (the "running, no transcript yet" answer for a
+just-launched session) under a scope: a bare tmux target carries no cwd to hold
+against one. No selector ⇒ no filtering, unchanged.
+
+`--path` resolution (`resolveScopeRoots`) keeps **both** the literal
+`path.resolve` spelling and the symlink-resolved one when they differ. Recorded
+session cwds are real process working directories (already symlink-free), so a
+symlinked checkout needs the real form to match anything — but a tree that is
+itself reached through a symlink (macOS `/tmp` → `/private/tmp`) records the
+symlinked spelling, where only the literal form matches. Keeping both makes the
+filter a superset of the naive one, so it can never hide a session a plain
+`resolve` would have found.
+
+A scope flag with no value (`agendo list --repo`, or a flag immediately followed
+by another flag) is a hard error rather than a silent no-op: the one failure mode
+a scoping flag must not have is quietly returning *more* than was asked for.
 
 ### The context
 
@@ -106,8 +150,19 @@ a github.com origin, Azure DevOps for `dev.azure.com` / `ssh.dev.azure.com` /
 forms. This overrides the persisted/default provider, so opening `agendo .`
 inside a checkout lands you on the right backend without a manual toggle. When
 the target is a plain parent folder with no remote of its own,
-`detectScopeProvider` asks the first repo found inside it instead (a target never
-mixes trackers, so any one of them speaks for all).
+`detectScopeProvider` asks the repos found inside it instead, taking the first one
+that names a known backend.
+
+**Known limitation — first match wins.** A target folder that holds repos from
+more than one tracker resolves to whichever repo the downward walk reaches first
+(name order). Everything from the other tracker is then filtered against scope
+keys it cannot match, so those items and PRs disappear from the views. This is
+**accepted, not guaranteed correct**: agendo is not meant to be pointed at a
+parent that mixes trackers, and mix detection, majority voting or per-repo
+backends would all cost more complexity than the case is worth. Point it at a
+folder whose repos share a tracker, or scope to the individual repo. `f` also
+turns the narrowing off if you land in that situation and want the full lists
+back.
 
 Detection has to run **both ways** now that a path context also filters the
 work-item / PR lists: the scope keys are derived from the same remotes, so a
@@ -234,5 +289,18 @@ so a launch from inside a scoped host session is restored by that same launcher.
 ## Invariants
 
 - Bare `agendo` is byte-identical to today: session `agendo`, no filter, legacy
-  restore file honored, `g` still groups.
+  restore file honored, `g` still groups. Two deliberate exceptions:
+  - **Bootstrap.** When the session-derived repo list is **empty** (a fresh
+    install — no sessions anywhere), the new-session picker falls back to the
+    launcher's cwd resolved to its enclosing checkout. Without it the picker has
+    nothing to offer and the first session can never be created, since a repo
+    only enters that list by already having a session in it. An install with any
+    session at all keeps its ranking untouched. The walk-up is bounded
+    (`bootstrapRepoRoot`): unlike a `[path]` argument, an inferred root must stop
+    below `$HOME`, or a dotfiles-tracked `$HOME` would be offered as the repo and
+    a worktree would land in `~/.claude/worktrees/`.
+  - **The no-checkout hint.** The work-item / PR repo picker warns when none of
+    its choices can host a worktree. That can also render on an established
+    unscoped install whose sessions all ran in plain folders — it is a warning,
+    never a change to what is offered or ranked.
 - Live window→session attribution is never gated by the path filter.

@@ -5,7 +5,10 @@
 // item / PR views to the repos inside `agendo <path>`.
 import { existsSync, readdirSync } from "fs";
 import { spawnSync } from "child_process";
+import { homedir } from "os";
 import { join, dirname, basename } from "path";
+import { isUnderRoot, normalizeCwd } from "./context.ts";
+import { parseGithubRemote } from "./github.ts";
 import type { AgentSession } from "./types.ts";
 
 export interface RepoInfo {
@@ -157,18 +160,6 @@ export function mergeRepos(a: RepoInfo[], b: RepoInfo[]): RepoInfo[] {
 
 const keyCache = new Map<string, string[]>();
 
-/**
- * The identifiers a backend could use for a checkout, lowercased: its `origin`
- * remote's GitHub `owner/repo` slug, or an Azure DevOps repo name (from the
- * `…/_git/<repo>` https form or the `v3/<org>/<project>/<repo>` ssh one).
- * Mirrors the slug parsing in github.ts's `repoRef`, kept here so repo-scope
- * filtering needs no backend — the remote forms are matched
- * independently, since a target uses one tracker or the other. The directory
- * basename is only a *fallback*, for a checkout with no `origin` (or one on an
- * unrecognized host): a GitHub slug already names the owner, and adding the bare
- * repo name next to it would let a same-named repo under a different owner (a
- * fork of it, say) match the scope through `PullRequest.repositoryName`.
- */
 /** Undo the percent-encoding a remote URL carries — an ADO repo named `My Repo`
  *  clones from `…/_git/My%20Repo`, but its PRs report `repositoryName: "My Repo"`.
  *  Malformed escapes are left as-is rather than throwing. */
@@ -180,6 +171,21 @@ function decodePath(s: string): string {
   }
 }
 
+/**
+ * The identifiers a backend could use for a checkout, lowercased: its `origin`
+ * remote's GitHub `owner/repo` slug, or an Azure DevOps repo name (from the
+ * `…/_git/<repo>` https form or the `v3/<org>/<project>/<repo>` ssh one). The
+ * GitHub slug goes through github.ts's `parseGithubRemote` — the one host-anchored
+ * parser the rest of the codebase already shares (sessions.ts, clone.ts) — so a
+ * look-alike host like `evilgithub.com` can't contribute a key. It's a type-only
+ * dependency in the other direction, so there is no runtime cycle. The remote
+ * forms are matched independently, since a target uses one tracker or the other.
+ * The directory basename is only a *fallback*, for a checkout with no `origin`
+ * (or one on an unrecognized host): a GitHub slug already names the owner, and
+ * adding the bare repo name next to it would let a same-named repo under a
+ * different owner (a fork of it, say) match the scope through
+ * `PullRequest.repositoryName`.
+ */
 function repoKeys(root: string): string[] {
   const cached = keyCache.get(root);
   if (cached) return cached;
@@ -188,8 +194,8 @@ function repoKeys(root: string): string[] {
   if (r.status === 0) {
     const url = r.stdout.trim();
     // git@github.com:owner/repo.git · https://github.com/owner/repo(.git)
-    const gh = url.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?\/?$/);
-    if (gh) keys.add(`${gh[1]}/${gh[2]}`);
+    const gh = parseGithubRemote(url);
+    if (gh) keys.add(`${gh.owner}/${gh.repo}`);
     // https://dev.azure.com/org/project/_git/repo · https://org.visualstudio.com/project/_git/repo
     const ado = url.match(/\/_git\/([^/]+?)(?:\.git)?\/?$/);
     if (ado) keys.add(decodePath(ado[1]));
@@ -210,4 +216,79 @@ export function repoScopeKeys(repos: RepoInfo[]): Set<string> {
   const set = new Set<string>();
   for (const r of repos) for (const k of repoKeys(r.root)) set.add(k);
   return set;
+}
+
+/**
+ * Whether `dir` is itself a git checkout. `repoRootForCwd` falls back to the
+ * input path when its walk-up finds no `.git`, so callers that want to know
+ * "did the walk-up actually land on a repo?" must re-check the result — a
+ * non-repo root can't host a `git worktree add`.
+ */
+export function isGitCheckout(dir: string): boolean {
+  return existsSync(join(normalizeCwd(dir), ".git"));
+}
+
+/**
+ * A zero-count repo entry for a folder that has no sessions yet. Not exported:
+ * `ensureRepoAtTop` is the only way to get one, so a synth entry can never
+ * appear without going through the dedupe.
+ *
+ * `basename` is empty for the filesystem root, so fall back to the path itself
+ * — `agendo /` would otherwise render a blank name cell in the picker.
+ */
+function synthRepo(root: string): RepoInfo {
+  return { root, name: basename(root) || root, total: 0, claude: 0, copilot: 0 };
+}
+
+/**
+ * Return `repos` with the repo rooted at `root` guaranteed present and ranked
+ * FIRST. If it already exists (has sessions elsewhere), it's moved to the top
+ * without duplicating; otherwise a synthesized zero-count entry is prepended.
+ * Used by the path-scoped picker so the scoped folder is always offerable.
+ *
+ * Matching goes through `normalizeCwd` rather than a raw `===`: `root` is
+ * typically `path.resolve`d from a CLI arg while the `repos` roots are derived
+ * from recorded session cwds, so the same directory routinely arrives spelled
+ * differently (trailing slash, `..` or doubled-slash segments). A raw compare
+ * would miss the match and break the no-duplicate promise above — a zero-count
+ * synth stacked directly on top of the real entry for the same repo.
+ */
+/**
+ * The repo root the fresh-session picker falls back to when nothing else is
+ * known — bare `agendo` on an install with no sessions at all. That fallback is
+ * an INFERENCE from the process cwd, not a statement of intent like a `[path]`
+ * argument, so it must not climb as far as `repoRootForCwd` willingly would.
+ *
+ * `repoRootForCwd` walks up to the nearest ancestor `.git`. On a machine whose
+ * $HOME is itself a checkout — chezmoi, yadm, a bare dotfiles repo, all common —
+ * that resolves ANY non-repo cwd to $HOME. The picker would then offer the
+ * dotfiles repo as a perfectly good checkout, and since it IS one, the
+ * "no git checkout here" hint stays silent and enter-enter-enter runs
+ * `git worktree add` into `$HOME/.claude/worktrees/<name>`: a worktree of the
+ * user's dotfiles dropped inside the live Claude Code config dir that
+ * `sessions.ts` scans for sessions. Nobody asked for that, and nothing warned.
+ *
+ * So accept the walk-up only while it stays strictly BELOW $HOME. If it reached
+ * $HOME or climbed past it, hand back the cwd itself — not a checkout, so the
+ * picker's run-in-place path and its hint take over. Working in the dotfiles
+ * repo on purpose still works; it just has to be said out loud as `agendo ~`,
+ * which takes the scoped branch and never reaches here.
+ */
+export function bootstrapRepoRoot(cwd: string): string {
+  const base = normalizeCwd(cwd);
+  const root = repoRootForCwd(base);
+  // The cwd IS the checkout — nothing was inferred, so nothing to second-guess.
+  if (root === base) return root;
+  // `isUnderRoot(home, root)` ⇔ root is $HOME itself or an ancestor of it.
+  return isUnderRoot(homedir(), root) ? base : root;
+}
+
+export function ensureRepoAtTop(repos: RepoInfo[], root: string): RepoInfo[] {
+  const target = normalizeCwd(root);
+  const existing = repos.find((r) => normalizeCwd(r.root) === target);
+  const rest = repos.filter((r) => normalizeCwd(r.root) !== target);
+  // Synthesize from the NORMALIZED root so the display name is a real basename
+  // (`basename("/a/b/")` is fine, but `basename("/a/b/.")` is not) and so the
+  // worktree is created at a clean path.
+  return [existing ?? synthRepo(target), ...rest];
 }

@@ -26,7 +26,40 @@ export interface FetchContext {
   repos: RepoInfo[];
 }
 
+/**
+ * Enough of a PullRequest to build its web URL (a real PullRequest satisfies
+ * it). There is no project field because a PullRequest carries none: ADO scopes
+ * the link to the configured project, which is where every PR the app fetches
+ * lives (see ado.fetchActivePRs / getPullRequest).
+ */
+export type PrUrlRef = Pick<PullRequest, "id" | "repositoryId"> &
+  Partial<Pick<PullRequest, "repositoryName">>;
+
+/** Enough of a WorkItem to build its web URL. `project` scopes the id for
+ *  backends whose ids are per-repo (GitHub); ADO ignores it (ids are org-wide). */
+export type ItemUrlRef = Pick<WorkItem, "id"> & Partial<Pick<WorkItem, "project">>;
+
+/**
+ * Canonical web links for the backend's entities — the single place a PR or
+ * work-item URL is constructed, so no caller ever hand-assembles one. Each
+ * backend builds from what it already has configured (ADO: the org base +
+ * project; GitHub: the `owner/repo` slug parsed from the remote), never by
+ * re-parsing or guessing. Returns null when the reference lacks the scope that
+ * backend needs — a missing link is better than a plausible-looking wrong one.
+ */
+export interface EntityUrls {
+  pullRequest(ref: PrUrlRef): string | null;
+  workItem(ref: ItemUrlRef): string | null;
+}
+
 export interface Provider {
+  /** Canonical web URLs for this backend's pull requests / work items. */
+  urls: EntityUrls;
+  /** Optional per-reload hook: invalidate any per-load caches so a refresh
+   *  re-reads mutable state. ADO clears its PR cache here (mutable PR fields
+   *  would otherwise stay frozen across reloads); GitHub fetches fresh every
+   *  time, so it has none. Called at the start of every loadModel. */
+  beginLoad?(): void;
   /** Whether the backend can authenticate right now (CLI installed + logged in).
    *  Cheap, never-throwing probe for the Settings page's auth-status line. */
   checkAuth(): Promise<boolean>;
@@ -61,6 +94,8 @@ export interface Provider {
 // ADO's functions predate the FetchContext shape, so adapt them here rather than
 // churn ado.ts: pull the field each one actually needs out of the context.
 const adoProvider: Provider = {
+  urls: ado.urls,
+  beginLoad: ado.clearPrCache,
   checkAuth: ado.checkAuth,
   getMe: ado.getMe,
   getTeamMembers: ado.getTeamMembers,
@@ -117,12 +152,17 @@ export function detectProviders(): Set<ProviderName> {
 }
 
 // The host must sit immediately after the scheme (`//`), an SSH user (`@`), or
-// the string start, and be delimited by `:`/`/` — so `evilgithub.com` and
-// `github.com.example.org` don't false-positive.
-const GITHUB_REMOTE_RE = /(^|@|\/\/)github\.com[:/]/i;
+// the string start, and be delimited by an optional port then `:`/`/` — so
+// `evilgithub.com` and `github.com.example.org` don't false-positive, while
+// `ssh://git@ssh.github.com:443/owner/repo` (GitHub's SSH-over-HTTPS host) is
+// still recognized.
+const GITHUB_REMOTE_RE = /(?:^|@|\/\/)(?:ssh\.)?github\.com(?::\d+)?[:/]/i;
 // Azure DevOps: `dev.azure.com` (HTTPS), `ssh.dev.azure.com` (SSH), and the
-// legacy `<org>.visualstudio.com` / `vs-ssh.visualstudio.com` forms.
-const ADO_REMOTE_RE = /(^|@|\/\/)((ssh\.)?dev\.azure\.com|([^/@:]+\.)?visualstudio\.com)[:/]/i;
+// legacy `<org>.visualstudio.com` / `vs-ssh.visualstudio.com` forms — anchored
+// and port-aware exactly the same way, so the two backends can't drift into
+// different ideas of what counts as their host.
+const ADO_REMOTE_RE =
+  /(?:^|@|\/\/)(?:(?:ssh\.)?dev\.azure\.com|(?:[^/@:]+\.)?visualstudio\.com)(?::\d+)?[:/]/i;
 
 /**
  * Detect the provider implied by a path's git `origin` remote, or `null` when
@@ -144,10 +184,9 @@ export function detectRepoProvider(path: string): ProviderName | null {
 
 /**
  * The provider a whole path context implies: the first repo inside the target
- * whose `origin` names a known backend, else the target's own `origin`. A target
- * folder never mixes trackers, so any one of its repos speaks for all — but not
- * every one of them can answer (a bare `git init` scratch dir, or a clone from
- * some other host, resolves to null), so we ask each in turn rather than let a
+ * whose `origin` names a known backend, else the target's own `origin`. Not
+ * every repo can answer (a bare `git init` scratch dir, or a clone from some
+ * other host, resolves to null), so we ask each in turn rather than let a
  * silent first repo veto the set. Without this a parent folder of repos would
  * keep a persisted default from the other backend and then be filtered against
  * repo keys it can never match (an empty view). The discovered repos win over
@@ -156,6 +195,14 @@ export function detectRepoProvider(path: string): ProviderName | null {
  * `$HOME` tracked as dotfiles, say), which would otherwise outvote the repos
  * actually in scope — so once any repo is in scope the path never gets a vote.
  * `null` means "nothing to infer from, leave the configured default alone".
+ *
+ * LIMITATION — first match wins. A target holding repos from more than one
+ * tracker resolves to whichever repo the walk reaches first (name order), and
+ * every other tracker's items are then filtered against keys they can't match.
+ * That is accepted, not guaranteed correct: agendo is not meant to be pointed at
+ * a parent that mixes trackers, and paying for mix detection or per-repo
+ * backends to cover it isn't worth the complexity. Point it at a folder whose
+ * repos share a tracker, or scope to the individual repo.
  */
 export function detectScopeProvider(path: string, repos: RepoInfo[]): ProviderName | null {
   if (repos.length === 0) return detectRepoProvider(path);
