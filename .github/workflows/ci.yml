@@ -21,9 +21,29 @@ jobs:
       - name: Typecheck (e2e harness)
         run: bun run typecheck:e2e
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    # oxlint finishes in well under a second; anything past 10 minutes is a
+    # hung install or runner, not a slow lint.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # Fails the build on any error, and on more warnings than the baseline
+      # recorded in the "lint" script. Both numbers only ever go down — see the
+      # ratchet note at the top of .oxlintrc.json.
+      - name: Lint (oxlint)
+        run: bun run lint
+
   e2e:
     name: E2E (browser)
     runs-on: ubuntu-latest
+    # A wedged Playwright install once burned two hours against GitHub's
+    # 360-minute default before anyone noticed. The job runs in ~4 minutes; past
+    # 20 it is stuck, and a stuck job should read as a red X, not as progress.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

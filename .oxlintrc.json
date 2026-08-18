@@ -1,0 +1,180 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // A RATCHET, NOT A CLIFF.
+  //
+  // Every "max" below is pinned to a value that ALREADY HOLDS today, so this
+  // config landed green on a codebase nobody had cleaned up yet. The rule is
+  // one-directional:
+  //
+  //     a refactor that makes a number achievable LOWERS it in the same PR,
+  //     and a lowered number never goes back up.
+  //
+  // Raising any threshold, or adding a file to the exemption list at the
+  // bottom, is the one change here that needs an argument in the PR
+  // description. Everything else about this file is ordinary config.
+  //
+  // The limits are NOT pinned once globally at the worst file in the tree —
+  // that shape leaves every other file free to grow up to the worst one. The
+  // `src/**` block below is the real budget, set at the worst value anywhere in
+  // src/ OUTSIDE the three files this refactor effort is dismantling. Those
+  // three carry named, temporary exemptions, and each shrinks or disappears as
+  // its PR lands.
+  //
+  // Be precise about what that buys: the budget is per GLOB GROUP, so the 24
+  // files sharing the `src/**` cap still have headroom below it (src/launch.ts
+  // is 833 lines against a 1242 cap, and any of them may add a fresh
+  // complexity-34 function). It bounds the blast radius; it does not freeze
+  // every file at its current size. If a file starts creeping toward the cap,
+  // the answer is its own tighter block here, not a raised budget.
+  //
+  // Also not running: the type-aware rules. oxlint reports
+  // typescript/no-floating-promises, no-base-to-string, await-thenable,
+  // unbound-method and restrict-template-expressions as "deny" via the
+  // correctness category, but they only execute under `--type-aware`, which
+  // needs the oxlint-tsgolint package and which the "lint" script does not
+  // pass. So the config reads stricter than it runs. Measured, they would add
+  // 12 findings today (6 no-floating-promises, 4 no-base-to-string, 2
+  // no-redundant-type-constituents) — worth turning on in its own PR where
+  // they can be looked at properly, not folded into a tooling change.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  "plugins": ["typescript", "unicorn", "oxc", "react", "import"],
+
+  "categories": {
+    "correctness": "error"
+  },
+
+  "rules": {
+    // Guards the refactor itself. src/ has ZERO import cycles today, and the
+    // main risk when a 2000-line file is split into modules that still talk to
+    // each other is quietly introducing one. Kept at error so it can never
+    // start.
+    "import/no-cycle": "error",
+
+    // Ink drives a real React reconciler, so the hook rules apply exactly as
+    // they do in the DOM — a wrong dep array here is a stale render or a leaked
+    // interval, not a cosmetic nit.
+    "react-hooks/rules-of-hooks": "error",
+
+    // These two are warnings ONLY because src/ui/App.tsx has a real backlog of
+    // them. The count is capped by --max-warnings in the "lint" script — the
+    // same ratchet as above, expressed as a total.
+    //
+    // Honest accounting as of this commit: 8 counted warnings (5
+    // exhaustive-deps + 3 no-array-index-key), plus 2 MORE exhaustive-deps
+    // findings at App.tsx:1421 and :1749 that are suppressed by inline
+    // disables. Those two predate this PR; this commit adds the `-- <why>` to
+    // each, per the escape-hatch rule in CLAUDE.md. True exhaustive-deps total
+    // is therefore 7, of which 5 are counted.
+    "react-hooks/exhaustive-deps": "warn",
+    "react/no-array-index-key": "warn"
+  },
+
+  "overrides": [
+    {
+      // ── the real budget ──────────────────────────────────────────────────
+      // Size and complexity limits apply to the APPLICATION only. Spec files
+      // are long by nature (a spec is a list, not a design), and e2e/ is frozen
+      // byte-for-byte for the duration of the refactor effort, so a threshold
+      // there could not be acted on even if it fired.
+      //
+      // Each number is the worst value in src/ excluding App.tsx / index.tsx /
+      // tmux.ts, named with the file that currently sets it.
+      // Every extension oxlint will parse, not just ts/tsx: a new src/foo.js or
+      // src/ui/Bar.jsx would otherwise land with no size budget at all.
+      "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
+      "rules": {
+        "max-lines": ["error", { "max": 1242, "skipBlankLines": false, "skipComments": false }], // src/sessions.ts
+        "max-lines-per-function": ["error", { "max": 245, "skipBlankLines": false, "skipComments": false }], // src/wait.ts
+        "complexity": ["error", 34], // src/wait.ts
+        "max-statements": ["error", 65], // src/wait.ts
+        "max-params": ["error", 6], // src/usageLimit.ts
+        "max-depth": ["error", 6], // src/sessions.ts:975
+        "max-nested-callbacks": ["error", 4] // src/sessions.ts:211
+      }
+    },
+
+    {
+      // ── temporary exemption: PR 3 (src/ui/App.tsx, 3624 lines) ───────────
+      // Delete a line here every time the split makes it possible. The file is
+      // done when this whole block is gone and App.tsx lives inside the budget
+      // above.
+      "files": ["src/ui/App.tsx"],
+      "rules": {
+        "max-lines": ["error", { "max": 3624, "skipBlankLines": false, "skipComments": false }],
+        // the `App` component itself, line 1185
+        "max-lines-per-function": ["error", { "max": 2440, "skipBlankLines": false, "skipComments": false }],
+        // the useInput keyboard handler, line 2467 — the single worst function
+        // in the codebase on both counts
+        "complexity": ["error", 244],
+        "max-statements": ["error", 280],
+        // pushSession (line 526) and pushPrsByRepo (line 694) — BOTH sit at 10,
+        // so lowering this needs both fixed
+        "max-params": ["error", 10]
+      }
+    },
+
+    {
+      // ── temporary exemption: PR 4 (src/index.tsx, 2456 lines) ────────────
+      "files": ["src/index.tsx"],
+      "rules": {
+        "max-lines": ["error", { "max": 2456, "skipBlankLines": false, "skipComments": false }],
+        "complexity": ["error", 66],
+        "max-statements": ["error", 90]
+      }
+    },
+
+    {
+      // ── temporary exemption: PR 2 (src/tmux.ts, 2033 lines) ──────────────
+      // Note it needs exactly ONE line: tmux.ts is a big file made of
+      // reasonably sized functions, so only the file-length budget is blown.
+      "files": ["src/tmux.ts"],
+      "rules": {
+        "max-lines": ["error", { "max": 2033, "skipBlankLines": false, "skipComments": false }]
+      }
+    },
+
+    {
+      // ── ANSI parsing ─────────────────────────────────────────────────────
+      // This is a terminal tool: matching ESC/CSI/control bytes in pane output
+      // is the actual job. Scoped to the files that genuinely do it, so a stray
+      // control byte in an unrelated regex still gets caught.
+      "files": ["src/tmux.ts", "src/ui/App.tsx", "e2e/detection.spec.ts"],
+      "rules": {
+        "no-control-regex": "off"
+      }
+    },
+
+    {
+      // ── e2e freeze carve-outs ────────────────────────────────────────────
+      // e2e/ is frozen for the refactor effort: an untouched suite passing
+      // against a rearranged src/ is the evidence that nothing regressed, so
+      // not one byte of it may change — including to satisfy a linter.
+      //
+      // Scoped to the exact files with findings rather than all of e2e/, so the
+      // rest of the suite stays covered. Both are real and both are one-line
+      // deletions once e2e/ is writable again:
+      //   e2e/provider.spec.ts:13    unused import `mkdirSync`
+      //   e2e/cli.spec.ts:1678       unused fixture param `mock` (wants `_mock`)
+      "files": ["e2e/provider.spec.ts", "e2e/cli.spec.ts"],
+      "rules": {
+        "no-unused-vars": "off"
+      }
+    },
+
+    {
+      // Playwright's own fixture shapes, not our code:
+      //   `async ({}, use)`  — required to declare zero fixture dependencies
+      //   `use(...)`         — the injection callback, which every hook rule
+      //                        reads as a hook called outside a component
+      // There is no React in e2e/ at all, so these are pure false positives.
+      "files": ["e2e/**"],
+      "rules": {
+        "no-empty-pattern": "off",
+        "react-hooks/rules-of-hooks": "off"
+      }
+    }
+  ]
+}

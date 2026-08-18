@@ -247,7 +247,8 @@ export function sendPeerMessage(peer: PeerSession, text: string): Promise<void> 
       settled = true;
       clearTimeout(timer);
       sock.destroy();
-      err ? reject(err) : resolve();
+      if (err) reject(err);
+      else resolve();
     };
     const timer = setTimeout(() => settle(new Error(`timed out writing to ${peer.socketPath}`)), SEND_TIMEOUT_MS);
     sock.on("connect", () => sock.end(peerMessageFrame(peer.sessionId, text)));
