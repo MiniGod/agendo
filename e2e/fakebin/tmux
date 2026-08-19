@@ -18,9 +18,14 @@ function readState() {
       windows: s.windows ?? [],
       panes: s.panes ?? [],
       captures: s.captures ?? {},
+      // Session the launcher believes it is inside (`display-message #{session_name}`)
+      // and the width `split-window` decisions are made against. Both only matter
+      // for the inside-tmux paths, so they default to "unset" / a roomy terminal.
+      currentSession: s.currentSession ?? "",
+      windowWidth: s.windowWidth ?? 200,
     };
   } catch {
-    return { sessions: [], windows: [], panes: [], captures: {} };
+    return { sessions: [], windows: [], panes: [], captures: {}, currentSession: "", windowWidth: 200 };
   }
 }
 function writeState(s) {
@@ -47,8 +52,21 @@ function emit(fmt, record) {
     .replace(/#\{window_name\}/g, record.window ?? "")
     .replace(/#\{pane_current_path\}/g, record.cwd ?? "")
     .replace(/#\{pane_dead\}/g, record.dead ? "1" : "0")
+    .replace(/#\{pane_id\}/g, record.id ?? "")
+    // A pane parked in someone else's window carries its managed name here.
+    .replace(/#\{@cl_pane_target\}/g, record.paneTarget ?? "")
     // The placeholder conditional `#{?@cl_placeholder,1,0}` → the pane's flag.
     .replace(/#\{\?@cl_placeholder,1,0\}/g, record.placeholder ? "1" : "0");
+}
+
+/** Next free `%N` pane id, so split-window hands out distinct, stable ids. */
+function nextPaneId(state) {
+  let max = 0;
+  for (const p of state.panes) {
+    const m = /^%(\d+)$/.exec(p.id ?? "");
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `%${max + 1}`;
 }
 
 log();
@@ -122,9 +140,43 @@ switch (cmd) {
     }
     process.exit(0);
   }
+  case "split-window": {
+    // `-P -F #{pane_id}` prints the new pane's id, which the launcher then
+    // addresses it by. The pane starts unnamed; a following `set-option -p`
+    // stamps its managed name (see PANE_TARGET_OPTION).
+    const cwd = flag("-c");
+    const id = nextPaneId(state);
+    state.panes.push({ session: state.currentSession || "launcher-session", window: "launcher", cwd: cwd ?? "", id });
+    writeState(state);
+    if (argv.includes("-P")) process.stdout.write(`${id}\n`);
+    process.exit(0);
+  }
+  case "set-option": {
+    // Only the pane form matters here: `-p -t %N @cl_pane_target <name>`, which
+    // is what makes a split pane discoverable as a managed target.
+    if (argv.includes("-p")) {
+      const target = flag("-t");
+      const i = argv.indexOf("@cl_pane_target");
+      const pane = state.panes.find((p) => p.id === target);
+      if (pane && i >= 0) {
+        pane.paneTarget = argv[i + 1] ?? "";
+        writeState(state);
+      }
+    }
+    process.exit(0);
+  }
+  case "display-message": {
+    // `-p -t <target> <format>`: the format is the trailing positional.
+    const fmt = argv[argv.length - 1] ?? "";
+    process.stdout.write(
+      emit(fmt, { session: state.currentSession, id: "" }).replace(/#\{window_width\}/g, String(state.windowWidth)) + "\n",
+    );
+    process.exit(0);
+  }
   // Navigation / config commands: nothing to do, just succeed.
   case "set-window-option":
   case "select-window":
+  case "select-pane":
   case "switch-client":
   case "attach-session":
   default:

@@ -3,14 +3,14 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { execFile } from "child_process";
 import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
-import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
+import { openSession, launchFresh, launchNewSession, launchGlobalOrchestrator, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
 import { parseResetTime, shouldAutoResume, shouldRevealDialog, RESET_LOOKBACK_MS } from "../usageLimit.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, defaultBranch, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
 import { ORCHESTRATOR_SLUG, isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
-import { repoRootForCwd, type RepoInfo } from "../repos.ts";
+import { globalOrchestratorCwd, repoRootForCwd, type RepoInfo } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { vocab, type Vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectRepoProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
@@ -1637,6 +1637,30 @@ export default function App({
     setMode({ kind: "repo", target: orchestratorTarget(), agent: "claude", cursor: 0 });
   };
 
+  /**
+   * Launch the GLOBAL orchestrator — the level above the per-repo ones, which
+   * coordinates them rather than any repository (see src/orchestrator.ts).
+   *
+   * No flow to walk: it belongs to no repo, so there is no repo to pick, no
+   * worktree to name, and no agent to choose (Claude-only, like `O`). It opens
+   * as a split pane beside this menu so the fleet view and its coordinator are
+   * on screen together; a terminal too narrow to split falls back to a window,
+   * and the notice says which happened so an unexpected layout isn't a mystery.
+   */
+  const enterGlobalOrchestrator = () => {
+    setNotice(null);
+    const roots = (model?.repos ?? []).map((r) => r.root);
+    const cwd = globalOrchestratorCwd(roots, process.cwd(), filterRoot);
+    const res = launchGlobalOrchestrator(cwd, { hostSession });
+    if (!res.plan) {
+      setNotice(`Global orchestrator failed: ${res.error ?? "unknown error"}`);
+      return;
+    }
+    const where = { pane: "beside the launcher", window: "in its own window", session: "in its own tmux session" }[res.layout];
+    open(res.plan);
+    setNotice(`▸ global orchestrator started ${where}${res.layoutNote ? ` — ${res.layoutNote}` : ""}`);
+  };
+
   // After the agent is chosen, resolve where to run: PRs check out their branch
   // as soon as the repo is known; work items prompt for a new branch name.
   const proceedFresh = (target: FreshTarget, agent: AgentSource) => {
@@ -1685,7 +1709,9 @@ export default function App({
     const launch = (cwd: string) =>
       open(
         target.kind === "free"
-          ? launchNewSession(cwd, agent, target.orchestrator)
+          // Only repo-level orchestrators come through this flow: the global one
+          // has no repo/worktree to pick, so it launches straight from its key.
+          ? launchNewSession(cwd, agent, target.orchestrator ? "repo" : undefined)
           : launchFresh(cwd, target.tmuxName, agent),
       );
     if (worktree) {
@@ -2073,6 +2099,11 @@ export default function App({
     // every unit of work to further background sessions instead of implementing.
     // Capital O, so the lowercase `o` open-in-browser binding is untouched.
     if (input === "O" && view === "sessions") { enterOrchestrator(); return; }
+
+    // new GLOBAL orchestrator (sessions view only) — one level above `O`: it
+    // coordinates the per-repo orchestrators rather than any repository, and
+    // opens beside this menu so both are visible at once.
+    if (input === "G" && view === "sessions") { enterGlobalOrchestrator(); return; }
 
     // focus the fuzzy-search input (all list views)
     if (input === "/") { setSearchFocus("input"); return; }
@@ -2507,7 +2538,9 @@ export default function App({
                 // `⇥ view` (not "switch view") matches the PRs hint and buys back
                 // 7 columns for the new `O orchestrator` entry — this line already
                 // truncated at ~120 cols before it, so tail hints are at a premium.
-                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orchestrator · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
+                // `G global` rides right after it: the two are one feature, and a
+                // reader who finds `O` needs to see the level above it exists.
+                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orchestrator · G global · enter resume · c →other agent · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}

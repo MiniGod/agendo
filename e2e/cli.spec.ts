@@ -776,6 +776,213 @@ test("agendo launch --orchestrator --copilot is refused, not silently downgraded
   expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session" && argv.includes("copilot"))).toBe(false);
 });
 
+// ── the global orchestrator (`launch --global-orchestrator`) ──────────────────
+// A second, distinct level: its own prompt, its own marker role, no worktree, and
+// a layout that prefers a split pane beside the menu. The e2e env is deliberately
+// outside tmux, so these cover the CLI contract and the outside-tmux fallback;
+// the split itself is exercised in the inside-tmux test below.
+
+test("agendo launch --global-orchestrator injects the GLOBAL instructions, not the repo ones", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Ship the platform");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched global orchestrator session");
+  const id = r.stdout.match(/launched global orchestrator session (\S+)/)?.[1];
+  expect(id).toBeTruthy();
+
+  const spawned = (await mock.tmuxLog()).find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(spawned).toBeTruthy();
+  const appended = appendedPrompt(spawned!);
+  expect(appended).toContain("You are running inside agendo"); // launcher prompt still shares the value
+  expect(appended).toContain("GLOBAL ORCHESTRATOR MODE");
+  expect(appended).toContain("NO MERGES");
+  expect(appended).toContain("NEVER `send` to an individual worktree session");
+  // Emphatically NOT the repo-level prompt: that one tells it to squash-merge.
+  expect(appended).not.toContain("# You are running in ORCHESTRATOR MODE");
+  expect(appended).not.toContain("squash-merge that branch into the main branch");
+  expect(spawned!).toContain("Ship the platform");
+  expect(spawned!.join(" ")).toContain("--permission-mode");
+
+  // No repository is involved, so no worktree is created — for a global one that
+  // isn't a preference, there is simply no repo to make one in.
+  expect(gitArgv(await mock.callLog()).some((a) => a.includes("worktree"))).toBe(false);
+
+  // The marker records the LEVEL, not just "is an orchestrator", and keeps the
+  // historical flat `ids` array so an older agendo still finds it.
+  const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
+  expect(marker.ids).toContain(id);
+  expect(marker.roles[id!]).toBe("global");
+});
+
+test("--orchestrator --global is the same thing as --global-orchestrator", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--global", "Coordinate everything");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched global orchestrator session");
+  const spawned = (await mock.tmuxLog()).find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(appendedPrompt(spawned!)).toContain("GLOBAL ORCHESTRATOR MODE");
+});
+
+test("a global orchestrator does not sit inside a repo", async ({ mock }) => {
+  // Its cwd is a vantage point, and `process.cwd()` is wherever the human stood —
+  // usually one repo, which is exactly the impression a coordinator of ALL repos
+  // must not give (and the invitation to run git there its prompt forbids).
+  const repo = mockRepo(mock.home);
+  const r = agendoIn(repo, mock.env, "launch", "--global-orchestrator", "Coordinate everything");
+  expect(r.status).toBe(0);
+  const cwd = r.stdout.match(/\(in (.+?)\)/)?.[1];
+  expect(cwd).toBeTruthy();
+  expect(cwd).not.toBe(repo);
+  // It sits above the repos the launcher knows, which all live under the mock home.
+  expect(repo.startsWith(cwd!)).toBe(true);
+});
+
+test("the global orchestrator reports where it opened, and falls back outside tmux", async ({ mock }) => {
+  // The harness runs outside tmux, so there is no launcher pane to split — the
+  // fallback must still produce a session AND say why it isn't beside the menu,
+  // or "it didn't appear next to agendo" reads as a bug.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Coordinate everything");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:");
+  expect(r.stdout).toContain("its own tmux session");
+  expect(r.stdout).toContain("not inside tmux");
+});
+
+test("the global orchestrator splits the launcher window when there's room", async ({ mock }) => {
+  // Inside tmux, with a live agendo menu and a wide enough window, the default
+  // layout is a pane beside it. Faked via TMUX + the fake tmux's window width.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [{ session: "agendo", window: "launcher", cwd: mock.home, id: "%1" }],
+    captures: {},
+    currentSession: "agendo",
+    windowWidth: 220,
+  });
+  const env = { ...mock.env, TMUX: "/tmp/fake-tmux,1,0" };
+  const r = agendoIn(mockRepo(mock.home), env, "launch", "--global-orchestrator", "Coordinate everything");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("split pane beside the agendo TUI");
+
+  const tmux = await mock.tmuxLog();
+  const split = tmux.find((argv) => argv[0] === "split-window");
+  expect(split).toBeTruthy();
+  expect(split!).toContain("-h"); // side by side, not stacked
+  expect(split!).toContain("claude");
+  // The pane is stamped with its managed name, or nothing could ever find it
+  // again: it lives in the launcher's window, which keeps its own name.
+  const stamp = tmux.find((argv) => argv[0] === "set-option" && argv.includes("@cl_pane_target"));
+  expect(stamp).toBeTruthy();
+  expect(stamp!.some((a) => a.startsWith("cl-bg-"))).toBe(true);
+  // No window was created for it — the whole point of the split.
+  expect(tmux.some((argv) => argv[0] === "new-window" && argv.includes("claude"))).toBe(false);
+});
+
+test("a narrow terminal gets a window instead of an unusable split", async ({ mock }) => {
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [{ session: "agendo", window: "launcher", cwd: mock.home, id: "%1" }],
+    captures: {},
+    currentSession: "agendo",
+    windowWidth: 90,
+  });
+  const env = { ...mock.env, TMUX: "/tmp/fake-tmux,1,0" };
+  const r = agendoIn(mockRepo(mock.home), env, "launch", "--global-orchestrator", "Coordinate everything");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("its own tmux window");
+  expect(r.stdout).toContain("90 cols");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "split-window")).toBe(false);
+});
+
+test("--window opts out of the split even on a wide terminal", async ({ mock }) => {
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [{ session: "agendo", window: "launcher", cwd: mock.home, id: "%1" }],
+    captures: {},
+    currentSession: "agendo",
+    windowWidth: 220,
+  });
+  const env = { ...mock.env, TMUX: "/tmp/fake-tmux,1,0" };
+  const r = agendoIn(mockRepo(mock.home), env, "launch", "--global-orchestrator", "--window", "Coordinate everything");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("its own tmux window");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "split-window")).toBe(false);
+  expect(tmux.some((argv) => argv[0] === "new-window" && argv.includes("claude"))).toBe(true);
+});
+
+test("the worktree and layout flags are rejected where they don't apply", async ({ mock }) => {
+  // Silently ignoring them would leave the caller believing they got isolation
+  // (or a layout) they asked for twice.
+  const wt = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "--worktree", "x");
+  expect(wt.status).not.toBe(0);
+  expect(wt.stderr).toContain("tied to no repo");
+
+  const layout = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--window", "x");
+  expect(layout.status).not.toBe(0);
+  expect(layout.stderr).toContain("only apply to --global-orchestrator");
+
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session" && argv.includes("claude"))).toBe(false);
+});
+
+test("agendo launch --global-orchestrator --copilot is refused too", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "--copilot", "Coordinate");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("--orchestrator is Claude-only");
+});
+
+test("a global orchestrator resumes as a GLOBAL one, not a repo one", async ({ mock }) => {
+  // The role is the whole reason the marker file grew past a flat id list: a
+  // global orchestrator resumed with the repo prompt would start squash-merging.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: [CRASH_SESSION_ID], roles: { [CRASH_SESSION_ID]: "global" } }),
+  );
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  const resumed = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  const appended = appendedPrompt(resumed!);
+  expect(appended).toContain("GLOBAL ORCHESTRATOR MODE");
+  expect(appended).not.toContain("# You are running in ORCHESTRATOR MODE");
+});
+
+test("a marker file written before roles existed still resumes as a repo orchestrator", async ({ mock }) => {
+  // Back-compat: an existing install's `{ids:[…]}` has no `roles` key at all, and
+  // every orchestrator it recorded predates the global level — so it is a repo one.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: [CRASH_SESSION_ID] }),
+  );
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  const resumed = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  const appended = appendedPrompt(resumed!);
+  expect(appended).toContain("# You are running in ORCHESTRATOR MODE");
+  expect(appended).not.toContain("GLOBAL ORCHESTRATOR MODE");
+});
+
+test("marking a new orchestrator preserves the ids an older agendo wrote", async ({ mock }) => {
+  // The read-modify-write must not drop pre-existing markers, or upgrading agendo
+  // would silently strip the framing from every orchestrator already running.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: ["legacy-orchestrator-id"] }),
+  );
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Coordinate");
+  expect(r.status).toBe(0);
+  const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
+  expect(marker.ids).toContain("legacy-orchestrator-id");
+  // …and the legacy id gains no role entry, so it keeps reading back as "repo".
+  expect(marker.roles["legacy-orchestrator-id"]).toBeUndefined();
+});
+
 test("orchestrator mode survives a cold resume; an ordinary session isn't given it", async ({ mock }) => {
   // claude records neither --append-system-prompt nor --agent in its session state,
   // so resume must re-inject from the launcher's own marker file. Mark the (idle)

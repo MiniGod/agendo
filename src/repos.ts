@@ -47,6 +47,59 @@ export function repoRootForCwd(cwd: string): string {
   return root;
 }
 
+/**
+ * Deepest directory that contains every path in `paths`, or null if they share
+ * nothing but the filesystem root (or the list is empty). Pure path arithmetic —
+ * no filesystem access, so it works on repo roots that may since have moved.
+ */
+export function commonParent(paths: string[]): string | null {
+  const split = paths.map((p) => normalizeSlashes(p).split("/").filter(Boolean));
+  if (split.length === 0) return null;
+  const first = split[0];
+  let n = first.length;
+  for (const parts of split.slice(1)) {
+    let i = 0;
+    while (i < n && i < parts.length && parts[i] === first[i]) i++;
+    n = i;
+  }
+  return n > 0 ? `/${first.slice(0, n).join("/")}` : null;
+}
+
+/** Collapse duplicate/trailing slashes so the segment split can't produce holes. */
+function normalizeSlashes(p: string): string {
+  return p.replace(/\/+/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Where to run a GLOBAL orchestrator — the one session that belongs to no single
+ * repository. It coordinates repo orchestrators through the launcher's CLI and
+ * never opens a checkout, so its cwd is only ever a vantage point; the goal is
+ * simply that it not LOOK like it lives in one repo (which would invite it to
+ * start running git there, the one thing its prompt forbids).
+ *
+ * So: the scope root when the launcher has one (that is literally the user's
+ * declared "everything I'm working on"), else the deepest directory containing
+ * every known repo. A single known repo makes that directory the repo itself, so
+ * step up to its parent. Anything degenerate — no repos, or roots so unrelated
+ * their only common ancestor is `/` — falls back to `fallback` (the caller's cwd).
+ */
+export function globalOrchestratorCwd(
+  repoRoots: string[],
+  fallback: string,
+  scopeRoot?: string | null,
+): string {
+  if (scopeRoot) return scopeRoot;
+  const parent = commonParent(repoRoots);
+  if (!parent || parent === "/") return fallback;
+  // Exactly one repo (or several nested under one) → the "common parent" IS a
+  // repo root. Sitting inside it would make the global orchestrator look local.
+  if (repoRoots.some((r) => normalizeSlashes(r) === parent)) {
+    const up = dirname(parent);
+    return up === "/" || up === parent ? fallback : up;
+  }
+  return parent;
+}
+
 /** Group all sessions by repo root and rank by total session count. */
 export function discoverRepos(sessions: AgentSession[]): RepoInfo[] {
   const byRoot = new Map<string, RepoInfo>();

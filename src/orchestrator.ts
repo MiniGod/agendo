@@ -35,6 +35,18 @@ import { STATE_DIR } from "./config.ts";
 export const ORCHESTRATOR_SLUG = "orchestrator";
 
 /**
+ * Which level of the coordination hierarchy a session sits at:
+ *
+ *     global orchestrator  →  per-repo orchestrators  →  per-worktree sessions
+ *
+ * `"repo"` coordinates the sessions of ONE repository and integrates their
+ * branches; `"global"` coordinates the repo orchestrators themselves and touches
+ * no repository at all. The two get different instructions, so the role — not
+ * merely "is an orchestrator" — is what the marker file has to remember.
+ */
+export type OrchestratorRole = "repo" | "global";
+
+/**
  * The orchestrator instructions, appended to the session's system prompt.
  *
  * `selfCmd` is how to re-invoke the launcher from a shell (see `SELF_CMD` in
@@ -177,6 +189,130 @@ export function orchestratorSystemPrompt(selfCmd: string): string {
   ].join("\n");
 }
 
+/**
+ * The GLOBAL orchestrator instructions — one level above `orchestratorSystemPrompt`.
+ *
+ * A repo orchestrator owns one repository: it delegates units of work and
+ * squash-merges the results. A global orchestrator owns the *fleet of repo
+ * orchestrators*: it starts one where a repo needs it, aggregates their status,
+ * and forwards cross-repo decisions to the user. It never opens a repository.
+ *
+ * The single rule that makes the hierarchy hold is "talk only to the level
+ * directly below you" — a global orchestrator that starts `send`ing individual
+ * worktree sessions is racing the repo orchestrator that owns them, and both
+ * would be issuing instructions to the same agent. That prohibition is therefore
+ * stated loudly and repeatedly below.
+ *
+ * `selfCmd` is how to re-invoke the launcher from a shell (see `SELF_CMD` in
+ * launch.ts) — passed in rather than imported so this module stays free of the
+ * spawn-time environment sniffing and is directly unit-testable.
+ */
+export function globalOrchestratorSystemPrompt(selfCmd: string): string {
+  return [
+    "# You are running in GLOBAL ORCHESTRATOR MODE",
+    "",
+    "You are the TOP level of a three-level hierarchy:",
+    "",
+    "    global orchestrator  →  per-repo orchestrators  →  per-worktree sessions",
+    "",
+    "You coordinate REPOSITORIES by making sure each one that needs coordinating has",
+    "its own repo orchestrator, and then talking to those orchestrators. You do not",
+    "open, build, or merge any repository yourself. Everything below overrides any",
+    "instinct to just go and do the work.",
+    "",
+    "## You write no code and touch no repository — not even a merge",
+    "",
+    "- Do NOT edit, create, or refactor source files in ANY repository. Not a fix, not",
+    "  a config tweak, not a one-line typo.",
+    "- Do NOT run a repository's git: no branching, no rebasing, and specifically NO",
+    "  MERGES. Integrating a finished branch is the REPO orchestrator's job, and it is",
+    "  the only one that knows whether that branch's review came back clean.",
+    "- Do NOT run builds, tests, or linters in a repository. Ask its orchestrator.",
+    "- You are not in any repo's working tree, and you should not go looking for one.",
+    "  Your job is entirely `list` → `launch` → `send` through the launcher's own CLI.",
+    "",
+    "## Discover the repos and their orchestrators",
+    "",
+    `    ${selfCmd} list --json          # every running session, with repoRoot + role`,
+    `    ${selfCmd} list repos --json    # one row per repo: does it have an orchestrator?`,
+    "",
+    "Each session row carries `repoRoot`, `orchestrator` (boolean) and `role`",
+    '(`"global"` · `"repo"` · `null`). A repo whose rows contain no `role: "repo"`',
+    "session is UNMANAGED — nobody is coordinating it. `list repos` answers that",
+    "question directly, one line per repo, so prefer it for the survey and drop to",
+    "`list --json` when you need the individual sessions. Re-read these rather than",
+    "trusting a survey you took a while ago; sessions start and finish while you think.",
+    "",
+    "## Start a repo orchestrator where one is missing",
+    "",
+    "When a repo has work to coordinate and no orchestrator of its own, start one IN",
+    "THAT REPO — the launcher runs it in the repo's main checkout, which is where its",
+    "merges have to land:",
+    "",
+    `    (cd <repoRoot> && ${selfCmd} launch --orchestrator "<that repo's goal>")`,
+    "",
+    "Give it the whole goal for that repository, self-contained: what to build, the",
+    "acceptance criteria, and any cross-repo decision already made. It will do its own",
+    "decomposition — do NOT hand it a list of worktree sessions to launch, that is its",
+    "call. One repo = one orchestrator; never start a second one for a repo that has",
+    "one already (check `list repos` first).",
+    "",
+    "## Talk ONLY to repo orchestrators — never to their sessions",
+    "",
+    `    ${selfCmd} send <repo-orchestrator-id> "<text>"`,
+    `    ${selfCmd} status <repo-orchestrator-id>`,
+    "",
+    "This is the rule that keeps the hierarchy from collapsing, so it is absolute:",
+    "",
+    "- NEVER `send` to an individual worktree session (a `bg`/`new`/`wi`/`pr` row that",
+    "  is not itself an orchestrator). Those belong to their repo orchestrator; two",
+    "  voices instructing one agent is how work gets duplicated, reverted, or lost.",
+    "- NEVER reach past a level in the other direction either: do not answer a worktree",
+    "  session's question, unblock it, or relaunch it. Tell its REPO orchestrator that",
+    "  the session needs attention and let it handle it.",
+    "- Reading is fine at any depth — `list` and `status` are read-only, so use them",
+    "  freely to see what is actually happening. It is WRITING (`send`, `launch` into",
+    "  someone else's repo, `unblock`) that must stay one level down.",
+    "- If a repo orchestrator dies or stops responding, that IS your level: restart it",
+    "  and tell the new one what was in flight.",
+    "",
+    "## Keep a task list at REPO granularity",
+    "",
+    "One entry per repository, not per unit of work — the units are the repo",
+    "orchestrator's bookkeeping, not yours. Each repo sits in exactly one state:",
+    "**unmanaged** (needs an orchestrator) · **starting** (orchestrator launching) ·",
+    "**running** (orchestrator coordinating) · **blocked** (needs a decision from you",
+    "or the user) · **done** (its goal is delivered). Update it on every survey.",
+    "Keep it in your task-list tool, not in files on disk.",
+    "",
+    "## Aggregate status, and surface only cross-repo decisions",
+    "",
+    "Poll the repo orchestrators, then report UP to the user in repo-level terms: which",
+    "repos are moving, which are blocked and on what, what landed since last time.",
+    "Do not relay each repo's internal churn — that is noise at this level.",
+    "",
+    "Bring a decision to the user when it genuinely spans repositories: a shared",
+    "contract or schema that two repos must agree on, an ordering constraint (repo B",
+    "cannot finish until repo A ships), a conflict between two repos' plans, or a",
+    "priority call about where the remaining effort should go. Anything answerable",
+    "inside one repository should be answered by that repository's orchestrator —",
+    "forward the question to it instead of escalating.",
+    "",
+    "## Cadence",
+    "",
+    "Survey (`list repos`) → start orchestrators for unmanaged repos → brief each one →",
+    "poll → aggregate → surface cross-repo decisions → repeat. Keep the loop running on",
+    "your own; only genuine cross-repo decisions go to the user.",
+  ].join("\n");
+}
+
+/** The instructions for a given orchestrator role — the one place the two prompts
+ *  are selected between, so every injection path (fresh launch and cold resume)
+ *  can't disagree about which level a session belongs to. */
+export function systemPromptForRole(role: OrchestratorRole, selfCmd: string): string {
+  return role === "global" ? globalOrchestratorSystemPrompt(selfCmd) : orchestratorSystemPrompt(selfCmd);
+}
+
 // ── which sessions are orchestrators (so resume can re-inject) ────────────────
 // claude records neither `--append-system-prompt` nor `--agent` in its own
 // session state, so a resumed orchestrator would come back as a plain session
@@ -188,22 +324,50 @@ const ORCHESTRATORS_PATH = join(STATE_DIR, "orchestrators.json");
 /** Cap the retained id list — this file only ever grows otherwise. */
 const MAX_REMEMBERED = 200;
 
-/** Session ids previously launched in orchestrator mode (newest last). */
-function loadOrchestratorIds(): string[] {
-  if (!existsSync(ORCHESTRATORS_PATH)) return [];
+/**
+ * The marker file's contents.
+ *
+ * `ids` is the historical shape (a flat array of orchestrator session ids) and
+ * stays exactly that, so an install written by an older agendo keeps every marker
+ * it had — and one written by THIS version is still readable by that older
+ * agendo, which simply ignores the field it doesn't know. Roles live in a
+ * separate `roles` map keyed by id, holding only the entries that differ from the
+ * default: a pre-roles file (and any id an older version appended) therefore
+ * reads back as `"repo"`, which is what every orchestrator was before the global
+ * level existed.
+ */
+interface OrchestratorMarks {
+  ids: string[];
+  roles: Record<string, OrchestratorRole>;
+}
+
+/** Session ids previously launched in orchestrator mode (newest last), with the
+ *  role of each one that isn't the default `"repo"`. */
+function loadOrchestratorMarks(): OrchestratorMarks {
+  if (!existsSync(ORCHESTRATORS_PATH)) return { ids: [], roles: {} };
   try {
     const data = JSON.parse(readFileSync(ORCHESTRATORS_PATH, "utf-8"));
-    return Array.isArray(data?.ids) ? data.ids.filter((x: unknown) => typeof x === "string") : [];
+    const ids = Array.isArray(data?.ids) ? data.ids.filter((x: unknown) => typeof x === "string") : [];
+    const roles: Record<string, OrchestratorRole> = {};
+    if (data?.roles && typeof data.roles === "object") {
+      for (const [id, role] of Object.entries(data.roles as Record<string, unknown>)) {
+        // Only recognized roles survive: an unknown value from a newer version (or
+        // a hand edit) must fall back to "repo" rather than reach a prompt lookup
+        // that has no entry for it.
+        if (role === "repo" || role === "global") roles[id] = role;
+      }
+    }
+    return { ids, roles };
   } catch {
     // A hand-edited or truncated file must not break resume; treat as empty.
-    return [];
+    return { ids: [], roles: {} };
   }
 }
 
 /**
- * Remember that `id` is an orchestrator session, so `resumeArgv` re-injects the
- * instructions when it's resumed cold. Best-effort: a failed write costs the
- * orchestrator framing on a later resume, never the launch itself.
+ * Remember that `id` is an orchestrator session of `role`, so `resumeArgv`
+ * re-injects the right instructions when it's resumed cold. Best-effort: a failed
+ * write costs the orchestrator framing on a later resume, never the launch itself.
  *
  * This is a read-modify-write, so two orchestrators launched in the very same
  * instant could have one drop the other's id. Not worth locking: the loser only
@@ -211,24 +375,44 @@ function loadOrchestratorIds(): string[] {
  * started with), and orchestrators are launched one at a time by a human or by
  * another agent, never fanned out in a batch.
  */
-export function markOrchestratorSession(id: string): void {
+export function markOrchestratorSession(id: string, role: OrchestratorRole = "repo"): void {
   try {
-    const ids = loadOrchestratorIds().filter((x) => x !== id);
-    ids.push(id);
+    const { ids, roles } = loadOrchestratorMarks();
+    const kept = ids.filter((x) => x !== id);
+    kept.push(id);
+    const retained = kept.slice(-MAX_REMEMBERED);
+    // Roles are keyed by id, so they'd outlive the ids they describe once the cap
+    // starts dropping the oldest — prune to what's still remembered.
+    const retainedSet = new Set(retained);
+    const prunedRoles: Record<string, OrchestratorRole> = {};
+    for (const [k, v] of Object.entries(roles)) if (retainedSet.has(k)) prunedRoles[k] = v;
+    // "repo" is the default a missing entry already means, so recording it would
+    // only grow the file — and would break the read-back of a marker appended by
+    // an older agendo, which knows nothing about roles.
+    if (role === "repo") delete prunedRoles[id];
+    else prunedRoles[id] = role;
     if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
     // Write-then-rename: a crash or a full disk mid-write would otherwise leave
-    // truncated JSON, and `loadOrchestratorIds` reads unparseable as empty — so a
+    // truncated JSON, and `loadOrchestratorMarks` reads unparseable as empty — so a
     // single bad write would strip the framing from EVERY orchestrator, not just
     // the one being marked. rename(2) within the directory is atomic.
     const tmp = `${ORCHESTRATORS_PATH}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ ids: ids.slice(-MAX_REMEMBERED) }, null, 2));
+    writeFileSync(tmp, JSON.stringify({ ids: retained, roles: prunedRoles }, null, 2));
     renameSync(tmp, ORCHESTRATORS_PATH);
   } catch {
     // Persisting the marker is best-effort; ignore write failures.
   }
 }
 
-/** Whether `id` was launched in orchestrator mode. */
+/** Whether `id` was launched in orchestrator mode (at either level). */
 export function isOrchestratorSession(id: string): boolean {
-  return loadOrchestratorIds().includes(id);
+  return loadOrchestratorMarks().ids.includes(id);
+}
+
+/** Which level `id` was launched at, or null if it isn't an orchestrator. An id
+ *  remembered without a role predates the global level, so it is a repo one. */
+export function orchestratorRoleOf(id: string): OrchestratorRole | null {
+  const { ids, roles } = loadOrchestratorMarks();
+  if (!ids.includes(id)) return null;
+  return roles[id] ?? "repo";
 }

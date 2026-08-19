@@ -2,7 +2,7 @@
 // with on-disk agent sessions (matched by PR branch) and live-tmux status.
 import { getProvider } from "./provider.ts";
 import { SessionIndex } from "./sessions.ts";
-import { liveTargets, liveManagedPaths, sessionName, managedKind, type SessionKind } from "./tmux.ts";
+import { liveTargets, liveManagedPaths, sessionName, managedKind, type ManagedTarget, type SessionKind } from "./tmux.ts";
 import { captureRestore, resolveWindowSession } from "./restore.ts";
 import { discoverRepos, repoRootForCwd, type RepoInfo } from "./repos.ts";
 import { basename } from "path";
@@ -55,7 +55,8 @@ export interface LoadedModel {
   liveTmux: Set<string>;
   /** How each currently-running session was launched, by canonical name (for UI badges). */
   liveKinds: Map<string, SessionKind>;
-  /** The live tmux window each running session occupies, by canonical name (for pane reads). */
+  /** The live tmux target each running session occupies, by canonical name (for
+   *  pane reads) — a window name, or a pane id for a pane-hosted session. */
   liveWindows: Map<string, string>;
   /**
    * Canonical names of sessions that have a live but dormant restore placeholder
@@ -148,14 +149,14 @@ export function refreshLiveTmux(allSessions: AgentSession[]): {
  */
 export function reconcileLive(
   base: Set<string>,
-  managed: { name: string; cwd: string; placeholder: boolean }[],
+  managed: ManagedTarget[],
   sessions: AgentSession[],
 ): { live: Set<string>; liveKinds: Map<string, SessionKind>; liveWindows: Map<string, string>; livePlaceholders: Set<string> } {
   const live = base;
   const liveKinds = new Map<string, SessionKind>();
   const liveWindows = new Map<string, string>();
   const placeholders = new Set<string>();
-  for (const { name, cwd, placeholder } of managed) {
+  for (const { name, target, cwd, placeholder } of managed) {
     const kind = managedKind(name);
     if (!kind) continue;
     // An idle placeholder must not vouch for "running": record its window name
@@ -171,7 +172,10 @@ export function reconcileLive(
     const canon = sessionName(best);
     live.add(canon);
     liveKinds.set(canon, kind);
-    liveWindows.set(canon, name);
+    // The addressable target, not the name: for a pane-hosted session (the global
+    // orchestrator, parked beside the menu) the name isn't a tmux target at all,
+    // and every consumer of this map — pane capture, send, navigate — needs one.
+    liveWindows.set(canon, target);
   }
   // A placeholder's window name IS its canonical name, so a real window vouching
   // for the same session shows up as a `liveKinds` entry under that name. Any

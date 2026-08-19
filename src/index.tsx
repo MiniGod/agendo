@@ -11,14 +11,18 @@ import {
   type SessionKind, type Readiness,
 } from "./tmux.ts";
 import { parseResetTime, RESET_LOOKBACK_MS } from "./usageLimit.ts";
-import { launchTask, llmGuide, openSession, SELF_CMD, type OpenPlan } from "./launch.ts";
+import {
+  launchTask, launchGlobalOrchestrator, llmGuide, openSession, SELF_CMD,
+  type GlobalLaunchResult, type LaunchResult, type OpenPlan,
+} from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession } from "./restore.ts";
 import { resolveContext, isUnderRoot } from "./context.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "./model.ts";
 import { resolveInitialProvider } from "./provider.ts";
 import { loadState } from "./config.ts";
-import { repoRootForCwd } from "./repos.ts";
+import { discoverRepos, globalOrchestratorCwd, repoRootForCwd } from "./repos.ts";
+import { orchestratorRoleOf, type OrchestratorRole } from "./orchestrator.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, WorkItem } from "./types.ts";
 
 const HELP = `agendo — manage claude sessions as attachable tmux windows
@@ -53,11 +57,25 @@ Usage:
                                 the merges have to happen. --worktree overrides, and
                                 then names the branch "orchestrator" (-2, -3, … if
                                 taken) unless --name says otherwise.
+      --global-orchestrator, -G One level up: a GLOBAL ORCHESTRATOR that coordinates
+                                the per-repo orchestrators instead of any repository.
+                                It writes no code and merges nothing anywhere — it
+                                finds repos with no orchestrator, starts one in each,
+                                and talks only to those. Tied to no repo, so it takes
+                                no worktree; it opens as a tmux pane beside the agendo
+                                TUI so both are visible at once. Claude only.
+                                (--orchestrator --global is accepted too.)
+      --window                  Open the global orchestrator in its own tmux window
+                                rather than a split pane (for narrow terminals).
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, dir, title). With a dir,
                                 only sessions whose cwd is under it are shown.
+                                Orchestrators are marked in the kind column (orch =
+                                per-repo, global = the global one) and summarised
+                                per repo below the table.
       --json                    Emit machine-readable JSON (with branch + linked
-                                PR + work-item/issue per session).
+                                PR + work-item/issue per session, plus repoRoot and
+                                orchestrator/role for the coordination hierarchy).
       --all, --include-idle     Also list idle (not-running) sessions, each marked
                                 running vs idle.
       --pr <n>                  Only sessions linked to PR #n (resolved via the
@@ -70,6 +88,10 @@ Usage:
        (aliases: wi,            (id, state, session, title). Vocab follows the backend:
         work-items)             GitHub says "issue", Azure DevOps "work item".
                                 --json for full rows (id + sessions[]).
+  agendo list repos            List the known repos, each with its orchestrator (or
+       (alias: repo)            "none") and session counts — the direct answer to
+                                "which repos is nobody coordinating?". --json for
+                                full rows (root + sessions + orchestrator).
   agendo resume <id>           Headless resume of an idle session in its own tmux
                                 window (detached). <id> as for status.
       --attach, -a              Switch/attach to it immediately (default: detached)
@@ -118,6 +140,25 @@ const KIND_LABEL: Record<SessionKind, string> = {
   pr: "pr",
   resumed: "—",
 };
+
+/**
+ * Width of the `list` kind column. Wide enough for `global`, so an orchestrator's
+ * role reads as a word rather than an abbreviation nobody can decode — this
+ * column is the one place a human scanning the list sees who is coordinating.
+ */
+const KIND_COL = 6;
+
+/**
+ * What a session is in the coordination hierarchy, as shown in the kind column.
+ * An orchestrator's ROLE displaces how it was launched: every orchestrator is
+ * some `bg`/`new` session underneath, so showing that would hide the only thing
+ * that distinguishes it from the sessions it manages.
+ */
+function roleLabel(role: OrchestratorRole | null, kind: SessionKind | null): string {
+  if (role === "global") return "global";
+  if (role === "repo") return "orch";
+  return kind ? KIND_LABEL[kind] : "-";
+}
 
 /**
  * Readiness states that mean the session is actively working (not settled) — the
@@ -175,6 +216,9 @@ if (process.argv[2] === "launch") {
   let worktree: boolean | undefined;
   let attach = false;
   let orchestrator = false;
+  let global = false;
+  // undefined = "not specified"; only meaningful for a global orchestrator.
+  let layout: "pane" | "window" | undefined;
   let agent: AgentSource = "claude";
   const positionals: string[] = [];
   const rest = process.argv.slice(3);
@@ -185,6 +229,13 @@ if (process.argv[2] === "launch") {
     else if (a === "--worktree") worktree = true;
     else if (a === "--name" || a === "-n") name = rest[++i];
     else if (a === "--orchestrator" || a === "-O") orchestrator = true;
+    // Both spellings reach the same place: `--global-orchestrator` reads well on
+    // its own, and `--orchestrator --global` is what someone who already knows
+    // `-O` will reach for. Either implies orchestrator mode.
+    else if (a === "--global-orchestrator" || a === "-G") { orchestrator = true; global = true; }
+    else if (a === "--global") { orchestrator = true; global = true; }
+    else if (a === "--window") layout = "window";
+    else if (a === "--pane") layout = "pane";
     else if (a === "--copilot") agent = "copilot";
     else if (a === "--claude") agent = "claude";
     else if (a === "--agent") {
@@ -206,20 +257,39 @@ if (process.argv[2] === "launch") {
     console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
     process.exit(1);
   }
-  // An orchestrator squash-merges into the main branch, and git allows the main
-  // branch in only ONE working tree — the primary checkout. A worktree would give
-  // it an empty branch it never commits to while forcing every merge to reach out
-  // to the repo root, so orchestrators run in the main checkout unless asked
-  // otherwise. Ordinary background sessions keep their isolation.
-  const useWorktree = worktree ?? !orchestrator;
+  // A global orchestrator belongs to no repository at all, so the worktree flags
+  // have nothing to act on. Reject rather than ignore: silently dropping
+  // `--worktree` would leave the caller believing it got isolation it didn't ask
+  // for twice.
+  if (global && worktree !== undefined) {
+    console.error(`launch failed: --global-orchestrator is tied to no repo, so --worktree/--no-worktree don't apply`);
+    process.exit(1);
+  }
+  if (!global && layout !== undefined) {
+    console.error(`launch failed: --window/--pane only apply to --global-orchestrator`);
+    process.exit(1);
+  }
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), {
-    prompt,
-    name,
-    worktree: useWorktree,
-    agent,
-    orchestrator,
-  });
+  // A global orchestrator has its own launch path: no worktree, no repo, and a
+  // layout (split pane beside the menu by default) the repo-level flow has no
+  // notion of. Its cwd is a vantage point only — see globalOrchestratorCwd.
+  const globalRes = global ? await launchGlobal(prompt, layout) : null;
+  const launched: LaunchResult =
+    globalRes ??
+    launchTask(process.cwd(), {
+      prompt,
+      name,
+      // An orchestrator squash-merges into the main branch, and git allows the
+      // main branch in only ONE working tree — the primary checkout. A worktree
+      // would give it an empty branch it never commits to while forcing every
+      // merge to reach out to the repo root, so orchestrators run in the main
+      // checkout unless asked otherwise. Ordinary background sessions keep their
+      // isolation.
+      worktree: worktree ?? !orchestrator,
+      agent,
+      orchestrator: orchestrator ? "repo" : undefined,
+    });
+  const { plan, id, cwd, error } = launched;
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -235,7 +305,7 @@ if (process.argv[2] === "launch") {
       {
         id,
         cwd,
-        title: prompt || (orchestrator ? "orchestrator session" : "background session"),
+        title: prompt || (global ? "global orchestrator session" : orchestrator ? "orchestrator session" : "background session"),
         source: agent,
         // Claude is profile-scoped via CLAUDE_CONFIG_DIR; Copilot keeps all state
         // under ~/.copilot, so it carries no config dir.
@@ -252,12 +322,33 @@ if (process.argv[2] === "launch") {
     spawnSync(cmd, args, { stdio: "inherit" });
   } else {
     // Print machine-readable next steps for the agent/human that launched it.
-    console.log(`▸ launched ${orchestrator ? "orchestrator" : "background"} session ${id}`);
+    console.log(`▸ launched ${global ? "global orchestrator" : orchestrator ? "orchestrator" : "background"} session ${id}`);
     console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
+    // Say where it actually opened, and why, when the split we default to wasn't
+    // possible — otherwise "it didn't appear beside agendo" looks like a bug.
+    if (globalRes) {
+      const where = { pane: "split pane beside the agendo TUI", window: "its own tmux window", session: "its own tmux session" }[globalRes.layout];
+      console.log(`  layout:  ${where}${globalRes.layoutNote ? ` — ${globalRes.layoutNote}` : ""}`);
+    }
     console.log(`  status:  ${SELF_CMD} status ${id}`);
     console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);
   }
   process.exit(0);
+}
+
+/**
+ * Launch a global orchestrator from the CLI. Its cwd is derived, not taken from
+ * the caller: `process.cwd()` is wherever the human happened to be standing —
+ * usually inside one repo, which is exactly the impression a coordinator of ALL
+ * repos must not give. So we sit it above the repos the launcher knows about
+ * (see globalOrchestratorCwd), falling back to the caller's cwd only when there
+ * is nothing to sit above.
+ */
+async function launchGlobal(prompt: string, layout: "pane" | "window" | undefined): Promise<GlobalLaunchResult> {
+  const index = await SessionIndex.build();
+  const roots = discoverRepos(index.all).map((r) => r.root);
+  const cwd = globalOrchestratorCwd(roots, process.cwd());
+  return launchGlobalOrchestrator(cwd, { prompt, layout });
 }
 
 // `send <id> <prompt>`: type a prompt into a running session's input and submit
@@ -293,7 +384,8 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
   const sub = process.argv[3];
   const PR_SUBS = new Set(["pr", "prs"]);
   const ISSUE_SUBS = new Set(["issue", "issues", "wi", "work-item", "work-items", "workitem", "workitems"]);
-  if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub))) {
+  const REPO_SUBS = new Set(["repo", "repos"]);
+  if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub) || REPO_SUBS.has(sub))) {
     let json = false;
     for (const a of process.argv.slice(4)) {
       if (a === "--json") json = true;
@@ -303,6 +395,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
       }
     }
     if (PR_SUBS.has(sub)) await runListPrs({ json });
+    else if (REPO_SUBS.has(sub)) await runListRepos({ json });
     else await runListIssues({ json });
     process.exit(0);
   }
@@ -624,8 +717,19 @@ interface ListRow {
   shells: number;
   /** How it was launched, when running (from the live-tmux reconciliation). */
   kind: SessionKind | null;
+  /** Whether this session coordinates others instead of implementing. */
+  orchestrator: boolean;
+  /** Which level of the hierarchy it sits at, or null if it's an ordinary
+   *  session: "global" coordinates repo orchestrators, "repo" coordinates the
+   *  worktree sessions of `repoRoot`. */
+  role: OrchestratorRole | null;
   branch: string | null;
   cwd: string;
+  /** Main checkout of the repo this session's cwd belongs to — the key a global
+   *  orchestrator groups by to see which repos have a coordinator and which don't. */
+  repoRoot: string;
+  /** Display name of `repoRoot` (its basename). */
+  repoName: string;
   dir: string;
   title: string;
   /** When the session was last active (ISO 8601), for machine consumers. */
@@ -723,6 +827,8 @@ async function runList(opts: ListOptions): Promise<void> {
       shells = paneShells(raw);
     }
     const l = linkOf(s);
+    const root = repoRootForCwd(s.cwd);
+    const role = orchestratorRoleOf(s.id);
     return {
       id: s.id,
       shortId: shortId(s.id),
@@ -731,8 +837,12 @@ async function runList(opts: ListOptions): Promise<void> {
       readiness,
       shells,
       kind: running ? liveKinds.get(canon) ?? null : null,
+      orchestrator: role !== null,
+      role,
       branch: s.branch ?? null,
       cwd: s.cwd,
+      repoRoot: root,
+      repoName: basename(root) || root,
       dir: basename(s.cwd) || s.cwd,
       title: s.title.replace(/\s+/g, " ").trim(),
       lastUsed: s.lastUsed.toISOString(),
@@ -755,14 +865,14 @@ async function runList(opts: ListOptions): Promise<void> {
   }
   const itemLabel = model?.provider === "github" ? "issue" : "wi";
   console.log(
-    ["", "ready".padEnd(10), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+    ["", "ready".padEnd(10), "kind".padEnd(KIND_COL), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
   for (const r of rows) {
     console.log(
       [
         r.running ? "●" : "○",
         (r.readiness ?? "-").padEnd(10),
-        (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
+        roleLabel(r.role, r.kind).padEnd(KIND_COL),
         r.shortId.padEnd(12),
         timeAgo(new Date(r.lastUsed)).padEnd(8),
         r.dir.slice(0, 20).padEnd(20),
@@ -772,6 +882,65 @@ async function runList(opts: ListOptions): Promise<void> {
       ].join("  ").trimEnd(),
     );
   }
+  printOrchestratorSummary(rows);
+}
+
+/** One line's worth of "who coordinates this repo", for the `list` summary. */
+interface OrchestratorSummaryRow {
+  repoRoot: string;
+  repoName: string;
+  shortId: string;
+  role: OrchestratorRole | null;
+  running: boolean;
+}
+
+/**
+ * The per-repo coordination summary printed under the `list` table.
+ *
+ * The kind column already marks each orchestrator row, but that only answers
+ * "is this session an orchestrator?" one row at a time. The question a human (or
+ * a global orchestrator) actually has is the inverse — "which repos have nobody
+ * coordinating them?" — and an absence is invisible in a table of what exists.
+ * So we group the listed sessions by repo and name the orchestrator, or say
+ * `none` and give the exact command that fixes it.
+ *
+ * Scope note: this summarises the sessions THIS invocation listed, so the
+ * default running-only `list` reports which repos have a *running* orchestrator
+ * right now — the useful reading. `--all` widens it to idle ones too.
+ */
+function printOrchestratorSummary(rows: OrchestratorSummaryRow[]): void {
+  const byRepo = new Map<string, { name: string; orchestrators: OrchestratorSummaryRow[] }>();
+  const globals: OrchestratorSummaryRow[] = [];
+  for (const r of rows) {
+    if (r.role === "global") {
+      // A global orchestrator belongs to no repo (its cwd is a vantage point),
+      // so listing it under whatever directory it happens to sit in would invent
+      // a repo it manages. It gets its own line.
+      globals.push(r);
+      continue;
+    }
+    const entry = byRepo.get(r.repoRoot) ?? { name: r.repoName, orchestrators: [] };
+    if (r.role === "repo") entry.orchestrators.push(r);
+    byRepo.set(r.repoRoot, entry);
+  }
+  if (byRepo.size === 0 && globals.length === 0) return;
+
+  console.log(`\n  orchestrators:`);
+  const width = Math.max(8, ...[...byRepo.values()].map((e) => Math.min(e.name.length, 24)));
+  for (const [root, entry] of [...byRepo.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name))) {
+    const [first, ...extra] = entry.orchestrators;
+    const detail = first
+      ? `${first.running ? "●" : "○"} ${first.shortId}${extra.length ? `  (+${extra.length} more — only one should be coordinating)` : ""}`
+      : `none — start one:  cd ${root} && ${SELF_CMD} launch --orchestrator "<goal>"`;
+    console.log(`    ${entry.name.slice(0, 24).padEnd(width)}  ${detail}`);
+  }
+  const [g] = globals;
+  console.log(
+    `    ${"(global)".padEnd(width)}  ` +
+      (g
+        ? `${g.running ? "●" : "○"} ${g.shortId}${globals.length > 1 ? `  (+${globals.length - 1} more — only one should be coordinating)` : ""}`
+        : `none — start one:  ${SELF_CMD} launch --global-orchestrator "<goal>"`),
+  );
 }
 
 /**
@@ -785,7 +954,8 @@ async function runList(opts: ListOptions): Promise<void> {
 function runPlainList(index: SessionIndex, filterRoot: string | null = null): void {
   const seen = new Set<string>();
   const rows: string[] = [];
-  for (const { name, cwd, placeholder } of liveManagedPaths()) {
+  const summary: OrchestratorSummaryRow[] = [];
+  for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
     // Skip restored-but-unopened placeholder windows — they're idle bash waiting
@@ -801,13 +971,18 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const raw = capturePane(name);
+    // The addressable target, not the managed name — a pane-hosted session (the
+    // global orchestrator, split beside the menu) has no window of that name.
+    const raw = capturePane(target);
     const shells = paneShells(raw);
+    const role = orchestratorRoleOf(s.id);
+    const root = repoRootForCwd(s.cwd);
+    summary.push({ repoRoot: root, repoName: basename(root) || root, shortId: shortId(s.id), role, running: true });
     rows.push(
       [
         "●",
         paneReadiness(raw).padEnd(10),
-        KIND_LABEL[kind].padEnd(3),
+        roleLabel(role, kind).padEnd(KIND_COL),
         shortId(s.id),
         timeAgo(s.lastUsed).padEnd(8),
         (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
@@ -816,8 +991,12 @@ function runPlainList(index: SessionIndex, filterRoot: string | null = null): vo
       ].join("  ").trimEnd(),
     );
   }
-  if (rows.length === 0) console.log("No running sessions.");
-  else rows.forEach((r) => console.log(r));
+  if (rows.length === 0) {
+    console.log("No running sessions.");
+    return;
+  }
+  rows.forEach((r) => console.log(r));
+  printOrchestratorSummary(summary);
 }
 
 /** A session working a PR / issue's branch, as reported by the resource lists. */
@@ -974,6 +1153,68 @@ async function runListIssues(opts: { json: boolean }): Promise<void> {
         r.title.slice(0, 50),
       ].join("  ").trimEnd(),
     );
+  }
+}
+
+/**
+ * `list repos`: one row per repo the launcher knows about (derived from where
+ * the user's sessions live — see `discoverRepos`), each with its orchestrator or
+ * an explicit `none`.
+ *
+ * This is the survey a GLOBAL orchestrator runs: its whole job is finding repos
+ * nobody is coordinating, and that is a question about repos, not about sessions.
+ * `list --json` can only report repos that have a session right now, and answers
+ * it only by inference; this answers it directly and includes repos whose
+ * sessions have all finished. Model-free (no backend auth), like the plain `list`.
+ */
+async function runListRepos(opts: { json: boolean }): Promise<void> {
+  const index = await SessionIndex.build();
+  const { live } = refreshLiveTmux(index.all);
+  const rows = discoverRepos(index.all).map((repo) => {
+    // Every orchestrator whose worktree belongs to this repo, running first (an
+    // idle one is coordinating nothing), then most recently used.
+    const orchestrators = index.all
+      .filter((s) => repoRootForCwd(s.cwd) === repo.root && orchestratorRoleOf(s.id) === "repo")
+      .map((s) => ({ id: s.id, shortId: shortId(s.id), running: live.has(sessionName(s)), lastUsed: s.lastUsed }))
+      .sort((a, b) => Number(b.running) - Number(a.running) || b.lastUsed.getTime() - a.lastUsed.getTime())
+      .map(({ id, shortId, running }) => ({ id, shortId, running }));
+    return {
+      root: repo.root,
+      name: repo.name,
+      sessions: repo.total,
+      runningSessions: index.all.filter((s) => repoRootForCwd(s.cwd) === repo.root && live.has(sessionName(s))).length,
+      orchestrators,
+      /** Convenience for the common check: is anybody coordinating this repo? */
+      hasOrchestrator: orchestrators.length > 0,
+      hasRunningOrchestrator: orchestrators.some((o) => o.running),
+    };
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (rows.length === 0) {
+    console.log("No repos known yet — open or resume a session in a repo first.");
+    return;
+  }
+  console.log(["", "repo".padEnd(24), "sess".padEnd(5), "orchestrator".padEnd(14), "root"].join("  "));
+  for (const r of rows) {
+    const best = r.orchestrators[0];
+    console.log(
+      [
+        best?.running ? "●" : best ? "○" : " ",
+        r.name.slice(0, 24).padEnd(24),
+        `${r.runningSessions}/${r.sessions}`.padEnd(5),
+        (best?.shortId ?? "none").padEnd(14),
+        r.root,
+      ].join("  ").trimEnd(),
+    );
+  }
+  const unmanaged = rows.filter((r) => !r.hasRunningOrchestrator);
+  if (unmanaged.length) {
+    console.log(`\n  no running orchestrator: ${unmanaged.map((r) => r.name).join(", ")}`);
+    console.log(`  start one:  cd <root> && ${SELF_CMD} launch --orchestrator "<goal>"`);
   }
 }
 

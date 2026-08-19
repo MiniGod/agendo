@@ -14,16 +14,25 @@ import {
   newDetached,
   newWindow,
   windowLocation,
+  paneLocation,
+  isPaneTarget,
+  splitPaneIn,
+  windowWidth,
+  launcherWindowLive,
+  currentSessionName,
+  exactTarget,
   insideTmux,
   tmuxQuiet,
+  MIN_SPLIT_COLS,
 } from "./tmux.ts";
 import { slugify, createWorktree, freeWorktreeBranch } from "./worktree.ts";
 import { repoRootForCwd } from "./repos.ts";
 import {
   ORCHESTRATOR_SLUG,
-  isOrchestratorSession,
   markOrchestratorSession,
-  orchestratorSystemPrompt,
+  orchestratorRoleOf,
+  systemPromptForRole,
+  type OrchestratorRole,
 } from "./orchestrator.ts";
 
 /** Is `cmd` resolvable as an executable on the current PATH? */
@@ -100,9 +109,44 @@ export function llmGuide(): string {
     "  code itself — it splits the goal into units, launches one background session per",
     "  unit (each with a sub-agent dev→review loop), monitors them via list/status/send,",
     "  and squash-merges each finished branch into the main branch. Claude only.",
+    "  Runs in the repo's MAIN checkout (that's where its merges must land).",
+    "",
+    `Go global:    ${SELF_CMD} launch --global-orchestrator "<cross-repo goal>"`,
+    "  One level higher: a session that coordinates the per-repo orchestrators instead",
+    "  of any repository. It writes no code and merges nothing anywhere — it finds repos",
+    "  that need an orchestrator and haven't got one, starts those, and talks only to",
+    "  them. Belongs to no repo, so it takes no worktree; by default it opens as a tmux",
+    "  pane beside the agendo TUI (--window for its own window instead). Claude only.",
     "",
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
+    "  The kind column marks coordinators: `orch` is a repo orchestrator, `global` the",
+    "  global one; everything else is an ordinary worktree session. A per-repo summary",
+    "  below the table names each repo's orchestrator, or says it has none.",
+    "",
+    `Repo survey:  ${SELF_CMD} list repos [--json]`,
+    "  One row per known repo: how many sessions it has, and its orchestrator (or",
+    "  `none`). The direct answer to \"which repos is nobody coordinating?\".",
+    "",
+    "── The three-level hierarchy ────────────────────────────────────────────────",
+    "",
+    "    global orchestrator  →  per-repo orchestrators  →  per-worktree sessions",
+    "",
+    "Each level talks ONLY to the level directly below it, and always via",
+    `\`${SELF_CMD} send <id> "…"\`:`,
+    "",
+    "  · The global orchestrator sends to repo orchestrators. Never to their sessions.",
+    "  · A repo orchestrator sends to the worktree sessions it launched, and integrates",
+    "    their branches. It does not manage other repos.",
+    "  · A worktree session does the work in its own worktree and reports back.",
+    "",
+    "Reaching past a level is the mistake to avoid: two coordinators instructing one",
+    "agent duplicate, revert, or lose its work. If something needs doing a level down",
+    "from where you can reach, tell the level below you and let it act. READING is",
+    "unrestricted — `list` and `status` are read-only, so inspect any depth you like.",
+    "",
+    "Discover who is where with `list --json`: each row carries `repoRoot`, plus",
+    '`orchestrator` (boolean) and `role` (`"global"` · `"repo"` · `null`).',
     "",
     `Check on it:  ${SELF_CMD} status <id>`,
     "  Prints its state, recent activity, and whether its input is ready for a prompt.",
@@ -118,16 +162,16 @@ export function llmGuide(): string {
 
 /**
  * Append our system-prompt additions to a claude argv — the launcher prompt
- * always, plus the orchestrator instructions when this session runs in
- * orchestrator mode.
+ * always, plus the instructions for `role` when this session is an orchestrator
+ * (the repo-level ones, or the global ones a level above them).
  *
  * Both go into a SINGLE `--append-system-prompt` value. claude's flag takes one
  * value, so passing it twice would keep only the last occurrence and silently
  * drop the other prompt.
  */
-function withLauncherPrompt(argv: string[], orchestrator = false): string[] {
+function withLauncherPrompt(argv: string[], role?: OrchestratorRole): string[] {
   const parts = [launcherSystemPrompt()];
-  if (orchestrator) parts.push(orchestratorSystemPrompt(SELF_CMD));
+  if (role) parts.push(systemPromptForRole(role, SELF_CMD));
   return [...argv, "--append-system-prompt", parts.join("\n\n")];
 }
 
@@ -169,8 +213,10 @@ export function resumeArgv(s: AgentSession): string[] {
     case "claude": {
       // claude records neither `--append-system-prompt` nor `--agent` in its own
       // session state, so an orchestrator resumed cold would come back as a plain
-      // session. Re-inject from our own marker file (see src/orchestrator.ts).
-      const cmd = withLauncherPrompt(["claude", "--resume", s.id], isOrchestratorSession(s.id));
+      // session. Re-inject from our own marker file (see src/orchestrator.ts) —
+      // at the level it was launched at, so a global one doesn't come back as a
+      // repo one that starts merging.
+      const cmd = withLauncherPrompt(["claude", "--resume", s.id], orchestratorRoleOf(s.id) ?? undefined);
       // Point claude at the config dir the session lives in, so the right
       // subscription/profile (e.g. ~/.claude vs ~/.claude-work) finds it.
       return s.configDir ? ["env", `CLAUDE_CONFIG_DIR=${s.configDir}`, ...cmd] : cmd;
@@ -196,8 +242,9 @@ interface FreshArgvOptions {
   prompt?: string;
   /** Apply the agent's unattended-autonomy flags (background sessions only). */
   autonomy?: boolean;
-  /** Run in orchestrator mode — inject the coordinate-don't-implement prompt. */
-  orchestrator?: boolean;
+  /** Run in orchestrator mode at this level — injects the matching
+   *  coordinate-don't-implement prompt. Absent ⇒ an ordinary session. */
+  orchestrator?: OrchestratorRole;
 }
 
 /**
@@ -254,9 +301,16 @@ export interface OpenPlan {
  *   (attach blocks until you detach, then control returns to the menu).
  */
 function openTarget(name: string, cwd: string, argv: string[]): OpenPlan {
+  // A pane id is already a live, addressable target — nothing to create, just go
+  // there. Reached when a caller hands us the resolved target of a pane-hosted
+  // session (the global orchestrator, parked beside the menu) rather than a name.
+  if (isPaneTarget(name)) return { alreadyRunning: true, tmuxName: name, mode: paneMode(), handover: paneHandover(name) };
   if (insideTmux()) {
     const loc = windowLocation(name);
     if (loc) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", loc] };
+    // The session may instead be hosted in a pane of someone else's window.
+    const pane = paneLocation(name);
+    if (pane) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: paneHandover(pane) };
     // A session by this name may exist from an earlier outside-tmux launch.
     if (hasSession(name)) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", name] };
     newWindow(name, cwd, argv);
@@ -265,6 +319,25 @@ function openTarget(name: string, cwd: string, argv: string[]): OpenPlan {
   const alreadyRunning = hasSession(name);
   if (!alreadyRunning) newDetached(name, cwd, argv);
   return { alreadyRunning, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name] };
+}
+
+/**
+ * How to bring the user to an existing pane. Inside tmux the pane's window must
+ * be selected AND the pane focused within it, which is two tmux commands — sent
+ * as one invocation via tmux's own `;` separator, since a plan carries a single
+ * argv. Outside tmux there's no client to move, so we attach to the pane's
+ * session (tmux resolves a pane id to the session containing it).
+ */
+function paneHandover(pane: string): string[] {
+  return insideTmux()
+    ? ["tmux", "select-window", "-t", pane, ";", "select-pane", "-t", pane]
+    : ["tmux", "attach-session", "-t", pane];
+}
+
+/** A pane handover navigates in place inside tmux (menu stays mounted) but has
+ *  to hand the terminal over from outside it, exactly as a window would. */
+function paneMode(): OpenPlan["mode"] {
+  return insideTmux() ? "inline" : "handover";
 }
 
 /**
@@ -339,13 +412,16 @@ function launchManaged(
   kind: "background" | "new",
   agent: AgentSource,
   prompt?: string,
-  orchestrator = false,
+  orchestrator?: OrchestratorRole,
+  /** Opens the target instead of `openTarget` — used by the global orchestrator,
+   *  which prefers a split pane beside the menu over a window of its own. */
+  open: (name: string, cwd: string, argv: string[]) => OpenPlan = openTarget,
 ): { plan: OpenPlan; id: string } {
   const id = randomUUID();
   const tmuxName = kindName(kind, id);
   const argv = freshArgv(agent, { sessionId: id, prompt, autonomy: kind === "background", orchestrator });
-  if (orchestrator) markOrchestratorSession(id);
-  return { plan: openTarget(tmuxName, cwd, argv), id };
+  if (orchestrator) markOrchestratorSession(id, orchestrator);
+  return { plan: open(tmuxName, cwd, argv), id };
 }
 
 /**
@@ -357,7 +433,7 @@ function launchManaged(
 export function launchNewSession(
   cwd: string,
   agent: AgentSource = "claude",
-  orchestrator = false,
+  orchestrator?: OrchestratorRole,
 ): OpenPlan {
   return launchManaged(cwd, "new", agent, undefined, orchestrator).plan;
 }
@@ -378,9 +454,11 @@ export interface LaunchOptions {
   /**
    * Run the new session in orchestrator mode: it delegates every unit of work to
    * further background sessions instead of implementing anything itself (see
-   * src/orchestrator.ts). Claude only.
+   * src/orchestrator.ts). Claude only. Only `"repo"` is meaningful here — a
+   * global orchestrator belongs to no repo, so it has its own entry point
+   * (`launchGlobalOrchestrator`) rather than a worktree-shaped one.
    */
-  orchestrator?: boolean;
+  orchestrator?: OrchestratorRole;
 }
 
 export interface LaunchResult {
@@ -447,4 +525,88 @@ export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
     opts.orchestrator,
   );
   return { plan, id, cwd: runCwd };
+}
+
+// ── the global orchestrator ───────────────────────────────────────────────────
+
+/** Where a global orchestrator's window/pane ended up. */
+export type GlobalLayout = "pane" | "window" | "session";
+
+export interface GlobalLaunchOptions {
+  /** Cross-repo goal, passed to the new agent as its opening prompt. */
+  prompt?: string;
+  /**
+   * Preferred layout. "pane" (the default) splits the launcher's own window so
+   * agendo and the orchestrator are visible at once; "window" gives it a window
+   * of its own, for terminals too narrow to split usefully.
+   */
+  layout?: "pane" | "window";
+  /** The launcher's tmux host session, whose `launcher` window gets split.
+   *  Defaults to the session the caller is currently in. */
+  hostSession?: string;
+}
+
+export interface GlobalLaunchResult extends LaunchResult {
+  /** What actually happened — the requested layout, or what we fell back to. */
+  layout: GlobalLayout;
+  /** Why the requested pane layout wasn't used; null when it was (or wasn't asked for). */
+  layoutNote: string | null;
+}
+
+/**
+ * Launch a GLOBAL orchestrator: the session that coordinates per-repo
+ * orchestrators rather than any repository (see globalOrchestratorSystemPrompt).
+ *
+ * It belongs to no repo, so — unlike `launchTask` — there is no worktree and no
+ * branch, and `cwd` is only a vantage point the caller picked
+ * (`globalOrchestratorCwd`). What IS special is the layout: by default it opens
+ * as a split pane beside the running agendo TUI, so the fleet view and its
+ * coordinator are on screen together.
+ *
+ * The pane is only possible when there's a launcher window to split, so each
+ * precondition falls back to a plain window (or, outside tmux, its own detached
+ * session) with a note saying why — a narrow terminal or a launcher started some
+ * other way should still get an orchestrator, just not a split one.
+ */
+export function launchGlobalOrchestrator(cwd: string, opts: GlobalLaunchOptions = {}): GlobalLaunchResult {
+  const wantPane = (opts.layout ?? "pane") === "pane";
+  let layout: GlobalLayout = insideTmux() ? "window" : "session";
+  let layoutNote: string | null = null;
+
+  // Resolve the pane preconditions up front, so `launchManaged` is handed either
+  // a splitter or the ordinary opener — the session id is minted inside it, and
+  // we must not mint one for an attempt we then abandon.
+  let splitTarget: string | null = null;
+  if (wantPane) {
+    const host = opts.hostSession ?? currentSessionName();
+    if (!insideTmux()) layoutNote = "not inside tmux — no launcher pane to split; started its own session";
+    else if (!host) layoutNote = "couldn't identify the launcher's tmux session; opened a window instead";
+    else if (!launcherWindowLive(host)) layoutNote = `no live agendo menu in tmux session "${host}"; opened a window instead`;
+    else {
+      const target = `${exactTarget(host)}:launcher`;
+      const cols = windowWidth(target);
+      // An unreadable width means the window is gone from under us; treat it as
+      // "don't split" rather than guessing, since we'd only fail at split time.
+      if (cols === null) layoutNote = "couldn't measure the launcher window; opened a window instead";
+      else if (cols < MIN_SPLIT_COLS)
+        layoutNote = `terminal is ${cols} cols, under the ${MIN_SPLIT_COLS} a usable split needs; opened a window instead`;
+      else splitTarget = target;
+    }
+  }
+
+  const open = (name: string, runCwd: string, argv: string[]): OpenPlan => {
+    if (splitTarget) {
+      const pane = splitPaneIn(splitTarget, name, runCwd, argv);
+      if (pane) {
+        layout = "pane";
+        return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: paneHandover(pane) };
+      }
+      // tmux refused (almost always "no space for new pane") — fall through.
+      layoutNote = "tmux would not split the launcher window; opened a window instead";
+    }
+    return openTarget(name, runCwd, argv);
+  };
+
+  const { plan, id } = launchManaged(cwd, "background", "claude", opts.prompt, "global", open);
+  return { plan, id, cwd, layout, layoutNote };
 }

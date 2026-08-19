@@ -35,6 +35,28 @@ export const ROOT_OPTION = "@cl_root";
  */
 export const PLACEHOLDER_OPTION = "@cl_placeholder";
 
+/**
+ * tmux *pane* user-option naming the managed target a pane hosts.
+ *
+ * Managed sessions are normally identified by a `cl-…` window (or session) name.
+ * The global orchestrator breaks that: it runs as a split pane BESIDE the menu,
+ * inside the launcher's own window, which keeps its own `launcher` name — so
+ * there is no `cl-…` name anywhere for the discovery pass to see, and the session
+ * would look dead to `list`, to the TUI, and to `send`. Stamping the pane with
+ * its managed name puts it back on the one discovery path (`liveManagedPaths`),
+ * and the pane id read alongside it is a first-class tmux target, so capture /
+ * send-keys / navigate all work against it unchanged.
+ */
+export const PANE_TARGET_OPTION = "@cl_pane_target";
+
+/**
+ * Minimum window width (columns) before splitting it in two is worth doing. Each
+ * half has to hold a full agent TUI — claude's own layout starts wrapping badly
+ * under ~74 columns — so below this the split produces two unusable panes and a
+ * separate window is the better answer. Callers fall back rather than refuse.
+ */
+export const MIN_SPLIT_COLS = 150;
+
 export function tmuxAvailable(): boolean {
   return spawnSync("tmux", ["-V"], { encoding: "utf-8" }).status === 0;
 }
@@ -79,19 +101,43 @@ export function managedKind(name: string): SessionKind | null {
   return null;
 }
 
+/** Managed names that embed a session short id (vs. a work-item / PR id). */
+const ID_BEARING_NAME = /^cl-(?:claude|copilot|bg|new)-(.+)$/;
+
 /**
  * A live managed target whose name embeds this session short id under any
  * id-bearing kind prefix (`cl-claude-`, `cl-copilot-`, `cl-bg-`, `cl-new-`) — so
  * attach can navigate to the *actual* window a session runs in, whatever name it
  * was launched under, instead of creating a duplicate. Work-item / PR targets
  * embed an item id rather than a session id, so they're intentionally excluded.
+ *
+ * Window/session names are checked first (the overwhelmingly common case, and one
+ * cheap tmux read); only then do we look for a pane-hosted session, whose managed
+ * name lives in a pane option and whose target is the pane id.
  */
 export function liveTargetForShortId(sid: string): string | null {
   for (const name of liveTargets()) {
-    const m = name.match(/^cl-(?:claude|copilot|bg|new)-(.+)$/);
+    const m = name.match(ID_BEARING_NAME);
     if (m && m[1] === sid) return name;
   }
+  for (const p of liveManagedPaths()) {
+    if (!isPaneHosted(p)) continue;
+    const m = p.name.match(ID_BEARING_NAME);
+    if (m && m[1] === sid) return p.target;
+  }
   return null;
+}
+
+/** The pane id hosting managed target `name`, or null if none does. */
+export function paneLocation(name: string): string | null {
+  for (const p of liveManagedPaths()) if (isPaneHosted(p) && p.name === name) return p.target;
+  return null;
+}
+
+/** Whether a tmux target string is a pane id (`%42`) rather than a name. Pane
+ *  ids are the only targets the launcher mints that aren't managed names. */
+export function isPaneTarget(target: string): boolean {
+  return /^%\d+$/.test(target);
 }
 
 /** Raw visible text of a target's active pane, including SGR escape codes. */
@@ -509,28 +555,59 @@ export function liveTargets(): Set<string> {
   return s;
 }
 
+/** A live managed (`cl-…`) target and where/how to reach it. */
+export interface ManagedTarget {
+  /** The managed `cl-…` name the launcher knows this target by. */
+  name: string;
+  /**
+   * The tmux target to address it with. Usually `name` itself; for a session
+   * hosted in someone else's window it's the pane id (see PANE_TARGET_OPTION),
+   * which tmux accepts everywhere a name would go.
+   */
+  target: string;
+  /** Working directory of the pane, for cwd-based attribution. */
+  cwd: string;
+  /** A restored-but-unopened placeholder window (idle bash, not a live agent). */
+  placeholder: boolean;
+}
+
+/** Whether a managed target lives in a pane of another window rather than in a
+ *  window/session of its own — the two are addressed the same way, but only the
+ *  pane-hosted one is invisible to name-based lookups like `liveTargets`. */
+export function isPaneHosted(t: ManagedTarget): boolean {
+  return t.target !== t.name;
+}
+
 /**
  * Every live managed (`cl-…`) target paired with the working directory of its
  * pane. A pane contributes its session name and/or window name, whichever is a
- * managed target. Used to attribute fresh-launch targets — named after a work
- * item / PR (`cl-wi-…`, `cl-pr-…`) rather than a session id — back to the
- * session actually running in them, so they register as running.
+ * managed target — plus, for a session the launcher parked in someone else's
+ * window, the name stamped on the pane itself (see PANE_TARGET_OPTION). Used to
+ * attribute fresh-launch targets — named after a work item / PR (`cl-wi-…`,
+ * `cl-pr-…`) rather than a session id — back to the session actually running in
+ * them, so they register as running.
  */
-export function liveManagedPaths(): { name: string; cwd: string; placeholder: boolean }[] {
-  const out: { name: string; cwd: string; placeholder: boolean }[] = [];
+export function liveManagedPaths(): ManagedTarget[] {
+  const out: ManagedTarget[] = [];
   for (const line of tmuxLines([
     "list-panes",
     "-a",
     "-F",
-    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}`,
+    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}`,
   ])) {
-    const [session, window, cwd, placeholder] = line.split("\t");
+    const [session, window, cwd, placeholder, paneId, paneTarget] = line.split("\t");
     if (!cwd) continue;
     // The marker is a *window* option, so it only attributes to the window name
     // (a restored placeholder is always a window); a managed session name is
     // never a placeholder.
     for (const [name, isPlaceholder] of [[session, false], [window, placeholder === "1"]] as const) {
-      if (name?.startsWith("cl-")) out.push({ name, cwd, placeholder: isPlaceholder });
+      if (name?.startsWith("cl-")) out.push({ name, target: name, cwd, placeholder: isPlaceholder });
+    }
+    // A pane-hosted session: its managed name is on the pane, and the pane id is
+    // how everything downstream (capture, send-keys, navigate) reaches it. Never
+    // a placeholder — restore recreates windows, never panes.
+    if (paneTarget?.startsWith("cl-") && paneId) {
+      out.push({ name: paneTarget, target: paneId, cwd, placeholder: false });
     }
   }
   return out;
@@ -649,6 +726,38 @@ export function tmuxQuiet(args: string[]): void {
 export function newWindow(name: string, cwd: string, argv: string[]): void {
   tmuxQuiet(["new-window", "-d", "-n", name, "-c", cwd, "--", ...argv]);
   pinName(name);
+}
+
+/**
+ * Split window `target` and run `argv` in the new pane, stamping it with the
+ * managed name `name` so the launcher can find the session again (see
+ * PANE_TARGET_OPTION). Returns the new pane id, or null if tmux refused —
+ * typically "no space for new pane", which callers treat as "open a window
+ * instead" rather than an error.
+ *
+ * `-h` splits left|right (side by side, the point of the exercise) and `-d`
+ * leaves the focus where it is, so the menu keeps the keyboard while the agent
+ * boots next to it. `-P -F #{pane_id}` prints the pane id we then address it by.
+ */
+export function splitPaneIn(target: string, name: string, cwd: string, argv: string[]): string | null {
+  const r = spawnSync(
+    "tmux",
+    ["split-window", "-h", "-d", "-P", "-F", "#{pane_id}", "-t", target, "-c", cwd, "--", ...argv],
+    { encoding: "utf-8" },
+  );
+  if (r.status !== 0) return null;
+  const pane = (r.stdout ?? "").trim();
+  if (!isPaneTarget(pane)) return null;
+  tmuxQuiet(["set-option", "-p", "-t", pane, PANE_TARGET_OPTION, name]);
+  return pane;
+}
+
+/** Current width in columns of window `target`, or null if it can't be read. */
+export function windowWidth(target: string): number | null {
+  const r = spawnSync("tmux", ["display-message", "-p", "-t", target, "#{window_width}"], { encoding: "utf-8" });
+  if (r.status !== 0) return null;
+  const n = Number((r.stdout ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**

@@ -16,7 +16,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
-import { ORCHESTRATOR_SLUG, orchestratorSystemPrompt } from "../src/orchestrator.ts";
+import {
+  ORCHESTRATOR_SLUG,
+  globalOrchestratorSystemPrompt,
+  orchestratorSystemPrompt,
+  systemPromptForRole,
+} from "../src/orchestrator.ts";
+import { commonParent, globalOrchestratorCwd } from "../src/repos.ts";
 import { freeWorktreeBranch, worktreePath } from "../src/worktree.ts";
 
 // A distinctive stand-in for SELF_CMD, so every assertion that the prompt points
@@ -142,6 +148,123 @@ test("the prompt names the merge as the one thing it does NOT delegate", async (
   // The escape-hatch bullet says delegate anything that must happen outside a
   // session; the merge section has it run merges itself. Reconcile explicitly.
   expect(flat).toContain("The integration merges are the one exception: those you run yourself");
+});
+
+// ── the GLOBAL orchestrator prompt ────────────────────────────────────────────
+// One level above the per-repo orchestrator. Same reasoning as above: the prompt
+// IS the feature, and the failure mode is silent — a global orchestrator that
+// loses the "never touch a repo" or "never skip a level" directives becomes an
+// ordinary orchestrator competing with the ones it is supposed to be managing.
+
+const globalPrompt = globalOrchestratorSystemPrompt(SELF);
+const globalFlat = globalPrompt.replace(/\s+/g, " ");
+
+test("the global prompt announces its own mode and states the three-level hierarchy", async () => {
+  expect(globalPrompt).toContain("GLOBAL ORCHESTRATOR MODE");
+  expect(globalPrompt).toContain("global orchestrator  →  per-repo orchestrators  →  per-worktree sessions");
+  // It must not read as the repo-level prompt: that one's headline directive is
+  // about writing code in a repo it owns, and this one owns no repo at all.
+  expect(globalPrompt).not.toContain("# You are running in ORCHESTRATOR MODE");
+});
+
+test("the global prompt forbids writing code AND operating on any repo — merges included", async () => {
+  expect(globalFlat).toContain("You write no code and touch no repository — not even a merge");
+  expect(globalFlat).toContain("Do NOT edit, create, or refactor source files in ANY repository");
+  // The merge prohibition is the one most likely to be rationalized away ("it's
+  // just an integration step"), so it's pinned explicitly, as is whose job it is.
+  expect(globalFlat).toContain("NO MERGES");
+  expect(globalFlat).toContain("Integrating a finished branch is the REPO orchestrator's job");
+  expect(globalFlat).toContain("Do NOT run builds, tests, or linters in a repository");
+});
+
+test("the global prompt discovers repos and orchestrators through list --json", async () => {
+  expect(globalPrompt).toContain(`${SELF} list --json`);
+  expect(globalPrompt).toContain(`${SELF} list repos --json`);
+  // The fields it parses must be named, or it will invent its own scheme.
+  expect(globalFlat).toContain("`repoRoot`");
+  expect(globalFlat).toContain("`orchestrator` (boolean)");
+  expect(globalFlat).toContain("is UNMANAGED");
+});
+
+test("the global prompt starts a repo orchestrator where one is missing", async () => {
+  expect(globalPrompt).toContain(`${SELF} launch --orchestrator`);
+  // In THAT repo — a launch from wherever the global one happens to sit would
+  // put the orchestrator in the wrong checkout entirely.
+  expect(globalPrompt).toContain("cd <repoRoot>");
+  expect(globalFlat).toContain("One repo = one orchestrator");
+  // Decomposition belongs to the repo orchestrator, not to this level.
+  expect(globalFlat).toContain("do NOT hand it a list of worktree sessions to launch");
+});
+
+test("the global prompt forbids reaching past a level, loudly and in both directions", async () => {
+  expect(globalFlat).toContain("Talk ONLY to repo orchestrators — never to their sessions");
+  expect(globalPrompt).toContain(`${SELF} send <repo-orchestrator-id>`);
+  expect(globalFlat).toContain("NEVER `send` to an individual worktree session");
+  expect(globalFlat).toContain("two voices instructing one agent is how work gets duplicated, reverted, or lost");
+  // The other direction: it must not answer/unblock/relaunch someone else's session.
+  expect(globalFlat).toContain("do not answer a worktree session's question, unblock it, or relaunch it");
+  // …but reading at any depth is explicitly fine, or it would stop using `status`.
+  expect(globalFlat).toContain("Reading is fine at any depth");
+  // A dead repo orchestrator IS its level, so that exception is stated too.
+  expect(globalFlat).toContain("If a repo orchestrator dies or stops responding, that IS your level");
+});
+
+test("the global prompt keeps a task list at REPO granularity", async () => {
+  expect(globalFlat).toContain("Keep a task list at REPO granularity");
+  expect(globalFlat).toContain("One entry per repository, not per unit of work");
+  for (const state of ["unmanaged", "starting", "running", "blocked", "done"]) {
+    expect(globalPrompt).toContain(`**${state}**`);
+  }
+});
+
+test("the global prompt aggregates status and escalates only cross-repo decisions", async () => {
+  expect(globalFlat).toContain("report UP to the user in repo-level terms");
+  expect(globalFlat).toContain("Bring a decision to the user when it genuinely spans repositories");
+  // Anything one repo can answer goes DOWN, not up — otherwise it becomes a relay.
+  expect(globalFlat).toContain("forward the question to it instead of escalating");
+});
+
+test("systemPromptForRole picks the level's own instructions", async () => {
+  // The single selection point every injection path shares: if it ever returned
+  // the repo prompt for a global session, that session would start merging.
+  expect(systemPromptForRole("repo", SELF)).toBe(orchestratorSystemPrompt(SELF));
+  expect(systemPromptForRole("global", SELF)).toBe(globalOrchestratorSystemPrompt(SELF));
+});
+
+// ── where a global orchestrator runs ──────────────────────────────────────────
+// It has no repo and no worktree, so its cwd is chosen rather than derived from
+// a checkout. The rule that matters: don't sit inside one repo, because a
+// coordinator of all of them must not look local (nor be tempted to run git).
+
+test("globalOrchestratorCwd sits above the known repos, never inside one", async () => {
+  const repos = ["/home/me/git/alpha", "/home/me/git/beta", "/home/me/work/gamma"];
+  expect(globalOrchestratorCwd(repos, "/fallback")).toBe("/home/me");
+  // A single repo makes the common parent the repo ITSELF — step up instead.
+  expect(globalOrchestratorCwd(["/home/me/git/alpha"], "/fallback")).toBe("/home/me/git");
+  // …including when the others are nested under it (worktrees resolve to their
+  // main checkout, but a genuinely nested repo would produce this shape).
+  expect(globalOrchestratorCwd(["/home/me/git/alpha", "/home/me/git/alpha/vendor/x"], "/fb")).toBe("/home/me/git");
+  // The launcher's own scope root wins outright: it's the user's declared scope.
+  expect(globalOrchestratorCwd(repos, "/fallback", "/home/me/scoped")).toBe("/home/me/scoped");
+});
+
+test("globalOrchestratorCwd falls back rather than landing on /", async () => {
+  // Nothing to sit above, or roots sharing only the filesystem root: `/` is a
+  // terrible cwd for an agent, so the caller's own directory is used instead.
+  expect(globalOrchestratorCwd([], "/fallback")).toBe("/fallback");
+  expect(globalOrchestratorCwd(["/srv/a", "/opt/b"], "/fallback")).toBe("/fallback");
+  // A single top-level repo would step up to `/` — fall back for that too.
+  expect(globalOrchestratorCwd(["/alpha"], "/fallback")).toBe("/fallback");
+});
+
+test("commonParent is segment-aware and slash-drift tolerant", async () => {
+  // A raw string prefix would return "/home/me/git/alp" here — a path that isn't
+  // a directory at all, which the launcher would then try to run an agent in.
+  expect(commonParent(["/home/me/git/alpha", "/home/me/git/alphabet"])).toBe("/home/me/git");
+  expect(commonParent(["/home/me/git/a/", "/home/me//git/b"])).toBe("/home/me/git");
+  expect(commonParent(["/home/me/git/a"])).toBe("/home/me/git/a");
+  expect(commonParent([])).toBeNull();
+  expect(commonParent(["/a", "/b"])).toBeNull();
 });
 
 test("the orchestrator slug is a stable, worktree-safe name", async () => {
