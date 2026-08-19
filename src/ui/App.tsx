@@ -66,6 +66,7 @@ import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { handleOpenKeys } from "./keys/open.ts";
+import { handleQuitKeys } from "./keys/quit.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import type {
   AgentSession,
@@ -80,25 +81,6 @@ const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
 // How often to re-read running sessions' panes for input readiness. Each tick
 // captures one pane per running session (cheap tmux calls), so keep it modest.
 const READINESS_MS = 1500;
-
-/**
- * Modes where `q` / ctrl-c must NOT quit the app.
- *
- * `branch` and `clone` are text inputs — `q` is an ordinary character in a
- * branch name, and in a repo URL it's unavoidable (`github.com/qmk/qmk_firmware`,
- * anything with "quarkus", "requests", "sequelize" in it). Quitting on it would
- * make those repos literally untypeable.
- *
- * `cloning` is in this set for a different reason: a `git clone` is mid-write,
- * so `q` should not walk away from it — esc cancels, which cleans up.
- *
- * Note this only holds `q`. Ink handles ctrl-c itself (`exitOnCtrlC` defaults
- * on) and never forwards it here, so ctrl-c still quits from every mode — the
- * `key.ctrl` half below is unreachable, kept only to mirror the `branch`
- * prompt's long-standing shape. What makes that safe is the unmount cleanup,
- * which kills the clone and removes the partial directory on the way out.
- */
-const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
 
 /**
  * Cursor value for the repo picker's "＋ Clone from URL…" row. A sentinel rather
@@ -1425,14 +1407,7 @@ export default function App({
     if (handleOpenKeys(input, key, ctx)) return;
     if (handleSearchKeys(input, key, ctx)) return;
 
-    if (!HOLDS_QUIT_KEYS.has(mode.kind) && (input === "q" || (key.ctrl && input === "c"))) {
-      exit();
-      return;
-    }
-    if (mode.kind === "list" && key.escape) {
-      exit();
-      return;
-    }
+    if (handleQuitKeys(input, key, ctx)) return;
 
     // ── agent picker (first step of every fresh flow) ──
     if (mode.kind === "agent") {
