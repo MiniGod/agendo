@@ -103,14 +103,15 @@
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 2034, "skipBlankLines": false, "skipComments": false }],
-        // the `App` component itself, line 100
-        "max-lines-per-function": ["error", { "max": 1935, "skipBlankLines": false, "skipComments": false }],
+        "max-lines": ["error", { "max": 1758, "skipBlankLines": false, "skipComments": false }],
+        // the `App` component itself, line 100 — all eleven mode screens now live
+        // in src/ui/screens/ and the key handlers in src/ui/keys/
+        "max-lines-per-function": ["error", { "max": 1648, "skipBlankLines": false, "skipComments": false }],
         // `App` itself is now the worst function in this file; the useInput
         // handler that used to hold these records is down to complexity 14 /
         // 14 statements, and lives in src/ui/keys/.
-        "complexity": ["error", 101],
-        "max-statements": ["error", 171]
+        "complexity": ["error", 63],
+        "max-statements": ["error", 154]
       }
     },
 
