@@ -43,11 +43,9 @@ import {
   buildItemsRows,
   buildPrsRows,
   buildSessionsRows,
-  sessionExpandKey,
   sessionId,
   SELECTABLE,
   type PrSort,
-  type Row,
   type SessionSort,
 } from "./rows.ts";
 import {
@@ -69,6 +67,7 @@ import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
 import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleIdentityKeys } from "./keys/identity.ts";
+import { handleListKeys } from "./keys/list.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleProfileKeys } from "./keys/profile.ts";
 import { handleProviderKeys } from "./keys/provider.ts";
@@ -1423,188 +1422,7 @@ export default function App({
 
     if (handleProfileKeys(input, key, ctx)) return;
 
-    // ── list mode ──
-    // view switching (Tab forward, Shift-Tab back)
-    if (key.tab) {
-      const order: View[] = ["items", "prs", "sessions"];
-      const dir = key.shift ? -1 : 1;
-      const next = order[(order.indexOf(view) + dir + order.length) % order.length];
-      return switchView(next);
-    }
-    if (input === "1") return switchView("items");
-    if (input === "2") return switchView("prs");
-    if (input === "3") return switchView("sessions");
-
-    // toggle path scope ↔ global (only when the launcher is scoped to a path;
-    // bare `agendo` is already global, so there's nothing to toggle). `a` = "all".
-    if (input === "a" && filterRoot) {
-      setCursor(0);
-      return setGlobalView((v) => !v);
-    }
-
-    // toggle the repo filter on the work-item / PR views (only when scoped to a
-    // path — with no root there are no repos to narrow to). `f` = "filter".
-    if (input === "f" && filterRoot) {
-      setCursor(0);
-      return setRepoFilterOn((v) => !v);
-    }
-
-    // toggle repo grouping (Sessions: whole view · PRs: subgroups per section)
-    if (input === "g" && (view === "sessions" || view === "prs")) {
-      setCursor(0);
-      if (view === "sessions") return setGrouped((v) => !v);
-      return setPrsGrouped((v) => !v);
-    }
-
-    // new arbitrary session (sessions view only)
-    if (input === "n" && view === "sessions") { enterNewSession(); return; }
-
-    // new ORCHESTRATOR session (sessions view only) — a session that delegates
-    // every unit of work to further background sessions instead of implementing.
-    // Capital O, so the lowercase `o` open-in-browser binding is untouched.
-    if (input === "O" && view === "sessions") { enterOrchestrator(); return; }
-
-    // focus the fuzzy-search input (all list views)
-    if (input === "/") { setSearchFocus("input"); return; }
-
-    // toggle PR sort order (created ↔ last updated); drafts stay at the bottom
-    if (input === "s" && view === "prs") {
-      setCursor(0);
-      return setPrSort((s) => (s === "created" ? "updated" : "created"));
-    }
-
-    // toggle session sort order (updated ↔ created)
-    if (input === "s" && view === "sessions") {
-      setCursor(0);
-      return setSessionSort((s) => (s === "updated" ? "created" : "updated"));
-    }
-
-    // open the Settings page (backend · identity · filters · auth status)
-    if (input === ",") { enterSettings(); return; }
-
-    // quick shortcut (also in Settings): switch who you are — Work items & PRs only
-    if (input === "u") { enterIdentity(); return; }
-
-    if (input === "r") {
-      setNotice(null);
-      setActivity(new Map()); // drop cached activity so expanded sessions refetch
-      requested.current.clear();
-      setRescanKey((k) => k + 1); // re-walk the path context for new checkouts
-      reload();
-      return;
-    }
-
-    // continue the hovered session in the other agent: convert its transcript
-    // and resume the result. Works on a session row in any view. Guard against
-    // ctrl-c (handled earlier as quit) so a bare `c` is required.
-    if (input === "c" && !key.ctrl && !key.meta) {
-      const row = rows[cursor];
-      if (!row || row.kind !== "session") {
-        setNotice("Select a session row first to continue it in another agent.");
-        return;
-      }
-      continueInOtherAgent(row.session);
-      return;
-    }
-
-    // move the hovered session to another Claude profile (~/.claude*). Works on
-    // a session row in any view, like `c`.
-    if (input === "m" && !key.ctrl && !key.meta) {
-      const row = rows[cursor];
-      if (!row || row.kind !== "session") {
-        setNotice("Select a session row first to move it to another profile.");
-        return;
-      }
-      enterProfilePicker(row.session);
-      return;
-    }
-
-    // open the hovered work item / PR / session in the browser
-    if (input === "o") {
-      const row = rows[cursor];
-      if (!row || (row.kind !== "item" && row.kind !== "pr" && row.kind !== "session")) {
-        setNotice("Nothing to open in the browser for this row.");
-        return;
-      }
-      const targets = row.open;
-      if (!targets || (!targets.pr && !targets.workItem)) {
-        setNotice("Nothing to open in the browser for this row.");
-        return;
-      }
-      const title =
-        row.kind === "item"
-          ? `#${row.item.id} — ${row.item.title}`
-          : row.kind === "pr"
-            ? `PR ${V.prPrefix}${row.pr.id} — ${row.pr.title}`
-            : row.session.title;
-      setNotice(null);
-      setMode({ kind: "open", targets, title });
-      return;
-    }
-
-    if (key.upArrow || input === "k") return move(-1);
-    if (key.downArrow || input === "j") return move(1);
-
-    // ── expand/collapse with →/← (or l/h) ──
-    const isExpandable = (row: Row) =>
-      row.kind === "item" || row.kind === "pr" || row.kind === "toggle" || row.kind === "session";
-    const isOpen = (row: Row) =>
-      row.kind === "item" || row.kind === "pr" || row.kind === "session"
-        ? row.expanded
-        : row.kind === "toggle"
-          ? row.open
-          : false;
-    const flipOpen = (row: Row) => {
-      if (row.kind === "item") toggleExpand(`wi:${itemKey(row.item)}`);
-      else if (row.kind === "pr") toggleExpand(`pr:${prKey(row.pr)}`);
-      else if (row.kind === "toggle") toggleSection(row.id);
-      else if (row.kind === "session") {
-        ensureActivity(row.session); // kick off the lazy parse on first expand
-        toggleExpand(sessionExpandKey(row.key));
-      }
-    };
-    // Nesting depth: sections/groups (toggle) = 0, work items / PRs = 1, the
-    // sessions & fresh rows under them = 2. Used to climb one level on ←.
-    const depthOf = (row: Row) =>
-      row.kind === "session" || row.kind === "fresh" ? 2 : row.kind === "item" || row.kind === "pr" ? 1 : 0;
-
-    if (key.rightArrow || input === "l") {
-      const row = rows[cursor];
-      if (!row || !isExpandable(row)) return;
-      if (!isOpen(row)) return flipOpen(row); // expand
-      // already open → select the first child (the row right below it)
-      const child = rows[cursor + 1];
-      if (child && SELECTABLE.has(child.kind)) setCursor(cursor + 1);
-      return;
-    }
-    if (key.leftArrow || input === "h") {
-      const row = rows[cursor];
-      if (!row) return;
-      // An open expandable collapses first; only once it's collapsed (or it's a
-      // leaf) does ← climb to the nearest selectable ancestor one level up
-      // (child → work item/PR → its section/group).
-      if (isExpandable(row) && isOpen(row)) return flipOpen(row);
-      const d = depthOf(row);
-      for (let i = cursor - 1; i >= 0; i--) {
-        if (depthOf(rows[i]) < d && SELECTABLE.has(rows[i].kind)) return setCursor(i);
-      }
-      return;
-    }
-
-    if (key.return) {
-      const row = rows[cursor];
-      if (!row) return;
-      if (row.kind === "item") toggleExpand(`wi:${itemKey(row.item)}`);
-      else if (row.kind === "pr") toggleExpand(`pr:${prKey(row.pr)}`);
-      else if (row.kind === "toggle") toggleSection(row.id);
-      else if (row.kind === "session") {
-        open(openSession(row.session, model?.liveWindows.get(sessionName(row.session))));
-      } else if (row.kind === "fresh") {
-        enterFresh(row.target);
-      } else if (row.kind === "newsess") {
-        enterNewSession();
-      }
-    }
+    handleListKeys(input, key, ctx);
   });
 
   // ── render ──
