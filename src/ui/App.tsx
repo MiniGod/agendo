@@ -9,7 +9,7 @@ import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProf
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
-import { ORCHESTRATOR_SLUG, isOrchestratorSession } from "../orchestrator.ts";
+import { isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
 import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../errors.ts";
 import {
@@ -70,6 +70,7 @@ import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
 import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
+import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import type {
   AgentSession,
@@ -1405,44 +1406,7 @@ export default function App({
     if (handleCloneKeys(input, key, ctx)) return;
     if (handleCloningKeys(input, key, ctx)) return;
 
-    // ── worktree-vs-main choice (free sessions only) ──
-    if (mode.kind === "wtchoice") {
-      if (key.escape) return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor - 1 + 2) % 2 } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor + 1) % 2 } : p));
-      if (key.return) {
-        const worktree = mode.cursor === 0;
-        // Orchestrator in the main checkout: nothing to name (the main-repo path
-        // discards the name anyway, and it has no branch of its own), so launch
-        // straight away instead of showing a prompt whose value is thrown out.
-        if (!worktree && mode.target.orchestrator) {
-          return startFresh(mode.target, mode.repo, ORCHESTRATOR_SLUG, false, mode.agent);
-        }
-        // A plain free session has no default name (defaultBranch is ""), so this
-        // still opens an empty prompt; an orchestrator prefills its own role slug,
-        // stepped past any orchestrator worktree already in this repo. Only a
-        // preview — `startFresh` re-derives it at create time, since the user may
-        // sit on this screen for a while. (Moot for the main-repo option, which
-        // ignores the name entirely.)
-        const seed =
-          worktree && mode.target.defaultBranch
-            ? freeWorktreeBranch(mode.repo.root, mode.target.defaultBranch)
-            : mode.target.defaultBranch;
-        return setMode({
-          kind: "branch",
-          target: mode.target,
-          agent: mode.agent,
-          repo: mode.repo,
-          value: seed,
-          cursor: seed.length,
-          worktree,
-          seed: seed || undefined,
-        });
-      }
-      return;
-    }
+    if (handleWtchoiceKeys(input, key, ctx)) return;
 
     // ── new-branch / session name prompt — editable, with a movable cursor ──
     if (mode.kind === "branch") {
