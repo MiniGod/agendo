@@ -63,7 +63,7 @@ import {
 import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
-import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
+import { handleAgentKeys } from "./keys/agent.ts";
 import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleIdentityKeys } from "./keys/identity.ts";
@@ -76,6 +76,7 @@ import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
 import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import { handleSettingsKeys } from "./keys/settings.ts";
+import { AgentScreen } from "./screens/AgentScreen.tsx";
 import type {
   AgentSession,
   AgentSource,
@@ -1457,27 +1458,7 @@ export default function App({
   if (!model) return <Text><Text color="cyan">⟳</Text> Loading work items, PRs & sessions…</Text>;
   if (busy) return <Text><Text color="cyan">⟳</Text> {busy}</Text>;
 
-  if (mode.kind === "agent") {
-    const isFree = mode.target.kind === "free";
-    return (
-      <Box flexDirection="column">
-        <Text bold>{isFree ? `New session — pick an agent` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
-        <Text dimColor>{`Which agent should run this session?  ·  ↑/↓ move · enter select · esc back`}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {AGENT_CHOICES.map((a, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={a.source} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text bold>{a.label.padEnd(10).slice(0, 10)}</Text>
-                <Text dimColor={!sel}>{`  ${a.desc}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
-  }
+  if (mode.kind === "agent") return <AgentScreen target={mode.target} cursor={mode.cursor} />;
 
   if (mode.kind === "repo") {
     const isFree = mode.target.kind === "free";
