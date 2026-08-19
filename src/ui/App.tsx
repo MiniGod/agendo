@@ -80,6 +80,7 @@ import { AgentScreen } from "./screens/AgentScreen.tsx";
 import { CloneScreen } from "./screens/CloneScreen.tsx";
 import { CloningScreen } from "./screens/CloningScreen.tsx";
 import { IdentityScreen } from "./screens/IdentityScreen.tsx";
+import { ProviderScreen } from "./screens/ProviderScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
 import { RepoScreen } from "./screens/RepoScreen.tsx";
 import type {
@@ -1515,33 +1516,7 @@ export default function App({
   }
 
   if (mode.kind === "provider") {
-    return (
-      <Box flexDirection="column">
-        <Text bold>Switch backend</Text>
-        <Text dimColor>
-          {"Everything reloads from the selected backend  ·  ↑/↓ move · enter select · esc back"}
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          {PROVIDER_INFO.map((info, i) => {
-            const sel = i === mode.cursor;
-            const isCur = info.name === provider;
-            const ok = available.has(info.name);
-            return (
-              <Text key={info.name} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text color={sel ? "black" : isCur ? "green" : "gray"}>{isCur ? "● " : "○ "}</Text>
-                <Text bold color={sel ? "black" : ok ? undefined : "gray"}>{info.label.padEnd(16).slice(0, 16)}</Text>
-                {ok ? (
-                  <Text dimColor={!sel}>{`  via ${info.cli}`}</Text>
-                ) : (
-                  <Text color={sel ? "black" : "yellow"}>{`  ${info.cli} not installed — ${info.authHint}`}</Text>
-                )}
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <ProviderScreen cursor={mode.cursor} provider={provider} available={available} />;
   }
 
   if (mode.kind === "wtchoice") {
