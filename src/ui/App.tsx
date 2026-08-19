@@ -79,6 +79,7 @@ import { handleSettingsKeys } from "./keys/settings.ts";
 import { AgentScreen } from "./screens/AgentScreen.tsx";
 import { CloneScreen } from "./screens/CloneScreen.tsx";
 import { CloningScreen } from "./screens/CloningScreen.tsx";
+import { IdentityScreen } from "./screens/IdentityScreen.tsx";
 import { RepoScreen } from "./screens/RepoScreen.tsx";
 import type {
   AgentSession,
@@ -1494,31 +1495,7 @@ export default function App({
   }
 
   if (mode.kind === "identity") {
-    const curId = (identity ?? model.me).id;
-    return (
-      <Box flexDirection="column">
-        <Text bold>Switch who you are</Text>
-        <Text dimColor>
-          {"Work items & PRs reload for the selected person  ·  ↑/↓ move · enter select · esc back"}
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          {roster.map((m, i) => {
-            const sel = i === mode.cursor;
-            const isCur = m.id === curId;
-            const isMe = m.id === model.me.id;
-            return (
-              <Text key={m.id} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text color={sel ? "black" : isCur ? "green" : "gray"}>{isCur ? "● " : "○ "}</Text>
-                <Text bold>{m.displayName.padEnd(28).slice(0, 28)}</Text>
-                {isMe ? <Text color={sel ? "black" : "magenta"}>{" (you)"}</Text> : null}
-                <Text dimColor={!sel}>{`  ${m.uniqueName}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <IdentityScreen cursor={mode.cursor} identity={identity} me={model.me} roster={roster} />;
   }
 
   if (mode.kind === "settings") {
