@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, filterModelByRepos, type LoadedModel } from "../model.ts";
+import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi } from "../tmux.ts";
@@ -37,11 +37,7 @@ import { cloneError, homeShort, type Activity, type PaneState } from "./format.t
 import { sameActivity, sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "./equality.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import {
-  buildItemsRows,
-  buildPrsRows,
-  buildSessionsRows,
   sessionId,
-  SELECTABLE,
   type PrSort,
   type SessionSort,
 } from "./rows.ts";
@@ -59,6 +55,7 @@ import {
 } from "./components.tsx";
 import { convertTarget, runConvert } from "./convert.ts";
 import { useRepoScope } from "./hooks/useRepoScope.ts";
+import { useRowModel } from "./hooks/useRowModel.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { handleAgentKeys } from "./keys/agent.ts";
@@ -90,7 +87,6 @@ import type {
   AgentSource,
   Identity,
   ProviderName,
-  TeamMember,
 } from "../types.ts";
 
 const POLL_MS = 1000;
@@ -469,35 +465,20 @@ export default function App({
   // than none.
   const resolved = cloneUrl && cloneDest?.key === cloneUrl.key ? cloneDest : null;
 
-  // Whether the repo filter is doing anything right now: it needs a path context
-  // with at least one repo inside it (model.repoScope is null otherwise) and the
-  // `f` toggle on. Applied as a display overlay over the loaded model, so the
-  // fetched data — and every count derived from it — narrows in one place.
-  const repoFiltered = !!model?.repoScope && repoFilterOn;
-  const viewModel = useMemo<LoadedModel | null>(
-    () => (model ? filterModelByRepos(model, repoFiltered ? model.repoScope : null) : null),
-    [model, repoFiltered],
-  );
-
-  const rows = useMemo(() => {
-    if (!viewModel) return [];
-    if (view === "prs") return buildPrsRows(viewModel, expanded, toggles, prsGrouped, prSort, activity, search.text, inScope);
-    if (view === "sessions") return buildSessionsRows(viewModel, toggles, grouped, expanded, activity, sessionSort, search.text, inScope);
-    return buildItemsRows(viewModel, expanded, toggles, activity, search.text, inScope);
-  }, [viewModel, view, expanded, toggles, grouped, prsGrouped, prSort, sessionSort, activity, search.text, inScope]);
-  const selectableIdx = useMemo(
-    () => rows.map((r, i) => (SELECTABLE.has(r.kind) ? i : -1)).filter((i) => i >= 0),
-    [rows],
-  );
-
-  // The identity-switcher roster: the team's members, with the authenticated
-  // user guaranteed present (in case they aren't on the configured team).
-  const roster = useMemo<TeamMember[]>(() => {
-    if (!model) return [];
-    const list = [...model.teamMembers];
-    if (!list.some((m) => m.id === model.me.id)) list.unshift(model.me);
-    return list;
-  }, [model]);
+  const { rows, selectableIdx, roster } = useRowModel({
+    model,
+    repoFilterOn,
+    view,
+    expanded,
+    toggles,
+    grouped,
+    prsGrouped,
+    prSort,
+    sessionSort,
+    activity,
+    search,
+    inScope,
+  });
 
   useEffect(() => {
     if (selectableIdx.length === 0) return;
