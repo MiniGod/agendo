@@ -36,7 +36,7 @@ import { vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectScopeProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
 import { homedir } from "os";
-import { cloneError, homeShort, repoBreakdown, type Activity, type PaneState } from "./format.ts";
+import { cloneError, homeShort, type Activity, type PaneState } from "./format.ts";
 import { sameActivity, sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "./equality.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import {
@@ -72,11 +72,12 @@ import { handleOpenKeys } from "./keys/open.ts";
 import { handleProfileKeys } from "./keys/profile.ts";
 import { handleProviderKeys } from "./keys/provider.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
-import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
+import { handleRepoKeys } from "./keys/repo.ts";
 import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import { handleSettingsKeys } from "./keys/settings.ts";
 import { AgentScreen } from "./screens/AgentScreen.tsx";
+import { RepoScreen } from "./screens/RepoScreen.tsx";
 import type {
   AgentSession,
   AgentSource,
@@ -1461,67 +1462,15 @@ export default function App({
   if (mode.kind === "agent") return <AgentScreen target={mode.target} cursor={mode.cursor} />;
 
   if (mode.kind === "repo") {
-    const isFree = mode.target.kind === "free";
-    const orch = !!mode.target.orchestrator;
-    const repoChoices = reposForTarget(mode.target);
-    // Work-item / PR flows MUST create a worktree, so a list with no git checkout
-    // in it can only ever produce "fatal: not a git repository" — the bootstrap
-    // case, where the only offer is the launcher's own non-repo cwd. Say what
-    // would actually unblock it instead of letting enter dead-end. A plain free
-    // session is exempt: running in place is a legitimate outcome there (see
-    // wtchoice). An ORCHESTRATOR is not exempt, even though it is a free target —
-    // it integrates by merging branches, which a non-repo folder cannot do, so
-    // for it "run in place here" is just as dead an end as for a work item.
-    const noCheckout = (!isFree || orch) && !anyHostableRepo;
     return (
-      <Box flexDirection="column">
-        <Text bold>
-          {orch ? `Orchestrator session — pick a repo` : isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}
-        </Text>
-        <Text dimColor>
-          {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
-        </Text>
-        {orch ? (
-          <Text color="magenta">{"It will delegate every unit of work to background sessions — it writes no code itself."}</Text>
-        ) : null}
-        {noCheckout ? (
-          <Text color="yellow">
-            {canClone
-              ? "No git checkout here — press c to clone one, or run `agendo <dir>` pointing at a repo."
-              : "No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
-          </Text>
-        ) : null}
-        <Box marginTop={1} flexDirection="column">
-          {repoChoices.map((r, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text bold>{r.name.padEnd(22).slice(0, 22)}</Text>
-                {r.total === 0 ? (
-                  <Text color={sel ? "black" : "gray"}>{`  (no sessions yet)         `}</Text>
-                ) : (
-                  <>
-                    <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
-                    <Text color={sel ? "black" : "gray"}>{` (${repoBreakdown(r)})`}</Text>
-                  </>
-                )}
-                <Text dimColor={!sel}>{`  ${r.root}`}</Text>
-              </Text>
-            );
-          })}
-          {canClone ? (
-            <Text
-              color={mode.cursor === CLONE_ROW ? "black" : undefined}
-              backgroundColor={mode.cursor === CLONE_ROW ? "cyan" : undefined}
-            >
-              {mode.cursor === CLONE_ROW ? "❯ " : "  "}
-              <Text bold>{"＋ Clone from URL…".padEnd(21).slice(0, 21)}</Text>
-              <Text dimColor={mode.cursor !== CLONE_ROW}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
-            </Text>
-          ) : null}
-        </Box>
-      </Box>
+      <RepoScreen
+        target={mode.target}
+        cursor={mode.cursor}
+        repoChoices={reposForTarget(mode.target)}
+        anyHostableRepo={anyHostableRepo}
+        canClone={canClone}
+        filterRoot={filterRoot}
+      />
     );
   }
 
