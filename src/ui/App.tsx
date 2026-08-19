@@ -66,6 +66,7 @@ import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
+import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
 import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
@@ -1401,57 +1402,8 @@ export default function App({
 
     if (handleRepoKeys(input, key, ctx)) return;
 
-    // ── clone: paste a repo URL ──
-    // Same editable single-line input as the branch prompt (see there for why the
-    // updates are functional).
-    if (mode.kind === "clone") {
-      if (key.escape) return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
-      if (key.return) {
-        if (mode.value.trim()) beginClone(mode.target, mode.agent, mode.value.trim());
-        return;
-      }
-      const edit = (fn: (v: string, c: number) => { value?: string; cursor: number }) =>
-        setMode((p) => {
-          if (p.kind !== "clone") return p;
-          const r = fn(p.value, p.cursor);
-          // Any edit clears a stale error — it described the *previous* value.
-          return { ...p, value: r.value ?? p.value, cursor: r.cursor, error: undefined };
-        });
-      if (key.leftArrow) return edit((v, c) => ({ cursor: Math.max(0, c - 1) }));
-      if (key.rightArrow) return edit((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
-      if (key.ctrl && input === "a") return edit(() => ({ cursor: 0 }));
-      if (key.ctrl && input === "e") return edit((v) => ({ cursor: v.length }));
-      if (key.ctrl && input === "u") return edit(() => ({ value: "", cursor: 0 }));
-      if (key.backspace || key.delete || input === "\x7f" || input === "\b")
-        return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      // A PASTE arrives as one chunk, and copying a URL as a whole line brings
-      // its trailing newline along. Ink doesn't read that chunk as Enter (the
-      // `\r` isn't alone), so a printable-only guard like the branch prompt's
-      // would reject the entire paste and insert nothing at all — on the one
-      // prompt whose whole instruction is "paste a URL". Strip the control
-      // characters and keep the rest. Deliberately NOT treated as submit: the
-      // destination preview exists so no clone starts unreviewed.
-      if (input && !key.ctrl && !key.meta) {
-        // Only CONTROL characters are dropped — deliberately not "everything
-        // outside printable ASCII". An ADO project name is routinely non-ASCII
-        // (`…/innovamps/Þróun/_git/hmi-framework`, and Chrome's omnibox hands
-        // that over unencoded), and stripping those letters doesn't reject the
-        // URL — it quietly turns it into a *different, still valid* one
-        // (`…/innovamps/run/_git/…`), which then previews a destination for a
-        // repo the user never named and fails at clone time as "not found".
-        const text = input.replace(/[\x00-\x1f\x7f]+/g, "");
-        if (!text) return;
-        return edit((v, c) => ({ value: v.slice(0, c) + text + v.slice(c), cursor: c + text.length }));
-      }
-      return;
-    }
-
-    // ── clone in progress ── (esc kills git and removes the partial directory;
-    // everything else is ignored so a stray keystroke can't abandon the clone)
-    if (mode.kind === "cloning") {
-      if (key.escape) cancelClone();
-      return;
-    }
+    if (handleCloneKeys(input, key, ctx)) return;
+    if (handleCloningKeys(input, key, ctx)) return;
 
     // ── worktree-vs-main choice (free sessions only) ──
     if (mode.kind === "wtchoice") {
