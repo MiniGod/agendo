@@ -25,7 +25,6 @@ import {
   findMatchingCheckout,
   freeCloneDest,
   startClone,
-  type CloneRun,
 } from "../clone.ts";
 import { normalizeCwd } from "../context.ts";
 import { vocab } from "../vocab.ts";
@@ -54,6 +53,7 @@ import {
 } from "./components.tsx";
 import { convertTarget, runConvert } from "./convert.ts";
 import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
+import { useCloneFlow } from "./hooks/useCloneFlow.ts";
 import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
 import { useRepoScope } from "./hooks/useRepoScope.ts";
 import { useViewport } from "./hooks/useViewport.ts";
@@ -140,18 +140,6 @@ export default function App({
   // Repos cloned during this run, merged into the picker until a reload
   // discovers them for real (see `scopedRepos`).
   const [cloned, setCloned] = useState<RepoInfo[]>([]);
-  // What the clone step did, carried into the screens that follow it. `notice`
-  // is a list-view banner, and a clone hands off directly to the next dialog —
-  // without this, "reused the checkout you already had" would be invisible until
-  // the user found their way back to the list. Cleared when a fresh flow starts.
-  const [cloneNote, setCloneNote] = useState<string | null>(null);
-  // The same value, readable synchronously. A PR target routes clone → checkout
-  // → launch inside one keystroke, and `open()` overwrites the notice on the way
-  // out; without a ref the note set moments earlier would still be the stale
-  // render value there, so the PR flow would never report what it cloned.
-  const cloneNoteRef = useRef<string | null>(null);
-  // The in-flight `git clone`, so esc can cancel it and unmount can't orphan it.
-  const cloneRun = useRef<CloneRun | null>(null);
   const [grouped, setGrouped] = useState(true); // Sessions view: group by repo
   // Path-scope toggle: when a filterRoot exists, `a` flips between the scoped
   // view (sessions under the root) and the global view (every session). Bare
@@ -393,42 +381,10 @@ export default function App({
     return () => clearInterval(t);
   }, [cloning]);
 
-  // Never leave a `git clone` (and its half-written directory) behind on
-  // unmount. `immediate` because the child's exit will never be observed here.
-  useEffect(() => () => cloneRun.current?.cancel({ immediate: true }), []);
-
-  // What the typed URL means. Two halves, split by cost: parsing is pure string
-  // work and belongs in render, but resolving *where it would land* reads the
-  // filesystem — an `origin` per sibling checkout (spawned git), a stat per
-  // candidate directory. In a folder holding dozens of checkouts that is long
-  // enough to see, so it runs in an effect and lands as state: the identity
-  // appears the instant you type, the destination a beat later, and the render
-  // path never blocks.
-  const cloneValue = mode.kind === "clone" ? mode.value : null;
-  const cloneUrl = useMemo(
-    () => (cloneValue?.trim() ? parseRepoUrl(cloneValue) : null),
-    [cloneValue],
-  );
-  const [cloneDest, setCloneDest] = useState<{ key: string; match: string | null; dest: string | null } | null>(null);
-  useEffect(() => {
-    // Clearing on the way out matters: leaving the resolution behind would let a
-    // later visit to the prompt match it by key and show a pre-clone answer
-    // ("clones into …" for a repo that is now on disk) until the effect caught up.
-    if (!cloneUrl || !filterRoot) {
-      setCloneDest(null);
-      return;
-    }
-    const match = findMatchingCheckout(filterRoot, cloneUrl.key);
-    setCloneDest({
-      key: cloneUrl.key,
-      match,
-      dest: match ? null : freeCloneDest(filterRoot, cloneDirName(cloneUrl.repo)),
-    });
-  }, [cloneUrl, filterRoot]);
-  // Only trust a resolution that belongs to the URL currently on screen — the
-  // previous one is about a different repo, and a stale destination is worse
-  // than none.
-  const resolved = cloneUrl && cloneDest?.key === cloneUrl.key ? cloneDest : null;
+  const { cloneNote, setCloneNote, cloneNoteRef, cloneRun, cloneUrl, resolved } = useCloneFlow({
+    mode,
+    filterRoot,
+  });
 
   const { rows, selectableIdx, roster } = useRowModel({
     model,
