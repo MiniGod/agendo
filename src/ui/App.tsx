@@ -68,6 +68,7 @@ import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
 import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
+import { handleIdentityKeys } from "./keys/identity.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleProviderKeys } from "./keys/provider.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
@@ -1417,33 +1418,7 @@ export default function App({
 
     if (handleProviderKeys(input, key, ctx)) return;
 
-    // ── identity picker ──
-    if (mode.kind === "identity") {
-      const back: Mode = mode.fromSettings ? { kind: "settings", cursor: 0 } : { kind: "list" };
-      if (key.escape) return setMode(back);
-      const len = roster.length;
-      if (len === 0) return;
-      // Functional updates so rapidly-arriving keys (batched in one stdin chunk)
-      // each advance the cursor instead of all reading the same stale value.
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "identity" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "identity" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) {
-        const picked = roster[mode.cursor];
-        if (picked) {
-          // Selecting the authenticated user clears the override so the launcher
-          // tracks whoever is logged in via az.
-          const next = model && picked.id === model.me.id ? null : picked;
-          setIdentity(next);
-          persist({ identity: next });
-          setCursor(0);
-        }
-        // A picked identity reloads the data, so always land on the list.
-        return setMode({ kind: "list" });
-      }
-      return;
-    }
+    if (handleIdentityKeys(input, key, ctx)) return;
 
     // ── Claude profile picker (move a session between ~/.claude* dirs) ──
     if (mode.kind === "profile") {
