@@ -5,7 +5,7 @@ import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi } from "../tmux.ts";
 import { paneResetAt, shouldAutoResume, shouldRevealDialog } from "../usageLimit.ts";
-import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
+import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
@@ -30,7 +30,6 @@ import {
   freeCloneDest,
   startClone,
   type CloneRun,
-  type RepoUrl,
 } from "../clone.ts";
 import { isUnderRoot, normalizeCwd } from "../context.ts";
 import { vocab } from "../vocab.ts";
@@ -39,7 +38,7 @@ import { basename } from "path";
 import { homedir } from "os";
 import { cloneError, homeShort, repoBreakdown, type Activity, type PaneState } from "./format.ts";
 import { sameActivity, sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "./equality.ts";
-import { freeTarget, orchestratorTarget, type FreshTarget, type OpenTargets } from "./targets.ts";
+import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import {
   buildItemsRows,
   buildPrsRows,
@@ -65,6 +64,7 @@ import {
 } from "./components.tsx";
 import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
+import type { Mode, View } from "./keys/context.ts";
 import type {
   AgentSession,
   AgentSource,
@@ -78,35 +78,6 @@ const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
 // How often to re-read running sessions' panes for input readiness. Each tick
 // captures one pane per running session (cheap tmux calls), so keep it modest.
 const READINESS_MS = 1500;
-
-// ── top-level views & fresh-session flow state ────────────────────────────────
-type View = "items" | "prs" | "sessions";
-
-type Mode =
-  | { kind: "list" }
-  | { kind: "settings"; cursor: number }
-  // `fromSettings` routes the picker back to the Settings page (not the list)
-  // on cancel, so Settings acts as a hub you drill into and return to.
-  | { kind: "provider"; cursor: number; fromSettings?: boolean }
-  | { kind: "identity"; cursor: number; fromSettings?: boolean }
-  | { kind: "agent"; target: FreshTarget; cursor: number }
-  | { kind: "repo"; target: FreshTarget; agent: AgentSource; cursor: number }
-  // Clone flow — only reachable from a scoped launcher (see `canClone`). `clone`
-  // is the URL prompt; `cloning` is the live `git clone`, cancellable with esc.
-  | { kind: "clone"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string[] }
-  | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
-  | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
-  // `seed` is the value the field was PREFILLED with (orchestrator flow only).
-  // Kept so submit can tell an untouched default from a name the user chose, and
-  // re-derive a free one — the prefill was computed when the screen opened, which
-  // may be minutes before enter is pressed.
-  | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean; seed?: string }
-  // "move this session to another Claude profile". `choices` is every discovered
-  // profile with the session's own flagged (see profileChoices) — shown for
-  // orientation but skipped by the cursor, since moving somewhere you already are
-  // is not a choice.
-  | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
-  | { kind: "open"; targets: OpenTargets; title: string };
 
 /**
  * Modes where `q` / ctrl-c must NOT quit the app.
