@@ -68,6 +68,7 @@ import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
+import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import type {
   AgentSession,
@@ -82,13 +83,6 @@ const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
 // How often to re-read running sessions' panes for input readiness. Each tick
 // captures one pane per running session (cheap tmux calls), so keep it modest.
 const READINESS_MS = 1500;
-
-/**
- * Cursor value for the repo picker's "＋ Clone from URL…" row. A sentinel rather
- * than `repos.length`, so a background rescan that grows the repo list can't
- * slide the cursor off it onto a real repo.
- */
-const CLONE_ROW = -1;
 
 // ── main app ──────────────────────────────────────────────────────────────────
 /**
@@ -1405,55 +1399,7 @@ export default function App({
 
     if (handleAgentKeys(input, key, ctx)) return;
 
-    // ── repo picker ──
-    if (mode.kind === "repo") {
-      const repos = reposForTarget(mode.target);
-      const len = repos.length || 1;
-      const openClone = () =>
-        setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
-      // The clone row is rendered last but addressed by a SENTINEL, never by
-      // `repos.length`: the background rescan replaces `model.repos` while the
-      // picker is open (a sibling session starting in a new repo grows the list),
-      // and a positional index would slide off the clone row onto whatever repo
-      // took its place — enter would then launch a session instead of cloning.
-      const onClone = mode.cursor === CLONE_ROW;
-      // ↑/↓ treat the clone row as one past the end, wrapping through it.
-      const move = (d: 1 | -1) =>
-        setMode((p) => {
-          if (p.kind !== "repo") return p;
-          if (!canClone) return { ...p, cursor: (p.cursor + d + len) % len };
-          if (p.cursor === CLONE_ROW) return { ...p, cursor: d === 1 ? 0 : len - 1 };
-          const next = p.cursor + d;
-          return { ...p, cursor: next < 0 || next >= len ? CLONE_ROW : next };
-        });
-      // The orchestrator flow entered here directly (no agent step to go back to),
-      // which makes THIS the last exit out of the fresh flow for it — so it also
-      // takes on the agent step's job of dropping an unconsumed clone note. Without
-      // that, escaping out after a clone and then resuming some existing session
-      // would prefix that launch with "✓ cloned …", crediting it to a clone it had
-      // nothing to do with (same failure the agent-mode escape guards against).
-      if (key.escape) {
-        if (mode.target.orchestrator) {
-          setCloneNote(null);
-          cloneNoteRef.current = null;
-          return setMode({ kind: "list" });
-        }
-        return setMode({ kind: "agent", target: mode.target, cursor: 0 });
-      }
-      if (key.upArrow || input === "k") return move(-1);
-      if (key.downArrow || input === "j") return move(1);
-      if (input === "c" && canClone) return openClone();
-      if (key.return && onClone && canClone) return openClone();
-      if (key.return && repos[mode.cursor]) {
-        // Picking a repo off the list is not the result of a clone. Without
-        // this, backing out of the post-clone flow and choosing a different repo
-        // would carry "✓ cloned ada/newthing…" onto a dialog about another one.
-        setCloneNote(null);
-        cloneNoteRef.current = null;
-        return chooseRepo(mode.target, repos[mode.cursor], mode.agent);
-      }
-      return;
-    }
+    if (handleRepoKeys(input, key, ctx)) return;
 
     // ── clone: paste a repo URL ──
     // Same editable single-line input as the branch prompt (see there for why the
