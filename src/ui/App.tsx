@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
@@ -55,6 +55,7 @@ import {
 import { convertTarget, runConvert } from "./convert.ts";
 import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
 import { useRepoScope } from "./hooks/useRepoScope.ts";
+import { useViewport } from "./hooks/useViewport.ts";
 import { useRowModel } from "./hooks/useRowModel.ts";
 import { useSearch } from "./hooks/useSearch.ts";
 import { V, setVocab } from "./vocabState.ts";
@@ -151,7 +152,6 @@ export default function App({
   const cloneNoteRef = useRef<string | null>(null);
   // The in-flight `git clone`, so esc can cancel it and unmount can't orphan it.
   const cloneRun = useRef<CloneRun | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
   const [grouped, setGrouped] = useState(true); // Sessions view: group by repo
   // Path-scope toggle: when a filterRoot exists, `a` flips between the scoped
   // view (sessions under the root) and the global view (every session). Bare
@@ -209,7 +209,6 @@ export default function App({
       : null;
   });
   const [reloadKey, setReloadKey] = useState(0);
-  const { stdout } = useStdout();
 
   // Reload whenever the backend, identity, or a manual refresh changes.
   //
@@ -582,31 +581,13 @@ export default function App({
 
   const panes = useReadinessPoll({ model, autoResume });
 
-  // ── viewport windowing ──
-  // Render only a slice of rows so the list never overflows the terminal (which
-  // breaks Ink's redraw and scrolls the cursor off-screen). One row = one line.
-  // Reserve lines for the tab strip, hint, scroll indicators, column header
-  // (items/prs only) and an occasional notice line.
-  const termRows = stdout?.rows ?? 24;
-  // Non-sessions views also reserve a line for the "viewing as / filter" status.
-  // The search box (shown while a search is active) takes one extra line, and a
-  // path-scoped launcher shows one scope line.
-  const pageSize = Math.max(
-    3,
-    termRows - (view === "sessions" ? 6 : 8) - (searchFocus ? 1 : 0) - (filterRoot ? 1 : 0),
-  );
-  useEffect(() => {
-    setScrollTop((prev) => {
-      let next = prev;
-      if (cursor < next) next = cursor;
-      else if (cursor >= next + pageSize) next = cursor - pageSize + 1;
-      const maxTop = Math.max(0, rows.length - pageSize);
-      return Math.min(Math.max(0, next), maxTop);
-    });
-  }, [cursor, pageSize, rows.length]);
-  const visible = rows.slice(scrollTop, scrollTop + pageSize);
-  const moreAbove = scrollTop;
-  const moreBelow = Math.max(0, rows.length - (scrollTop + pageSize));
+  const { scrollTop, visible, moreAbove, moreBelow } = useViewport({
+    rows,
+    cursor,
+    view,
+    searchFocus,
+    filterRoot,
+  });
 
   const move = (dir: 1 | -1) => {
     if (selectableIdx.length === 0) return;
