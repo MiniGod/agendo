@@ -73,6 +73,7 @@ import { handleQuitKeys } from "./keys/quit.ts";
 import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
 import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
 import { handleSearchKeys } from "./keys/search.ts";
+import { handleSettingsKeys } from "./keys/settings.ts";
 import type {
   AgentSession,
   AgentSource,
@@ -1411,29 +1412,7 @@ export default function App({
 
     if (handleBranchKeys(input, key, ctx)) return;
 
-    // ── settings page ──
-    if (mode.kind === "settings") {
-      const len = settingsItems.length;
-      if (key.escape) return setMode({ kind: "list" });
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "settings" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "settings" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return || input === " ") {
-        const item = settingsItems[mode.cursor];
-        if (item === "provider") return enterProvider(true);
-        if (item === "identity") return enterIdentity(true);
-        if (item === "autoResume") {
-          setAutoResume((v) => {
-            const nv = !v;
-            persist({ autoResume: nv });
-            return nv;
-          });
-          return;
-        }
-      }
-      return;
-    }
+    if (handleSettingsKeys(input, key, ctx)) return;
 
     // ── backend picker ──
     if (mode.kind === "provider") {
