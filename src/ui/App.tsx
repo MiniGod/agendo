@@ -8,7 +8,7 @@ import { paneResetAt, shouldAutoResume, shouldRevealDialog } from "../usageLimit
 import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
-import { createWorktree, checkoutWorktree, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
+import { createWorktree, checkoutWorktree, freeWorktreeBranch } from "../worktree.ts";
 import { isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
 import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../errors.ts";
@@ -77,6 +77,7 @@ import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import { handleSettingsKeys } from "./keys/settings.ts";
 import { AgentScreen } from "./screens/AgentScreen.tsx";
+import { BranchScreen } from "./screens/BranchScreen.tsx";
 import { CloneScreen } from "./screens/CloneScreen.tsx";
 import { CloningScreen } from "./screens/CloningScreen.tsx";
 import { IdentityScreen } from "./screens/IdentityScreen.tsx";
@@ -1525,32 +1526,16 @@ export default function App({
   }
 
   if (mode.kind === "branch") {
-    const { value, cursor } = mode;
-    const isFree = mode.target.kind === "free";
-    // Free sessions get a `cl-new-<id>` name assigned at launch, so we can only
-    // preview the prefix; item/PR launches already know their target name.
-    const tmuxPreview = isFree ? "cl-new-…" : mode.target.tmuxName;
-    const orch = !!mode.target.orchestrator;
     return (
-      <Box flexDirection="column">
-        <Text bold>
-          {orch ? `Orchestrator session in ${mode.repo.name}` : isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}
-        </Text>
-        <Text dimColor>{mode.worktree ? "New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back" : "Session name · ←/→ move · ⌃a/⌃e start/end · enter launch · esc back"}</Text>
-        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
-        <Box marginTop={1}>
-          <Text>{mode.worktree ? "branch: " : "name:   "}</Text>
-          <Text color="cyan">{value.slice(0, cursor)}</Text>
-          <Text inverse>{value[cursor] ?? " "}</Text>
-          <Text color="cyan">{value.slice(cursor + 1)}</Text>
-        </Box>
-        <Box marginTop={1}>
-          {mode.worktree
-            ? <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
-            : <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
-          }
-        </Box>
-      </Box>
+      <BranchScreen
+        target={mode.target}
+        agent={mode.agent}
+        repo={mode.repo}
+        value={mode.value}
+        cursor={mode.cursor}
+        worktree={mode.worktree}
+        cloneNote={cloneNote}
+      />
     );
   }
 
