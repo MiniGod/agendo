@@ -65,6 +65,7 @@ import {
 import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
+import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
 import { handleSearchKeys } from "./keys/search.ts";
@@ -88,13 +89,6 @@ const READINESS_MS = 1500;
  * slide the cursor off it onto a real repo.
  */
 const CLONE_ROW = -1;
-
-/** Agents offered by the fresh-session picker, in display order. */
-const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
-  { source: "claude", label: "Claude", desc: "claude --session-id …" },
-  { source: "copilot", label: "Copilot", desc: "copilot --session-id …" },
-  { source: "codex", label: "Codex", desc: "codex … (assigns its own session id)" },
-];
 
 // ── main app ──────────────────────────────────────────────────────────────────
 /**
@@ -1409,25 +1403,7 @@ export default function App({
 
     if (handleQuitKeys(input, key, ctx)) return;
 
-    // ── agent picker (first step of every fresh flow) ──
-    if (mode.kind === "agent") {
-      const len = AGENT_CHOICES.length;
-      if (key.escape) {
-        // Last exit from the fresh flow, so it's where an unconsumed clone note
-        // dies. Escaping all the way out (wtchoice → repo → agent → list) and
-        // then resuming some existing session would otherwise prefix that
-        // launch with "✓ cloned …", crediting it to an unrelated clone.
-        setCloneNote(null);
-        cloneNoteRef.current = null;
-        return setMode({ kind: "list" });
-      }
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "agent" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "agent" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) return proceedFresh(mode.target, AGENT_CHOICES[mode.cursor].source);
-      return;
-    }
+    if (handleAgentKeys(input, key, ctx)) return;
 
     // ── repo picker ──
     if (mode.kind === "repo") {
