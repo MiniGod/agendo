@@ -70,6 +70,7 @@ import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleIdentityKeys } from "./keys/identity.ts";
 import { handleOpenKeys } from "./keys/open.ts";
+import { handleProfileKeys } from "./keys/profile.ts";
 import { handleProviderKeys } from "./keys/provider.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
 import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
@@ -1420,29 +1421,7 @@ export default function App({
 
     if (handleIdentityKeys(input, key, ctx)) return;
 
-    // ── Claude profile picker (move a session between ~/.claude* dirs) ──
-    if (mode.kind === "profile") {
-      if (key.escape) return setMode({ kind: "list" });
-      // Only the profiles the session ISN'T in are selectable; its own is on
-      // screen for orientation, so the cursor steps over it in both directions.
-      const targets = mode.choices.flatMap((c, i) => (c.current ? [] : [i]));
-      if (targets.length === 0) return;
-      const step = (dir: number) =>
-        setMode((p) => {
-          if (p.kind !== "profile") return p;
-          const at = targets.indexOf(p.cursor);
-          const next = at < 0 ? targets[0] : targets[(at + dir + targets.length) % targets.length];
-          return { ...p, cursor: next };
-        });
-      if (key.upArrow || input === "k") return step(-1);
-      if (key.downArrow || input === "j") return step(1);
-      if (key.return) {
-        const picked = mode.choices[mode.cursor];
-        if (picked && !picked.current) moveToProfile(mode.session, picked.profile);
-        return;
-      }
-      return;
-    }
+    if (handleProfileKeys(input, key, ctx)) return;
 
     // ── list mode ──
     // view switching (Tab forward, Shift-Tab back)
