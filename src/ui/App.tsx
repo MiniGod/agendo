@@ -66,6 +66,7 @@ import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
+import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
@@ -1408,37 +1409,7 @@ export default function App({
 
     if (handleWtchoiceKeys(input, key, ctx)) return;
 
-    // ── new-branch / session name prompt — editable, with a movable cursor ──
-    if (mode.kind === "branch") {
-      if (key.escape) {
-        if (mode.target.kind === "free") return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo: mode.repo, cursor: mode.worktree ? 0 : 1 });
-        return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
-      }
-      if (key.return) {
-        if (mode.value.trim()) startFresh(mode.target, mode.repo, mode.value, mode.worktree, mode.agent, mode.seed);
-        return;
-      }
-      // Functional updates so batched keystrokes (e.g. two Lefts in one chunk)
-      // each apply against the latest value/cursor instead of a stale snapshot.
-      const edit = (fn: (v: string, c: number) => { value?: string; cursor: number }) =>
-        setMode((p) => {
-          if (p.kind !== "branch") return p;
-          const r = fn(p.value, p.cursor);
-          return { ...p, value: r.value ?? p.value, cursor: r.cursor };
-        });
-      if (key.leftArrow) return edit((v, c) => ({ cursor: Math.max(0, c - 1) }));
-      if (key.rightArrow) return edit((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
-      // Ctrl-A / Ctrl-E jump to start / end (terminals rarely send Home/End cleanly).
-      if (key.ctrl && input === "a") return edit(() => ({ cursor: 0 }));
-      if (key.ctrl && input === "e") return edit((v) => ({ cursor: v.length }));
-      // Backspace (and Delete, which many terminals send for Backspace) removes
-      // the character before the cursor.
-      if (key.backspace || key.delete || input === "\x7f" || input === "\b")
-        return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input))
-        return edit((v, c) => ({ value: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
-      return;
-    }
+    if (handleBranchKeys(input, key, ctx)) return;
 
     // ── settings page ──
     if (mode.kind === "settings") {
