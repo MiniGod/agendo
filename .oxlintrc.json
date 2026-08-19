@@ -103,15 +103,19 @@
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 1758, "skipBlankLines": false, "skipComments": false }],
-        // the `App` component itself, line 100 — all eleven mode screens now live
-        // in src/ui/screens/ and the key handlers in src/ui/keys/
-        "max-lines-per-function": ["error", { "max": 1648, "skipBlankLines": false, "skipComments": false }],
+        // NOTE: no max-lines here any more. App.tsx is 1228 lines and now lives
+        // inside the shared src/** budget of 1242 — the first of the three big
+        // files to get there. What remains below is about the `App` FUNCTION,
+        // not the file.
+        //
+        // `App` itself, line 100: the eleven mode screens are in src/ui/screens/,
+        // the key handlers in src/ui/keys/, and nine hooks in src/ui/hooks/.
+        "max-lines-per-function": ["error", { "max": 1124, "skipBlankLines": false, "skipComments": false }],
         // `App` itself is now the worst function in this file; the useInput
         // handler that used to hold these records is down to complexity 14 /
         // 14 statements, and lives in src/ui/keys/.
-        "complexity": ["error", 63],
-        "max-statements": ["error", 154]
+        "complexity": ["error", 51],
+        "max-statements": ["error", 109]
       }
     },
 
