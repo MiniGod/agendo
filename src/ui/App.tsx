@@ -81,6 +81,7 @@ import { BranchScreen } from "./screens/BranchScreen.tsx";
 import { CloneScreen } from "./screens/CloneScreen.tsx";
 import { CloningScreen } from "./screens/CloningScreen.tsx";
 import { IdentityScreen } from "./screens/IdentityScreen.tsx";
+import { ProfileScreen } from "./screens/ProfileScreen.tsx";
 import { ProviderScreen } from "./screens/ProviderScreen.tsx";
 import { WtChoiceScreen } from "./screens/WtChoiceScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
@@ -1540,28 +1541,7 @@ export default function App({
   }
 
   if (mode.kind === "profile") {
-    return (
-      <Box flexDirection="column">
-        <Text bold>{`Move to another Claude profile — ${mode.session.title.slice(0, 44)}`}</Text>
-        <Text dimColor>
-          {"Relocates the transcript + its sidecar files  ·  ↑/↓ move · enter move · esc cancel"}
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          {mode.choices.map((c, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={c.profile.configDir} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
-                <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{c.profile.name.padEnd(18).slice(0, 18)}</Text>
-                <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
-                <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <ProfileScreen title={mode.session.title} choices={mode.choices} cursor={mode.cursor} />;
   }
 
   if (mode.kind === "open") {
