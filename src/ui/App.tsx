@@ -33,7 +33,7 @@ import { detectProviders, resolveInitialProvider, detectScopeProvider, getProvid
 import { basename } from "path";
 import { homedir } from "os";
 import { cloneError, homeShort, type Activity } from "./format.ts";
-import { sameActivity, sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "./equality.ts";
+import { sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "./equality.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import {
   sessionId,
@@ -53,6 +53,7 @@ import {
   TaskRow,
 } from "./components.tsx";
 import { convertTarget, runConvert } from "./convert.ts";
+import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
 import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
 import { useRepoScope } from "./hooks/useRepoScope.ts";
 import { useViewport } from "./hooks/useViewport.ts";
@@ -91,7 +92,6 @@ import type {
   ProviderName,
 } from "../types.ts";
 
-const POLL_MS = 1000;
 const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
 
 // ── main app ──────────────────────────────────────────────────────────────────
@@ -347,9 +347,6 @@ export default function App({
   // cache it (keyed by session identity). A ref dedupes in-flight requests so
   // it's safe to call on every expand/collapse — it fetches each session once.
   const requested = useRef<Set<string>>(new Set());
-  // Live-poll timers: one setInterval per expanded session identity.
-  const watchers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
-  const inFlight = useRef<Set<string>>(new Set());
   // Mirror `model` into a ref so the mount-only liveness interval reads the
   // current sessions without a stale closure and without re-arming the timer.
   const modelRef = useRef<LoadedModel | null>(null);
@@ -453,67 +450,7 @@ export default function App({
     if (!selectableIdx.includes(cursor)) setCursor(selectableIdx[0]);
   }, [selectableIdx, cursor]);
 
-  // Derive the set of session identities that are currently expanded (and have a
-  // log to poll), plus a lookup map and a stable string key for the effect dep.
-  const openSessionInfo = useMemo(() => {
-    const ids = new Set<string>();
-    const lookup = new Map<string, AgentSession>();
-    for (const r of rows) {
-      if (r.kind === "session" && r.expanded && r.session.logPath) {
-        const id = sessionId(r.session);
-        ids.add(id);
-        lookup.set(id, r.session);
-      }
-    }
-    const key = [...ids].sort().join(",");
-    return { openSessionIds: ids, sessionLookup: lookup, key };
-  }, [rows]);
-
-  // Reconcile live-poll timers whenever the set of open sessions changes.
-  useEffect(() => {
-    const { openSessionIds, sessionLookup } = openSessionInfo;
-    // Start a timer for each newly-opened session.
-    for (const id of openSessionIds) {
-      if (watchers.current.has(id)) continue;
-      const s = sessionLookup.get(id);
-      if (!s) continue;
-      const handle = setInterval(async () => {
-        if (inFlight.current.has(id)) return;
-        inFlight.current.add(id);
-        try {
-          const a = await loadActivity(s);
-          if (!watchers.current.has(id)) return; // timer cleared mid-read
-          setActivity((p) => {
-            const prev = p.get(id);
-            if (sameActivity(prev, a)) return p;
-            const next = new Map(p);
-            next.set(id, a);
-            return next;
-          });
-        } catch {
-          // leave last good data on error
-        } finally {
-          inFlight.current.delete(id);
-        }
-      }, POLL_MS);
-      watchers.current.set(id, handle);
-    }
-    // Clear timers for sessions that are no longer open.
-    for (const id of watchers.current.keys()) {
-      if (!openSessionIds.has(id)) {
-        clearInterval(watchers.current.get(id));
-        watchers.current.delete(id);
-      }
-    }
-  }, [openSessionInfo.key]); // eslint-disable-line react-hooks/exhaustive-deps -- `.key` is the sorted id digest built above precisely so this reconciles timers when the id SET changes; the object itself changes on every `rows` recompute, which would tear down live timers.
-
-  // Leak-proof teardown: clear all timers when the component unmounts.
-  useEffect(() => {
-    return () => {
-      for (const t of watchers.current.values()) clearInterval(t);
-      watchers.current.clear();
-    };
-  }, []);
+  useActivityWatchers({ rows, setActivity });
 
   // Background LOCAL rescan every LIVE_POLL_MS: re-run the cheap, network-free
   // session scan (loadLocalSessions → SessionIndex.build + discoverRepos +
