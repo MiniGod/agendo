@@ -64,7 +64,8 @@ import {
 } from "./components.tsx";
 import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
-import type { Mode, View } from "./keys/context.ts";
+import type { KeyContext, Mode, View } from "./keys/context.ts";
+import { handleSearchKeys } from "./keys/search.ts";
 import type {
   AgentSession,
   AgentSource,
@@ -1401,6 +1402,24 @@ export default function App({
     setNotice(`Moved “${s.title}” → ${target.name}${extras.length ? ` (${extras.join("; ")})` : ""}`);
   };
 
+  // Everything the ./keys handlers read or drive, rebuilt each render so they
+  // always see this pass's state. Each handler narrows it to a `Pick` of the
+  // members it actually touches, so a module's signature documents its reach.
+  const ctx: KeyContext = {
+    exit, model, filterRoot,
+    mode, setMode, view, switchView, cursor, setCursor, rows, selectableIdx, move,
+    toggleExpand, toggleSection, ensureActivity,
+    searchFocus, setSearchFocus, search, editSearch, clearSearch,
+    setGlobalView, setRepoFilterOn, setGrouped, setPrsGrouped, setPrSort, setSessionSort,
+    setNotice, setActivity, requested, setRescanKey, reload,
+    enterFresh, enterNewSession, enterOrchestrator, proceedFresh, reposForTarget,
+    chooseRepo, startFresh, open, openInBrowser,
+    canClone, beginClone, cancelClone, setCloneNote, cloneNoteRef,
+    settingsItems, enterSettings, enterProvider, enterIdentity, applyProvider,
+    setAutoResume, persist, roster, setIdentity,
+    continueInOtherAgent, enterProfilePicker, moveToProfile,
+  };
+
   useInput((input, key) => {
     // ── open-in-browser dialog (p = PR, i = issue, esc/q = cancel) ──
     if (mode.kind === "open") {
@@ -1411,71 +1430,7 @@ export default function App({
       return;
     }
 
-    // ── fuzzy search (sessions / PRs / work items) ───────────────────────────
-    // A search owns one query shared by two focus states. These blocks sit ahead
-    // of the global q/esc handlers but ONLY handle the keys that differ while
-    // searching — caret editing and focus changes. Every real list action (o, g,
-    // s, n, enter, arrows, expand) is left to fall through to its single handler
-    // below; it is never reimplemented here. All three list views search the same
-    // way, so these blocks gate on `searchFocus` (set only while searching) rather
-    // than a specific view.
-
-    // Shared: esc cancels the search from either focus; ctrl-c still quits.
-    if (mode.kind === "list" && searchFocus) {
-      if (key.ctrl && input === "c") { exit(); return; }
-      if (key.escape) { clearSearch(); setCursor(0); return; }
-    }
-
-    // INPUT focused: keystrokes edit the query. ←/→ move the caret (the list is
-    // not focused while typing); ↓ hands focus to the results; enter/tab fall
-    // through (resume the top match / switch view); everything else is swallowed.
-    if (mode.kind === "list" && searchFocus === "input") {
-      if (key.downArrow) {
-        if (selectableIdx.length > 0) { setSearchFocus("list"); setCursor(selectableIdx[0]); }
-        return;
-      }
-      if (key.upArrow) return; // single-line input — nothing above
-      if (key.leftArrow) return editSearch((_v, c) => ({ cursor: Math.max(0, c - 1) }));
-      if (key.rightArrow) return editSearch((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
-      if (key.ctrl && input === "a") return editSearch(() => ({ cursor: 0 }));
-      if (key.ctrl && input === "e") return editSearch((v) => ({ cursor: v.length }));
-      // Delete the previous word: Ctrl+Backspace (^H → key.backspace in Ink),
-      // Alt/Meta+Backspace, or Ctrl+W.
-      if (key.backspace || (key.meta && key.delete) || (key.ctrl && input === "w")) {
-        setCursor(0);
-        return editSearch((v, c) => {
-          let i = c;
-          while (i > 0 && /\s/.test(v[i - 1]!)) i--;
-          while (i > 0 && !/\s/.test(v[i - 1]!)) i--;
-          return { text: v.slice(0, i) + v.slice(c), cursor: i };
-        });
-      }
-      // Delete the previous character: plain Backspace (\x7f → key.delete in Ink).
-      if (key.delete || input === "\x7f") {
-        setCursor(0);
-        return editSearch((v, c) => (c === 0 ? { cursor: 0 } : { text: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      }
-      if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input)) {
-        setCursor(0);
-        return editSearch((v, c) => ({ text: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
-      }
-      // With an empty query there is no top match to resume, so swallow enter
-      // rather than act on the (hidden) list selection. With a query it falls
-      // through to resume the top result; tab falls through to switch view.
-      if (key.return && !search.text.trim()) return;
-      // enter (resume top match) and tab (switch view) fall through; swallow the rest
-      if (!(key.return || key.tab)) return;
-    }
-
-    // LIST focused (query active): only the search-specific keys are handled
-    // here — `q` cancels, `/` re-focuses the input, and ↑ on the first result
-    // hands focus back to the input. Everything else falls through to the normal
-    // list handlers (o, g, s, n, enter, arrows, expand) below — not duplicated.
-    if (mode.kind === "list" && searchFocus === "list") {
-      if (input === "q") { clearSearch(); setCursor(0); return; }
-      if (input === "/") { setSearchFocus("input"); return; }
-      if ((key.upArrow || input === "k") && cursor === selectableIdx[0]) { setSearchFocus("input"); return; }
-    }
+    if (handleSearchKeys(input, key, ctx)) return;
 
     if (!HOLDS_QUIT_KEYS.has(mode.kind) && (input === "q" || (key.ctrl && input === "c"))) {
       exit();
