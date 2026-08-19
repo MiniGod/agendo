@@ -56,6 +56,7 @@ import {
 import { convertTarget, runConvert } from "./convert.ts";
 import { useRepoScope } from "./hooks/useRepoScope.ts";
 import { useRowModel } from "./hooks/useRowModel.ts";
+import { useSearch } from "./hooks/useSearch.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { handleAgentKeys } from "./keys/agent.ts";
@@ -166,14 +167,7 @@ export default function App({
   const [prsGrouped, setPrsGrouped] = useState(false); // PRs view: repo subgroups
   const [prSort, setPrSort] = useState<PrSort>("created"); // PRs view: sort order
   const [sessionSort, setSessionSort] = useState<SessionSort>("updated"); // Sessions view: sort order
-  // Fuzzy search (works on every list view: sessions, PRs, work items).
-  // `searchFocus` is the three-state mode:
-  //   null    — not searching
-  //   "input" — the text box is focused; keystrokes edit the query
-  //   "list"  — a query is active but the results list is focused for navigation
-  // `search` holds the query text plus a caret position for in-place editing.
-  const [searchFocus, setSearchFocus] = useState<"input" | "list" | null>(null);
-  const [search, setSearch] = useState<{ text: string; cursor: number }>({ text: "", cursor: 0 });
+  const { searchFocus, setSearchFocus, search, clearSearch, editSearch } = useSearch();
   const [activity, setActivity] = useState<Map<string, Activity>>(new Map());
   // Live pane snapshot (input readiness + background-shell count) per running
   // session, by canonical name. Polled on a short timer independent of the
@@ -771,19 +765,6 @@ export default function App({
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
-    });
-
-  // ── sessions search helpers ──
-  const clearSearch = () => {
-    setSearchFocus(null);
-    setSearch({ text: "", cursor: 0 });
-  };
-  // Edit the query text + caret together so batched keystrokes each apply
-  // against the latest value instead of a stale snapshot.
-  const editSearch = (fn: (text: string, cursor: number) => { text?: string; cursor: number }) =>
-    setSearch((s) => {
-      const r = fn(s.text, s.cursor);
-      return { text: r.text ?? s.text, cursor: r.cursor };
     });
 
   const switchView = (v: View) => {
