@@ -46,7 +46,6 @@ export function handleCloneKeys(input: string, key: Key, ctx: Ctx): boolean {
     // URL — it quietly turns it into a *different, still valid* one
     // (`…/innovamps/run/_git/…`), which then previews a destination for a
     // repo the user never named and fails at clone time as "not found".
-    // eslint-disable-next-line no-control-regex -- matching control bytes IS the job here, exactly as it was in App.tsx; .oxlintrc.json turns this rule off for App.tsx/tmux.ts but its glob list does not yet name src/ui/keys/.
     const text = input.replace(/[\x00-\x1f\x7f]+/g, "");
     if (!text) return true;
     edit((v, c) => ({ value: v.slice(0, c) + text + v.slice(c), cursor: c + text.length }));

@@ -103,13 +103,14 @@
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 2590, "skipBlankLines": false, "skipComments": false }],
-        // the `App` component itself, line 151
-        "max-lines-per-function": ["error", { "max": 2440, "skipBlankLines": false, "skipComments": false }],
-        // the useInput keyboard handler, line 1433 — the single worst function
-        // in the codebase on both counts
-        "complexity": ["error", 244],
-        "max-statements": ["error", 280]
+        "max-lines": ["error", { "max": 2034, "skipBlankLines": false, "skipComments": false }],
+        // the `App` component itself, line 100
+        "max-lines-per-function": ["error", { "max": 1935, "skipBlankLines": false, "skipComments": false }],
+        // `App` itself is now the worst function in this file; the useInput
+        // handler that used to hold these records is down to complexity 14 /
+        // 14 statements, and lives in src/ui/keys/.
+        "complexity": ["error", 101],
+        "max-statements": ["error", 171]
       }
     },
 
@@ -152,7 +153,7 @@
       // This is a terminal tool: matching ESC/CSI/control bytes in pane output
       // is the actual job. Scoped to the files that genuinely do it, so a stray
       // control byte in an unrelated regex still gets caught.
-      "files": ["src/tmux.ts", "src/ui/App.tsx", "e2e/detection.spec.ts"],
+      "files": ["src/tmux.ts", "src/ui/keys/clone.ts", "e2e/detection.spec.ts"],
       "rules": {
         "no-control-regex": "off"
       }

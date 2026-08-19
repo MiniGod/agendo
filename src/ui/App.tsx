@@ -1422,7 +1422,7 @@ export default function App({
 
     if (handleProfileKeys(input, key, ctx)) return;
 
-    handleListKeys(input, key, ctx);
+    handleListKeys(input, key, ctx); // last link: nothing left to guard
   });
 
   // ── render ──
