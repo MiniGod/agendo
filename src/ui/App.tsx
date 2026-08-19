@@ -81,6 +81,7 @@ import { BranchScreen } from "./screens/BranchScreen.tsx";
 import { CloneScreen } from "./screens/CloneScreen.tsx";
 import { CloningScreen } from "./screens/CloningScreen.tsx";
 import { IdentityScreen } from "./screens/IdentityScreen.tsx";
+import { OpenScreen } from "./screens/OpenScreen.tsx";
 import { ProfileScreen } from "./screens/ProfileScreen.tsx";
 import { ProviderScreen } from "./screens/ProviderScreen.tsx";
 import { WtChoiceScreen } from "./screens/WtChoiceScreen.tsx";
@@ -1545,27 +1546,7 @@ export default function App({
   }
 
   if (mode.kind === "open") {
-    const { pr, workItem } = mode.targets;
-    return (
-      <Box flexDirection="column">
-        <Text bold>{`Open in browser — ${mode.title.slice(0, 54)}`}</Text>
-        <Text dimColor>{"Pick what to open · esc/q cancel"}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {pr ? (
-            <Text>
-              <Text bold color="magenta">{"  p"}</Text>
-              <Text>{`  PR ${V.prPrefix}${pr.id}`}</Text>
-            </Text>
-          ) : null}
-          {workItem ? (
-            <Text>
-              <Text bold color="cyan">{"  i"}</Text>
-              <Text>{`  issue #${workItem.id}`}</Text>
-            </Text>
-          ) : null}
-        </Box>
-      </Box>
-    );
+    return <OpenScreen targets={mode.targets} title={mode.title} />;
   }
 
   // list view
