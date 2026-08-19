@@ -64,7 +64,7 @@
     //
     // Honest accounting as of this commit: 8 counted warnings (5
     // exhaustive-deps + 3 no-array-index-key), plus 2 MORE exhaustive-deps
-    // findings at App.tsx:1421 and :1749 that are suppressed by inline
+    // findings at App.tsx:387 and :709 that are suppressed by inline
     // disables. Those two predate this PR; this commit adds the `-- <why>` to
     // each, per the escape-hatch rule in CLAUDE.md. True exhaustive-deps total
     // is therefore 7, of which 5 are counted.
@@ -97,27 +97,38 @@
     },
 
     {
-      // ── temporary exemption: PR 3 (src/ui/App.tsx, 3624 lines) ───────────
+      // ── temporary exemption: src/ui/App.tsx ─────────────────────────────
       // Delete a line here every time the split makes it possible. The file is
       // done when this whole block is gone and App.tsx lives inside the budget
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 3624, "skipBlankLines": false, "skipComments": false }],
-        // the `App` component itself, line 1185
+        "max-lines": ["error", { "max": 2590, "skipBlankLines": false, "skipComments": false }],
+        // the `App` component itself, line 151
         "max-lines-per-function": ["error", { "max": 2440, "skipBlankLines": false, "skipComments": false }],
-        // the useInput keyboard handler, line 2467 — the single worst function
+        // the useInput keyboard handler, line 1433 — the single worst function
         // in the codebase on both counts
         "complexity": ["error", 244],
-        "max-statements": ["error", 280],
-        // pushSession (line 526) and pushPrsByRepo (line 694) — BOTH sit at 10,
-        // so lowering this needs both fixed
+        "max-statements": ["error", 280]
+      }
+    },
+
+    {
+      // ── temporary exemption: src/ui/rows.ts ──────────────────────────────
+      // The row builders take long positional argument lists — pushSession and
+      // pushPrsByRepo both sit at 10. They came out of App.tsx unchanged; the
+      // signatures are a separate cleanup from the extraction that moved them.
+      // One named block here, deliberately, rather than six disable comments
+      // scattered through the file: a threshold you can see is a threshold you
+      // can ratchet.
+      "files": ["src/ui/rows.ts"],
+      "rules": {
         "max-params": ["error", 10]
       }
     },
 
     {
-      // ── temporary exemption: PR 4 (src/index.tsx, 2456 lines) ────────────
+      // ── temporary exemption: src/index.tsx (2456 lines) ──────────────────
       "files": ["src/index.tsx"],
       "rules": {
         "max-lines": ["error", { "max": 2456, "skipBlankLines": false, "skipComments": false }],
@@ -127,7 +138,7 @@
     },
 
     {
-      // ── temporary exemption: PR 2 (src/tmux.ts, 2033 lines) ──────────────
+      // ── temporary exemption: src/tmux.ts (2033 lines) ────────────────────
       // Note it needs exactly ONE line: tmux.ts is a big file made of
       // reasonably sized functions, so only the file-length budget is blown.
       "files": ["src/tmux.ts"],
