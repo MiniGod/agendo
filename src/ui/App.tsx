@@ -69,6 +69,7 @@ import { AGENT_CHOICES, handleAgentKeys } from "./keys/agent.ts";
 import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleOpenKeys } from "./keys/open.ts";
+import { handleProviderKeys } from "./keys/provider.ts";
 import { handleQuitKeys } from "./keys/quit.ts";
 import { CLONE_ROW, handleRepoKeys } from "./keys/repo.ts";
 import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
@@ -1414,18 +1415,7 @@ export default function App({
 
     if (handleSettingsKeys(input, key, ctx)) return;
 
-    // ── backend picker ──
-    if (mode.kind === "provider") {
-      const back: Mode = mode.fromSettings ? { kind: "settings", cursor: 0 } : { kind: "list" };
-      const len = PROVIDER_INFO.length;
-      if (key.escape) return setMode(back);
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "provider" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "provider" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) return applyProvider(PROVIDER_INFO[mode.cursor].name, back);
-      return;
-    }
+    if (handleProviderKeys(input, key, ctx)) return;
 
     // ── identity picker ──
     if (mode.kind === "identity") {
