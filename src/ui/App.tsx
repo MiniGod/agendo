@@ -65,6 +65,7 @@ import {
 import { convertTarget, runConvert } from "./convert.ts";
 import { V, setVocab } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
+import { handleOpenKeys } from "./keys/open.ts";
 import { handleSearchKeys } from "./keys/search.ts";
 import type {
   AgentSession,
@@ -1421,15 +1422,7 @@ export default function App({
   };
 
   useInput((input, key) => {
-    // ── open-in-browser dialog (p = PR, i = issue, esc/q = cancel) ──
-    if (mode.kind === "open") {
-      if (key.escape || input === "q") return setMode({ kind: "list" });
-      if (input === "p" && mode.targets.pr) return openInBrowser(mode.targets.pr, `PR ${V.prPrefix}${mode.targets.pr.id}`);
-      if (input === "i" && mode.targets.workItem) return openInBrowser(mode.targets.workItem, `#${mode.targets.workItem.id}`);
-      if (key.ctrl && input === "c") exit();
-      return;
-    }
-
+    if (handleOpenKeys(input, key, ctx)) return;
     if (handleSearchKeys(input, key, ctx)) return;
 
     if (!HOLDS_QUIT_KEYS.has(mode.kind) && (input === "q" || (key.ctrl && input === "c"))) {
