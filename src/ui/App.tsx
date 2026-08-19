@@ -27,7 +27,7 @@ import {
 } from "../clone.ts";
 import { normalizeCwd } from "../context.ts";
 import { vocab } from "../vocab.ts";
-import { detectProviders, resolveInitialProvider, detectScopeProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
+import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../provider.ts";
 import { basename } from "path";
 import { homedir } from "os";
 import { cloneError, homeShort, type Activity } from "./format.ts";
@@ -52,6 +52,7 @@ import {
 } from "./components.tsx";
 import { convertTarget, runConvert } from "./convert.ts";
 import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
+import { useAuthProbe } from "./hooks/useAuthProbe.ts";
 import { useCloneFlow } from "./hooks/useCloneFlow.ts";
 import { useModelLoader } from "./hooks/useModelLoader.ts";
 import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
@@ -170,10 +171,6 @@ export default function App({
       filterRoot ? detectScopeProvider(filterRoot, discoveredRepos) : null,
     ),
   );
-  // Per-backend auth status for the Settings page: absent ⇒ not yet probed,
-  // "checking" ⇒ probe in flight, boolean ⇒ result. Refreshed each time the
-  // Settings page opens (auth can change out from under us between opens).
-  const [authStatus, setAuthStatus] = useState<Map<ProviderName, "checking" | boolean>>(new Map());
   // Persisted "who am I / filter" state (Work items & PRs views only).
   const [identity, setIdentity] = useState<Identity | null>(() => {
     const s = loadState();
@@ -200,27 +197,7 @@ export default function App({
     noticeRef.current = notice;
   }, [notice]);
 
-  // Probe each backend's auth status whenever the Settings page opens. Not-
-  // installed backends resolve to false immediately (no CLI to ask); installed
-  // ones show "checking" until their async probe lands.
-  useEffect(() => {
-    if (mode.kind !== "settings") return;
-    let cancelled = false;
-    for (const info of PROVIDER_INFO) {
-      if (!available.has(info.name)) {
-        setAuthStatus((m) => new Map(m).set(info.name, false));
-        continue;
-      }
-      setAuthStatus((m) => new Map(m).set(info.name, "checking"));
-      getProvider(info.name)
-        .checkAuth()
-        .then((ok) => !cancelled && setAuthStatus((m) => new Map(m).set(info.name, ok)))
-        .catch(() => !cancelled && setAuthStatus((m) => new Map(m).set(info.name, false)));
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [mode.kind]); // eslint-disable-line react-hooks/exhaustive-deps -- probe-on-open, not a subscription: keyed to entering the Settings page. Adding `available` re-probes every backend each time that map is rebuilt.
+  const authStatus = useAuthProbe({ mode, available });
 
   const persist = (next: { provider?: ProviderName; identity?: Identity | null; autoResume?: boolean }) => {
     const p = next.provider !== undefined ? next.provider : provider;
