@@ -78,6 +78,7 @@ import { handleSearchKeys } from "./keys/search.ts";
 import { handleSettingsKeys } from "./keys/settings.ts";
 import { AgentScreen } from "./screens/AgentScreen.tsx";
 import { CloneScreen } from "./screens/CloneScreen.tsx";
+import { CloningScreen } from "./screens/CloningScreen.tsx";
 import { RepoScreen } from "./screens/RepoScreen.tsx";
 import type {
   AgentSession,
@@ -1489,23 +1490,7 @@ export default function App({
   }
 
   if (mode.kind === "cloning") {
-    return (
-      <Box flexDirection="column">
-        <Text bold>
-          <Text color="cyan">⟳</Text>
-          {` Cloning ${repoUrlLabel(mode.url)}  `}
-          <Text dimColor>{`(${mode.elapsed}s)`}</Text>
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          <Text dimColor wrap="truncate">{`  from  ${mode.url.displayRemote}`}</Text>
-          <Text dimColor wrap="truncate">{`  into  ${homeShort(mode.dest)}`}</Text>
-          <Text wrap="truncate">{`  ${mode.progress}`}</Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text dimColor>{"  esc cancels (the partial clone is removed)"}</Text>
-        </Box>
-      </Box>
-    );
+    return <CloningScreen url={mode.url} dest={mode.dest} progress={mode.progress} elapsed={mode.elapsed} />;
   }
 
   if (mode.kind === "identity") {
