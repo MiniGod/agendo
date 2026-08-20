@@ -274,7 +274,7 @@ so a launch from inside a scoped host session is restored by that same launcher.
 | `src/restore.ts` | Restore keyed per host session; legacy fallback; `captureRestore`/`restoreTabs`/`recordLaunchedSession` take a session name. Attribution helpers (`resolveWindowSession`, `bestSessionForCwd`) unchanged. |
 | `src/model.ts` | `LoadModelOptions.hostSession`; passed to `captureRestore`. Reconciliation unchanged. |
 | `src/provider.ts` | New `detectRepoProvider(path)` (github.com remote → `"github"`, else `null`). `resolveInitialProvider` gains a `forced?` arg that overrides the persisted default when its CLI is installed. |
-| `src/index.tsx` | Parse `[path]`/`-s`; build the context; thread it into the default tmux-host bootstrap (collision check + `restoreTabs`), the `--no-tmux` menu render (App props), and `launch`. Subcommands stay global. |
+| `src/index.tsx` | Parse `[path]`/`-s`; build the context; thread it into the default tmux-host bootstrap (collision check + `restoreTabs`), the `--no-tmux` menu render (now `runMenu(ctx)` in `src/cli/menu.tsx`, which passes the App props), and `launch`. Subcommands stay global. |
 | `src/ui/App.tsx` | `filterRoot`/`hostSession` props; `globalView` state + `a` toggle; scope filter applied in the row builders and repo picker; header/status scope indicator. `openTarget` (launch.ts) needs no change — the host session is set by `enterLauncherSession`, and inside-tmux `new-window` already targets the current session. |
 
 ## Testing
