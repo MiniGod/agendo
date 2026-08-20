@@ -307,7 +307,15 @@ function clusterWidth(cluster: string): number {
   //    0, which under-pads the cell by one. Needs to come before the zero test
   //    for that reason. (Only reachable from malformed provider JSON, but it is
   //    the same family of bug as the rest of this function.)
-  if (cluster.length === 1 && cp >= 0xd800 && cp <= 0xdfff) return 1;
+  //
+  //    The test is "the cluster STARTS with an unpaired surrogate", not "is
+  //    one": `codePointAt(0)` returns the combined scalar for a well-formed
+  //    pair, so landing in D800–DFFF already means the first code unit is
+  //    unpaired. A lone surrogate that absorbed a following combining mark
+  //    ("\uD83D́") is one cluster of length 2, and the terminal draws
+  //    U+FFFD (1) plus the mark (0) — still 1. The old `length === 1` guard let
+  //    that fall through to `stringWidth`, which answers 0.
+  if (cp >= 0xd800 && cp <= 0xdfff) return 1;
   const w = stringWidth(cluster);
   // 1. ZERO stays zero: combining marks, ZWSP, a bare variation selector, a
   //    control byte. East Asian Width has no "invisible" answer — it calls all
