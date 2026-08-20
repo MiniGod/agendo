@@ -1418,7 +1418,7 @@ export default function App({
     return () => {
       cancelled = true;
     };
-  }, [mode.kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode.kind]); // eslint-disable-line react-hooks/exhaustive-deps -- probe-on-open, not a subscription: keyed to entering the Settings page. Adding `available` re-probes every backend each time that map is rebuilt.
 
   const persist = (next: { provider?: ProviderName; identity?: Identity | null; autoResume?: boolean }) => {
     const p = next.provider !== undefined ? next.provider : provider;
@@ -1740,7 +1740,7 @@ export default function App({
         watchers.current.delete(id);
       }
     }
-  }, [openSessionInfo.key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [openSessionInfo.key]); // eslint-disable-line react-hooks/exhaustive-deps -- `.key` is the sorted id digest built above precisely so this reconciles timers when the id SET changes; the object itself changes on every `rows` recompute, which would tear down live timers.
 
   // Leak-proof teardown: clear all timers when the component unmounts.
   useEffect(() => {
@@ -1905,9 +1905,9 @@ export default function App({
         });
       }
       // A window that vanished between reloads leaves stale bookkeeping; prune it.
-      for (const canon of [...limitWindows.current.keys()]) if (!windows.has(canon)) limitWindows.current.delete(canon);
-      for (const canon of [...resumeFired.current.keys()]) if (!windows.has(canon)) resumeFired.current.delete(canon);
-      for (const canon of [...dialogRevealed.current]) if (!windows.has(canon)) dialogRevealed.current.delete(canon);
+      for (const canon of limitWindows.current.keys()) if (!windows.has(canon)) limitWindows.current.delete(canon);
+      for (const canon of resumeFired.current.keys()) if (!windows.has(canon)) resumeFired.current.delete(canon);
+      for (const canon of dialogRevealed.current) if (!windows.has(canon)) dialogRevealed.current.delete(canon);
       setPanes((prev) => {
         const same =
           prev.size === next.size &&
@@ -1963,14 +1963,16 @@ export default function App({
   const toggleExpand = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
 
   const toggleSection = (id: string) =>
     setToggles((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
 
@@ -2264,7 +2266,7 @@ export default function App({
   });
 
   /** Remember the checkout and continue into the ordinary session flow. */
-  const useClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
+  const adoptClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
     const repo = clonedRepo(root);
     setCloned((prev) =>
       prev.some((r) => normalizeCwd(r.root) === normalizeCwd(root)) ? prev : [...prev, repo],
@@ -2289,7 +2291,7 @@ export default function App({
 
     const existing = findMatchingCheckout(filterRoot!, url.key);
     if (existing) {
-      return useClonedRepo(target, agent, existing, `already cloned — using ${homeShort(existing)}`);
+      return adoptClonedRepo(target, agent, existing, `already cloned — using ${homeShort(existing)}`);
     }
 
     const dest = freeCloneDest(filterRoot!, cloneDirName(url.repo));
@@ -2309,7 +2311,7 @@ export default function App({
       }
       if (!res.ok) return fail(...cloneError(res));
       const landed = basename(dest) === cloneDirName(url.repo) ? "" : ` as ${basename(dest)}`;
-      useClonedRepo(target, agent, dest, `cloned ${repoUrlLabel(url)}${landed} into ${homeShort(dest)}`);
+      adoptClonedRepo(target, agent, dest, `cloned ${repoUrlLabel(url)}${landed} into ${homeShort(dest)}`);
     });
   };
 

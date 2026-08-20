@@ -27,7 +27,7 @@ import { openUrlAsync } from "./browser.ts";
 import { loadState, resumeDialogChoice, peerSocketEnabled, PEER_SOCKET_ENV } from "./config.ts";
 import { takeWarnings } from "./errors.ts";
 import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
-import { discoverGitReposUnder, repoRootForCwd } from "./repos.ts";
+import { discoverGitReposUnder } from "./repos.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
 import { AGENTS } from "./types.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";

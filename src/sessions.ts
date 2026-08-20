@@ -368,7 +368,7 @@ const CODEX_IDE_REQUEST = /^# Context from my IDE setup:[\s\S]*?## My request fo
 function stripCodexPreamble(msg: string): string {
   const ide = msg.replace(CODEX_IDE_REQUEST, "");
   if (ide !== msg) return ide.trim();
-  return msg.startsWith("<") || /^# AGENTS\.md instructions/.test(msg) ? "" : msg;
+  return msg.startsWith("<") || msg.startsWith("# AGENTS.md instructions") ? "" : msg;
 }
 
 /**
