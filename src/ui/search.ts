@@ -3,10 +3,19 @@ import type { AgentSession, LinkedPR, PullRequest, ReviewPRWithSessions, WorkIte
 
 // Subsequence fuzzy match: every (non-space) character of the query must appear
 // in `text`, in order, but not necessarily contiguously. Case-insensitive.
+//
+// Both sides are normalised to NFC first, because the two sides genuinely
+// arrive in different forms: a branch or directory name read off a macOS
+// filesystem is NFD (`o` + U+0308), while the same name typed at the prompt or
+// returned by the ADO/GitHub APIs is NFC (U+00F6). Comparing those code unit by
+// code unit, a user searching for "Þróun" matches nothing. Normalising AFTER
+// `toLowerCase` rather than before is deliberate — case folding is itself
+// allowed to emit decomposed output, so it has to be the input to the
+// normalisation, not the other way round.
 function fuzzyMatch(query: string, text: string): boolean {
-  const q = query.toLowerCase().replace(/\s+/g, "");
+  const q = query.toLowerCase().normalize("NFC").replace(/\s+/g, "");
   if (!q) return true;
-  const t = text.toLowerCase();
+  const t = text.toLowerCase().normalize("NFC");
   let qi = 0;
   for (let ti = 0; ti < t.length && qi < q.length; ti++) {
     if (t[ti] === q[qi]) qi++;
