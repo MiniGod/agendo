@@ -6,7 +6,7 @@ import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePaneState, readPaneState, sendToPane, sendResume, paneReadiness, paneShells, paneCompactionPercent, stripAnsi,
+  liveManagedPaths, managedKind, capturePaneState, readPaneState, sendToPane, sendResume, paneReadiness, paneShells, paneBackgroundAgents, paneCompactionPercent, stripAnsi,
   sessionRoot, currentSessionName, killWindow, killManagedTarget, windowLocations, isPlaceholderWindow, exactTarget,
   paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, answerResumeDialog, paneAcceptsPaste,
   capturePane, RESUME_DIALOG_WAIT_MS, RESUME_DIALOG_POLL_MS,
@@ -155,9 +155,12 @@ Usage:
                                 each session's from → state, changed, satisfied,
                                 limitResetAt, plus resumeDialog (parked on
                                 claude's resume dialog: it reads ready, but
-                                nothing has run yet)
+                                nothing has run yet) and backgroundAgents (the
+                                main agent is idle and send WILL reach it, but a
+                                subagent is still running, so it isn't done)
       --state <ready|busy|…>    Wait for exactly this state (default: settled —
-                                not busy, limited or unknown).
+                                not busy, limited or unknown — and no background
+                                agent still running).
                                 One of ready, busy, compacting, queued, dialog,
                                 limited, unknown, exited. "dialog" means a question
                                 for you — claude's own resume dialog reads ready,
@@ -285,9 +288,11 @@ const KIND_LABEL: Record<SessionKind, string> = {
  * rewritten ("compacting"), text typed but not yet submitted ("queued"), or an
  * open question waiting on an answer ("dialog").
  *
- * The states NOT listed are deliberately closeable: "ready" (idle, the finished
- * session this command exists for), "limited" (stuck at its usage cap — a prime
- * close candidate) and "unknown". "unknown" is what a pane whose agent already
+ * The states NOT listed are deliberately closeable: "ready" (idle at its prompt —
+ * the session this command exists for, though see the caller: since #44 that no
+ * longer implies FINISHED, so `runClose` refuses a ready pane whose subagents are
+ * still running), "limited" (stuck at its usage cap — a prime close candidate)
+ * and "unknown". "unknown" is what a pane whose agent already
  * exited looks like — a bare shell prompt with no input box — which is the most
  * obvious thing of all to want closed; refusing it would push callers straight
  * back to hand-rolled `tmux kill-window`, the failure this command replaces.
@@ -914,7 +919,12 @@ async function runStatus(
   // A pane parked on claude's own resume dialog reads as `ready` but hasn't run
   // yet, so its idle age belongs to the PREVIOUS run — never a stall (idle.ts).
   // Same signal `wait --json` reports as `resumeDialog`, not a second guess.
-  const resumeDialog = pane ? paneResumeDialogActive(pane.raw) : false;
+  // Both read off the ONE capture, in the one branch that already tested for it —
+  // a second `pane ? … : …` would cost this function a complexity point for a
+  // question it has already asked.
+  const { resumeDialog, backgroundAgents } = pane
+    ? { resumeDialog: paneResumeDialogActive(pane.raw), backgroundAgents: paneBackgroundAgents(pane.raw) }
+    : { resumeDialog: false, backgroundAgents: 0 };
   const idle = idleSeconds(s.lastUsed);
   const thresholdMs = resolveStalledAfterMs(stalledAfterMs);
   // A peer with no window arrives here as running-but-`readiness: null`, which
@@ -923,7 +933,7 @@ async function runStatus(
   // documents: the registry's own `status` is not the settled/busy test `wait`
   // uses, so treating it as one would let a stall verdict rest on a signal the
   // rest of agendo doesn't share.
-  const stalled = isStalled({ running, readiness, resumeDialog, idleSeconds: idle }, thresholdMs);
+  const stalled = isStalled({ running, readiness, resumeDialog, backgroundAgents, idleSeconds: idle }, thresholdMs);
   // Both config-derived values are resolved BEFORE the single drain below: the
   // stall threshold here, and the resume choice the dialog line prints further
   // down. A malformed config.json queues its complaint once per read, and
@@ -1768,6 +1778,7 @@ async function runList(opts: ListOptions): Promise<void> {
     const window = liveWindows.get(canon);
     let readiness: Readiness | null = null;
     let shells = 0;
+    let backgroundAgents = 0;
     // Parked on claude's own resume dialog: reads `ready`, but nothing has run
     // yet, so its idle age is the previous run's and it is never stalled.
     let resumeDialog = false;
@@ -1777,6 +1788,7 @@ async function runList(opts: ListOptions): Promise<void> {
       const { raw, cursor } = capturePaneState(window.target);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
+      backgroundAgents = paneBackgroundAgents(raw);
       resumeDialog = paneResumeDialogActive(raw);
       resetAt = rowResetAt(readiness, raw);
       compactionPercent = rowCompactionPercent(readiness, raw);
@@ -1804,7 +1816,7 @@ async function runList(opts: ListOptions): Promise<void> {
       title: s.title.replace(/\s+/g, " ").trim(),
       lastUsed: s.lastUsed.toISOString(),
       idleSeconds: idle,
-      stalled: isStalled({ running, readiness, resumeDialog, idleSeconds: idle }, thresholdMs),
+      stalled: isStalled({ running, readiness, resumeDialog, backgroundAgents, idleSeconds: idle }, thresholdMs),
       // Exact, NOT floored: a consumer re-deriving `idleSeconds >= stalledAfterSeconds`
       // must reach the same verdict this row already carries, including for
       // sub-second thresholds.
@@ -1922,7 +1934,7 @@ function runPlainList(
     // cell beside this already says when its cap lifts, so the two never both
     // describe the same pause.
     const stalled = isStalled(
-      { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), idleSeconds: idleSeconds(s.lastUsed) },
+      { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), backgroundAgents: paneBackgroundAgents(raw), idleSeconds: idleSeconds(s.lastUsed) },
       thresholdMs,
     );
     rows.push([
@@ -2241,7 +2253,10 @@ async function runResume(token: string | undefined, attach: boolean): Promise<vo
  *     So an id-less window with rival sessions in its dir needs `--force`.
  *  4. WORK IN FLIGHT. A pane mid-turn (or compacting, or holding queued text /
  *     an open question) is refused unless `force` — killing an agent mid-write
- *     is how work gets lost. See UNSAFE_CLOSE_STATES. A pane that could not be
+ *     is how work gets lost. See UNSAFE_CLOSE_STATES. Readiness alone stopped
+ *     answering that question when #44 split the flag: a session whose MAIN agent
+ *     is idle at its prompt can still have a subagent running, and it reads
+ *     "ready". So the background-agent count is refused alongside the states. A pane that could not be
  *     READ is refused too: readiness classifies a blank screen as "unknown",
  *     which this guard lets through, so a failed read would pass for an idle
  *     session (see `readPaneState`).
@@ -2346,8 +2361,17 @@ async function runClose(token: string | undefined, force: boolean, verb = "close
     process.exit(2);
   }
   const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
-  if (pane && readiness && UNSAFE_CLOSE_STATES.has(readiness) && !force) {
-    console.error(`Not closing: session looks "${readiness}" — work is in flight. Pass --force to close it anyway.`);
+  // Readiness describes the MAIN agent only (#44), so `ready` no longer means the
+  // session is finished — a subagent it spawned can still be running, and killing
+  // the window takes that work with it. This is the third caller of "has this
+  // stopped working?" and it must not answer differently from `wait` and the
+  // ⚠stalled qualifier. Read off the capture already taken, like the readiness.
+  const agents = pane ? paneBackgroundAgents(pane.raw) : 0;
+  if (pane && readiness && (UNSAFE_CLOSE_STATES.has(readiness) || agents > 0) && !force) {
+    const why = UNSAFE_CLOSE_STATES.has(readiness)
+      ? `session looks "${readiness}"`
+      : `session is idle but ${agents} background agent${agents === 1 ? " is" : "s are"} still running`;
+    console.error(`Not closing: ${why} — work is in flight. Pass --force to close it anyway.`);
     console.error(`\n  current screen (tail):`);
     for (const l of stripAnsi(pane.raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
     process.exit(2);

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { stripAnsi, exactTarget, windowTarget } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { BUSY_PANE, CODEX_SESSION_ID, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
+import { BUSY_PANE, SUBAGENT_PANE, CODEX_SESSION_ID, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
 
 // The tmux target agendo addresses the fixture's running pane by (#39). The
@@ -2981,6 +2981,74 @@ test("agendo wait exits non-zero when the session stays busy past the timeout", 
   expect(r.stderr).toContain("timed out");
 });
 
+test("agendo close refuses a session whose subagent is still running (#44)", async ({ mock }) => {
+  // Found in review, and the sharpest edge of the split: `close` asks "would
+  // ending this lose something?", and it asked readiness alone. Once readiness
+  // describes only the MAIN agent, an idle prompt reads `ready` while a subagent
+  // is mid-write — and this command kills the window. Verified as a real
+  // regression on the way in: exit 0, window gone, no warning at all.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: SUBAGENT_PANE } });
+  const r = agendo(mock.env, "close", SHORT_ID);
+  // Exit 2 is the refusal code, as at every other close guard.
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("1 background agent is still running");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  // Still overridable — the guard is a refusal, not a lock.
+  const forced = agendo(mock.env, "close", "-f", SHORT_ID);
+  expect(forced.status).toBe(0);
+  expect(killsIn(await mock.tmuxLog()).length).toBe(1);
+});
+
+test("agendo wait keeps waiting while a subagent runs, and settles when it finishes (#44)", async ({ mock }) => {
+  // The main agent is idle at its prompt, so every readiness signal says "ready" —
+  // but the session is not finished. The TUI's own sentence is the thing being
+  // waited on, not the readiness verdict.
+  //
+  // Honest about the two halves: the first `wait` also timed out BEFORE the fix,
+  // for the wrong reason (the panel made the pane read `busy`), so only the
+  // second half — same pane, sentence removed, agent finished — distinguishes.
+  // Together they say the wait is keyed to the sentence and to nothing else.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: SUBAGENT_PANE } });
+  const early = agendo(mock.env, "wait", SHORT_ID, "--interval", "100ms", "--timeout", "600ms");
+  expect(early.status).not.toBe(0);
+  expect(early.stderr).toContain("timed out");
+  // WHY it is still pending has to be in the message: the state alone reads
+  // `ready`, which looks like a bug in the wait rather than a session that is
+  // working. Parenthesized and singular for one.
+  expect(early.stderr).toContain(`${SHORT_ID}(ready) (1 background agent)`);
+  // Same fact in the machine-readable shape, which is what a script polls.
+  const json = agendo(mock.env, "wait", SHORT_ID, "--interval", "100ms", "--timeout", "300ms", "--json");
+  const out = JSON.parse(json.stdout) as { sessions: { backgroundAgents: number }[] };
+  expect(out.sessions[0].backgroundAgents).toBe(1);
+
+  // Drop the sentence — the same pane, one line lighter, agent finished — and the
+  // very next poll settles. Pinning both halves on the same capture is what makes
+  // this a test of the sentence rather than of the pane.
+  const { done } = agendoAsync(mock.env, "wait", SHORT_ID, "--interval", "200ms", "--timeout", "20s");
+  await sleep(700);
+  await mock.setTmuxState({
+    ...tmuxState,
+    captures: {
+      [RUNNING_TARGET]: SUBAGENT_PANE.split("\n").filter((l) => !l.includes("background agent")).join("\n"),
+    },
+  });
+  const r = await done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("ready");
+});
+
+test("agendo send DOES deliver to a session whose subagent is still running (#44)", async ({ mock }) => {
+  // The other half of the same capture, and the reported symptom: the panel rows
+  // pinned readiness to "busy", `send` refuses a non-ready pane, and nothing ever
+  // clears a panel — so the session was unreachable for good.
+  await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: SUBAGENT_PANE } });
+  const r = agendo(mock.env, "send", SHORT_ID, "carry on once the review lands");
+  expect(r.status).toBe(0);
+  // The exit code alone would pass if a future change routed the send over the
+  // socket, which never consults readiness — assert the paste actually happened.
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+});
+
 test("agendo wait errors on an explicit id that isn't running", async ({ mock }) => {
   // The crash session exists on disk but has no live tmux window → can't settle.
   const r = agendo(mock.env, "wait", CRASH_SHORT_ID, "--timeout", "2s");
@@ -3104,7 +3172,10 @@ test("agendo wait does NOT call a usage-limited session settled", async ({ mock 
   // near the 10s timeout. (A wait that just times out is the blindness this
   // whole branch exists to avoid, so the margin is the assertion.)
   expect(out.elapsedMs).toBeLessThan(3_000);
-  expect(out.condition).toBe("settled (not busy, limited or unknown)");
+  // `condition` is documented as the predicate in words, and #44 gave the default
+  // a second condition — so this string has to say so or it misreports what the
+  // wait was waiting for. Still an exact match, and still the original clause.
+  expect(out.condition).toBe("settled (not busy, limited or unknown) and no background agent running");
   const [s] = out.sessions;
   expect(s.state).toBe("limited");
   expect(s.satisfied).toBe(false);

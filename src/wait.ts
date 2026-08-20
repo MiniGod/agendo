@@ -18,7 +18,7 @@
  */
 import { basename } from "path";
 import {
-  capturePaneState, isSettledReadiness, paneReadiness, paneResumeDialogActive,
+  capturePaneState, sessionFinished, paneBackgroundAgents, paneReadiness, paneResumeDialogActive,
   sessionName, shortId, stripAnsi,
   type Readiness,
 } from "./tmux.ts";
@@ -127,6 +127,19 @@ export interface WaitResult {
    * completed turn is not, so it is named rather than left to inference.
    */
   resumeDialog: boolean;
+  /**
+   * Background agents the session is waiting on. A running subagent means the
+   * session IS working even though its main agent sits idle at the prompt, so the
+   * DEFAULT predicate does not settle while this is above zero — otherwise `wait`
+   * would report "done" on a session that is still doing the work (#44).
+   *
+   * Reported rather than left to inference, because it is the one thing that can
+   * hold a wait open on a pane whose own state reads `ready`. Monitors and
+   * background shells are deliberately NOT counted here: both are long-running by
+   * design, and holding for them would mean `wait` never returns for anyone with a
+   * dev server up.
+   */
+  backgroundAgents: number;
 }
 
 /** The `--json` wake payload. `woke` is why the wait returned:
@@ -151,23 +164,53 @@ export interface WaitPayload {
   sessions: WaitResult[];
 }
 
+/** Why a target is still pending when its readiness alone doesn't say — `ready`
+ *  on its own reads like a bug in the wait, not like a session that is working
+ *  (#44). Empty when the state already explains itself. */
+function heldBy(x: WaitResult): string {
+  if (x.backgroundAgents <= 0) return "";
+  // Parenthesized, never comma-joined: both call sites below already join their
+  // targets with ", ", so a bare comma here reads as another target.
+  return ` (${x.backgroundAgents} background agent${x.backgroundAgents === 1 ? "" : "s"})`;
+}
+
+/** The default predicate in words — the stderr banner and `--json`'s `condition`.
+ *  Kept beside `waitSatisfied` so it cannot drift from what that actually tests;
+ *  it said "settled" until #44 gave the default a second condition. */
+const SETTLED_DESC = "settled (not busy, limited or unknown) and no background agent running";
+
 /** Whether an observed state satisfies the wait predicate. The default (no
- *  `--state`/`--not`) waits for a *known, settled, unblocked* non-busy state —
- *  `unknown` and `limited` are excluded (see `isSettledReadiness`) so neither an
- *  unread pane nor a session sitting at its usage cap reports a false success.
- *  `exited` passes that default: a session whose window is gone is as settled as
- *  it will ever get. An explicit `--state`/`--not` is honoured verbatim, so
- *  `--state limited` still wakes the moment the cap hits.
+ *  `--state`/`--not`) waits for a session that has *stopped working*: a known,
+ *  settled, unblocked non-busy state AND no background agent still running.
+ *  `unknown` and `limited` are excluded (see `sessionFinished`) so neither an
+ *  unread pane nor a session sitting at its usage cap reports a false success,
+ *  and a subagent still running holds it open even though the main agent's prompt
+ *  reads `ready` (#44). `exited` passes that default: a session whose window is
+ *  gone is as settled as it will ever get. An explicit `--state`/`--not` is
+ *  honoured verbatim, so `--state limited` still wakes the moment the cap hits.
  *
  *  The test itself lives in tmux.ts beside `Readiness`, shared with the
- *  stalled-session qualifier (idle.ts) so the two can't drift into disagreeing
- *  about what "stopped working" means — a capped session is neither finished nor
- *  hung in both. The cast is safe for the reason above: `exited` is in neither
- *  the working set nor the not-settled set, so it settles. */
-export function waitSatisfied(r: WaitState, o: WaitOptions): boolean {
+ *  stalled-session qualifier (idle.ts) and the `close` guard so they can't drift
+ *  into disagreeing about what "stopped working" means — a capped session is
+ *  neither finished nor hung in any of them. The cast is safe for the reason
+ *  above: `exited` is in neither the working set nor the not-settled set, so it
+ *  settles. */
+export function waitSatisfied(r: WaitState, o: WaitOptions, backgroundAgents: number): boolean {
   if (o.state) return r === o.state;
   if (o.not) return r !== o.not;
-  return isSettledReadiness(r as Readiness);
+  // The DEFAULT predicate only: a session whose main agent is back at its prompt
+  // but whose subagent is still running is not finished, however "ready" the
+  // prompt reads (#44). An explicit `--state`/`--not` has already said what this
+  // caller counts as done — and several of those readings mean "wait through
+  // it" — so both return above without consulting this.
+  //
+  // `--not busy` is the one worth naming, because it changed meaning: it used to
+  // hold while a subagent ran, for the wrong reason (the panel made the pane read
+  // `busy`), and now settles as soon as the main agent is done. That is what it
+  // literally asks for, and the default predicate is the one that means "wait for
+  // the session to finish" — but a caller who wrote `--not busy` meaning that
+  // should drop the flag.
+  return sessionFinished(r as Readiness, backgroundAgents);
 }
 
 /** Parse a duration like `500ms`, `2s`, `5m`, `1h` (bare number ⇒ seconds); null
@@ -353,7 +396,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
     return 1;
   }
 
-  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : "settled (not busy, limited or unknown)";
+  const desc = o.state ? `= ${o.state}` : o.not ? `≠ ${o.not}` : SETTLED_DESC;
   const mode: "all" | "any" = o.any ? "any" : "all";
   console.error(
     `waiting for ${o.any ? "any of" : "all"} ${targets.length} session(s) to be ${desc} ` +
@@ -406,11 +449,13 @@ export async function runWait(o: WaitOptions): Promise<number> {
       // a different frame than the state it qualifies. A target with no live
       // window has no pane to be parked in, so it is false there by construction.
       let resumeDialog = false;
+      let backgroundAgents = 0;
       if (live) {
         misses.set(s.id, 0);
         const { raw, cursor } = capturePaneState(live.target);
         state = paneReadiness(raw, cursor);
         resumeDialog = paneResumeDialogActive(raw);
+        backgroundAgents = paneBackgroundAgents(raw);
         // Same capture again — no extra tmux call, and the same helper `agendo
         // list` uses, so the two never disagree on the time.
         if (state === "limited") resetAt = paneResetAt(stripAnsi(raw));
@@ -427,12 +472,13 @@ export async function runWait(o: WaitOptions): Promise<number> {
         state,
         from,
         changed: state !== from,
-        satisfied: waitSatisfied(state, o),
+        satisfied: waitSatisfied(state, o, backgroundAgents),
         cwd: s.cwd,
         title: s.title,
         window: live ? live.name : target,
         limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
         resumeDialog,
+        backgroundAgents,
       };
     });
   }
@@ -518,11 +564,11 @@ export async function runWait(o: WaitOptions): Promise<number> {
     if (Date.now() >= deadline) {
       console.error(
         `wait: timed out after ${Math.round(o.timeoutMs / 1000)}s; still pending: ` +
-          pending.map((x) => `${x.shortId}(${x.state})`).join(", "),
+          pending.map((x) => `${x.shortId}(${x.state})${heldBy(x)}`).join(", "),
       );
       return finish("timeout", results);
     }
-    console.error(`  pending: ${pending.map((x) => `${x.shortId}=${x.state}`).join(", ")}`);
+    console.error(`  pending: ${pending.map((x) => `${x.shortId}=${x.state}${heldBy(x)}`).join(", ")}`);
     // Never sleep past the deadline: bounds the timeout overrun to ~0 even when
     // the interval is large relative to the remaining time.
     await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));

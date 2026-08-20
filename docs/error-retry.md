@@ -622,9 +622,11 @@ separate:
 
 This one needs a decision, and there is a clean precedent to follow.
 
-Today an errored session reads `ready` → `isSettledReadiness` returns true →
+Today an errored session reads `ready` → `sessionFinished` returns true →
 `wait` exits 0 and tells an orchestrator the session **finished**. That is
-already wrong, before this feature exists. It is exactly the reasoning
+already wrong, before this feature exists. (#44 split a second question out of
+that same predicate — a running subagent now holds the wait open — but an
+errored session produces no such signal, so this case is untouched by it.) It is exactly the reasoning
 `NOT_SETTLED` applies to `limited`: *"it has stopped, but it is not DONE"* —
 `wait` wakes on a capped target with `woke: "blocked"` and a non-zero exit rather
 than claiming success.

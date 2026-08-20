@@ -93,7 +93,10 @@ in the background with its **exit** as the notification. A session parked at its
 cap is the one thing that stops without being _done_: the wait wakes on it promptly,
 but exits non-zero with `woke: "blocked"` and the session's `limitResetAt`, so a capped
 session is never mistaken for finished work (an explicit `--state`/`--not` is never
-pre-empted that way, so you can still wait _through_ a cap):
+pre-empted that way, so you can still wait _through_ a cap). A session whose main
+agent is idle while a subagent it spawned keeps working is the opposite case: the
+wait is _held_ rather than woken early, because `send` still reaches it but it has
+not finished:
 
 ```sh
 agendo wait --repo myapp --any --json --timeout 30m
@@ -203,6 +206,7 @@ What that does and doesn't catch, from real sessions:
 | Parked at a usage cap | `limited` + `limitResetAt` | **Yes** — and deliberately never `⚠stalled`: it resumes on its own. |
 | Rewriting its own context | `compacting` + `compactionPercent` | **Yes** — blocked but progressing, and the percentage off the pane's own bar says whether to wait. |
 | Parked on Claude's resume dialog | `ready` + `resumeDialog: true` | **Yes** — never `⚠stalled`; nothing has run yet, so the idle age is the previous run's. |
+| Main agent idle at its prompt, a subagent it spawned still running | `ready`, and never `⚠stalled` | **Yes** — and it is the case one flag could not describe: `send` reaches the prompt (it is genuinely accepting input) while `wait` holds until the subagent finishes, and the idle age never earns a ⚠ however long that takes. The count itself is on `wait --json` as `backgroundAgents`, not on the list row. |
 | Feedback survey on screen (numbered options above a live input box) | `ready` | **Yes** — a menu above a *live* input box is not a dialog; pinned as a negative test. |
 | Busy-waiting: `until [ -f /sentinel ]; do sleep 30; done`, for an hour | `busy` | **No — known gap.** The pane is genuinely active, so neither readiness nor idle age moves. A session can spin forever and look like one that is working. Detecting it needs a signal this PR doesn't have (no assistant turn despite an active pane), and is the obvious next step. |
 
