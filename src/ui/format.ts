@@ -1,4 +1,5 @@
 import { basename } from "path";
+import stringWidth from "string-width";
 import { repoRootForCwd, type RepoInfo } from "../repos.ts";
 import { formatResetTime } from "../usageLimit.ts";
 import { V } from "./vocabState.ts";
@@ -168,11 +169,69 @@ export function ciCell(pr: PullRequest): Cell {
   }
 }
 
+// ── column fitting ────────────────────────────────────────────────────────────
+//
+// `fit` both truncates and pads, so its unit has to be the terminal CELL — what
+// the reader actually sees — and not the JavaScript string index. Those two
+// diverge in two independent ways, and each one breaks something different:
+//
+//   - A WIDE character is one code unit but TWO cells (CJK, and most emoji).
+//     Measuring by index under-counts it, so the cell is padded one column too
+//     wide per wide character and every column to its right slides right. This
+//     is the alignment half of the bug, and it is visible with a single 中 in a
+//     title.
+//   - An ASTRAL character is TWO code units but one glyph, so slicing at an odd
+//     offset cuts a surrogate pair in half and emits a lone surrogate — the same
+//     defect `caretLeft`/`caretRight` (src/ui/keys/caret.ts) fix for the prompt
+//     caret, reaching the screen through truncation instead of the arrow keys.
+//
+// A third case only truncation has: a COMBINING MARK is its own code point, so a
+// cut between a base and its mark leaves the mark to re-attach itself to the "…"
+// or to whatever the terminal draws next.
+//
+// Measurement is `string-width` — the same library ink itself uses to lay out
+// `<Text>`, so agendo and its renderer agree on what a column is by construction
+// rather than by two hand-rolled tables happening to match. Cutting is done on
+// GRAPHEME CLUSTER boundaries via the built-in `Intl.Segmenter`: clusters are a
+// superset of code-point boundaries, so keeping base + marks together comes free
+// with never splitting a pair.
+const SEGMENTER = new Intl.Segmenter();
+
+// Printable ASCII only: no wide characters, no astral characters, no combining
+// marks, so one code unit is exactly one cell.
+const ASCII_ONLY = /^[\x20-\x7E]*$/;
+
+// Longest prefix of `s` that fits in `cells` columns, cut only between grapheme
+// clusters. A wide cluster straddling the boundary is dropped whole, which can
+// leave the result one column short of `cells`; the caller's padding covers it.
+function clipToWidth(s: string, cells: number): string {
+  if (cells <= 0) return "";
+  let out = "";
+  let used = 0;
+  for (const { segment } of SEGMENTER.segment(s)) {
+    const cw = stringWidth(segment);
+    if (used + cw > cells) break;
+    out += segment;
+    used += cw;
+  }
+  return out;
+}
+
 export function fit(s: string, w: number): string {
   // Reserve a 1-column gap so truncated cells never touch the next column.
   const max = w - 1;
-  const t = s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
-  return t.padEnd(w);
+  // Hot path: `fit` runs once per cell per row per render. For printable ASCII
+  // the index arithmetic below IS cell arithmetic, so this branch and the
+  // general one produce the same string — it just skips the segmentation.
+  if (ASCII_ONLY.test(s)) {
+    const t = s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
+    return t.padEnd(w);
+  }
+  const width = stringWidth(s);
+  if (width <= max) return s + " ".repeat(Math.max(0, w - width));
+  // "…" is one cell wide, so the visible prefix gets max - 1 of them.
+  const t = clipToWidth(s, max - 1) + "…";
+  return t + " ".repeat(Math.max(0, w - stringWidth(t)));
 }
 
 export interface Cell { text: string; color?: string }
