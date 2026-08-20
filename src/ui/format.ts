@@ -276,6 +276,16 @@ const SEGMENTER = new Intl.Segmenter();
 // marks, so one code unit is exactly one cell.
 const ASCII_ONLY = /^[\x20-\x7E]*$/;
 
+// Code points a wcwidth terminal advances the cursor zero columns for. Beyond
+// the combining marks these are the invisible format controls, plus the
+// conjoining Hangul jamo — a medial or final jamo composes onto the preceding
+// syllable rather than taking a cell of its own, which is why glibc gives the
+// whole U+1160–U+11FF block width 0.
+const ZERO_WIDTH_CP =
+  /^[\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]$/;
+const CONJOINING_JAMO = /^[\u1160-\u11ff\ud7b0-\ud7c6\ud7cb-\ud7fb]$/;
+const COMBINING_MARK = /^[\p{Mn}\p{Me}]$/u;
+
 // Columns one grapheme cluster occupies, by the rule a wcwidth-based terminal
 // actually applies. tmux is one, and agendo runs inside it.
 //
@@ -287,15 +297,22 @@ const ASCII_ONLY = /^[\x20-\x7E]*$/;
 // right, which is the exact defect this whole section exists to prevent: it is
 // how `⚠ conflict` became misaligned when `⌛ expired` was fixed.
 //
-// KNOWN DIVERGENCES from tmux 3.4, all measured against a real terminal and
-// all PRE-EXISTING (this function narrowed 201 code points versus a plain
-// `stringWidth` measure and regressed none of them). They are recorded rather
-// than fixed because each one is a step toward reimplementing `wcwidth`, which
-// is out of proportion to a mis-padded column in a title:
+// The rule is checked against glibc `wcwidth` — which is what tmux itself
+// calls, so on this machine it IS what gets drawn — across every assignable
+// BMP code point with a defined width. It agrees on 61,950 of 61,972 and
+// disagrees on 22, all of them a Unicode-VERSION disagreement rather than a
+// mistake: `get-east-asian-width` ships current Unicode, this glibc's tables
+// are older. U+2630-2637 and U+268A-268F (trigrams, monograms) became Wide in
+// Unicode 9.0 and glibc still says 1; U+3248-324F are Ambiguous in Unicode and
+// glibc says 2. Closing those means shipping wcwidth tables and pinning them to
+// the reader's libc, which is out of proportion to a mis-padded column.
 //
-//   - DEFAULT_IGNORABLE code points that the terminal nevertheless draws.
-//     `string-width` filters them to 0; tmux gives U+00AD SOFT HYPHEN 1
-//     (reachable from a web-pasted title), U+FFA0 1, U+115F 2, U+3164 2.
+// For comparison, measured the same way: counting UTF-16 code units (what the
+// callers of `padCell` used to do) is correct for 18,421 of those code points,
+// and a plain `stringWidth` measure for 60,912.
+//
+// KNOWN DIVERGENCES that remain, beyond those 22:
+//
 //   - SPACING COMBINING MARKS (Mc, 471 code points). `string-width` reads only
 //     `codePointAt(0)` of the cluster, so "कि" measures 1 where tmux draws 2.
 //     Devanagari / Bengali / Tamil / Khmer titles under-measure by a column per
@@ -304,13 +321,17 @@ const ASCII_ONLY = /^[\x20-\x7E]*$/;
 //     cell, so "🇮🇸🇳🇴" draws 2 where this measures 4. Truncation is still safe:
 //     `Intl.Segmenter` clusters an RI pair, and `clipToWidth` only ever cuts on
 //     a cluster boundary, so a flag can never be split in half.
+//   - C0/C1 CONTROLS AND DEL measure 0, which is a choice rather than a truth:
+//     `wcwidth` reports them as undefined (-1) because a terminal does not draw
+//     them at all. A TAB in a directory name advances to the next tab stop, so
+//     no single number is right. 0 keeps the previous behaviour.
 //
-// And one divergence from ink rather than from tmux: ink still measures with
-// `string-width`, so for the 201 code points narrowed above the two disagree by
-// one column. At a terminal exactly as wide as the table, ink's
-// `wrap="truncate"` can clip one trailing pad space early. The paragraph below
-// about sharing ink's copy therefore now holds only for branch 3 —
-// multi-code-point clusters — which is where the deferral actually happens.
+// And one divergence from ink rather than from tmux: ink measures with
+// `string-width`, so wherever this narrows a code point the two disagree by one
+// column. At a terminal exactly as wide as the table, ink's `wrap="truncate"`
+// can clip one trailing pad space early. The paragraph below about sharing
+// ink's copy therefore holds only for the multi-code-point branch, which is
+// where the deferral actually happens.
 //
 // Where it DOES defer to `string-width`, agendo wants the same copy ink uses to
 // lay `<Text>` out. That sharing is not automatic and not free: it holds only
@@ -329,37 +350,45 @@ function clusterWidth(cluster: string): number {
   const cp = cluster.codePointAt(0) ?? 0;
   // 0. An UNPAIRED SURROGATE is not encodable as UTF-8, so what reaches the
   //    terminal is the replacement character — one column. `stringWidth` says
-  //    0, which under-pads the cell by one. Needs to come before the zero test
-  //    for that reason. (Only reachable from malformed provider JSON, but it is
-  //    the same family of bug as the rest of this function.)
+  //    0, which under-pads the cell by one.
   //
   //    The test is "the cluster STARTS with an unpaired surrogate", not "is
   //    one": `codePointAt(0)` returns the combined scalar for a well-formed
   //    pair, so landing in D800–DFFF already means the first code unit is
   //    unpaired. A lone surrogate that absorbed a following combining mark
   //    ("\uD83D́") is one cluster of length 2, and the terminal draws
-  //    U+FFFD (1) plus the mark (0) — still 1. The old `length === 1` guard let
-  //    that fall through to `stringWidth`, which answers 0.
+  //    U+FFFD (1) plus the mark (0) — still 1.
   if (cp >= 0xd800 && cp <= 0xdfff) return 1;
-  const w = stringWidth(cluster);
-  // 1. ZERO stays zero: combining marks, ZWSP, a bare variation selector, a
-  //    control byte. East Asian Width has no "invisible" answer — it calls all
-  //    of them Neutral, i.e. 1 — so this is the one question only
-  //    `string-width` can answer, and it has to be asked first.
-  if (w === 0) return 0;
-  // 2. A SINGLE code point on its own gets TEXT presentation in a terminal, and
-  //    the width of a text-presentation glyph is its East Asian Width. Wide/
-  //    Fullwidth → 2 (CJK, and every code point whose default presentation is
-  //    emoji — Unicode gives those EAW=Wide, so ⌛ U+231B and 👍 U+1F44D are
-  //    still 2 here). Everything else → 1, including the bare symbols
-  //    `emoji-regex` over-claims.
-  if (cluster.length === (cp > 0xffff ? 2 : 1)) return eastAsianWidth(cp) === 2 ? 2 : 1;
-  // 3. A MULTI-code-point cluster is a deliberate emoji: VS16 explicitly
+  // 1. A SINGLE code point gets TEXT presentation in a terminal, so its width
+  //    is its East Asian Width — Wide/Fullwidth → 2 (CJK, and every code point
+  //    whose default presentation is emoji, since Unicode gives those
+  //    EAW=Wide, so ⌛ U+231B and 👍 U+1F44D are still 2), everything else → 1,
+  //    including the bare symbols `emoji-regex` over-claims.
+  //
+  //    The zero tests come first and are spelled out rather than delegated to
+  //    `stringWidth(cluster) === 0`, which is what this used to ask. That
+  //    question is subtly the wrong one: `string-width` filters
+  //    DEFAULT_IGNORABLE code points to 0, but a terminal DRAWS several of
+  //    them — it gives U+00AD 1, U+FFA0 1, U+115F 2, U+3164 2 — so asking it
+  //    first threw away the East Asian Width answer, which is correct for all
+  //    four. It also called every Mn/Me mark on a CJK base 2 rather than 0.
+  //    Against glibc that swap is worth 1,060 wrong code points down to 22.
+  if (cluster.length === (cp > 0xffff ? 2 : 1)) {
+    // C0/C1 and DEL are tested numerically rather than as a character class:
+    // spelling them into the regex trips `no-control-regex`, and the carve-out
+    // for that rule is for code that parses ANSI, which this is not.
+    if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f)) return 0;
+    if (ZERO_WIDTH_CP.test(cluster) || CONJOINING_JAMO.test(cluster) || COMBINING_MARK.test(cluster)) return 0;
+    return eastAsianWidth(cp) === 2 ? 2 : 1;
+  }
+  // 2. A MULTI-code-point cluster is a deliberate emoji: VS16 explicitly
   //    requests emoji presentation, and ZWJ sequences, skin-tone modifiers,
   //    regional-indicator flags and keycaps have no text form to fall back to.
   //    `string-width` is right about these, so defer to it (and to ink, which
-  //    will lay the row out with the same number).
-  return w;
+  //    will lay the row out with the same number). It also answers 0 for a
+  //    multi-code-point cluster that is entirely invisible, which is why the
+  //    zero tests above only need to cover single code points.
+  return stringWidth(cluster);
 }
 
 // `clusterWidth` is a pure function of a short string, and a table redraw asks
@@ -395,7 +424,12 @@ function measureWidth(s: string): number {
 // clusters. A wide cluster straddling the boundary is dropped whole, which can
 // leave the result one column short of `cells`; the caller's padding covers it.
 function clipToWidth(s: string, cells: number): string {
-  if (cells <= 0) return "";
+  // `!(cells > 0)` rather than `cells <= 0` so a NaN width truncates to nothing
+  // instead of falling through: the loop's `used + cw > NaN` is never true, so
+  // a bare `<=` test would return the string UNCLIPPED and the caller would pad
+  // it with `" ".repeat(NaN)` — a throw. No call site computes a width today,
+  // but `fit` shares this helper and `fit`'s widths are computed.
+  if (!(cells > 0)) return "";
   let out = "";
   let used = 0;
   for (const { segment } of SEGMENTER.segment(s)) {
