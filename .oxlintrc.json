@@ -27,7 +27,7 @@
   //
   // Be precise about what that buys: the budget is per GLOB GROUP, so the 24
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
-  // is 833 lines against a 1242 cap, and any of them may add a fresh
+  // is 833 lines against a 1228 cap, and any of them may add a fresh
   // complexity-34 function). It bounds the blast radius; it does not freeze
   // every file at its current size. If a file starts creeping toward the cap,
   // the answer is its own tighter block here, not a raised budget.
@@ -99,17 +99,19 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        "max-lines": ["error", { "max": 1242, "skipBlankLines": false, "skipComments": false }], // src/sessions.ts
+        "max-lines": ["error", { "max": 1228, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
         "max-lines-per-function": ["error", { "max": 210, "skipBlankLines": false, "skipComments": false }], // src/index.tsx runStatus
         // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
-        // three-way tie between src/sessions.ts `claudeAction`, src/sessions.ts
+        // three-way tie between src/activity.ts `claudeAction`, src/activity.ts
         // `loadCodexActivity` and src/ui/components.tsx `SessionRow`. Three
         // separate refactors have to land before this one can move at all.
-        "complexity": ["error", 34], // src/sessions.ts claudeAction / loadCodexActivity, src/ui/components.tsx SessionRow
+        // (The first two moved out of src/sessions.ts with the activity split;
+        // neither changed.)
+        "complexity": ["error", 34], // src/activity.ts claudeAction / loadCodexActivity, src/ui/components.tsx SessionRow
         "max-statements": ["error", 61], // src/ui/keys/list.ts handleListViewKeys
         "max-params": ["error", 6], // src/usageLimit.ts
-        "max-depth": ["error", 6], // src/sessions.ts:975
-        "max-nested-callbacks": ["error", 4] // src/sessions.ts:211
+        "max-depth": ["error", 6], // src/activity.ts:219
+        "max-nested-callbacks": ["error", 4] // src/sessions.ts:212
       }
     },
 
@@ -121,9 +123,10 @@
       "files": ["src/ui/App.tsx"],
       "rules": {
         // NOTE: no max-lines here any more. App.tsx is 1228 lines and now lives
-        // inside the shared src/** budget of 1242 — the first of the three big
-        // files to get there. What remains below is about the `App` FUNCTION,
-        // not the file.
+        // inside the shared src/** budget — the first of the three big files to
+        // get there, and since the sessions.ts split it is the file that SETS
+        // that budget. What remains below is about the `App` FUNCTION, not the
+        // file.
         //
         // `App` itself, line 100: the eleven mode screens are in src/ui/screens/,
         // the key handlers in src/ui/keys/, and nine hooks in src/ui/hooks/.
