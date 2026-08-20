@@ -2,6 +2,11 @@ import { paneCompactionPercent, stripAnsi, type Readiness } from "../tmux.ts";
 import { formatResetTime, paneResetAt } from "../usageLimit.ts";
 import { idleSeconds, shortAge } from "../idle.ts";
 
+// The CLI tables and the TUI measure a fixed-width cell the same way, so the
+// column helper lives in `ui/format.ts` and is re-exported here rather than
+// reimplemented — `cells.ts` is where the CLI looks for its column helpers.
+export { padCell } from "../ui/format.ts";
+
 /**
  * Compact "last used" age for the list columns (matches the menu's timeAgo).
  * Built from the same `idleSeconds`/`shortAge` pair the `idle:` line and the

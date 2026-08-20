@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import { PROVIDER_INFO } from "../../provider.ts";
 import type { ProviderName } from "../../types.ts";
+import { padCell } from "../format.ts";
 
 /**
  * The backend picker. `provider` is the one in force (marked ●) and `available`
@@ -31,7 +32,7 @@ export function ProviderScreen({
             <Text key={info.name} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
               <Text color={sel ? "black" : isCur ? "green" : "gray"}>{isCur ? "● " : "○ "}</Text>
-              <Text bold color={sel ? "black" : ok ? undefined : "gray"}>{info.label.padEnd(16).slice(0, 16)}</Text>
+              <Text bold color={sel ? "black" : ok ? undefined : "gray"}>{padCell(info.label, 16)}</Text>
               {ok ? (
                 <Text dimColor={!sel}>{`  via ${info.cli}`}</Text>
               ) : (

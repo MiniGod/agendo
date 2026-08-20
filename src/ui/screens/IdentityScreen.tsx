@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { Identity, TeamMember } from "../../types.ts";
+import { padCell } from "../format.ts";
 
 /**
  * The identity switcher. `identity` is the override picked in a previous visit
@@ -33,7 +34,7 @@ export function IdentityScreen({
             <Text key={m.id} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
               <Text color={sel ? "black" : isCur ? "green" : "gray"}>{isCur ? "● " : "○ "}</Text>
-              <Text bold>{m.displayName.padEnd(28).slice(0, 28)}</Text>
+              <Text bold>{padCell(m.displayName, 28)}</Text>
               {isMe ? <Text color={sel ? "black" : "magenta"}>{" (you)"}</Text> : null}
               <Text dimColor={!sel}>{`  ${m.uniqueName}`}</Text>
             </Text>

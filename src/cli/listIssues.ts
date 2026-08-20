@@ -3,6 +3,7 @@ import { printJson } from "../output.ts";
 import type { WorkItem } from "../types.ts";
 import { type ResourceListOptions, assocSessions, loadScopedModel } from "./resources.ts";
 import { flushWarnings } from "./warnings.ts";
+import { padCell } from "../ui/format.ts";
 
 /**
  * `list issues` (aliases `wi` / `work-items`): issues / work items known to the
@@ -58,7 +59,7 @@ export async function runListIssues(opts: ResourceListOptions): Promise<void> {
       [
         best?.running ? "●" : r.sessions.length ? "○" : " ",
         `#${r.id}`.padEnd(7),
-        (r.state || "-").slice(0, 14).padEnd(14),
+        padCell(r.state || "-", 14),
         (best?.shortId ?? "-").padEnd(12),
         r.title.slice(0, 50),
       ].join("  ").trimEnd(),

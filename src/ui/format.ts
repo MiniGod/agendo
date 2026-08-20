@@ -436,6 +436,32 @@ export function fit(s: string, w: number): string {
   return t + " ".repeat(Math.max(0, w - measureWidth(t)));
 }
 
+// Pad or truncate `s` to exactly `w` terminal cells.
+//
+// This is `fit`'s blunter sibling, and the difference is deliberate: `fit` is
+// the table formatter, so it reserves a gap column and marks truncation with
+// "…". These are FIXED-WIDTH LABEL cells — the picker screens and the CLI
+// tables — whose callers all wrote `padEnd(w).slice(0, w)`, which does neither.
+// Routing them through `fit` would visibly change rows that are correct today,
+// so it gets its own function rather than a flag.
+//
+// For printable ASCII this is byte-identical to `padEnd(w).slice(0, w)`, which
+// is the property that makes it safe to swap in: every such cell rendered by a
+// test today is ASCII, so no existing rendering can move. What changes is the
+// non-ASCII case those callers got wrong — a repo name, display name, branch or
+// directory with a CJK or accented character was measured in UTF-16 code units,
+// so the cell came out the wrong number of columns and dragged every column to
+// its right along with it, and a hard `.slice()` could sever a surrogate pair.
+export function padCell(s: string, w: number): string {
+  if (ASCII_ONLY.test(s)) return s.padEnd(w).slice(0, w);
+  const width = measureWidth(s);
+  if (width <= w) return s + " ".repeat(w - width);
+  // A wide cluster straddling the edge is dropped whole, so the clip can land
+  // a column short; pad back up to the exact width.
+  const t = clipToWidth(s, w);
+  return t + " ".repeat(Math.max(0, w - measureWidth(t)));
+}
+
 export interface Cell { text: string; color?: string }
 
 export function agentCell(running: number, total: number): Cell {

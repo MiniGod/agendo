@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { homeShort, repoBreakdown } from "../format.ts";
+import { homeShort, padCell, repoBreakdown } from "../format.ts";
 import { CLONE_ROW } from "../keys/repo.ts";
 import type { FreshTarget } from "../targets.ts";
 import type { RepoInfo } from "../../repos.ts";
@@ -60,7 +60,7 @@ export function RepoScreen({
           return (
             <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
-              <Text bold>{r.name.padEnd(22).slice(0, 22)}</Text>
+              <Text bold>{padCell(r.name, 22)}</Text>
               {r.total === 0 ? (
                 <Text color={sel ? "black" : "gray"}>{`  (no sessions yet)         `}</Text>
               ) : (
@@ -79,7 +79,7 @@ export function RepoScreen({
             backgroundColor={cursor === CLONE_ROW ? "cyan" : undefined}
           >
             {cursor === CLONE_ROW ? "❯ " : "  "}
-            <Text bold>{"＋ Clone from URL…".padEnd(21).slice(0, 21)}</Text>
+            <Text bold>{padCell("＋ Clone from URL…", 22)}</Text>
             <Text dimColor={cursor !== CLONE_ROW}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
           </Text>
         ) : null}

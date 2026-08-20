@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import { AGENT_CHOICES } from "../keys/agent.ts";
 import type { FreshTarget } from "../targets.ts";
+import { padCell } from "../format.ts";
 
 /**
  * The agent picker for a fresh session: which CLI should run it. `target` is the
@@ -19,7 +20,7 @@ export function AgentScreen({ target, cursor }: { target: FreshTarget; cursor: n
           return (
             <Text key={a.source} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
-              <Text bold>{a.label.padEnd(10).slice(0, 10)}</Text>
+              <Text bold>{padCell(a.label, 10)}</Text>
               <Text dimColor={!sel}>{`  ${a.desc}`}</Text>
             </Text>
           );

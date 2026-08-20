@@ -8,6 +8,7 @@ import {
   fit,
   fmtDelta,
   limitSuffix,
+  padCell,
   prBadge,
   runningStatus,
   stateColor,
@@ -179,7 +180,7 @@ export function ActionRow({ action }: { action: ActionLine }) {
       <Text wrap="truncate">
         <Text color="gray">{timeAgo(action.timestamp).padStart(8)}</Text>
         <Text color="gray" dimColor>{("  " + fmtDelta(action.deltaMs)).padEnd(8)}</Text>
-        <Text color={color}>{action.verb.slice(0, 9).padEnd(10)}</Text>
+        <Text color={color}>{padCell(action.verb, 9) + " "}</Text>
         <Text dimColor>{action.detail.replace(/\s+/g, " ")}</Text>
       </Text>
     </Box>

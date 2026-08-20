@@ -1,7 +1,7 @@
 import { type LoadedModel } from "../model.ts";
 import { printJson } from "../output.ts";
 import type { PRWithSessions } from "../types.ts";
-import { approvalInline } from "../ui/format.ts";
+import { approvalInline, padCell } from "../ui/format.ts";
 import { type ResourceListOptions, assocSessions, loadScopedModel } from "./resources.ts";
 import { flushWarnings } from "./warnings.ts";
 
@@ -90,7 +90,7 @@ export async function runListPrs(opts: ResourceListOptions): Promise<void> {
         // unprotected repo, and of every ADO PR with no minimum-reviewers
         // policy. Same bug 66c6222 fixed in the PR view, in a third place.
         approvalInline(r, "-").padEnd(5),
-        r.branch.slice(0, 24).padEnd(24),
+        padCell(r.branch, 24),
         (best?.shortId ?? "-").padEnd(12),
         (r.isDraft ? "[draft] " : "") + r.title.slice(0, 44),
       ].join("  ").trimEnd(),

@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { homeShort } from "../format.ts";
+import { homeShort, padCell } from "../format.ts";
 import type { ProfileChoice } from "../../profiles.ts";
 
 /**
@@ -29,7 +29,7 @@ export function ProfileScreen({
             <Text key={c.profile.configDir} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
               <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
-              <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{c.profile.name.padEnd(18).slice(0, 18)}</Text>
+              <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{padCell(c.profile.name, 18)}</Text>
               <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
               <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
             </Text>

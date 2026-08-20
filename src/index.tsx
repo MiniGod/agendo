@@ -26,7 +26,7 @@ import type { AgentSession, AgentSource, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 import { HELP } from "./cli/help.ts";
 import { flushWarnings } from "./cli/warnings.ts";
-import { readyCell, readyWidth, rowCompactionPercent, rowResetAt, timeAgo } from "./cli/cells.ts";
+import { padCell, readyCell, readyWidth, rowCompactionPercent, rowResetAt, timeAgo } from "./cli/cells.ts";
 import { currentModelOptions, resolveSessionLink } from "./cli/links.ts";
 import { runOpen } from "./cli/open.ts";
 import { runSend } from "./cli/send.ts";
@@ -1119,7 +1119,7 @@ async function runList(opts: ListOptions): Promise<void> {
         (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
         r.shortId.padEnd(12),
         timeAgo(new Date(r.lastUsed)).padEnd(8),
-        r.dir.slice(0, 20).padEnd(20),
+        padCell(r.dir, 20),
         (r.pr ? `!${r.pr.id}` : "-").padEnd(6),
         (r.workItem ? `#${r.workItem.id}` : "-").padEnd(6),
         r.title.slice(0, 44) +
@@ -1188,7 +1188,7 @@ function runPlainList(
       KIND_LABEL[kind].padEnd(3),
       shortId(s.id),
       timeAgo(s.lastUsed).padEnd(8),
-      (basename(s.cwd) || s.cwd).slice(0, 24).padEnd(24),
+      padCell(basename(s.cwd) || s.cwd, 24),
       s.title.replace(/\s+/g, " ").slice(0, 44),
       [stalled ? STALLED_MARK : "", shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""]
         .filter(Boolean)

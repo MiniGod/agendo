@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import { PROVIDER_INFO } from "../../provider.ts";
 import type { Identity, ProviderName } from "../../types.ts";
+import { padCell } from "../format.ts";
 
 /**
  * The Settings page: the actionable rows on top (in `settingsItems` order, the
@@ -45,7 +46,7 @@ export function SettingsScreen({
           return (
             <Text key={item} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
-              <Text bold>{settingLabel(item).padEnd(28).slice(0, 28)}</Text>
+              <Text bold>{padCell(settingLabel(item), 28)}</Text>
               <Text color={sel ? "black" : v.color}>{v.text}</Text>
             </Text>
           );
@@ -66,7 +67,7 @@ export function SettingsScreen({
           return (
             <Box key={info.name} marginLeft={2}>
               <Text wrap="truncate">
-                <Text bold>{info.label.padEnd(16).slice(0, 16)}</Text>
+                <Text bold>{padCell(info.label, 16)}</Text>
                 <Text color={detail.color}>{detail.text}</Text>
               </Text>
             </Box>

@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import type { RepoInfo } from "../../repos.ts";
 import type { FreshTarget } from "../targets.ts";
+import { padCell } from "../format.ts";
 
 /**
  * Where a fresh session should run in the chosen repo: a new worktree, or the
@@ -42,7 +43,7 @@ export function WtChoiceScreen({
           return (
             <Text key={label} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
-              <Text bold>{label.padEnd(22).slice(0, 22)}</Text>
+              <Text bold>{padCell(label, 22)}</Text>
               <Text dimColor={!sel}>{`  ${descs[i]}`}</Text>
             </Text>
           );
