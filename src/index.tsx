@@ -25,7 +25,6 @@ import { loadModel, refreshLiveTmux, filterModelByRepos, type LoadedModel, type 
 import { resolveInitialProvider, detectScopeProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
 import { loadState, resumeDialogChoice, peerSocketEnabled, PEER_SOCKET_ENV } from "./config.ts";
-import { takeWarnings } from "./errors.ts";
 import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
 import { discoverGitReposUnder } from "./repos.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
@@ -33,6 +32,7 @@ import { AGENTS } from "./types.ts";
 import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 import { HELP } from "./cli/help.ts";
+import { flushWarnings } from "./cli/warnings.ts";
 
 /** CLI glyphs for the three task states (plain ASCII markers stay greppable). */
 const STATUS_GLYPH: Record<string, string> = {
@@ -1447,17 +1447,6 @@ function readyCell(readiness: Readiness | null, resetAt: number | null, percent:
  */
 function readyWidth(cells: string[]): number {
   return Math.max(10, ...cells.map((c) => c.length));
-}
-
-/**
- * Print (and clear) anything the load reported-and-ignored. The TUI surfaces
- * these as a notice; the CLI has no such chrome, so they go to stderr — leaving
- * stdout clean for `--json`. Without this a corrupt `~/.agendo/state.json` would
- * silently drop the persisted backend and identity, and the command would query
- * the wrong backend with no hint as to why.
- */
-function flushWarnings(prefix: string): void {
-  for (const w of takeWarnings()) console.error(`${prefix}: ${w}`);
 }
 
 /**
