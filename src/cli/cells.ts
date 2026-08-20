@@ -2,9 +2,12 @@ import { paneCompactionPercent, stripAnsi, type Readiness } from "../tmux.ts";
 import { formatResetTime, paneResetAt } from "../usageLimit.ts";
 import { idleSeconds, shortAge } from "../idle.ts";
 
-// The CLI tables and the TUI measure a fixed-width cell the same way, so the
-// column helper lives in `ui/format.ts` and is re-exported here rather than
-// reimplemented — `cells.ts` is where the CLI looks for its column helpers.
+// Re-exported rather than imported directly by `src/index.tsx`, and the honest
+// reason is the line budget: index.tsx sits exactly on its `max-lines` cap, so
+// a bare import line there would fail the build. `cells.ts` is already where
+// the CLI keeps its column helpers and already imports from elsewhere in src/,
+// so routing through it costs nothing and keeps one measure of a cell shared
+// between the CLI tables and the TUI.
 export { padCell } from "../ui/format.ts";
 
 /**
