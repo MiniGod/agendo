@@ -632,8 +632,11 @@ than claiming success.
 An errored session is the same case. Recommendation:
 
 * `wait --json` reports `errored: { kind, text, attempts }`.
-* The default predicate wakes with `woke: "errored"` and a distinct non-zero
-  exit code, mirroring `woke: "blocked"`.
+* The default predicate wakes with `woke: "errored"` and a non-zero exit,
+  mirroring `woke: "blocked"`. (`finish()` today returns 0 for `satisfied` and 1
+  for everything else, so this needs no new exit code — but if `blocked` and
+  `errored` are ever to be told apart from the shell, that is the moment to give
+  each its own.)
 * `--state errored` becomes an explicit success condition, as `--state limited`
   is for the cap.
 
