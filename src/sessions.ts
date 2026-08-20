@@ -716,9 +716,9 @@ function sessionInScope(s: AgentSession, scope: RepoScope): boolean {
   return false;
 }
 
-// ── On-demand activity (recent action lines) ────────────────────────────────
-// The full-log parse behind an expanded session row lives in activity.ts. It is
-// re-exported here because `src/sessions.ts` is the path the UI (App.tsx,
-// useActivityWatchers) and index.tsx already import `loadActivity` from.
+// The on-demand full-log parse behind an expanded session row lives in
+// activity.ts. Re-exported here, and only here, because `src/sessions.ts` is the
+// path App.tsx, useActivityWatchers and index.tsx already import `loadActivity`
+// from. Import anything else from activity.ts directly: this file re-exporting
+// it is the edge that would let a cycle form if activity.ts ever imported back.
 export { loadActivity } from "./activity.ts";
-export type { LoadActivityOpts } from "./activity.ts";
