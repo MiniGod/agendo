@@ -9,6 +9,7 @@ import {
   sessionName,
   shortId,
   kindName,
+  type LiveTarget,
   liveTargetForShortId,
   hasSession,
   newDetached,
@@ -611,8 +612,10 @@ export function runInline(plan: OpenPlan): void {
  * cwd. Without it, a session shown as running under such a window would resume a
  * duplicate instead of attaching.
  */
-export function openSession(s: AgentSession, liveWindow?: string): OpenPlan {
-  const target = liveWindow ?? liveTargetForShortId(shortId(s.id)) ?? sessionName(s);
+export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan {
+  // The NAME half: `openTarget` re-resolves the location itself (via
+  // `windowLocation`), so it is already host-agnostic and wants the name.
+  const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
   return openTarget(target, s.cwd, resumeArgv(s));
 }
 

@@ -4,7 +4,7 @@ import { execFile } from "child_process";
 import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, filterModelByRepos, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi, type SessionKind, type Readiness } from "../tmux.ts";
+import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi, type SessionKind, type Readiness, type LiveTarget } from "../tmux.ts";
 import { formatResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog } from "../usageLimit.ts";
 import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
@@ -201,11 +201,11 @@ function sameLiveTmux(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
-// Map equality (same keys → same values). Gates the rescan's setModel on the
-// live-window map, whose changes drive the readiness/auto-resume effect.
-function sameLiveWindows(a: Map<string, string>, b: Map<string, string>): boolean {
+// Map equality on BOTH halves of each live target — a window that moved host keeps
+// its name and changes only the target addressing it. Gates the rescan's setModel.
+function sameLiveWindows(a: Map<string, LiveTarget>, b: Map<string, LiveTarget>): boolean {
   if (a.size !== b.size) return false;
-  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  for (const [k, v] of a) if (b.get(k)?.name !== v.name || b.get(k)?.target !== v.target) return false;
   return true;
 }
 
@@ -1835,7 +1835,7 @@ export default function App({
       // same cadence and the same fresh capture.
       const next = new Map<string, PaneState>();
       for (const [canon, win] of windows) {
-        const { raw, cursor } = capturePaneState(win);
+        const { raw, cursor } = capturePaneState(win.target);
         const readiness = paneReadiness(raw, cursor);
         let resetAt: number | null | undefined;
         if (readiness === "limited") {
@@ -1858,9 +1858,9 @@ export default function App({
           if (autoResumeRef.current) {
             const fired = resumeFired.current.get(canon) ?? null;
             if (shouldAutoResume({ enabled: true, readiness, resetAt: resetAt ?? null, now: Date.now(), firedFor: fired })) {
-              const fresh = capturePaneState(win);
+              const fresh = capturePaneState(win.target);
               if (paneResumeSafe(fresh.raw, fresh.cursor)) {
-                sendResume(win);
+                sendResume(win.target);
                 resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
               }
             } else if (
@@ -1879,8 +1879,8 @@ export default function App({
               // Re-capture fresh to guard the sample→act gap, and confirm it's STILL
               // the active dialog before pressing Escape (only ever Escape a pane
               // whose own "Esc to cancel" affordance is showing).
-              if (paneLimitDialogActive(capturePane(win))) {
-                sendDialogReveal(win);
+              if (paneLimitDialogActive(capturePane(win.target))) {
+                sendDialogReveal(win.target);
                 dialogRevealed.current.add(canon);
               }
             }

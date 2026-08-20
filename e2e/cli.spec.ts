@@ -8,11 +8,19 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { stripAnsi } from "../src/tmux.ts";
+import { stripAnsi, exactTarget, windowTarget } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
 import { BUSY_PANE, CODEX_SESSION_ID, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
 import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
+
+// The tmux target agendo addresses the fixture's running pane by (#39). The
+// fixture session is a tmux SESSION of its own (an agent launched outside tmux),
+// so its addressable target is the exact-pinned session name; a window living
+// inside a host session is addressed as `=host:=window` instead. Built with the
+// src helper rather than spelled here, so the two can't drift — the literal form
+// is pinned once, in detection.spec.ts's `windowTarget` test.
+const PANE_TARGET = exactTarget(RUNNING_TARGET);
 
 // The short id the CLI prints / accepts (sessionName strips non-alphanumerics).
 const shortIdOf = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
@@ -950,7 +958,7 @@ const keyIndexes = (log: string[][], key: string) =>
   log.flatMap((argv, i) => (argv[0] === "send-keys" && argv[3] === key ? [i] : []));
 /** The keys sent to the running pane, in order — the whole keystroke story. */
 const keysSent = (log: string[][]) =>
-  log.filter((argv) => argv[0] === "send-keys" && argv[2] === RUNNING_TARGET).map((argv) => argv.slice(3).join(" "));
+  log.filter((argv) => argv[0] === "send-keys" && argv[2] === PANE_TARGET).map((argv) => argv.slice(3).join(" "));
 
 /**
  * Fake-tmux state whose pane serves `queue` one capture per read, then `rest`
@@ -960,7 +968,11 @@ const keysSent = (log: string[][]) =>
  */
 const scriptedPane = (queue: string[], rest: string) => ({
   ...tmuxState,
-  captureQueue: { [RUNNING_TARGET]: queue },
+  // Keyed by PANE_TARGET, not the bare name: `captureQueue` is looked up by the
+  // RAW `-t` value (see e2e/fakebin/tmux), so it has to be filed under the target
+  // agendo actually sends. `captures` is looked up through targetName(), which
+  // normalises the target back to a window name, so it stays keyed by the name.
+  captureQueue: { [PANE_TARGET]: queue },
   captures: { [RUNNING_TARGET]: rest },
 });
 /**
@@ -2267,10 +2279,10 @@ test("agendo unblock sends <esc>continue<enter> to a limited session", async ({ 
   // The exact keystroke sequence reached tmux, to the right window: Escape, then
   // the literal word "continue", then Enter.
   const tmux = await mock.tmuxLog();
-  const sendKeys = tmux.filter((argv) => argv[0] === "send-keys" && argv.includes(RUNNING_TARGET));
-  expect(sendKeys).toContainEqual(["send-keys", "-t", RUNNING_TARGET, "Escape"]);
-  expect(sendKeys).toContainEqual(["send-keys", "-t", RUNNING_TARGET, "-l", "continue"]);
-  expect(sendKeys).toContainEqual(["send-keys", "-t", RUNNING_TARGET, "Enter"]);
+  const sendKeys = tmux.filter((argv) => argv[0] === "send-keys" && argv.includes(PANE_TARGET));
+  expect(sendKeys).toContainEqual(["send-keys", "-t", PANE_TARGET, "Escape"]);
+  expect(sendKeys).toContainEqual(["send-keys", "-t", PANE_TARGET, "-l", "continue"]);
+  expect(sendKeys).toContainEqual(["send-keys", "-t", PANE_TARGET, "Enter"]);
 });
 
 test("agendo unblock refuses a session that isn't limited (no clobber)", async ({ mock }) => {
@@ -4610,4 +4622,136 @@ test("a codex launch and a codex resume propagate it too", async ({ mock }) => {
   // Resume is `codex resume <uuid>` — never `--resume=`, and never the bare
   // `codex resume` that would open codex's interactive picker.
   expect(codexArgv.slice(codexArgv.indexOf("codex"))).toEqual(["codex", "resume", CODEX_SESSION_ID]);
+});
+// ── #39: a session hosted in ANOTHER launcher session ────────────────────────
+// tmux resolves a bare window-name target only inside the caller's own session,
+// so with several agendo hosts live every read of a window in a different host
+// failed and readiness fell through to `unknown` — for that whole host at once.
+// That is a lie rather than a degradation, and it also made `close`/`unblock`
+// refuse targets they "could not read".
+//
+// The fixture puts the running session in a SECOND host and makes the bare read
+// fail exactly as tmux does ("can't find pane"), so only a read that carries the
+// host session can succeed. A test that let the bare form work would pass either
+// way and prove nothing.
+const OTHER_HOST = "agendo-mc-applications";
+const crossHostState = {
+  sessions: ["agendo", OTHER_HOST],
+  windows: [
+    { session: "agendo", index: 0, name: "launcher" },
+    { session: OTHER_HOST, index: 3, name: RUNNING_TARGET },
+  ],
+  panes: [
+    { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+    { session: OTHER_HOST, window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+  ],
+  captures: { [RUNNING_TARGET]: BUSY_PANE },
+  // Three ways to get this wrong, all of which must fail rather than quietly
+  // serve the right screen: the bare name, the session-only pin, and — the one
+  // the harness could not otherwise catch — a qualifier naming the WRONG host.
+  // `targetName` in e2e/fakebin/tmux falls back to the window name when the
+  // session half doesn't resolve, so without this entry `=agendo:=<win>` would
+  // return the correct pane and a mis-qualified read would pass.
+  captureFails: {
+    [RUNNING_TARGET]: true,
+    [exactTarget(RUNNING_TARGET)]: true,
+    [windowTarget("agendo", RUNNING_TARGET)]: true,
+  },
+};
+const capturesIn = (tmux: string[][]) => tmux.filter((argv) => argv[0] === "capture-pane");
+
+test("agendo list reads a session hosted in another launcher session", async ({ mock }) => {
+  await mock.setTmuxState(crossHostState);
+
+  const r = agendo(mock.env, "list");
+  expect(r.status).toBe(0);
+  // The pane says busy. Before the fix this column read `unknown` for every
+  // session outside the caller's own host.
+  expect(r.stdout).toContain("busy");
+  expect(r.stdout).not.toContain("unknown");
+  // …and it got there by naming the host session, with BOTH halves exact-pinned:
+  // host names are prefixes of each other (`agendo` ⊂ `agendo-mc-applications`),
+  // so an unpinned qualifier would bind to the wrong host.
+  const reads = capturesIn(await mock.tmuxLog());
+  expect(reads.length).toBeGreaterThan(0);
+  for (const argv of reads) expect(argv).toContain(`=${OTHER_HOST}:=${RUNNING_TARGET}`);
+});
+
+test("agendo status reads a session hosted in another launcher session", async ({ mock }) => {
+  await mock.setTmuxState(crossHostState);
+
+  const r = agendo(mock.env, "status", SHORT_ID);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("● running");
+  expect(r.stdout).toContain("busy");
+});
+
+// A restored-but-unopened placeholder tab carries the canonical name in ONE host
+// while the real agent runs under the same name in another — a shape this launcher
+// creates by design. `send` and `unblock` WRITE to the pane they resolve, so
+// picking the placeholder is worse than not resolving at all: a pasted prompt
+// wakes it into a second agent on the same transcript, and unblock's leading
+// Escape closes the tab. The placeholder is listed FIRST here, so a resolver that
+// takes the first sighting picks it.
+const placeholderRivalState = {
+  sessions: ["agendo", OTHER_HOST],
+  windows: [
+    { session: "agendo", index: 2, name: RUNNING_TARGET, placeholder: true },
+    { session: OTHER_HOST, index: 3, name: RUNNING_TARGET, placeholder: false },
+  ],
+  panes: [
+    { session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: true },
+    { session: OTHER_HOST, window: RUNNING_TARGET, cwd: "/run/login", placeholder: false },
+  ],
+  captures: { [RUNNING_TARGET]: LIMIT_PANE },
+  // Reading the dormant tab must not be mistakable for success.
+  captureFails: { [windowTarget("agendo", RUNNING_TARGET)]: true },
+};
+
+test("agendo send pastes into a session hosted in another launcher session", async ({ mock }) => {
+  // `send` is the only path that WRITES a user's prompt into a pane, so a wrong
+  // target here types into someone else's window rather than merely misreporting
+  // a state. Ready pane (the default fixture screen) so delivery is allowed.
+  await mock.setTmuxState({ ...crossHostState, captures: { [RUNNING_TARGET]: tmuxState.captures[RUNNING_TARGET] } });
+
+  const r = agendo(mock.env, "send", SHORT_ID, "run the tests");
+  expect(r.status).toBe(0);
+  // Reported by NAME…
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+  // …and delivered to the host-qualified TARGET, buffer and Enter alike.
+  const target = windowTarget(OTHER_HOST, RUNNING_TARGET);
+  const log = await mock.tmuxLog();
+  expect(log).toContainEqual(["paste-buffer", "-p", "-d", "-b", "cl-send", "-t", target]);
+  expect(log).toContainEqual(["send-keys", "-t", target, "Enter"]);
+});
+
+test("agendo unblock prefers the REAL window over a same-named placeholder in another host", async ({ mock }) => {
+  await mock.setTmuxState(placeholderRivalState);
+
+  const r = agendo(mock.env, "unblock", SHORT_ID);
+  expect(r.status).toBe(0);
+  // It resolved a readable, limited pane — not the placeholder's dead read.
+  expect(r.stdout).toContain(`unblocked ${RUNNING_TARGET}`);
+  // And every keystroke went to the REAL window's host, not the placeholder's.
+  const real = windowTarget(OTHER_HOST, RUNNING_TARGET);
+  const sendKeys = (await mock.tmuxLog()).filter((argv) => argv[0] === "send-keys");
+  expect(sendKeys).toContainEqual(["send-keys", "-t", real, "Escape"]);
+  expect(sendKeys).toContainEqual(["send-keys", "-t", real, "-l", "continue"]);
+  expect(sendKeys).toContainEqual(["send-keys", "-t", real, "Enter"]);
+  // Nothing at all reached the placeholder — command-scoped, so it cannot be
+  // satisfied by the target merely being spelled differently.
+  const placeholder = windowTarget("agendo", RUNNING_TARGET);
+  expect(sendKeys.filter((argv) => argv.includes(placeholder))).toHaveLength(0);
+});
+
+test("agendo unblock reaches a session hosted in another launcher session", async ({ mock }) => {
+  // `unblock` refuses anything it can't read as limited, so an unreadable pane
+  // made it unusable for a whole host. It should now read the pane, find it busy
+  // rather than limited, and refuse for THAT reason — the honest one.
+  await mock.setTmuxState(crossHostState);
+
+  const r = agendo(mock.env, "unblock", SHORT_ID);
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain('looks "busy"');
+  expect(r.stderr).not.toContain("not running");
 });

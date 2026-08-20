@@ -880,7 +880,7 @@ async function runStatus(
     // session that may well be in another repo.
     const live = scope ? null : liveTargetForShortId(sid);
     if (live) {
-      console.log(`● running (${live}) — no activity logged yet; it may still be starting.`);
+      console.log(`● running (${live.name}) — no activity logged yet; it may still be starting.`);
       process.exit(0);
     }
     console.error(`No session found for "${token}"${scopeNote(scope)}.`);
@@ -909,7 +909,7 @@ async function runStatus(
   // below) because the stall qualifier needs readiness — a session that is
   // mid-turn is never stalled, however old its transcript looks — and it prints
   // above the readiness line.
-  const pane = target ? capturePaneState(target) : null;
+  const pane = target ? capturePaneState(target.target) : null;
   const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
   // A pane parked on claude's own resume dialog reads as `ready` but hasn't run
   // yet, so its idle age belongs to the PREVIOUS run — never a stall (idle.ts).
@@ -1290,7 +1290,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   // and `reason`, a human tailing stderr still sees what went wrong.
   const say = (line: string) => { if (!json) console.log(line); };
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
-  const target = liveTargetForShortId(sid);
+  const live = liveTargetForShortId(sid);
   // The kill switch. Deliberately gating DISCOVERY and not just the write: with
   // it off, `send` must behave exactly as it did before the socket existed, and
   // a resolved-but-unused peer would still change the outcome — a windowless
@@ -1310,7 +1310,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
         queued: o.route === "socket",
         id: sid,
         sessionId: peer?.sessionId ?? null,
-        target: target ?? null,
+        target: live ? live.name : null,
         pid: peer?.pid ?? null,
         socket: routeInfo,
         ...(o.reason ? { reason: o.reason } : {}),
@@ -1323,7 +1323,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   // outside agendo entirely (a plain terminal, an editor). Requiring a tmux
   // target first would make `send` the one thing you cannot do to a session
   // that `status` reports as running.
-  if (!target && !peer) {
+  if (!live && !peer) {
     // Two different failures wear the same shape here, and they need OPPOSITE
     // advice, so they must not share a message.
     //
@@ -1365,12 +1365,12 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
   // Pane state only exists when there IS a pane. Where it exists it is what the
   // dialog step below reads — that step is not advisory, and only a pane can
   // satisfy it.
-  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target) : { raw: "", cursor: null };
-  let readiness: Readiness | null = target ? paneReadiness(raw, cursor) : null;
+  let { raw, cursor }: PaneSnapshot = live ? capturePaneState(live.target) : { raw: "", cursor: null };
+  let readiness: Readiness | null = live ? paneReadiness(raw, cursor) : null;
   // ── Step 1: answer claude's resume dialog. Keystrokes only, and BEFORE any
   // delivery — a queued frame can't answer it, and a session parked here hasn't
   // started, so delivering past it would strand the message.
-  if (target && paneResumeDialogActive(raw)) {
+  if (live && paneResumeDialogActive(raw)) {
     const choice = resumeDialogChoice();
     // Reading the config can report-and-ignore a malformed config.json, and this
     // is the one command that ACTS on that file's value. Silently falling back to
@@ -1387,14 +1387,14 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     // Nothing was confirmed and the menu is still up — the cursor wouldn't move,
     // or we couldn't read it. Stop here rather than wait out the whole timeout;
     // either way not one character of the message has been sent.
-    if (!answerResumeDialog(target, option) && paneResumeDialogActive(capturePane(target))) {
+    if (!answerResumeDialog(live.target, option) && paneResumeDialogActive(capturePane(live.target))) {
       console.error(
         `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
           `selection keys). Nothing was pasted — answer it yourself, then retry.`,
       );
       return finish({ ok: false, route: null, reason: "resume-dialog-unanswered", extra: { resumeDialog: true } }, 2);
     }
-    const settled = await waitForInputBox(target, dialogWaitMs);
+    const settled = await waitForInputBox(live.target, dialogWaitMs);
     if (!settled) {
       console.error(
         `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
@@ -1416,7 +1416,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     return finish({ ok: false, route: null, reason: "limited", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
   }
   if (peer) {
-    const where = target ?? `pid ${peer.pid}`;
+    const where = live ? live.name : `pid ${peer.pid}`;
     // Each path names the state in its own vocabulary — the pane classifier's
     // ("ready", "compacting") when there is a pane, the receiver's own
     // ("idle", "busy", "waiting") when there is not. Both spell idle-ness
@@ -1440,7 +1440,7 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     } catch (e) {
       // The socket was advertised but unusable — the session died between
       // discovery and send, or something else holds the path.
-      if (!target) {
+      if (!live) {
         console.error(`Failed to reach the session socket (${(e as Error).message}), and it has no tmux window to type into.`);
         return finish({ ok: false, route: null, reason: "socket-unusable" }, 1);
       }
@@ -1468,13 +1468,13 @@ async function runSend(token: string | undefined, prompt: string, force: boolean
     );
     return finish({ ok: false, route: null, reason: "resume-menu-suspect", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
   }
-  sendToPane(target!, prompt); // non-null: reaching here means the peer path didn't return
+  sendToPane(live!.target, prompt); // non-null: reaching here means the peer path didn't return
   // Name the route, and — where it isn't obvious — why this one. A caller that
   // expected the socket needs to know it got keystroke semantics instead: this
   // message is in the pane NOW, and it was only allowed there because the pane
   // was idle (or --force said to anyway).
   const why = socketFellBack ? " (socket fallback)" : !socket.enabled ? ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})` : "";
-  say(`▸ pasted into pane ${target}${why}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
+  say(`▸ pasted into pane ${live!.name}${why}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
   return finish({ ok: true, route: "pane", extra: { state: readiness, resumeDialog: dialogAnswered, socketFellBack } }, 0);
 }
 
@@ -1489,13 +1489,13 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
     process.exit(1);
   }
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
-  const target = liveTargetForShortId(sid);
-  if (!target) {
+  const live = liveTargetForShortId(sid);
+  if (!live) {
     console.error(`Session ${token} is not running (no live tmux window to unblock).`);
     console.error(notRunningHint(token, "then unblock it"));
     process.exit(1);
   }
-  const { raw, cursor } = capturePaneState(target);
+  const { raw, cursor } = capturePaneState(live.target);
   const readiness = paneReadiness(raw, cursor);
   // The resume keystrokes lead with Escape, which on claude's own resume dialog
   // is its "Esc to cancel" — it would cancel the resume rather than unblock
@@ -1513,10 +1513,10 @@ async function runUnblock(token: string | undefined, force: boolean): Promise<vo
     console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
     process.exit(2);
   }
-  sendResume(target);
+  sendResume(live.target);
   const resetAt = readiness === "limited" ? paneResetAt(stripAnsi(raw)) : null;
   console.log(
-    `▸ unblocked ${target}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
+    `▸ unblocked ${live.name}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
   );
 }
 
@@ -1774,7 +1774,7 @@ async function runList(opts: ListOptions): Promise<void> {
     let resetAt: number | null = null;
     let compactionPercent: number | null = null;
     if (running && window) {
-      const { raw, cursor } = capturePaneState(window);
+      const { raw, cursor } = capturePaneState(window.target);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
       resumeDialog = paneResumeDialogActive(raw);
@@ -1895,7 +1895,7 @@ function runPlainList(
   // Cells, not finished lines: the readiness column's width isn't known until
   // every row is in (a `limited <time>` cell is wider than the state words).
   const rows: string[][] = [];
-  for (const { name, cwd, placeholder } of liveManagedPaths()) {
+  for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
     // Skip restored-but-unopened placeholder windows — they're idle bash waiting
@@ -1911,7 +1911,7 @@ function runPlainList(
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const { raw, cursor } = capturePaneState(name);
+    const { raw, cursor } = capturePaneState(target);
     const shells = paneShells(raw);
     const readiness = paneReadiness(raw, cursor);
     // Running-workflow marker (◆N): the session is live here by construction.
@@ -2273,12 +2273,12 @@ async function runClose(token: string | undefined, force: boolean, verb = "close
   // For one too new to be indexed: the live id-bearing window named after this
   // very short id — which is only ever that session's own window, so it's as
   // safe a target as the canonical name.
-  const canon = s ? sessionName(s) : liveTargetForShortId(sid);
+  const canon = s ? sessionName(s) : (liveTargetForShortId(sid)?.name ?? null);
   if (!canon) {
     console.error(`No session found for "${token}" — refusing to close anything.`);
     process.exit(1);
   }
-  const liveWindow = s ? liveWindows.get(canon) : canon;
+  const liveWindow = s ? liveWindows.get(canon)?.name : canon;
   // A placeholder squats the canonical name with no agent behind it; close it by
   // that name (it's a real tmux window) when no live window vouches for the session.
   const placeholder = !liveWindow && livePlaceholders.has(canon);

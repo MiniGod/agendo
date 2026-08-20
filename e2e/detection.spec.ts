@@ -25,7 +25,7 @@ import {
   type RepoInfo,
 } from "../src/repos.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
+import { type ManagedTarget, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
 import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
@@ -39,6 +39,15 @@ function sess(id: string, cwd: string, lastUsedMs: number, source: AgentSession[
   return { id, source, cwd, title: id, lastUsed: new Date(lastUsedMs) };
 }
 type Managed = { name: string; cwd: string; placeholder: boolean };
+/**
+ * Fixture shape → producer shape. `liveManagedPaths` now pairs every managed
+ * name with the target that ADDRESSES it, because a bare window name resolves
+ * only inside the caller's own tmux session (#39). These fixtures all model a
+ * single host, where the addressable target IS the exact-pinned bare name — so
+ * the fixtures keep saying exactly what they said, and this fills in the half
+ * that used to be implicit. Multi-host targets are asserted separately below.
+ */
+const qualify = (m: Managed): ManagedTarget => ({ ...m, target: `=${m.name}` });
 
 test.describe("managedKind: name-prefix → launch kind", () => {
   test("classifies every known prefix and rejects unknown ones", () => {
@@ -262,10 +271,10 @@ test.describe("dotted-basename contexts detect running sessions", () => {
     const s = sess("keppni7id", DOT_WT, 5_000);
     const canon = sessionName(s); // cl-claude-keppni7id
     const managed: Managed[] = [{ name: "cl-wi-42", cwd: DOT_WT, placeholder: false }];
-    const r = reconcileLive(new Set(["cl-wi-42"]), managed, [s]);
+    const r = reconcileLive(new Set(["cl-wi-42"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
     expect(r.liveKinds.get(canon)).toBe("workitem");
-    expect(r.liveWindows.get(canon)).toBe("cl-wi-42");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-wi-42");
   });
 
   test("attribution survives cwd representation drift (trailing slash / dot segments)", () => {
@@ -275,9 +284,9 @@ test.describe("dotted-basename contexts detect running sessions", () => {
     const s = sess("driftid", DOT_WT, 5_000);
     const canon = sessionName(s);
     const managed: Managed[] = [{ name: "cl-pr-9", cwd: DOT_WT + "/", placeholder: false }];
-    const r = reconcileLive(new Set(["cl-pr-9"]), managed, [s]);
+    const r = reconcileLive(new Set(["cl-pr-9"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
-    expect(r.liveWindows.get(canon)).toBe("cl-pr-9");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-pr-9");
   });
 
   test("resolveContext derives a slugified host session for a dotted path", () => {
@@ -293,10 +302,10 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
   test("id-bearing window marks its exact session running", () => {
     const s = sess("abc123def", "/x", 1_000);
     const canon = sessionName(s); // cl-claude-abc123def
-    const r = reconcileLive(new Set(), [{ name: canon, cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: canon, cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
     expect(r.liveKinds.get(canon)).toBe("resumed");
-    expect(r.liveWindows.get(canon)).toBe(canon);
+    expect(r.liveWindows.get(canon)?.name).toBe(canon);
     expect(r.livePlaceholders.size).toBe(0);
   });
 
@@ -304,14 +313,14 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     const older = sess("old", "/repo", 1_000);
     const newer = sess("new", "/repo", 5_000);
     const managed: Managed[] = [{ name: "cl-wi-101", cwd: "/repo", placeholder: false }];
-    const r = reconcileLive(new Set(["cl-wi-101"]), managed, [older, newer]);
+    const r = reconcileLive(new Set(["cl-wi-101"]), managed.map(qualify), [older, newer]);
 
     const canon = sessionName(newer);
     expect(r.live.has(canon)).toBe(true);
     expect(r.liveKinds.get(canon)).toBe("workitem");
     // The recorded window is the LEGACY name — this is what the app attaches to,
     // so it never spawns a duplicate cl-claude-<id> window for the session.
-    expect(r.liveWindows.get(canon)).toBe("cl-wi-101");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-wi-101");
     // Only the MRU session is attributed; the older one in the same cwd is not.
     expect(r.live.has(sessionName(older))).toBe(false);
   });
@@ -320,7 +329,7 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     const s = sess("xyz", "/x", 1_000);
     const canon = sessionName(s);
     // `base` counted the placeholder window as live (it carries the canonical name).
-    const r = reconcileLive(new Set([canon]), [{ name: canon, cwd: "/x", placeholder: true }], [s]);
+    const r = reconcileLive(new Set([canon]), [{ name: canon, cwd: "/x", placeholder: true }].map(qualify), [s]);
     expect(r.live.has(canon)).toBe(false); // not actually running
     expect(r.livePlaceholders.has(canon)).toBe(true); // badged restored-but-unopened
     expect(r.liveKinds.has(canon)).toBe(false);
@@ -336,10 +345,10 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
       { name: canon, cwd: "/repo", placeholder: true }, // placeholder first
       { name: "cl-wi-9", cwd: "/repo", placeholder: false }, // real window, same session by cwd
     ];
-    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed, [s]);
+    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true); // real window vouched → running
     expect(r.livePlaceholders.has(canon)).toBe(false); // not a dormant tab
-    expect(r.liveWindows.get(canon)).toBe("cl-wi-9"); // attached via the real window
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-wi-9"); // attached via the real window
   });
 
   test("same, with the real window listed BEFORE the placeholder", () => {
@@ -349,14 +358,14 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
       { name: "cl-wi-9", cwd: "/repo", placeholder: false },
       { name: canon, cwd: "/repo", placeholder: true },
     ];
-    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed, [s]);
+    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
     expect(r.livePlaceholders.has(canon)).toBe(false);
   });
 
   test("windows with an unknown cl- kind are ignored", () => {
     const s = sess("s", "/x", 1_000);
-    const r = reconcileLive(new Set(), [{ name: "cl-bogus-1", cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: "cl-bogus-1", cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.size).toBe(0);
     expect(r.liveWindows.size).toBe(0);
   });
@@ -366,14 +375,14 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     // back to that session. Guards the shortId slug rule the names depend on.
     const s = sess("a1b2-c3d4-e5f6-long", "/x", 1_000, "copilot");
     expect(sessionName(s)).toBe(`cl-copilot-${shortId(s.id)}`);
-    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
   });
 
   test("a resumed codex window attributes by its canonical id-bearing name", () => {
     const s = sess("019cde00-1111-7000-8000-00000000cde0", "/x", 1_000, "codex");
     expect(sessionName(s)).toBe("cl-codex-019cde001111");
-    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
     expect(r.liveKinds.get(sessionName(s))).toBe("resumed");
   });
@@ -382,10 +391,10 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     // The window name carries no session id, so this is the path that makes a
     // `agendo launch --agent codex` session show up as running at all.
     const s = sess("019cde00-1111-7000-8000-00000000cde0", "/wt", 1_000, "codex");
-    const r = reconcileLive(new Set(), [{ name: "cl-bg-codex-9f8e7d6c", cwd: "/wt", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: "cl-bg-codex-9f8e7d6c", cwd: "/wt", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
     expect(r.liveKinds.get(sessionName(s))).toBe("background");
-    expect(r.liveWindows.get(sessionName(s))).toBe("cl-bg-codex-9f8e7d6c");
+    expect(r.liveWindows.get(sessionName(s))?.name).toBe("cl-bg-codex-9f8e7d6c");
   });
 });
 
@@ -2967,5 +2976,56 @@ test.describe("bootstrapRepoRoot: the cwd fallback never climbs into $HOME", () 
     const plain = join(nestedHome, "work");
     mkdirSync(plain, { recursive: true });
     expect(bootstrapRepoRoot(plain)).toBe(plain);
+  });
+});
+// ── #39: a window's name and the target that addresses it are not the same ───
+// `liveWindows()` used to yield a bare window name, and tmux resolves one of
+// those only inside the caller's own session. With several launcher hosts live,
+// every capture of a window in another host failed outright, so `list`/`status`
+// reported that whole host's sessions as `unknown`. The CLI-level regression is
+// pinned in cli.spec.ts; these fix the pieces it is built out of.
+test.describe("#39: window targets carry their host session", () => {
+  test("windowTarget pins BOTH halves of a compound target", () => {
+    expect(windowTarget("agendo-mc-applications", "cl-claude-ec3d3fb21f62")).toBe(
+      "=agendo-mc-applications:=cl-claude-ec3d3fb21f62",
+    );
+    // Unpinned, tmux resolves exact → unique-prefix → fnmatch, and these names
+    // are prefixes of each other in BOTH positions: `agendo` ⊂ `agendo-agendo`
+    // ⊂ `agendo-mc-applications`, and `cl-pr-5` ⊂ `cl-pr-50`.
+    expect(windowTarget("agendo", "cl-pr-5")).toBe("=agendo:=cl-pr-5");
+  });
+
+  test("reconcileLive keeps the attribution name and the addressable target apart", () => {
+    const s = sess("ec3d3fb21f62", "/x", 1_000);
+    const canon = sessionName(s);
+    const target = `=agendo-mc-applications:=${canon}`;
+    const r = reconcileLive(new Set([canon]), [{ name: canon, target, cwd: "/x", placeholder: false }], [s]);
+    // The name is what everything attributes, displays and kills by…
+    expect(r.liveWindows.get(canon)?.name).toBe(canon);
+    // …and the target is the only form that may be handed to tmux. Collapsing
+    // the two into one string is exactly what #39 was.
+    expect(r.liveWindows.get(canon)?.target).toBe(target);
+  });
+
+  test("the recorded target is the REAL window's, not a same-named placeholder's", () => {
+    // A restored-but-unopened tab in one host carries the same canonical name as
+    // the live window in another — the duplicate-name case this launcher creates
+    // by design. Recording the placeholder's target would point every readiness
+    // read at an idle bash and report it as the session's own screen.
+    const s = sess("dupehost1", "/x", 1_000);
+    const canon = sessionName(s);
+    const real = `=agendo-mc-applications:=${canon}`;
+    const r = reconcileLive(
+      new Set([canon]),
+      [
+        { name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: true },
+        { name: canon, target: real, cwd: "/x", placeholder: false },
+      ],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveWindows.get(canon)?.target).toBe(real);
+    // A real window vouched for the name, so it is not a dormant tab.
+    expect(r.livePlaceholders.has(canon)).toBe(false);
   });
 });
