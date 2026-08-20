@@ -38,7 +38,8 @@
     "release": "commit-and-tag-version",
     "prepare": "git config core.hooksPath .githooks || true",
     "typecheck:e2e": "tsc --noEmit -p e2e/tsconfig.json",
-    "test:e2e": "playwright test",
+    "test": "bun test test/",
+  "test:e2e": "playwright test",
     "test:e2e:setup": "playwright install chromium"
   },
   "dependencies": {
