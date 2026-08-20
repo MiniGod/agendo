@@ -266,6 +266,13 @@ function voteSummary(reviews: any[] | undefined, reviewDecision: string | undefi
   // carries GitHub's own answer so nothing has to guess.
   const requiredCount = reviewDecision ? 1 : 0;
   const gateMet = reviewDecision ? reviewDecision === "APPROVED" : undefined;
+  // The `Math.max(1, …)` is load-bearing, not defensive tidying. A decision of
+  // APPROVED with `approvals` counted as 0 is a real shape — the approving
+  // review can be older than the page of reviews `gh` returned, or dismissed
+  // and re-approved outside it — and it would render a GREEN "✓ 0/1": gate met,
+  // nobody approved. Flooring the count at 1 is the only thing that makes that
+  // cell unreachable. Don't remove it without giving the renderers another way
+  // to reconcile the two (src/ui/format.ts approvalProgress).
   const approvedCount = reviewDecision === "APPROVED" ? Math.max(1, approvals) : approvals;
   return { approvals, rejections, waiting: 0, approvedCount, requiredCount, gateMet };
 }
