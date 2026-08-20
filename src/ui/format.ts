@@ -130,13 +130,35 @@ function approvalsMet(pr: PullRequest): boolean {
   return pr.requiredCount > 0 && pr.approvedCount >= pr.requiredCount;
 }
 
+// The approval figure, in the one form both PR renderings use.
+//
+// `approvedCount` / `requiredCount` are the SAME two fields wherever they are
+// drawn — the work-items badge and the PR view's APPROVE column describe one
+// quantity, so they must not phrase it two ways. They used to: the badge showed
+// `✓2` where the column showed `✓ 2/0`.
+//
+// The column's version was the wrong one. `requiredCount` is 0 when the gate is
+// UNKNOWN, not when it is zero: ADO leaves it 0 when a PR names no required
+// reviewers and no minimum-reviewers policy was found (src/ado.ts voteSummary +
+// the enrichment pass), and GitHub leaves it 0 whenever `reviewDecision` is
+// absent — which is every PR in a repo without branch protection, approvals or
+// not. So "2/0" prints "2 of 0 required", a claim the data never makes, for the
+// ordinary case of an approved PR on an unprotected repo.
+//
+// Returns "" when there is nothing to report. The placeholder is the caller's,
+// because the two sites are different shapes: a padded column writes the em
+// dash it uses for every other empty cell, an inline badge writes a middot.
+function approvalRatio(pr: PullRequest): string {
+  if (pr.requiredCount > 0) return `${pr.approvedCount}/${pr.requiredCount}`;
+  return pr.approvedCount > 0 ? `${pr.approvedCount}` : "";
+}
+
 export function prBadge(pr: PullRequest): { text: string; color: string } {
-  const ratio =
-    pr.requiredCount > 0
-      ? `${pr.approvedCount}/${pr.requiredCount}`
-      : pr.approvedCount > 0
-        ? `✓${pr.approvedCount}`
-        : "·";
+  const progress = approvalRatio(pr);
+  // A bare count has no slash to mark it as approvals, so it takes a leading ✓
+  // the X/Y form does not need. Note this is NOT the badge's other ✓: that one
+  // is CI_GLYPH.pass and is always last.
+  const ratio = progress === "" ? "·" : pr.requiredCount > 0 ? progress : `✓${progress}`;
   const ci = CI_GLYPH[pr.ci] ? ` ${CI_GLYPH[pr.ci]}` : "";
   const draft = pr.isDraft ? " draft" : "";
   const bad = pr.rejections > 0 || pr.ci === "fail" || pr.ci === "conflict";
@@ -147,9 +169,16 @@ export function prBadge(pr: PullRequest): { text: string; color: string } {
 
 // PR-view column cells: approval progress (X/Y) and CI / merge-gate status.
 export function approvalCell(pr: PullRequest): Cell {
-  if (pr.requiredCount === 0 && pr.approvedCount === 0) return { text: "—", color: "gray" };
+  const progress = approvalRatio(pr);
+  if (progress === "") return { text: "—", color: "gray" };
+  // The leading ✓ labels the number as approvals — it is the APPROVE column's
+  // glyph, not a verdict, which is why it is there at "✓ 0/1" too. The verdict
+  // is the color: green once the gate is met, yellow while it isn't, red on a
+  // rejection. With no known gate `approvalsMet` is false, so bare approvals
+  // read as yellow/pending — the honest colour for progress toward a gate
+  // nobody told us about.
   const color = pr.rejections > 0 ? "red" : approvalsMet(pr) ? "green" : "yellow";
-  return { text: `✓ ${pr.approvedCount}/${pr.requiredCount}`, color };
+  return { text: `✓ ${progress}`, color };
 }
 
 export function ciCell(pr: PullRequest): Cell {
