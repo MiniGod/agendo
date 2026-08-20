@@ -36,7 +36,21 @@ export function handleBranchKeys(input: string, key: Key, ctx: Ctx): boolean {
     edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
     return true;
   }
-  if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input)) {
+  // Same guard as the search prompt (see there, and clone.ts, for why an
+  // ASCII-only class is the wrong test for names in this repo): printable is
+  // "not a control character", and a chunk holding one is rejected whole.
+  //
+  // Safe for a BRANCH name specifically. Git refnames forbid control
+  // characters, space and ~ ^ : ? * [ \ — but NOT letters outside ASCII, so
+  // `worktree-þróun` is a perfectly legal ref while the punctuation this guard
+  // has always accepted is not. That path is unchanged and already handles a
+  // bad name: the value reaches git only as one argv element of a `spawnSync`
+  // (`createWorktree`, src/worktree.ts), never a shell, so an invalid refname
+  // fails loudly as "Worktree failed: <git's own message>" with nothing
+  // created. The worktree DIRECTORY is not this string either —
+  // `worktreeDirName` reduces it to [a-zA-Z0-9-], and BranchScreen previews
+  // that result live under the input.
+  if (input && !key.ctrl && !key.meta && !/\p{Cc}/u.test(input)) {
     edit((v, c) => ({ value: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
     return true;
   }

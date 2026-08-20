@@ -66,7 +66,24 @@ function handleSearchInputKeys(input: string, key: Key, ctx: Ctx): boolean {
       ctx.editSearch((v, c) => (c === 0 ? { cursor: 0 } : { text: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
       return true;
     }
-    if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input)) {
+    // Printable means "not a control character", NOT "ASCII". The clone prompt
+    // (src/ui/keys/clone.ts) carries the long version of why that distinction
+    // is not cosmetic here: repo names, branches and ADO work-item titles are
+    // routinely Icelandic — þ ð æ ö á í ó ú ý — and an ASCII-only class drops
+    // those keystrokes with no character, no beep and no error, so the one row
+    // visible on screen is the one row that cannot be searched for.
+    //
+    // `\p{Cc}` is exactly the C0 and C1 control ranges (U+0000–U+001F,
+    // U+007F–U+009F), written as a property escape so the pattern holds no
+    // control character of its own (see `no-control-regex` in .oxlintrc.json).
+    // A chunk containing one is still rejected WHOLE rather than stripped —
+    // that is precisely today's behaviour for ASCII, and it is what keeps an
+    // unrecognised escape sequence out of the query: Ink hands those over with
+    // the leading ESC already removed, so stripping the rest would type
+    // `[200~` into the search box instead of ignoring it. clone.ts trades that
+    // away deliberately because a pasted URL with a trailing newline is its
+    // entire job; a search query has no such paste to protect.
+    if (input && !key.ctrl && !key.meta && !/\p{Cc}/u.test(input)) {
       ctx.setCursor(0);
       ctx.editSearch((v, c) => ({ text: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
       return true;
