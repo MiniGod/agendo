@@ -1,8 +1,5 @@
 #!/usr/bin/env bun
-import React from "react";
-import { render } from "ink";
 import { spawnSync } from "child_process";
-import App from "./ui/App.tsx";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
@@ -12,7 +9,7 @@ import {
   type SessionKind, type Readiness,
 } from "./tmux.ts";
 import { formatResetTime, paneResetAt } from "./usageLimit.ts";
-import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, SELF_CMD, withSelfCmdEnv, type OpenPlan } from "./launch.ts";
+import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, SELF_CMD, withSelfCmdEnv } from "./launch.ts";
 import { SessionIndex, loadActivity } from "./sessions.ts";
 import { findPeer } from "./peer.ts";
 import { durationLabel, idleSeconds, isStalled, resolveStalledAfterMs, shortAge } from "./idle.ts";
@@ -38,6 +35,7 @@ import { runListPrs } from "./cli/listPrs.ts";
 import { runListIssues } from "./cli/listIssues.ts";
 import { runResume } from "./cli/resume.ts";
 import { runClose } from "./cli/close.ts";
+import { runMenu } from "./cli/menu.tsx";
 
 /** CLI glyphs for the three task states (plain ASCII markers stay greppable). */
 const STATUS_GLYPH: Record<string, string> = {
@@ -1235,24 +1233,13 @@ process.stdin.on("end", quitOnInputLoss);
 process.stdin.on("close", quitOnInputLoss);
 process.stdin.on("error", quitOnInputLoss);
 
-/** Render the menu once; resolves with the chosen plan, or null if the user quit. */
-function runMenu(): Promise<OpenPlan | null> {
-  return new Promise((resolve) => {
-    const chosen: { plan: OpenPlan | null } = { plan: null };
-    const { waitUntilExit } = render(
-      <App onOpen={(p) => { chosen.plan = p; }} filterRoot={ctx.filterRoot} hostSession={ctx.hostSession} />,
-    );
-    waitUntilExit().then(() => resolve(chosen.plan));
-  });
-}
-
 // Loop: show menu → (outside tmux only) open a session → return to the menu.
 // Outside tmux, picking a session resolves a "handover" plan: `attach` blocks
 // until you detach, then the menu redraws. Inside tmux the menu handles opens
 // itself (switches to the agent's window) and stays mounted, so it never
 // resolves a plan here — the loop just waits for q/esc to quit (plan === null).
 while (true) {
-  const plan = await runMenu();
+  const plan = await runMenu(ctx);
   if (!plan) break;
 
   // Clear the screen before handing over so tmux starts clean.
