@@ -18,9 +18,12 @@
   // The limits are NOT pinned once globally at the worst file in the tree —
   // that shape leaves every other file free to grow up to the worst one. The
   // `src/**` block below is the real budget, set at the worst value anywhere in
-  // src/ OUTSIDE the three files this refactor effort is dismantling. Those
-  // three carry named, temporary exemptions, and each shrinks or disappears as
-  // its PR lands.
+  // src/ that the exemption blocks do not already cover. The three files this
+  // refactor effort is dismantling carry named, temporary exemptions, and each
+  // shrinks or disappears as its PR lands — but an exemption block only lifts
+  // the rules it names, so `src/index.tsx` (which exempts max-lines / complexity
+  // / max-statements and nothing else) is still measured by the shared
+  // max-lines-per-function, and currently sets it.
   //
   // Be precise about what that buys: the budget is per GLOB GROUP, so the 24
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
@@ -83,16 +86,23 @@
       // byte-for-byte for the duration of the refactor effort, so a threshold
       // there could not be acted on even if it fired.
       //
-      // Each number is the worst value in src/ excluding App.tsx / index.tsx /
-      // tmux.ts, named with the file that currently sets it.
+      // Each number is the worst value in src/ that is not already covered by an
+      // exemption block below, named with the file and function that sets it.
+      // Note that is NOT the same as "excluding App.tsx / index.tsx / tmux.ts":
+      // an exemption lifts only the rules it names, so index.tsx still answers to
+      // the shared max-lines-per-function and tmux.ts to everything but max-lines.
       // Every extension oxlint will parse, not just ts/tsx: a new src/foo.js or
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
         "max-lines": ["error", { "max": 1242, "skipBlankLines": false, "skipComments": false }], // src/sessions.ts
-        "max-lines-per-function": ["error", { "max": 245, "skipBlankLines": false, "skipComments": false }], // src/wait.ts
-        "complexity": ["error", 34], // src/wait.ts
-        "max-statements": ["error", 65], // src/wait.ts
+        "max-lines-per-function": ["error", { "max": 210, "skipBlankLines": false, "skipComments": false }], // src/index.tsx runStatus
+        // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
+        // three-way tie between src/sessions.ts `claudeAction`, src/sessions.ts
+        // `loadCodexActivity` and src/ui/components.tsx `SessionRow`. Three
+        // separate refactors have to land before this one can move at all.
+        "complexity": ["error", 34], // src/sessions.ts claudeAction / loadCodexActivity, src/ui/components.tsx SessionRow
+        "max-statements": ["error", 61], // src/ui/keys/list.ts handleListViewKeys
         "max-params": ["error", 6], // src/usageLimit.ts
         "max-depth": ["error", 6], // src/sessions.ts:975
         "max-nested-callbacks": ["error", 4] // src/sessions.ts:211
