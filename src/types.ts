@@ -194,6 +194,15 @@ export interface PullRequest {
   /** Approval progress toward the gate: approvedCount of requiredCount (X/Y). */
   approvedCount: number;
   requiredCount: number;
+  /**
+   * The provider's OWN verdict on the review gate, for a provider that reports
+   * whether the gate is satisfied without reporting how big it is (GitHub's
+   * `reviewDecision`). Authoritative when set: it outranks comparing
+   * approvedCount against requiredCount, which can only ever be as good as
+   * `requiredCount` is. Left undefined by a provider that reports an exact
+   * count instead (Azure DevOps), where the comparison IS the verdict.
+   */
+  gateMet?: boolean;
   /** CI / merge-gate status. "none" until policy enrichment fills it in. */
   ci: CIStatus;
   /**

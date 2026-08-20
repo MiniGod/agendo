@@ -127,7 +127,12 @@ const CI_GLYPH: Record<PullRequest["ci"], string> = {
   none: "",
 };
 
+// Whether the review gate is satisfied — the one question both PR renderings
+// answer with colour. A provider that states its own verdict wins: GitHub's
+// `requiredCount` is a floor rather than a count (src/github.ts voteSummary),
+// so `approvedCount >= requiredCount` is not evidence of anything there.
 function approvalsMet(pr: PullRequest): boolean {
+  if (pr.gateMet !== undefined) return pr.gateMet;
   return pr.requiredCount > 0 && pr.approvedCount >= pr.requiredCount;
 }
 
@@ -145,6 +150,15 @@ function approvalsMet(pr: PullRequest): boolean {
 // absent — which is every PR in a repo without branch protection, approvals or
 // not. So "2/0" prints "2 of 0 required", a claim the data never makes, for the
 // ordinary case of an approved PR on an unprotected repo.
+//
+// GitHub's Y of 1 is a different case and deliberately stays. It is not a
+// sentinel standing in for "unknown": `reviewDecision` being non-null means the
+// base branch genuinely requires review, so 1 is the smallest gate consistent
+// with what the API said — a floor, and one that reads correctly at the
+// boundary the column exists for ("0/1" = awaited, "1/1" = there). The wrong
+// thing it could do was decide the VERDICT, letting a two-approval gate look
+// satisfied at one; `PullRequest.gateMet` now carries GitHub's own answer and
+// `approvalsMet` prefers it, so the floor only ever sets the printed Y.
 //
 // Returns "" when there is nothing to report. The placeholder is the caller's,
 // because the two sites are different shapes: a padded column writes the em
