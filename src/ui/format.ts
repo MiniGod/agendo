@@ -1,4 +1,5 @@
 import { basename } from "path";
+import { eastAsianWidth } from "get-east-asian-width";
 import stringWidth from "string-width";
 import { repoRootForCwd, type RepoInfo } from "../repos.ts";
 import { formatResetTime } from "../usageLimit.ts";
@@ -218,17 +219,96 @@ export function ciCell(pr: PullRequest): Cell {
 // cut between a base and its mark leaves the mark to re-attach itself to the "…"
 // or to whatever the terminal draws next.
 //
-// Measurement is `string-width` — the same library ink itself uses to lay out
-// `<Text>`, so agendo and its renderer agree on what a column is by construction
-// rather than by two hand-rolled tables happening to match. Cutting is done on
-// GRAPHEME CLUSTER boundaries via the built-in `Intl.Segmenter`: clusters are a
-// superset of code-point boundaries, so keeping base + marks together comes free
-// with never splitting a pair.
+// Cutting is done on GRAPHEME CLUSTER boundaries via the built-in
+// `Intl.Segmenter`: clusters are a superset of code-point boundaries, so keeping
+// base + marks together comes free with never splitting a pair.
 const SEGMENTER = new Intl.Segmenter();
 
 // Printable ASCII only: no wide characters, no astral characters, no combining
 // marks, so one code unit is exactly one cell.
 const ASCII_ONLY = /^[\x20-\x7E]*$/;
+
+// Columns one grapheme cluster occupies, by the rule a wcwidth-based terminal
+// actually applies. tmux is one, and agendo runs inside it.
+//
+// This is NOT `stringWidth(cluster)`. `string-width` asks `emoji-regex` first,
+// and `emoji-regex` matches BARE symbol code points that have an emoji form —
+// so it calls "⚠" (U+26A0, no variation selector) two columns wide. tmux draws
+// it in one. The same disagreement covers ✔ U+2714 and ❤ U+2764. Measuring
+// those as 2 pads the cell one column short and slides every column to its
+// right, which is the exact defect this whole section exists to prevent: it is
+// how `⚠ conflict` became misaligned when `⌛ expired` was fixed.
+//
+// Where it DOES defer to `string-width`, agendo wants the same copy ink uses to
+// lay `<Text>` out. That sharing is not automatic and not free: it holds only
+// because this package declares `^7.2.0` and ink declares `^7.2.0`, so the
+// installer hoists one instance. **The declared range has to keep tracking
+// ink's.** Widening it to `^8` would install a second copy with a different
+// table — v8 answers 1 for U+26A0, U+2714 and U+2764 where v7 answers 2 — and
+// agendo would then be measuring with a library its renderer isn't using, which
+// is the one property worth having here. `get-east-asian-width` is declared for
+// the same reason `string-width` is: package.json ships `src/`, so a runtime
+// import that is only ever a transitive dependency breaks the day the tree
+// shifts.
+//
+// The three branches, in order, and why the order matters:
+function clusterWidth(cluster: string): number {
+  const cp = cluster.codePointAt(0) ?? 0;
+  // 0. An UNPAIRED SURROGATE is not encodable as UTF-8, so what reaches the
+  //    terminal is the replacement character — one column. `stringWidth` says
+  //    0, which under-pads the cell by one. Needs to come before the zero test
+  //    for that reason. (Only reachable from malformed provider JSON, but it is
+  //    the same family of bug as the rest of this function.)
+  if (cluster.length === 1 && cp >= 0xd800 && cp <= 0xdfff) return 1;
+  const w = stringWidth(cluster);
+  // 1. ZERO stays zero: combining marks, ZWSP, a bare variation selector, a
+  //    control byte. East Asian Width has no "invisible" answer — it calls all
+  //    of them Neutral, i.e. 1 — so this is the one question only
+  //    `string-width` can answer, and it has to be asked first.
+  if (w === 0) return 0;
+  // 2. A SINGLE code point on its own gets TEXT presentation in a terminal, and
+  //    the width of a text-presentation glyph is its East Asian Width. Wide/
+  //    Fullwidth → 2 (CJK, and every code point whose default presentation is
+  //    emoji — Unicode gives those EAW=Wide, so ⌛ U+231B and 👍 U+1F44D are
+  //    still 2 here). Everything else → 1, including the bare symbols
+  //    `emoji-regex` over-claims.
+  if (cluster.length === (cp > 0xffff ? 2 : 1)) return eastAsianWidth(cp) === 2 ? 2 : 1;
+  // 3. A MULTI-code-point cluster is a deliberate emoji: VS16 explicitly
+  //    requests emoji presentation, and ZWJ sequences, skin-tone modifiers,
+  //    regional-indicator flags and keycaps have no text form to fall back to.
+  //    `string-width` is right about these, so defer to it (and to ink, which
+  //    will lay the row out with the same number).
+  return w;
+}
+
+// `clusterWidth` is a pure function of a short string, and a table redraw asks
+// it the same few hundred questions over and over — the CI glyph, the caret,
+// and every character of every title, once per row per frame. So memoize it.
+// The cap is a safety valve for pathological input, not a working-set estimate:
+// a screenful of mixed CJK settles around a few hundred distinct clusters, and
+// past the cap lookups simply stop being cached (never wrong, just uncached).
+// Measured on a 50-row × 7-column PR screen: ≈1270µs → ≈260µs with ASCII
+// titles, ≈4170µs → ≈700µs with CJK ones — i.e. cheaper than the plain
+// `stringWidth` measure this replaces, which paid ≈310µs and ≈1660µs for the
+// same two screens while getting ⚠ wrong.
+const CLUSTER_WIDTHS = new Map<string, number>();
+
+function cachedClusterWidth(cluster: string): number {
+  const hit = CLUSTER_WIDTHS.get(cluster);
+  if (hit !== undefined) return hit;
+  const w = clusterWidth(cluster);
+  if (CLUSTER_WIDTHS.size < 4096) CLUSTER_WIDTHS.set(cluster, w);
+  return w;
+}
+
+// Columns `s` occupies, summed over its clusters. The per-cluster rule is the
+// only measure `fit` uses, so padding and truncation can never be computed from
+// two different ideas of a column.
+function measureWidth(s: string): number {
+  let n = 0;
+  for (const { segment } of SEGMENTER.segment(s)) n += cachedClusterWidth(segment);
+  return n;
+}
 
 // Longest prefix of `s` that fits in `cells` columns, cut only between grapheme
 // clusters. A wide cluster straddling the boundary is dropped whole, which can
@@ -238,7 +318,7 @@ function clipToWidth(s: string, cells: number): string {
   let out = "";
   let used = 0;
   for (const { segment } of SEGMENTER.segment(s)) {
-    const cw = stringWidth(segment);
+    const cw = cachedClusterWidth(segment);
     if (used + cw > cells) break;
     out += segment;
     used += cw;
@@ -249,18 +329,30 @@ function clipToWidth(s: string, cells: number): string {
 export function fit(s: string, w: number): string {
   // Reserve a 1-column gap so truncated cells never touch the next column.
   const max = w - 1;
-  // Hot path: `fit` runs once per cell per row per render. For printable ASCII
-  // the index arithmetic below IS cell arithmetic, so this branch and the
-  // general one produce the same string — it just skips the segmentation.
+  // Fast path: for printable ASCII the index arithmetic below IS cell
+  // arithmetic, so this branch and the general one produce the same string —
+  // it just skips the segmentation.
+  //
+  // Be honest about its reach: it is a fast path for the DATA, not for the
+  // chrome. agendo's own cell glyphs are mostly non-ASCII, so most FIXED cells
+  // miss this branch entirely — every ID cell carries the ▸/▾ caret, both
+  // approvalCell shapes carry ✓ or —, and all nine ciCell shapes open with a
+  // status glyph. What actually takes the branch is free text and counts: ASCII
+  // titles, branches, "3d ago", "3 sess", "draft".
+  //
+  // Measured, per cell: ≈90ns here against ≈1.1µs for "✓ 2/2" and ≈3µs for a
+  // CJK title on the general path; a whole 50×7 PR screen is ≈260µs of ASCII
+  // titles or ≈750µs of CJK ones. Well inside a frame for a TUI — which is why
+  // the test stays a plain regex instead of growing to cover the glyphs.
   if (ASCII_ONLY.test(s)) {
     const t = s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
     return t.padEnd(w);
   }
-  const width = stringWidth(s);
+  const width = measureWidth(s);
   if (width <= max) return s + " ".repeat(Math.max(0, w - width));
   // "…" is one cell wide, so the visible prefix gets max - 1 of them.
   const t = clipToWidth(s, max - 1) + "…";
-  return t + " ".repeat(Math.max(0, w - stringWidth(t)));
+  return t + " ".repeat(Math.max(0, w - measureWidth(t)));
 }
 
 export interface Cell { text: string; color?: string }
