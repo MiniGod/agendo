@@ -1,6 +1,7 @@
 import { type LoadedModel } from "../model.ts";
 import { printJson } from "../output.ts";
 import type { PRWithSessions } from "../types.ts";
+import { approvalInline } from "../ui/format.ts";
 import { type ResourceListOptions, assocSessions, loadScopedModel } from "./resources.ts";
 import { flushWarnings } from "./warnings.ts";
 
@@ -11,7 +12,9 @@ import { flushWarnings } from "./warnings.ts";
  * reuse the model's forward PR lists (linkedPrs + orphanPrs — PRs I created;
  * review PRs are someone else's, so excluded) and its live-tmux set for the
  * association, so there's no new matcher. `--json` emits the full rows (id +
- * branch + status + ci + sessions[]) for scripting.
+ * branch + status + ci + approvals + sessions[]) for scripting — including
+ * `gateMet`, so a script reads the review verdict off the backend rather than
+ * inferring it from the two counts, which does not survive GitHub's floor.
  */
 export async function runListPrs(opts: ResourceListOptions): Promise<void> {
   let model: LoadedModel;
@@ -45,6 +48,14 @@ export async function runListPrs(opts: ResourceListOptions): Promise<void> {
     ci: pr.ci,
     approvedCount: pr.approvedCount,
     requiredCount: pr.requiredCount,
+    // The backend's OWN verdict on the review gate, when it states one. Without
+    // it a script has only `approvedCount >= requiredCount` to go on, and that
+    // inference is unsound: GitHub's `requiredCount` is a floor, not a count
+    // (src/github.ts voteSummary), so a two-approval gate reads satisfied at
+    // one. `null` = never stated (every ADO PR; any GitHub PR whose base branch
+    // isn't protected) and is deliberately distinct from `false` = stated and
+    // not met.
+    gateMet: pr.gateMet ?? null,
     branch: pr.branch,
     repositoryId: pr.repositoryId,
     repositoryName: pr.repositoryName ?? null,
@@ -72,7 +83,13 @@ export async function runListPrs(opts: ResourceListOptions): Promise<void> {
         best?.running ? "●" : r.sessions.length ? "○" : " ",
         `${prPrefix}${r.id}`.padEnd(6),
         r.ci.padEnd(8),
-        `${r.approvedCount}/${r.requiredCount}`.padEnd(5),
+        // The menu's figure, from the menu's helper — the third renderer of the
+        // same two counts, and the last one still deriving the format itself.
+        // It phrased `requiredCount === 0` as "X/0" ("X of 0 required"), when a
+        // 0 there means the gate is UNKNOWN — the ordinary state of a PR on an
+        // unprotected repo, and of every ADO PR with no minimum-reviewers
+        // policy. Same bug 66c6222 fixed in the PR view, in a third place.
+        approvalInline(r, "-").padEnd(5),
         r.branch.slice(0, 24).padEnd(24),
         (best?.shortId ?? "-").padEnd(12),
         (r.isDraft ? "[draft] " : "") + r.title.slice(0, 44),
