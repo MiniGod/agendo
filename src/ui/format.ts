@@ -287,6 +287,31 @@ const ASCII_ONLY = /^[\x20-\x7E]*$/;
 // right, which is the exact defect this whole section exists to prevent: it is
 // how `⚠ conflict` became misaligned when `⌛ expired` was fixed.
 //
+// KNOWN DIVERGENCES from tmux 3.4, all measured against a real terminal and
+// all PRE-EXISTING (this function narrowed 201 code points versus a plain
+// `stringWidth` measure and regressed none of them). They are recorded rather
+// than fixed because each one is a step toward reimplementing `wcwidth`, which
+// is out of proportion to a mis-padded column in a title:
+//
+//   - DEFAULT_IGNORABLE code points that the terminal nevertheless draws.
+//     `string-width` filters them to 0; tmux gives U+00AD SOFT HYPHEN 1
+//     (reachable from a web-pasted title), U+FFA0 1, U+115F 2, U+3164 2.
+//   - SPACING COMBINING MARKS (Mc, 471 code points). `string-width` reads only
+//     `codePointAt(0)` of the cluster, so "कि" measures 1 where tmux draws 2.
+//     Devanagari / Bengali / Tamil / Khmer titles under-measure by a column per
+//     mark. Thai (Mn) and Hebrew niqqud are non-spacing and measure correctly.
+//   - REGIONAL INDICATORS. tmux collapses an adjacent RI run into ONE 2-column
+//     cell, so "🇮🇸🇳🇴" draws 2 where this measures 4. Truncation is still safe:
+//     `Intl.Segmenter` clusters an RI pair, and `clipToWidth` only ever cuts on
+//     a cluster boundary, so a flag can never be split in half.
+//
+// And one divergence from ink rather than from tmux: ink still measures with
+// `string-width`, so for the 201 code points narrowed above the two disagree by
+// one column. At a terminal exactly as wide as the table, ink's
+// `wrap="truncate"` can clip one trailing pad space early. The paragraph below
+// about sharing ink's copy therefore now holds only for branch 3 —
+// multi-code-point clusters — which is where the deferral actually happens.
+//
 // Where it DOES defer to `string-width`, agendo wants the same copy ink uses to
 // lay `<Text>` out. That sharing is not automatic and not free: it holds only
 // because this package declares `^7.2.0` and ink declares `^7.2.0`, so the
