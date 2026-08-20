@@ -21,19 +21,20 @@ import { branchSync, type BranchSync } from "./gitrefs.ts";
 import { restoreTabs, recordLaunchedSession, resolveWindowSession, forgetRestoreTab, idBearingName } from "./restore.ts";
 import { resolveContext, normalizeCwd } from "./context.ts";
 import { makeSessionScope, scopeFilter, scopeFlagValue, scopeNote, type SessionScope } from "./scope.ts";
-import { loadModel, refreshLiveTmux, filterModelByRepos, type LoadedModel, type SessionLink } from "./model.ts";
-import { resolveInitialProvider, detectScopeProvider } from "./provider.ts";
+import { loadModel, refreshLiveTmux, filterModelByRepos, type LoadedModel } from "./model.ts";
+import { detectScopeProvider } from "./provider.ts";
 import { openUrlAsync } from "./browser.ts";
-import { loadState, resumeDialogChoice, peerSocketEnabled, PEER_SOCKET_ENV } from "./config.ts";
+import { resumeDialogChoice, peerSocketEnabled, PEER_SOCKET_ENV } from "./config.ts";
 import { linkLine, linkVocab, printJson, printLine } from "./output.ts";
 import { discoverGitReposUnder } from "./repos.ts";
 import { parseDuration, runWaitCli } from "./wait.ts";
 import { AGENTS } from "./types.ts";
-import type { AgentSession, AgentSource, Identity, PRWithSessions, ProviderName, WorkItem, WorkflowStatus } from "./types.ts";
+import type { AgentSession, AgentSource, PRWithSessions, WorkItem, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 import { HELP } from "./cli/help.ts";
 import { flushWarnings } from "./cli/warnings.ts";
 import { readyCell, readyWidth, rowCompactionPercent, rowResetAt, timeAgo } from "./cli/cells.ts";
+import { currentModelOptions, resolveSessionLink } from "./cli/links.ts";
 
 /** CLI glyphs for the three task states (plain ASCII markers stay greppable). */
 const STATUS_GLYPH: Record<string, string> = {
@@ -875,32 +876,6 @@ function indent(text: string): string {
 }
 
 /**
- * The PR / work item a session links to, resolved through the model's reverse
- * index (`sessionLinks`) — the same association the menu's `o` action opens, so
- * the CLI and the TUI can't drift. Loading the model costs a backend round-trip,
- * hence the opt-in callers. A failed load is returned as `error` rather than
- * thrown, so `status --urls` degrades to a note instead of dying.
- */
-async function resolveSessionLink(
-  s: AgentSession,
-  /** Command name for any reported-and-ignored load warnings (see flushWarnings). */
-  prefix: string,
-): Promise<{ link?: SessionLink; provider: ProviderName; error?: string }> {
-  const opts = currentModelOptions();
-  try {
-    const model = await loadModel(opts);
-    return { link: model.sessionLinks.get(`${s.source}:${s.id}`), provider: model.provider };
-  } catch (e) {
-    return { provider: opts.provider, error: (e as Error)?.message ?? String(e) };
-  } finally {
-    // Whether or not the load succeeded: a corrupt state.json silently drops the
-    // persisted backend, which would otherwise resolve links against the wrong
-    // one with no hint why. stderr, so `--print` output stays pipeable.
-    flushWarnings(prefix);
-  }
-}
-
-/**
  * Open a session's linked PR / work item in the browser — the CLI mirror of the
  * menu's `o` action, down to the shared `openUrl` path. `want` picks the entity
  * when the session has both (the menu asks p/i; the CLI defaults to the PR).
@@ -1390,23 +1365,6 @@ interface ListRow {
   workItemUrl: string | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
-}
-
-/**
- * Model-load options mirroring what the TUI (App.tsx) resolves: the persisted
- * backend (falling back to whichever CLI is installed) and the persisted
- * identity, if any. Used by the association-resolving `list` modes so their
- * gh/az fetch set matches what the menu would show. `forced` is the provider a
- * path context implies (App.tsx passes detectScopeProvider(filterRoot, …) the same
- * way) — the tracker of the `[dir]`'s origin wins over the persisted default.
- */
-function currentModelOptions(forced?: ProviderName | null): { provider: ProviderName; identity: Identity | null } {
-  const st = loadState();
-  const provider = resolveInitialProvider(st.provider, forced);
-  const identity: Identity | null = st.identityId
-    ? { id: st.identityId, displayName: st.identityName ?? "?", uniqueName: st.identityUniqueName ?? "" }
-    : null;
-  return { provider, identity };
 }
 
 /**
