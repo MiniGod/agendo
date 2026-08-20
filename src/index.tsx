@@ -26,6 +26,7 @@ import type { AgentSession, AgentSource, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
 import { HELP } from "./cli/help.ts";
 import { flushWarnings } from "./cli/warnings.ts";
+import { parseSessionArgs } from "./cli/args.ts";
 import { padCell, readyCell, readyWidth, rowCompactionPercent, rowResetAt, timeAgo } from "./cli/cells.ts";
 import { currentModelOptions, resolveSessionLink } from "./cli/links.ts";
 import { runOpen } from "./cli/open.ts";
@@ -485,13 +486,7 @@ if (process.argv[2] === "list" || process.argv[2] === "ls") {
 // the session back running without stealing the terminal — and print how to
 // reach it. `--attach` hands the terminal over the way `launch --attach` does.
 if (process.argv[2] === "resume") {
-  let attach = false;
-  let id: string | undefined;
-  const rest = process.argv.slice(3);
-  for (const a of rest) {
-    if (a === "--attach" || a === "-a") attach = true;
-    else if (id === undefined) id = a;
-  }
+  const { id, flag: attach } = parseSessionArgs("resume", process.argv.slice(3), { long: "--attach", short: "-a" });
   await runResume(id, attach);
   process.exit(0);
 }
@@ -504,21 +499,7 @@ if (process.argv[2] === "resume") {
 // disk, so `resume` can bring it back.
 if (process.argv[2] === "close" || process.argv[2] === "kill" || process.argv[2] === "stop") {
   const verb = process.argv[2];
-  let id: string | undefined;
-  let force = false;
-  for (const a of process.argv.slice(3)) {
-    if (a === "--force" || a === "-f") force = true;
-    // A command that kills things parses strictly: an unknown flag or a stray
-    // extra positional is a mistake, never something to silently ignore.
-    else if (a.startsWith("-")) {
-      console.error(`${verb}: unknown flag "${a}" (only --force/-f)`);
-      process.exit(1);
-    } else if (id === undefined) id = a;
-    else {
-      console.error(`${verb}: unexpected argument "${a}" — close takes exactly one session id`);
-      process.exit(1);
-    }
-  }
+  const { id, flag: force } = parseSessionArgs(verb, process.argv.slice(3), { long: "--force", short: "-f" });
   await runClose(id, force, verb);
   process.exit(0);
 }
@@ -528,12 +509,7 @@ if (process.argv[2] === "close" || process.argv[2] === "kill" || process.argv[2]
 // in a fresh window); this pokes a live, limited pane. Refuses unless the pane is
 // still showing the usage-limit notice, so a recovered session isn't clobbered.
 if (process.argv[2] === "unblock") {
-  let id: string | undefined;
-  let force = false;
-  for (const a of process.argv.slice(3)) {
-    if (a === "--force" || a === "-f") force = true;
-    else if (id === undefined) id = a;
-  }
+  const { id, flag: force } = parseSessionArgs("unblock", process.argv.slice(3), { long: "--force", short: "-f" });
   await runUnblock(id, force);
   process.exit(0);
 }

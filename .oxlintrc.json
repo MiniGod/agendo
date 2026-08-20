@@ -21,13 +21,13 @@
   // src/ that the exemption blocks do not already cover. The three files this
   // refactor effort is dismantling carry named, temporary exemptions, and each
   // shrinks or disappears as its PR lands — but an exemption block only lifts
-  // the rules it names, so `src/index.tsx` (which exempts max-lines / complexity
-  // / max-statements and nothing else) is still measured by the shared
-  // max-lines-per-function, and currently sets it.
+  // the rules it names, so `src/index.tsx` (which exempts complexity and
+  // max-statements and nothing else) is still measured by the shared max-lines
+  // and max-lines-per-function, and currently sets both.
   //
   // Be precise about what that buys: the budget is per GLOB GROUP, so the 86
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
-  // is 833 lines against a 1228 cap, and any of them may add a fresh
+  // is 833 lines against a 1227 cap, and any of them may add a fresh
   // complexity-34 function). It bounds the blast radius; it does not freeze
   // every file at its current size. If a file starts creeping toward the cap,
   // the answer is its own tighter block here, not a raised budget.
@@ -100,14 +100,16 @@
       // "excluding App.tsx / index.tsx / tmux.ts": an exemption block replaces
       // only the rules it names and lets every other rule fall through to this
       // budget. So index.tsx still answers to the shared max-lines-per-function —
-      // and in fact sets it, at 210 — while tmux.ts, which names only max-lines,
+      // and in fact sets it, at 210 — and, since its own max-lines exemption was
+      // dropped when it reached 1227, now ties App.tsx for the shared max-lines
+      // too. Meanwhile tmux.ts, which names only max-lines,
       // answers to every other size rule here. Verified against the installed
       // oxlint rather than assumed from eslint's semantics.
       // Every extension oxlint will parse, not just ts/tsx: a new src/foo.js or
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        "max-lines": ["error", { "max": 1227, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
+        "max-lines": ["error", { "max": 1227, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx, src/index.tsx (tied)
         "max-lines-per-function": ["error", { "max": 210, "skipBlankLines": false, "skipComments": false }], // src/index.tsx runStatus
         // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
         // three-way tie between src/activity.ts `claudeAction`, src/activity.ts
@@ -177,7 +179,6 @@
       // "cli/status.ts" and "cli/list.ts" join that allow-list.
       "files": ["src/index.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 1251, "skipBlankLines": false, "skipComments": false }],
         "complexity": ["error", 66],
         "max-statements": ["error", 90]
       }
