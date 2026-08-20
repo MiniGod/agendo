@@ -30,7 +30,7 @@ export function ProfileScreen({
               {sel ? "❯ " : "  "}
               <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
               <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{padCell(c.profile.name, 18)}</Text>
-              <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
+              <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here     "}</Text>
               <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
             </Text>
           );
