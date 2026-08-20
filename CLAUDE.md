@@ -7,6 +7,28 @@ Terminal UI (bun + Ink) to launch/resume Claude, Copilot and Codex agent session
 - **Commits follow [Conventional Commits](https://www.conventionalcommits.org/).** A `commit-msg` git hook (commitlint) blocks bad messages, a `pre-push` hook backstops direct pushes to master, and PR titles are validated in CI (squash-merge uses the PR title as the commit subject).
 - **Releases are manual.** Trigger the **Release** GitHub Action (`workflow_dispatch`): it bumps the version from the conventional-commit log since the last tag (`commit-and-tag-version`), updates `CHANGELOG.md`, tags `vX.Y.Z`, publishes to npm, and cuts a GitHub release. The very first release uses the workflow's `first-release` input to ship the current `0.1.0` as-is.
 
+## Tests
+
+Two suites, and the split is deliberate.
+
+`bun run test:e2e` (Playwright, `e2e/`) drives the real TUI and the real CLI
+against fixture backends. It is the suite that catches behaviour, and it is
+blocking in CI.
+
+`bun run test` (bun's runner, `test/`) covers the pure helpers that e2e
+structurally cannot reach. The width and approval logic in `src/ui/format.ts` is
+the standing example: every fixture value that reaches a table cell is ASCII, and
+ASCII is exactly the input class for which a correct and an incorrect cell
+measure agree. Three separate bugs there were found by review rather than by a
+green suite. Unit tests live in `test/` rather than beside the source because
+`package.json` ships `src/` to npm, and the script is scoped to `test/` so bun
+does not try to execute the Playwright specs, which it would otherwise match on
+`*.spec.ts`.
+
+A fix to a pure function belongs in `test/`. A fix to something the user can see
+belongs in `e2e/`. If a bug was invisible to both, say so in the PR rather than
+letting a green run imply coverage that does not exist.
+
 ## Linting — a ratchet, not a style guide
 
 `bun run lint` (oxlint, config in `.oxlintrc.json`) runs in CI as a **blocking**
