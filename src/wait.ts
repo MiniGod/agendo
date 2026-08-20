@@ -411,8 +411,13 @@ function resolveWaitTargets(
   return targets;
 }
 
-/** Freeze the derived settings one wait runs on: the predicate's description, the
- *  clock bounds and the per-wait counters. */
+/** Gather everything one wait runs on: the predicate's description, the clock
+ *  bounds and the three per-wait counters.
+ *
+ *  Nothing here is frozen, and that matters. The counters are the SAME Map
+ *  instances for the whole wait, mutated in place tick by tick — copying them
+ *  (or spreading the ctx) would silently break the confirm-tick logic that
+ *  `isCapped` and the exited-miss count depend on. */
 function makeWaitCtx(o: WaitOptions, all: AgentSession[], targets: WaitTarget[]): WaitCtx {
   const started = Date.now();
   return {
@@ -538,7 +543,18 @@ function unsatisfiable(ctx: WaitCtx, pending: WaitResult[]): boolean {
 }
 
 /**
- * Whether a pending target is parked at its usage cap for long enough to wake on.
+ * Whether one pending target has been seen at its usage cap on
+ * LIMIT_CONFIRM_TICKS consecutive ticks — enough to act on rather than a single
+ * sighting. The counter is reset to 0 by the poll loop on any non-limited tick,
+ * so this is "still capped right now", not "was capped at some point".
+ */
+function isCapped(ctx: WaitCtx, x: WaitResult): boolean {
+  return (ctx.limitedTicks.get(x.id) ?? 0) >= LIMIT_CONFIRM_TICKS;
+}
+
+/**
+ * Whether the wait should give up because its remaining targets are parked at
+ * their usage cap.
  *
  * A target at its usage cap won't move for hours (it resumes when the window
  * reopens, or when someone unblocks it). Holding the timeout open would leave
@@ -548,16 +564,13 @@ function unsatisfiable(ctx: WaitCtx, pending: WaitResult[]): boolean {
  * a script can't mistake a capped session for finished work. Same mode rule as
  * `unsatisfiable`: `--any` still needs every remaining candidate to be blocked.
  *
- * ONLY for the default predicate. An explicit `--state`/`--not` has already
- * told us what this caller counts as done, and several of those predicates
- * mean "wait THROUGH the cap" — `--state exited` (tell me when it's finished
- * for good), `--state ready`, `--not limited` (tell me when the cap clears).
- * Waking those with `blocked` would answer a question they didn't ask.
+ * ONLY for the default predicate — that is what the `!ctx.o.state && !ctx.o.not`
+ * guard below is for, and it is load-bearing. An explicit `--state`/`--not` has
+ * already told us what this caller counts as done, and several of those
+ * predicates mean "wait THROUGH the cap" — `--state exited` (tell me when it's
+ * finished for good), `--state ready`, `--not limited` (tell me when the cap
+ * clears). Waking those with `blocked` would answer a question they didn't ask.
  */
-function isCapped(ctx: WaitCtx, x: WaitResult): boolean {
-  return (ctx.limitedTicks.get(x.id) ?? 0) >= LIMIT_CONFIRM_TICKS;
-}
-
 function blockedByLimit(ctx: WaitCtx, pending: WaitResult[]): boolean {
   const capped = (x: WaitResult) => isCapped(ctx, x);
   const blocked = !ctx.o.state && !ctx.o.not && (ctx.o.any ? pending.every(capped) : pending.some(capped));
@@ -599,7 +612,15 @@ function wakeReason(ctx: WaitCtx, results: WaitResult[], pending: WaitResult[]):
   return null;
 }
 
-/** The poll loop itself: announce the wait, then tick until something ends it. */
+/** The poll loop itself: announce the wait, then tick until something ends it.
+ *
+ *  One deliberate delta from the pre-split version, recorded rather than undone:
+ *  the announce below used to happen BEFORE the clock bounds were taken, so the
+ *  timeout budget and the `--json` elapsedMs excluded this stderr write and now
+ *  include it. It is one write against a timeout measured in seconds. Restoring
+ *  the exact ordering would mean either emitting output from makeWaitCtx or
+ *  mutating ctx.started after the fact — both worse than the sub-millisecond
+ *  they would buy back. */
 async function waitLoop(ctx: WaitCtx): Promise<number> {
   console.error(
     `waiting for ${ctx.o.any ? "any of" : "all"} ${ctx.targets.length} session(s) to be ${ctx.desc} ` +

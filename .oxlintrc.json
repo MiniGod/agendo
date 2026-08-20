@@ -86,11 +86,15 @@
       // byte-for-byte for the duration of the refactor effort, so a threshold
       // there could not be acted on even if it fired.
       //
-      // Each number is the worst value in src/ that is not already covered by an
-      // exemption block below, named with the file and function that sets it.
-      // Note that is NOT the same as "excluding App.tsx / index.tsx / tmux.ts":
-      // an exemption lifts only the rules it names, so index.tsx still answers to
-      // the shared max-lines-per-function and tmux.ts to everything but max-lines.
+      // Each number is the worst value in src/ not already covered by an exemption
+      // block below FOR THAT RULE, named with the file and function that sets it.
+      // The per-rule part is the whole point, and it is NOT the same as
+      // "excluding App.tsx / index.tsx / tmux.ts": an exemption block replaces
+      // only the rules it names and lets every other rule fall through to this
+      // budget. So index.tsx still answers to the shared max-lines-per-function —
+      // and in fact sets it, at 210 — while tmux.ts, which names only max-lines,
+      // answers to every other size rule here. Verified against the installed
+      // oxlint rather than assumed from eslint's semantics.
       // Every extension oxlint will parse, not just ts/tsx: a new src/foo.js or
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],

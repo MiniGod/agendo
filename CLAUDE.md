@@ -38,8 +38,9 @@ a total count.
 
 **One escape hatch, deliberately narrow.** Some rules can't tell a deliberate
 pattern from a careless one. `react-hooks/exhaustive-deps` is the standing
-example: `src/ui/App.tsx` has two effects keyed to a narrower dependency on
-purpose, and both carry a `-- <why>` saying so. A single-line
+example: `src/ui/hooks/useAuthProbe.ts` and
+`src/ui/hooks/useActivityWatchers.ts` each have an effect keyed to a narrower
+dependency on purpose, and both carry a `-- <why>` saying so. A single-line
 `// eslint-disable-line <rule> -- <why>` is the sanctioned way to say "I meant
 this."
 
