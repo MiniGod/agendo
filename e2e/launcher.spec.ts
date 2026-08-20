@@ -7,6 +7,14 @@ import { join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
 import { COMPACTING_PANE, RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
+import { windowTarget } from "../src/tmux.ts";
+
+// The tmux target the menu addresses the fixture's running pane by (#39). The
+// readiness poll reads the window reconciliation attributed the session to, and a
+// window is addressed through its host session — the bare name resolves only
+// inside the caller's own session. Built with the src helper so the two can't
+// drift; the literal form is pinned once, in detection.spec.ts.
+const PANE_TARGET = windowTarget(RUNNING_TARGET, RUNNING_TARGET);
 
 // Regression guard for the "session-detection regresses often" area: a launcher
 // scoped to a repo whose BASENAME CONTAINS A DOT (`kappflug.is-2`). The host
@@ -968,10 +976,10 @@ test("auto-resume ON: the limit dialog is revealed with exactly ONE Escape, neve
   await wt.waitForText("Current sprint", 20000);
 
   // The poll sends the reveal Escape.
-  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).some((a) => a.includes("Escape")));
+  await waitUntil(async () => (await keysTo(mock, PANE_TARGET)).some((a) => a.includes("Escape")));
   // Several more poll cycles (READINESS_MS = 1500ms) must NOT re-send: once-only.
   await sleep(4000);
-  let keys = await keysTo(mock, RUNNING_TARGET);
+  let keys = await keysTo(mock, PANE_TARGET);
   expect(keys.filter((a) => a.includes("Escape"))).toHaveLength(1); // exactly one reveal
   expect(keys.some((a) => a.includes("continue"))).toBe(false); // never continue on reveal
   expect(keys.some((a) => a.includes("Enter"))).toBe(false);
@@ -980,8 +988,8 @@ test("auto-resume ON: the limit dialog is revealed with exactly ONE Escape, neve
   await mock.setTmuxState({ ...tmuxState }); // default READY pane → "ready"
   await sleep(3000); // let the poll observe recovery and clear the guard
   await mock.setTmuxState({ ...tmuxState, captures: { [RUNNING_TARGET]: LIMIT_DIALOG } });
-  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).filter((a) => a.includes("Escape")).length >= 2);
-  keys = await keysTo(mock, RUNNING_TARGET);
+  await waitUntil(async () => (await keysTo(mock, PANE_TARGET)).filter((a) => a.includes("Escape")).length >= 2);
+  keys = await keysTo(mock, PANE_TARGET);
   expect(keys.filter((a) => a.includes("Escape"))).toHaveLength(2); // re-revealed for the new window
   expect(keys.some((a) => a.includes("continue"))).toBe(false);
 });
@@ -996,7 +1004,11 @@ test("auto-resume OFF: the limit dialog is left untouched (no Escape, no keystro
   await wt.waitForText("Current sprint", 20000);
   // Give the poll several cycles; with the setting off it must never mutate the pane.
   await sleep(4000);
-  const keys = await keysTo(mock, RUNNING_TARGET);
+  // Scoped to the COMMAND, not to a target: a negative assertion pinned to one
+  // target spelling silently passes the moment the spelling changes, which is
+  // exactly what happened here (#39 requalified every pane target and this stopped
+  // matching anything). "No keystroke reached any pane" is what the test means.
+  const keys = (await mock.tmuxLog()).filter((a) => a[0] === "send-keys");
   expect(keys).toHaveLength(0);
 });
 
@@ -1044,7 +1056,8 @@ test("(a) a session started AFTER the initial load appears + is live-polled with
   await wt.waitForText("Late arriving session", 12000);
   // ...and its window entered liveWindows — proven by the readiness poll capturing
   // its pane (the poll only reads windows in model.liveWindows).
-  await waitUntil(async () => (await mock.tmuxLog()).some((a) => a[0] === "capture-pane" && a.includes(win)));
+  const winTarget = windowTarget(RUNNING_TARGET, win);
+  await waitUntil(async () => (await mock.tmuxLog()).some((a) => a[0] === "capture-pane" && a.includes(winTarget)));
 });
 
 test("(b) the fast rescan does NO backend fetch; work items stay put across several rescans", async ({ launch, mock }) => {
@@ -1151,8 +1164,8 @@ test("(d) a rescan must not re-fire `continue` for an already-resumed limited wi
   await wt.waitForText("Current sprint", 20000);
 
   // It fires the resume exactly once.
-  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).some((a) => a.includes("continue")));
-  const continues = async () => (await keysTo(mock, RUNNING_TARGET)).filter((a) => a.includes("continue")).length;
+  await waitUntil(async () => (await keysTo(mock, PANE_TARGET)).some((a) => a.includes("continue")));
+  const continues = async () => (await keysTo(mock, PANE_TARGET)).filter((a) => a.includes("continue")).length;
   expect(await continues()).toBe(1);
 
   // Now force a rescan MODEL CHANGE (a new session appears) → the readiness effect
@@ -1214,7 +1227,7 @@ test("(e) a ghost suggestion in the box does NOT block auto-resume (caret at the
   await wt.waitForText("Current sprint", 20000);
 
   // Resume fires despite the text on screen: the caret proves it isn't typed.
-  await waitUntil(async () => (await keysTo(mock, RUNNING_TARGET)).some((a) => a.includes("continue")));
+  await waitUntil(async () => (await keysTo(mock, PANE_TARGET)).some((a) => a.includes("continue")));
 });
 
 test("(f) a REAL draft in a limited box still blocks auto-resume (caret at the end)", async ({ launch, mock }) => {
@@ -1232,5 +1245,8 @@ test("(f) a REAL draft in a limited box still blocks auto-resume (caret at the e
   // Several poll cycles (READINESS_MS = 1500ms): `<esc>continue<enter>` would wipe
   // the user's queued prompt, so nothing may be sent to the pane at all.
   await sleep(5000);
-  expect(await keysTo(mock, RUNNING_TARGET)).toHaveLength(0);
+  // Command-scoped for the same reason as the auto-resume-OFF case above: this
+  // guards a user's typed draft against `<esc>continue<enter>`, and must not be
+  // satisfiable by the target simply being spelled differently.
+  expect((await mock.tmuxLog()).filter((a) => a[0] === "send-keys")).toHaveLength(0);
 });

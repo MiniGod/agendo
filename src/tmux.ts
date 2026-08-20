@@ -100,6 +100,33 @@ export function managedKind(name: string): SessionKind | null {
 }
 
 /**
+ * A live managed target: the bare `name` it is known and attributed by, and the
+ * fully-qualified `target` that addresses it from ANY host session.
+ *
+ * These are NOT interchangeable, and conflating them is what #39 was: tmux
+ * resolves a bare window-name target only inside the caller's own session, so
+ * with several launcher hosts live, every read of a window in another host
+ * failed and readiness fell through to `unknown` — `list`/`status` reported a
+ * whole host's sessions as unknown, and `close`/`unblock` refused targets they
+ * "could not read".
+ *
+ * `name` stays the attribution and display key (`windowLocations`,
+ * `killManagedTarget`, `openTarget`, restore snapshots and user-facing output
+ * are all written against it); `target` is the only form that may be handed to
+ * tmux as `-t`. Carrying both makes a caller say which it means.
+ */
+export interface LiveTarget {
+  name: string;
+  target: string;
+}
+
+/** A `LiveTarget` paired with the working directory of the pane running in it. */
+export interface ManagedTarget extends LiveTarget {
+  cwd: string;
+  placeholder: boolean;
+}
+
+/**
  * A live managed target whose name embeds this session short id under any
  * id-bearing kind prefix (`cl-claude-`, `cl-copilot-`, `cl-codex-`, `cl-bg-`,
  * `cl-new-`) — so attach can navigate to the *actual* window a session runs in,
@@ -107,10 +134,10 @@ export function managedKind(name: string): SessionKind | null {
  * Work-item / PR targets embed an item id rather than a session id, and tagged
  * id-less fresh names carry no session id at all, so both are excluded.
  */
-export function liveTargetForShortId(sid: string): string | null {
-  for (const name of liveTargets()) {
+export function liveTargetForShortId(sid: string): LiveTarget | null {
+  for (const [name, target] of liveTargets()) {
     const m = name.match(ID_BEARING_NAME);
-    if (m && m[1] === sid) return name;
+    if (m && m[1] === sid) return { name, target };
   }
   return null;
 }
@@ -1634,16 +1661,59 @@ export function liveSessions(): Set<string> {
   return new Set(tmuxLines(["list-sessions", "-F", "#{session_name}"]));
 }
 
-/** Names of all windows across all sessions. */
-export function liveWindows(): Set<string> {
-  return new Set(tmuxLines(["list-windows", "-a", "-F", "#{window_name}"]));
+/**
+ * Every live window across all sessions, bare name → addressable target (#39).
+ *
+ * tmux allows duplicate window names and this launcher creates them BY DESIGN: a
+ * restored-but-unopened placeholder tab carries the canonical `cl-…` name in one
+ * host while the real agent window runs under it in another. So a name can have
+ * several locations, and they are not interchangeable — a placeholder is an idle
+ * bash waiting on a keypress (see restore.ts), not the session's pane.
+ *
+ * A REAL window therefore always wins over a placeholder, whichever order tmux
+ * lists them in. Getting this wrong is worse than the bug this function exists to
+ * fix: `liveTargetForShortId` feeds `send` and `unblock`, which WRITE to the pane
+ * they resolve — pasting a prompt into a placeholder wakes it into a second agent
+ * on the same transcript, and `unblock`'s leading Escape closes the tab outright.
+ * `reconcileLive` skips placeholders for the same reason; these two must agree.
+ *
+ * Among several REAL windows of one name the first sighting wins, which is a
+ * genuine ambiguity this cannot resolve — `close` is the caller that must not
+ * guess, and it enumerates `windowLocations` and refuses instead.
+ */
+export function liveWindows(): Map<string, string> {
+  const out = new Map<string, string>();
+  const provisional = new Set<string>(); // names whose target came from a placeholder
+  for (const line of tmuxLines([
+    "list-windows",
+    "-a",
+    "-F",
+    `#{session_name}\t#{window_name}\t#{?${PLACEHOLDER_OPTION},1,0}`,
+  ])) {
+    const [session, window, placeholder] = line.split("\t");
+    if (!window) continue;
+    const isPlaceholder = placeholder === "1";
+    // Keep what we have unless this is a real window displacing a placeholder.
+    if (out.has(window) && (isPlaceholder || !provisional.has(window))) continue;
+    // No session reported is not a case tmux produces, but the fallback is the
+    // pre-#39 bare name: still correct for a single host, and never worse.
+    out.set(window, session ? windowTarget(session, window) : exactTarget(window));
+    if (isPlaceholder) provisional.add(window);
+    else provisional.delete(window);
+  }
+  return out;
 }
 
-/** Union of live session and window names — every managed target that's live. */
-export function liveTargets(): Set<string> {
-  const s = liveSessions();
-  for (const w of liveWindows()) s.add(w);
-  return s;
+/**
+ * Every live session and window name → the target that addresses it. A session
+ * addresses itself; a window needs its host session as qualifier. A session name
+ * wins over a window of the same name, as it did when this returned a set.
+ */
+export function liveTargets(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const s of liveSessions()) out.set(s, exactTarget(s));
+  for (const [name, target] of liveWindows()) if (!out.has(name)) out.set(name, target);
+  return out;
 }
 
 /**
@@ -1653,8 +1723,8 @@ export function liveTargets(): Set<string> {
  * item / PR (`cl-wi-…`, `cl-pr-…`) rather than a session id — back to the
  * session actually running in them, so they register as running.
  */
-export function liveManagedPaths(): { name: string; cwd: string; placeholder: boolean }[] {
-  const out: { name: string; cwd: string; placeholder: boolean }[] = [];
+export function liveManagedPaths(): ManagedTarget[] {
+  const out: ManagedTarget[] = [];
   for (const line of tmuxLines([
     "list-panes",
     "-a",
@@ -1666,8 +1736,20 @@ export function liveManagedPaths(): { name: string; cwd: string; placeholder: bo
     // The marker is a *window* option, so it only attributes to the window name
     // (a restored placeholder is always a window); a managed session name is
     // never a placeholder.
-    for (const [name, isPlaceholder] of [[session, false], [window, placeholder === "1"]] as const) {
-      if (name?.startsWith("cl-")) out.push({ name, cwd, placeholder: isPlaceholder });
+    //
+    // Each name carries the target that ADDRESSES it alongside it (see
+    // `LiveTarget`): a session addresses itself, a window needs its host session
+    // as qualifier or it is unreadable from anywhere else (#39).
+    for (const [name, isWindow, isPlaceholder] of [
+      [session, false, false],
+      [window, true, placeholder === "1"],
+    ] as const) {
+      // Built only for a name we keep: `exactTarget("")` is `=`, which tmux reads
+      // as the `{mouse}` target — it would silently address wherever the pointer
+      // last was rather than fail.
+      if (!name?.startsWith("cl-")) continue;
+      const target = isWindow && session ? windowTarget(session, name) : exactTarget(name);
+      out.push({ name, target, cwd, placeholder: isPlaceholder });
     }
   }
   return out;
@@ -1684,6 +1766,19 @@ export function liveManagedPaths(): { name: string; cwd: string; placeholder: bo
  */
 export function exactTarget(name: string): string {
   return `=${name}`;
+}
+
+/**
+ * Exact-pinned `session:window` target — the form that addresses a window from
+ * any host session, and the one this file hands to `capture-pane`.
+ *
+ * BOTH halves are pinned: host names are prefixes of each other (`agendo` ⊂
+ * `agendo-agendo` ⊂ `agendo-mc-applications`) and so are managed window names
+ * (`cl-pr-5` ⊂ `cl-pr-50`), so an unpinned half lets tmux's prefix/fnmatch
+ * fallback bind it to the wrong thing — the `exactTarget` hazard, twice over.
+ */
+export function windowTarget(session: string, window: string): string {
+  return `${exactTarget(session)}:${exactTarget(window)}`;
 }
 
 export function hasSession(name: string): boolean {

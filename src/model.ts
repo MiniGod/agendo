@@ -2,7 +2,10 @@
 // with on-disk agent sessions (matched by PR branch) and live-tmux status.
 import { getProvider } from "./provider.ts";
 import { SessionIndex } from "./sessions.ts";
-import { liveTargets, liveManagedPaths, sessionName, managedKind, type SessionKind } from "./tmux.ts";
+import {
+  liveTargets, liveManagedPaths, sessionName, managedKind,
+  type SessionKind, type LiveTarget, type ManagedTarget,
+} from "./tmux.ts";
 import { captureRestore, resolveWindowSession } from "./restore.ts";
 import { discoverRepos, mergeRepos, repoRootForCwd, repoScopeKeys, type RepoInfo } from "./repos.ts";
 import { basename } from "path";
@@ -56,7 +59,7 @@ export interface LoadedModel {
   /** How each currently-running session was launched, by canonical name (for UI badges). */
   liveKinds: Map<string, SessionKind>;
   /** The live tmux window each running session occupies, by canonical name (for pane reads). */
-  liveWindows: Map<string, string>;
+  liveWindows: Map<string, LiveTarget>;
   /**
    * Canonical names of sessions that have a live but dormant restore placeholder
    * window (idle bash awaiting a keypress, not yet running). Not in `liveTmux`;
@@ -134,10 +137,13 @@ export function isRunning(s: AgentSession, live: Set<string>): boolean {
 export function refreshLiveTmux(allSessions: AgentSession[]): {
   live: Set<string>;
   liveKinds: Map<string, SessionKind>;
-  liveWindows: Map<string, string>;
+  liveWindows: Map<string, LiveTarget>;
   livePlaceholders: Set<string>;
 } {
-  return reconcileLive(liveTargets(), liveManagedPaths(), allSessions);
+  // `base` is membership only — the names tmux currently lists. The addressable
+  // targets ride along on `liveManagedPaths`, which is where reconciliation picks
+  // the window it attributes a session to.
+  return reconcileLive(new Set(liveTargets().keys()), liveManagedPaths(), allSessions);
 }
 
 /**
@@ -165,14 +171,14 @@ export function refreshLiveTmux(allSessions: AgentSession[]): {
  */
 export function reconcileLive(
   base: Set<string>,
-  managed: { name: string; cwd: string; placeholder: boolean }[],
+  managed: ManagedTarget[],
   sessions: AgentSession[],
-): { live: Set<string>; liveKinds: Map<string, SessionKind>; liveWindows: Map<string, string>; livePlaceholders: Set<string> } {
+): { live: Set<string>; liveKinds: Map<string, SessionKind>; liveWindows: Map<string, LiveTarget>; livePlaceholders: Set<string> } {
   const live = base;
   const liveKinds = new Map<string, SessionKind>();
-  const liveWindows = new Map<string, string>();
+  const liveWindows = new Map<string, LiveTarget>();
   const placeholders = new Set<string>();
-  for (const { name, cwd, placeholder } of managed) {
+  for (const { name, target, cwd, placeholder } of managed) {
     const kind = managedKind(name);
     if (!kind) continue;
     // An idle placeholder must not vouch for "running": record its window name
@@ -188,7 +194,7 @@ export function reconcileLive(
     const canon = sessionName(best);
     live.add(canon);
     liveKinds.set(canon, kind);
-    liveWindows.set(canon, name);
+    liveWindows.set(canon, { name, target });
   }
   // A placeholder's window name IS its canonical name, so a real window vouching
   // for the same session shows up as a `liveKinds` entry under that name. Any
@@ -300,7 +306,7 @@ export interface LocalSessions {
   sessionGroups: RepoSessions[];
   live: Set<string>;
   liveKinds: Map<string, SessionKind>;
-  liveWindows: Map<string, string>;
+  liveWindows: Map<string, LiveTarget>;
   livePlaceholders: Set<string>;
 }
 

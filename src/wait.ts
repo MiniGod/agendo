@@ -339,8 +339,8 @@ export async function runWait(o: WaitOptions): Promise<number> {
   const targets: { s: AgentSession; target: string }[] = [];
   const notRunning: AgentSession[] = [];
   for (const s of sessions) {
-    const target = liveWindows.get(sessionName(s));
-    if (target) targets.push({ s, target });
+    const w = liveWindows.get(sessionName(s));
+    if (w) targets.push({ s, target: w.name });
     else notRunning.push(s);
   }
   if (o.ids.length && notRunning.length) {
@@ -408,7 +408,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
       let resumeDialog = false;
       if (live) {
         misses.set(s.id, 0);
-        const { raw, cursor } = capturePaneState(live);
+        const { raw, cursor } = capturePaneState(live.target);
         state = paneReadiness(raw, cursor);
         resumeDialog = paneResumeDialogActive(raw);
         // Same capture again — no extra tmux call, and the same helper `agendo
@@ -430,7 +430,7 @@ export async function runWait(o: WaitOptions): Promise<number> {
         satisfied: waitSatisfied(state, o),
         cwd: s.cwd,
         title: s.title,
-        window: live ?? target,
+        window: live ? live.name : target,
         limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
         resumeDialog,
       };
