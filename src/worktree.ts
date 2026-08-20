@@ -55,16 +55,35 @@ export function defaultBranch(workItemId: number, title: string): string {
  * connector punctuation, never `\p{L}`/`\p{N}`/`\p{M}`, so it cannot occur in a
  * slug and the fallback can never collide with one.
  *
- * The result is therefore letters, digits, marks, interior dashes — or
+ * The digest is taken over the UTF-16 code units, NOT the default UTF-8. Node
+ * encodes every unpaired surrogate as the same three bytes (U+FFFD), so hashing
+ * the string directly gave `\ud83d` and `\ude00` — and every other lone
+ * surrogate — one identical directory, re-creating the collision this fallback
+ * exists to prevent. Lone surrogates are reachable: `prBranch` is provider JSON,
+ * and `JSON.parse` turns a `\udXXX` escape into a real one.
+ *
+ * The result is therefore letters, digits, interior marks and dashes — or
  * `_<hex>`. No separator, no `.` (dots become dashes, so no `..` and no
- * leading dot), no leading dash, nothing that can escape the container.
+ * leading dot), no leading dash or mark, nothing that can escape the container.
+ *
+ * NFC has a cost worth naming: a decomposed and a composed spelling of the same
+ * word are two DISTINCT git refs that now share one directory, so launching the
+ * second gets the first's checkout. That is the collision this function
+ * otherwise prevents. It is still the right trade — a paste from a macOS path
+ * is decomposed, and treating it as a different branch from the one the user
+ * typed would be the more surprising failure — but it is a trade, not a free
+ * win.
  */
 export function worktreeDirName(branch: string): string {
   const name = branch.replace(/^worktree-/, "").normalize("NFC");
   const slug = name
     .replace(/[^\p{L}\p{N}\p{M}]+/gu, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || `_${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
+    // Leading marks go too, not just leading dashes: a mark with no base
+    // character renders over the path separator, and a lone U+FE0F is a
+    // directory that is invisible in `ls`. A name that is ALL marks falls
+    // through to the hash, which is the right home for it.
+    .replace(/^[-\p{M}]+|-+$/gu, "");
+  return slug || `_${createHash("sha256").update(Buffer.from(name, "utf16le")).digest("hex").slice(0, 8)}`;
 }
 
 /** Worktree directory path for a branch. */
