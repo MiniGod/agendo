@@ -32,7 +32,7 @@
     "start": "bun run src/index.tsx",
     "dev": "bun run src/index.tsx",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint --max-warnings 8",
+    "lint": "oxlint --max-warnings 0",
     "doctor": "bunx react-doctor@0.9.12 --no-telemetry --verbose --yes .",
     "commitlint": "commitlint",
     "release": "commit-and-tag-version",

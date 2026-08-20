@@ -52,6 +52,7 @@ export function CloneScreen({
         </Text>
         <Text color={preview.color}>{`  ${preview.text}`}</Text>
         {(error ?? []).map((line, i) => (
+          // eslint-disable-next-line react/no-array-index-key -- at most two lines, replaced wholesale (App's fail() sets a fresh mode object from cloneError()), never appended or reordered, and stateless <Text> leaves. Keying by `line` is worse: nothing guarantees the hint differs from the detail, and a duplicate key prints a React warning into the TUI.
           <Text key={i} color="red">{`  ${line}`}</Text>
         ))}
       </Box>

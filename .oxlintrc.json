@@ -25,7 +25,7 @@
   // / max-statements and nothing else) is still measured by the shared
   // max-lines-per-function, and currently sets it.
   //
-  // Be precise about what that buys: the budget is per GLOB GROUP, so the 24
+  // Be precise about what that buys: the budget is per GLOB GROUP, so the 86
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
   // is 833 lines against a 1228 cap, and any of them may add a fresh
   // complexity-34 function). It bounds the blast radius; it does not freeze
@@ -65,15 +65,23 @@
     // them. The count is capped by --max-warnings in the "lint" script — the
     // same ratchet as above, expressed as a total.
     //
-    // Honest accounting: 8 counted warnings (5 exhaustive-deps + 3
-    // no-array-index-key), plus 2 MORE exhaustive-deps findings suppressed by
-    // inline disables, each carrying its `-- <why>` per the escape-hatch rule
-    // in CLAUDE.md. True exhaustive-deps total is therefore 7, of which 5 are
-    // counted. The two suppressed ones now live at
-    // src/ui/hooks/useAuthProbe.ts:41 and
-    // src/ui/hooks/useActivityWatchers.ts:86 — they moved out of App.tsx with
-    // the effects they annotate. (An earlier revision of this note cited
-    // App.tsx:387 and :709; those line numbers were wrong even then.)
+    // Honest accounting: ZERO counted warnings — `lint` runs at
+    // --max-warnings 0, so either of these firing anywhere now fails the build.
+    // Four findings are suppressed by single-line disables, each carrying its
+    // `-- <why>` per the escape-hatch rule in CLAUDE.md:
+    //
+    //   exhaustive-deps    src/ui/hooks/useAuthProbe.ts        probe-on-open
+    //   exhaustive-deps    src/ui/hooks/useActivityWatchers.ts id-set digest
+    //   no-array-index-key src/ui/components.tsx               column layout
+    //   no-array-index-key src/ui/screens/CloneScreen.tsx      error lines
+    //
+    // The two index-key ones are deliberate: in both the index IS the identity
+    // (a fixed positional column layout; a two-line list replaced wholesale),
+    // and the available alternative key is not unique, so keying by it would
+    // print a duplicate-key warning into the terminal the TUI is drawing on.
+    // These stay warnings rather than errors so that a CARELESS new instance
+    // shows up as a warning to be judged, not as a wall to be climbed with a
+    // blanket disable.
     "react-hooks/exhaustive-deps": "warn",
     "react/no-array-index-key": "warn"
   },

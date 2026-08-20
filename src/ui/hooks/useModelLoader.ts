@@ -17,15 +17,22 @@ import type { Identity, ProviderName } from "../../types.ts";
  * state here would hand that effect a setter it cannot see the origin of. The
  * load effect takes `setModel`, `setNotice` and `noticeRef` as parameters for
  * the same reason, and its dependency array is unchanged — it is the one effect
- * in the tree that already carries an exhaustive-deps finding.
+ * in the tree.
  *
- * That finding WIDENED in the move, without the count changing: in App it read
- * `missing dependency: 'hostSession'`, and now names setModel, hostSession,
- * setNotice and noticeRef, because as parameters the linter can no longer prove
- * the two setters are stable. The dependency array is byte-identical and the
- * behaviour is unchanged — but a wider finding is a worse tripwire, since a
- * genuinely new missing dep would hide inside it. Narrowing it back is part of
- * moving `model` ownership here, not a separate cleanup.
+ * The load effect's dependency array is COMPLETE, and deliberately so — it
+ * carried an exhaustive-deps finding for a long time, first in App and then
+ * (four names wide instead of one) here. Listing all of them costs nothing and
+ * buys a real tripwire: `setModel`, `setNotice` and `noticeRef` are a useState
+ * setter pair and a ref, so React guarantees their identity and they never
+ * trigger a re-run; `hostSession` comes from `resolveContext` at process start
+ * and `<App>` renders once, so it is a per-process constant today. The effect
+ * therefore re-runs on exactly the renders it always did — and the day someone
+ * makes the host session re-scopable at runtime, the reload it needs is already
+ * wired instead of being a stale-model bug nobody connects to that change.
+ *
+ * One thing to keep true: `setNotice` must stay the raw setter. An inline
+ * `(v) => …` passed by a caller would change identity every render and turn
+ * this effect into a per-render reload.
  */
 export function useModelLoader({
   provider,
@@ -141,7 +148,7 @@ export function useModelLoader({
       if (timer) clearTimeout(timer);
       wake?.();
     };
-  }, [provider, identity, reloadKey, discoveredRepos]);
+  }, [provider, identity, reloadKey, discoveredRepos, hostSession, setModel, setNotice, noticeRef]);
 
   // Tick twice a second while a retry is counting down, so the countdown on the
   // retry screen actually counts down instead of freezing on its first value.

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import type { LoadedModel } from "../../model.ts";
 import {
   repoRootForCwd,
@@ -44,10 +44,20 @@ export function useRepoScope({
   // the post-clone flow with esc would hide the clone the user just waited for.
   // Applied in BOTH views: toggling `a` to global must not make a fresh clone
   // disappear either.
-  const withCloned = (repos: RepoInfo[]) => [
-    ...repos,
-    ...cloned.filter((c) => !repos.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
-  ];
+  // Memoized on `cloned` alone, which is the only thing it closes over. That is
+  // not decoration: `scopedRepos` below must invalidate exactly when `cloned`
+  // changes and at no other time, and depending on the callee says so in a form
+  // the linter can verify instead of one it has to be told. Depending on an
+  // unmemoized `withCloned` would recompute the memo on EVERY render, cascading
+  // into `worktreeRepos` and `anyHostableRepo` — which exist precisely to keep
+  // `isGitCheckout`'s existsSync off the per-keystroke path.
+  const withCloned = useCallback(
+    (repos: RepoInfo[]) => [
+      ...repos,
+      ...cloned.filter((c) => !repos.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
+    ],
+    [cloned],
+  );
   const scopedRepos = useMemo<RepoInfo[]>(() => {
     if (!model) return [];
     if (!scoped) {
@@ -89,7 +99,7 @@ export function useRepoScope({
     // Resolved through repoRootForCwd so scoping INSIDE a checkout still offers
     // the repo root, and worktrees land at the root rather than a subdir.
     return ensureRepoAtTop(inScopeRepos, repoRootForCwd(filterRoot!));
-  }, [model, scoped, filterRoot, cloned]);
+  }, [model, scoped, filterRoot, withCloned]);
 
   // The same list, reordered for targets that MUST create a worktree. Work-item
   // ("new") and PR flows structurally cannot run in place — `pr` goes straight

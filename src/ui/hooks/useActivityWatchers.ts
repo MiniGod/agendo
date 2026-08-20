@@ -86,10 +86,18 @@ export function useActivityWatchers({
   }, [openSessionInfo.key]); // eslint-disable-line react-hooks/exhaustive-deps -- `.key` is the sorted id digest built above precisely so this reconciles timers when the id SET changes; the object itself changes on every `rows` recompute, which would tear down live timers.
 
   // Leak-proof teardown: clear all timers when the component unmounts.
+  //
+  // `watchers.current` is read once into a local rather than in the cleanup. The
+  // two are the same object for the component's whole life — `watchers` is a
+  // container ref whose `.current` is assigned exactly once, at useRef, and only
+  // ever mutated through Map methods — so this is a no-op that also stops the
+  // linter warning about a ref read at cleanup time, which is a real hazard for
+  // node refs and not for this one.
   useEffect(() => {
+    const timers = watchers.current;
     return () => {
-      for (const t of watchers.current.values()) clearInterval(t);
-      watchers.current.clear();
+      for (const t of timers.values()) clearInterval(t);
+      timers.clear();
     };
   }, []);
 }

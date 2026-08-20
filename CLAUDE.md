@@ -34,13 +34,18 @@ The contract is one-directional:
 drives a real React reconciler, so those rules mean exactly what they mean in the
 DOM. `react-hooks/exhaustive-deps` and `react/no-array-index-key` are warnings
 capped by `--max-warnings` in the `lint` script — the same ratchet, expressed as
-a total count.
+a total count. **That cap is now 0.** They stay warnings rather than errors so a
+careless new instance arrives as something to judge, not as a wall to climb with
+a blanket disable; but nothing uncounted is left, so any new one fails CI.
 
 **One escape hatch, deliberately narrow.** Some rules can't tell a deliberate
 pattern from a careless one. `react-hooks/exhaustive-deps` is the standing
 example: `src/ui/hooks/useAuthProbe.ts` and
 `src/ui/hooks/useActivityWatchers.ts` each have an effect keyed to a narrower
-dependency on purpose, and both carry a `-- <why>` saying so. A single-line
+dependency on purpose, and both carry a `-- <why>` saying so.
+`react/no-array-index-key` is the other: `src/ui/components.tsx` and
+`src/ui/screens/CloneScreen.tsx` render lists where the index genuinely IS the
+identity and the obvious alternative key is not unique. A single-line
 `// eslint-disable-line <rule> -- <why>` is the sanctioned way to say "I meant
 this."
 

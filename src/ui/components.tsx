@@ -43,6 +43,7 @@ function ColRow({ cells, widths, selected }: { cells: Cell[]; widths: number[]; 
   return (
     <Text wrap="truncate" backgroundColor={selected ? "cyan" : undefined}>
       {cells.map((c, i) => (
+        // eslint-disable-next-line react/no-array-index-key -- `cells` IS the fixed column layout: a positional literal built by ItemRow/PrRow and indexed in lockstep with `widths[i]`, never reordered, filtered or resized. The index is the column's identity. `c.text` is not unique — two columns rendering "—" is ordinary — so keying by it would print a duplicate-key warning into the terminal this UI is painting.
         <Text key={i} color={selected ? "black" : c.color}>{fit(c.text, widths[i])}</Text>
       ))}
     </Text>

@@ -40,7 +40,7 @@ export function WtChoiceScreen({
         {opts.map((label, i) => {
           const sel = i === cursor;
           return (
-            <Text key={i} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
+            <Text key={label} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
               {sel ? "❯ " : "  "}
               <Text bold>{label.padEnd(22).slice(0, 22)}</Text>
               <Text dimColor={!sel}>{`  ${descs[i]}`}</Text>
