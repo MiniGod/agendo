@@ -27,7 +27,7 @@ import {
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
-import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
@@ -1817,6 +1817,231 @@ test.describe("paneReadiness: Codex CLI panes (real captures)", () => {
   });
 });
 
+// CODEX USAGE-LIMIT fixtures: raw `tmux capture-pane -p -e` output plus the
+// matching `#{cursor_x} #{cursor_y}` readout, captured live from a REAL capped
+// account (codex v0.148.0, `gpt-5.6-sol high`, pane 383x96, 2026-08-20) during a
+// single `codex resume`. Sterilized — home dir → /home/user, session id zeroed,
+// the two long user prompts in scrollback replaced with filler — but the footer,
+// the notice and the dialogs are byte-for-byte as captured. Five states, in the
+// order the resume produced them:
+//   - codex-trust.ansi              codex's own folder-trust prompt.
+//   - codex-resume-cwd.ansi         codex's own "which working directory?" resume
+//                                   prompt — the analogue of claude's resume
+//                                   dialog, and it means NO turn has run yet.
+//   - codex-limit-idle.ansi         capped, idle at the input box. THE one: the
+//                                   footer reads `Ready` AND `weekly 0% left`.
+//   - codex-limit-model-switch.ansi capped, a message sent, codex's "Approaching
+//                                   rate limits / Switch to gpt-5.6-luna?" menu
+//                                   raised. NO footer — the dialog replaces it.
+//   - codex-limit-dismissed.ansi    that menu dismissed with Esc: back to the
+//                                   codex-limit-idle shape.
+// See docs/codex-usage-limits.md for the full reasoning. In short: the footer's
+// run-state word LIES (`Ready` at a hard cap), the truth is a different field of
+// that same line (`weekly 0% left`), the reset time is a wall-clock time of day
+// rather than a countdown and can already be past, and the `■ You've hit your
+// usage limit…` notice is TRANSCRIPT — it scrolls, so detection must not need it.
+//
+// Codex's selection marker is `›` (U+203A), not claude's `❯` — the same glyph it
+// uses for the input-box prompt.
+
+/** The `■ You've hit your usage limit…` notice, read out of a fixture rather than
+ *  retyped, so a re-sterilization that changed the wording can't leave these
+ *  tests asserting against a string the fixture no longer contains. */
+const codexLimitNotice = (name: string) => {
+  const line = stripAnsi(fullPane(name)).split("\n").find((l) => /hit your usage limit/i.test(l));
+  expect(line, `${name} must carry the usage-limit notice`).toBeTruthy();
+  return line!.trim();
+};
+
+/**
+ * Rewrite the footer's quota field — `weekly 0% left` ⇄ `weekly 99% left` — on a
+ * real capture. The field is contiguous inside its SGR run, so a plain replace
+ * reaches it; every caller asserts the edit took, so a silently-missed edit can't
+ * turn one of these into a test that passes for the wrong reason.
+ *
+ * Used in BOTH directions on purpose. Patching a healthy capture down to `0%`
+ * proves the footer alone is sufficient evidence (that pane has no notice on
+ * screen at all); patching a capped one back up proves the notice alone is not.
+ */
+const patchQuota = (raw: string, from: string, to: string) => {
+  expect(stripAnsi(raw), `the capture must carry the quota field "${from}"`).toContain(from);
+  const out = raw.replaceAll(from, to);
+  expect(stripAnsi(out)).toContain(to);
+  expect(stripAnsi(out)).not.toContain(from);
+  return out;
+};
+
+test.describe("paneReadiness: Codex CLI usage limits (real captures)", () => {
+  test("the footer states two contradictory things on one line", () => {
+    // The fixture guard the whole design rests on. `Ready` and `weekly 0% left`
+    // are separate ` · ` fields of the SAME status bar, and it is their
+    // DISAGREEMENT that identifies the state — neither field alone can.
+    for (const name of ["codex-limit-idle.ansi", "codex-limit-dismissed.ansi"]) {
+      const footer = stripAnsi(fullPane(name)).split("\n").filter((l) => l.trim()).pop()!;
+      const fields = footer.split(" · ").map((f) => f.trim());
+      expect(fields, name).toContain("Ready");
+      expect(fields, name).toContain("weekly 0% left");
+    }
+    // …and every healthy codex capture in this repo carries the same field with a
+    // healthy value, which is what makes `0% left` a discriminator rather than a
+    // marker. Without this, "has a quota field" would look like a cap signal.
+    for (const name of ["codex-idle.ansi", "codex-draft.ansi", "codex-busy.ansi", "codex-busy-approval.ansi", "codex-done.ansi"]) {
+      const footer = stripAnsi(fullPane(name)).split("\n").filter((l) => l.trim()).pop()!;
+      expect(footer, name).toMatch(/\bweekly (?:9\d|100)% left\b/);
+    }
+    // And NOT via colour: codex paints `weekly 0% left` and `weekly 99% left` in
+    // the same pink, so the SGR run is no help and the text is all there is.
+    const colour = /\x1b\[38;2;233;144;169m(weekly \d+% left)/;
+    expect(fullPane("codex-limit-idle.ansi")).toMatch(colour);
+    expect(fullPane("codex-idle.ansi")).toMatch(colour);
+  });
+
+  test("a healthy idle codex pane still reads 'ready'", () => {
+    // The negative case a fix must not break. `codex-idle` sits at `weekly 99%
+    // left`; treating the field's presence (rather than its value) as a cap would
+    // make every codex session permanently unsendable.
+    expect(stripAnsi(fullPane("codex-idle.ansi"))).toContain("weekly 99% left");
+    expect(paneReadiness(fullPane("codex-idle.ansi"), codexCursor("codex-idle.cursor"))).toBe("ready");
+    expect(paneAcceptsPaste(fullPane("codex-idle.ansi"), codexCursor("codex-idle.cursor"))).toBe(true);
+    // Nothing pins where between 99% and 0% the field stops meaning "fine" — no
+    // capture exists at a low-but-nonzero quota (see the gaps in
+    // docs/codex-usage-limits.md). The assumption under test is that ONLY a
+    // literal `0% left` is a cap, so a merely low quota stays sendable.
+    for (const quota of ["weekly 9% left", "weekly 1% left"]) {
+      const low = patchQuota(fullPane("codex-idle.ansi"), "weekly 99% left", quota);
+      expect(paneReadiness(low, codexCursor("codex-idle.cursor")), quota).toBe("ready");
+    }
+  });
+
+  test("a recovered footer outranks a limit notice left in scrollback", () => {
+    // The notice is TRANSCRIPT: it stays on screen after the quota rolls over.
+    // So a detector keyed on the notice would report a recovered session as
+    // limited forever — the codex form of the staleness `paneUsageLimited`'s
+    // last-content-block walk exists to avoid on the claude side.
+    const recovered = patchQuota(fullPane("codex-limit-idle.ansi"), "weekly 0% left", "weekly 96% left");
+    expect(stripAnsi(recovered)).toContain("hit your usage limit");
+    expect(paneReadiness(recovered, codexCursor("codex-limit-idle.cursor"))).toBe("ready");
+    expect(paneUsageLimited(recovered)).toBe(false);
+  });
+
+  test("busy outranks the quota field", () => {
+    // Precedence: a session that is GENERATING is busy, whatever the quota field
+    // says — same order as the claude path, where paneUsageLimited is checked
+    // after the busy read. Synthesized (no capture exists of a busy pane at a
+    // cap; see docs/codex-usage-limits.md), so this pins the intended ordering
+    // rather than an observed one.
+    const busyCapped = patchQuota(fullPane("codex-busy.ansi"), "weekly 95% left", "weekly 0% left");
+    expect(paneReadiness(busyCapped, codexCursor("codex-busy.cursor"))).toBe("busy");
+  });
+
+  test("codex's own startup prompts are the CLI asking, not the agent asking", () => {
+    // Neither the folder-trust prompt nor the resume-cwd prompt is a question
+    // about the WORK — codex is asking how to start. They are never `ready`,
+    // never paste-safe (a message pasted into either picks a numbered option),
+    // and carry no cap of their own.
+    for (const state of ["trust", "resume-cwd"]) {
+      const raw = fullPane(`codex-${state}.ansi`);
+      const cursor = codexCursor(`codex-${state}.cursor`);
+      // The `›` selection cursor on option 1 — codex's marker, not claude's `❯`.
+      expect(stripAnsi(raw), state).toMatch(/^›\s*1\./m);
+      expect(paneReadiness(raw, cursor), state).not.toBe("ready");
+      expect(paneAcceptsPaste(raw, cursor), state).toBe(false);
+      expect(paneResumeSafe(raw, cursor), state).toBe(false);
+      expect(paneUsageLimited(raw), state).toBe(false);
+    }
+  });
+
+  test("the model-switch menu is never safe to paste into", () => {
+    // The safety floor for state 04, and it holds TODAY (via the generic dialog
+    // check) — pinned so a limit-detection change can't cost it. sendToPane is
+    // keystroke injection plus Enter: a message containing `1` switches the
+    // user's model, and `3` permanently suppresses future rate-limit warnings.
+    const raw = fullPane("codex-limit-model-switch.ansi");
+    const plain = stripAnsi(raw);
+    expect(plain).toContain("Approaching rate limits");
+    expect(plain).toMatch(/^›\s*1\.\s+Switch to /m);
+    expect(plain).toMatch(/^\s*3\.\s+Keep current model \(never show again\)/m);
+    const cursor = codexCursor("codex-limit-model-switch.cursor");
+    expect(paneReadiness(raw, cursor)).not.toBe("ready");
+    expect(paneAcceptsPaste(raw, cursor)).toBe(false);
+    // The resume keystrokes lead with Escape, which HERE is this dialog's own
+    // "esc to go back" — and the `continue` + Enter behind it would land in
+    // whatever the Escape revealed. No codex pane is resume-safe yet.
+    expect(paneResumeSafe(raw, cursor)).toBe(false);
+  });
+
+  test("capped and idle reads 'limited', not 'ready'", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    const raw = fullPane("codex-limit-idle.ansi");
+    const cursor = codexCursor("codex-limit-idle.cursor");
+    // The footer's own run-state word says `Ready`; the account is capped. Today
+    // paneReadiness believes the word, and paneAcceptsPaste therefore returns
+    // TRUE — `agendo send` delivers straight into a session that cannot answer.
+    expect(stripAnsi(raw)).toContain("Ready");
+    expect(paneUsageLimited(raw)).toBe(true);
+    expect(paneReadiness(raw, cursor)).toBe("limited");
+    expect(paneReadiness(raw)).toBe("limited");
+    expect(paneAcceptsPaste(raw, cursor)).toBe(false);
+  });
+
+  test("dismissing the model-switch menu leaves it capped, not ready", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // Esc is a safe dismissal — it returns the pane to the codex-limit-idle
+    // shape. Nothing about the cap changed, so neither may the verdict.
+    const raw = fullPane("codex-limit-dismissed.ansi");
+    const cursor = codexCursor("codex-limit-dismissed.cursor");
+    expect(paneUsageLimited(raw)).toBe(true);
+    expect(paneReadiness(raw, cursor)).toBe("limited");
+    expect(paneAcceptsPaste(raw, cursor)).toBe(false);
+  });
+
+  test("the model-switch menu is a LIMIT state, not merely a dialog", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // Today this reads `dialog` — safe by luck, not by detection: nothing knows
+    // the session is capped, so `agendo status` shows no cap and `agendo wait`
+    // never wakes with `blocked`. It must read `limited`, which on the claude
+    // path already outranks `dialog`.
+    //
+    // The structural wrinkle: this state has NO footer status bar (the dialog
+    // replaces it), so `codexFooter` rejects the pane and `codexPane` returns
+    // null — the capture never reaches `codexReadiness` at all. Codex limit
+    // detection cannot live only inside that classifier.
+    const raw = fullPane("codex-limit-model-switch.ansi");
+    const footer = stripAnsi(raw).split("\n").filter((l) => l.trim()).pop()!;
+    expect(footer.split(" · ").length, "no status bar to read a quota field from").toBe(1);
+    expect(paneUsageLimited(raw)).toBe(true);
+    expect(paneReadiness(raw, codexCursor("codex-limit-model-switch.cursor"))).toBe("limited");
+  });
+
+  test("the footer quota field alone is enough — with no notice on screen", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // The load-bearing claim of the design: the notice SCROLLS, so once it is
+    // gone `weekly 0% left` is the only evidence left, and it must suffice.
+    // `codex-idle` is a healthy capture with no notice anywhere in it; drop its
+    // quota to zero and the pane must read limited on the footer alone.
+    const capped = patchQuota(fullPane("codex-idle.ansi"), "weekly 99% left", "weekly 0% left");
+    expect(stripAnsi(capped)).not.toMatch(/usage limit/i);
+    expect(paneUsageLimited(capped)).toBe(true);
+    expect(paneReadiness(capped, codexCursor("codex-idle.cursor"))).toBe("limited");
+  });
+
+  test("a limit notice replayed above the resume-cwd prompt is the PREVIOUS run", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // The codex analogue of paneResumeDialogActive's whole reason for existing
+    // (#30). A session parked at "which working directory?" has run NO turn yet;
+    // everything above the prompt is the previous run's replayed transcript, and
+    // that transcript routinely ends in the very notice that made the user
+    // resume. Judged as current state it reads `limited` today — so `agendo
+    // status` would print a stale reset time and `agendo wait` would never
+    // settle, which is the blocked-forever reporting this must not reintroduce.
+    const notice = codexLimitNotice("codex-limit-idle.ansi");
+    const replayed = [notice, "", fullPane("codex-resume-cwd.ansi")].join("\n");
+    expect(stripAnsi(replayed)).toContain("hit your usage limit");
+    expect(paneReadiness(replayed, codexCursor("codex-resume-cwd.cursor"))).not.toBe("limited");
+    expect(paneUsageLimited(replayed)).toBe(false);
+  });
+});
+
 test.describe("parseResetTime: extract the reset instant from the notice", () => {
   test("time + IANA timezone → that wall-clock time in the named zone", () => {
     const now = new Date("2026-06-15T12:00:00Z");
@@ -1979,6 +2204,55 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(d.getDate()).toBe(15); // today (already reopened)
     expect(d.getHours()).toBe(1);
     expect(at!).toBeLessThan(now.getTime());
+  });
+});
+
+test.describe("parseResetTime: Codex's `try again at <time>` wording", () => {
+  test("the reset time parses out of the codex notice", () => {
+    test.fixme(true, "parseResetTime has no codex arm — see docs/codex-usage-limits.md");
+    // Claude says "Your limit will reset at 3pm (America/Santiago)"; codex says
+    // "…or try again at 1:22 PM." — no `reset` anchor, no timezone. parseResetTime
+    // returns null on it today, which leaves resetAt unknown and auto-resume
+    // unreachable even once the pane classifies as limited.
+    const notice = codexLimitNotice("codex-limit-idle.ansi");
+    expect(notice).toContain("try again at 1:22 PM");
+    // 09:00 local, before the stated reset → today at 13:22, still ahead.
+    const before = new Date(2026, 4, 15, 9, 0);
+    const at = parseResetTime(notice, before, RESET_LOOKBACK_MS);
+    expect(at).not.toBeNull();
+    expect(at!).toBe(new Date(2026, 4, 15, 13, 22).getTime());
+    // …and the pane-level read agrees, since that's what callers actually use.
+    expect(paneResetAt(stripAnsi(fullPane("codex-limit-idle.ansi")), before)).toBe(at);
+  });
+
+  test("an already-past reset does not report an indefinite live limit", () => {
+    test.fixme(true, "parseResetTime has no codex arm — see docs/codex-usage-limits.md");
+    // The hazard this capture demonstrates in the wild: it was taken at 10:14 the
+    // morning AFTER the notice was printed, so `1:22 PM` was already long past
+    // while the notice sat on screen. Two rules, both already established for
+    // claude's bare-time form and inherited unchanged here:
+    const notice = codexLimitNotice("codex-limit-idle.ansi");
+    // (a) JUST past — inside BARE_TIME_LOOKBACK_MS — is returned as-is, so the
+    //     caller can act now rather than waiting another whole day.
+    const justAfter = new Date(2026, 4, 15, 14, 30);
+    const recent = parseResetTime(notice, justAfter, RESET_LOOKBACK_MS);
+    expect(recent).toBe(new Date(2026, 4, 15, 13, 22).getTime());
+    expect(recent!).toBeLessThan(justAfter.getTime());
+    // (b) LONG past — beyond that lookback — rolls forward to tomorrow rather
+    //     than being handed back as a stale instant that would fire auto-resume
+    //     into a session which is still capped.
+    const longAfter = new Date(2026, 4, 15, 23, 0);
+    const rolled = parseResetTime(notice, longAfter, RESET_LOOKBACK_MS);
+    expect(rolled).toBe(new Date(2026, 4, 16, 13, 22).getTime());
+    expect(rolled!).toBeGreaterThan(longAfter.getTime());
+    // And the liveness verdict never comes from the notice regardless: the pane
+    // above stays limited only while its FOOTER says so. A past reset time on a
+    // still-capped footer is limited; the same past time over a recovered footer
+    // is not. Neither reading is "limited forever because a clock time elapsed".
+    const stillCapped = fullPane("codex-limit-idle.ansi");
+    const recovered = patchQuota(stillCapped, "weekly 0% left", "weekly 96% left");
+    expect(paneUsageLimited(stillCapped)).toBe(true);
+    expect(paneUsageLimited(recovered)).toBe(false);
   });
 });
 
