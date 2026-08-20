@@ -17,9 +17,17 @@
 // paste or a keyboard can emit, which is why the fix belongs in the caret
 // rather than in a guard on the input.
 //
-// Only the arrow keys and backspace need this. Every other caret move in those
-// prompts goes to 0 or to `value.length`, which are always boundaries — so a
-// caret that starts on a boundary stays on one.
+// Arrow keys and backspace need this. Most other caret moves in those prompts
+// go to 0 or to `value.length`, which are always boundaries, so a caret that
+// starts on one stays on one.
+//
+// The exception is the word-delete in search.ts (^W / ^Backspace / alt-backspace),
+// which does its own index arithmetic and was deliberately NOT converted. It is
+// safe for a reason worth writing down rather than rediscovering: it scans
+// backwards and stops only at a character matching /\s/ or at 0, and every
+// whitespace character is BMP — so it can only ever halt on a code-point
+// boundary. That argument is load-bearing. Widen the predicate it stops on (to
+// punctuation, say, which is NOT all BMP) and the site needs caretLeft.
 
 /** The code-point boundary at or before `cursor` — i.e. one ← press. */
 export function caretLeft(value: string, cursor: number): number {

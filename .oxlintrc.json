@@ -107,7 +107,7 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        "max-lines": ["error", { "max": 1228, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
+        "max-lines": ["error", { "max": 1227, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
         "max-lines-per-function": ["error", { "max": 210, "skipBlankLines": false, "skipComments": false }], // src/index.tsx runStatus
         // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
         // three-way tie between src/activity.ts `claudeAction`, src/activity.ts

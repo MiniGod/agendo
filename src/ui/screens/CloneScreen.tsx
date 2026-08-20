@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import { CaretText } from "../components.tsx";
 import { repoUrlLabel, type RepoUrl } from "../../clone.ts";
 import { homeShort } from "../format.ts";
 
@@ -46,9 +47,7 @@ export function CloneScreen({
       <Box marginTop={1} flexDirection="column">
         <Text>
           {"  "}
-          <Text>{value.slice(0, cursor)}</Text>
-          <Text inverse>{value[cursor] ?? " "}</Text>
-          <Text>{value.slice(cursor + 1)}</Text>
+          <CaretText value={value} cursor={cursor} />
         </Text>
         <Text color={preview.color}>{`  ${preview.text}`}</Text>
         {(error ?? []).map((line, i) => (

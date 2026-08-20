@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import { CaretText } from "../components.tsx";
 import { worktreeDirName } from "../../worktree.ts";
 import type { AgentSource } from "../../types.ts";
 import type { RepoInfo } from "../../repos.ts";
@@ -40,9 +41,7 @@ export function BranchScreen({
       {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
       <Box marginTop={1}>
         <Text>{worktree ? "branch: " : "name:   "}</Text>
-        <Text color="cyan">{value.slice(0, cursor)}</Text>
-        <Text inverse>{value[cursor] ?? " "}</Text>
-        <Text color="cyan">{value.slice(cursor + 1)}</Text>
+        <CaretText value={value} cursor={cursor} color="cyan" />
       </Box>
       <Box marginTop={1}>
         {worktree

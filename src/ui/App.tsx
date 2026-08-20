@@ -42,6 +42,7 @@ import {
   ActionRow,
   ColumnHeader,
   HEADERS_ITEMS,
+  CaretText,
   ITEM_WIDTHS,
   ItemRow,
   PR_WIDTHS,
@@ -1081,9 +1082,7 @@ export default function App({
             <Text color={searchFocus === "input" ? "cyan" : "gray"}>{"search "}</Text>
             {searchFocus === "input" ? (
               <Text>
-                {search.text.slice(0, search.cursor)}
-                <Text inverse>{search.text[search.cursor] ?? " "}</Text>
-                {search.text.slice(search.cursor + 1)}
+                <CaretText value={search.text} cursor={search.cursor} />
               </Text>
             ) : (
               <Text dimColor>{search.text}</Text>

@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import { caretRight } from "./keys/caret.ts";
 import {
   agentCell,
   approvalCell,
@@ -35,6 +36,27 @@ export const HEADERS_ITEMS = ["  ID", "TYPE", "STATE", "TITLE", "PR", "AGENT"];
 // PR headers are built per render: the sort-time column's label is the active sort.
 export function prHeaders(sort: PrSort): string[] {
   return ["  ID", "APPROVE", "CI / MERGE", "TITLE", "CONTEXT", sort.toUpperCase(), "AGENT"];
+}
+
+/**
+ * A single-line prompt value with a block caret over the character at `cursor`.
+ *
+ * The caret cell is `value.slice(cursor, caretRight(value, cursor))`, not
+ * `value[cursor]`: the latter is ONE UTF-16 code unit, so a caret parked on an
+ * astral character (where caretLeft/caretRight deliberately park it) rendered
+ * two unpaired surrogates and the terminal drew replacement glyphs over an
+ * emoji. The value was always fine — this is the display half of the same
+ * boundary problem src/ui/keys/caret.ts fixes for editing.
+ */
+export function CaretText({ value, cursor, color }: { value: string; cursor: number; color?: string }) {
+  const end = caretRight(value, cursor);
+  return (
+    <>
+      <Text color={color}>{value.slice(0, cursor)}</Text>
+      <Text inverse>{value.slice(cursor, end) || " "}</Text>
+      <Text color={color}>{value.slice(end)}</Text>
+    </>
+  );
 }
 
 function ColRow({ cells, widths, selected }: { cells: Cell[]; widths: number[]; selected: boolean }) {
