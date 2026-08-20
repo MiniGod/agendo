@@ -1,5 +1,6 @@
 import type { Key } from "ink";
 import type { KeyContext } from "./context.ts";
+import { caretLeft, caretRight } from "./caret.ts";
 
 type Ctx = Pick<KeyContext, "mode" | "setMode" | "beginClone">;
 type CloningCtx = Pick<KeyContext, "mode" | "cancelClone">;
@@ -22,13 +23,19 @@ export function handleCloneKeys(input: string, key: Key, ctx: Ctx): boolean {
       // Any edit clears a stale error — it described the *previous* value.
       return { ...p, value: r.value ?? p.value, cursor: r.cursor, error: undefined };
     });
-  if (key.leftArrow) { edit((v, c) => ({ cursor: Math.max(0, c - 1) })); return true; }
-  if (key.rightArrow) { edit((v, c) => ({ cursor: Math.min(v.length, c + 1) })); return true; }
+  // Whole code points, not string indices — this prompt takes PASTES, so a
+  // non-BMP character in one is not exotic here (see caret.ts).
+  if (key.leftArrow) { edit((v, c) => ({ cursor: caretLeft(v, c) })); return true; }
+  if (key.rightArrow) { edit((v, c) => ({ cursor: caretRight(v, c) })); return true; }
   if (key.ctrl && input === "a") { edit(() => ({ cursor: 0 })); return true; }
   if (key.ctrl && input === "e") { edit((v) => ({ cursor: v.length })); return true; }
   if (key.ctrl && input === "u") { edit(() => ({ value: "", cursor: 0 })); return true; }
   if (key.backspace || key.delete || input === "\x7f" || input === "\b") {
-    edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
+    edit((v, c) => {
+      if (c === 0) return { cursor: 0 };
+      const i = caretLeft(v, c);
+      return { value: v.slice(0, i) + v.slice(c), cursor: i };
+    });
     return true;
   }
   // A PASTE arrives as one chunk, and copying a URL as a whole line brings

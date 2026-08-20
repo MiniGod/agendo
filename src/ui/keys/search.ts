@@ -1,5 +1,6 @@
 import type { Key } from "ink";
 import type { KeyContext } from "./context.ts";
+import { caretLeft, caretRight } from "./caret.ts";
 
 type Ctx = Pick<
   KeyContext,
@@ -44,8 +45,9 @@ function handleSearchInputKeys(input: string, key: Key, ctx: Ctx): boolean {
       return true;
     }
     if (key.upArrow) return true; // single-line input — nothing above
-    if (key.leftArrow) { ctx.editSearch((_v, c) => ({ cursor: Math.max(0, c - 1) })); return true; }
-    if (key.rightArrow) { ctx.editSearch((v, c) => ({ cursor: Math.min(v.length, c + 1) })); return true; }
+    // Whole code points, not string indices — see caret.ts.
+    if (key.leftArrow) { ctx.editSearch((v, c) => ({ cursor: caretLeft(v, c) })); return true; }
+    if (key.rightArrow) { ctx.editSearch((v, c) => ({ cursor: caretRight(v, c) })); return true; }
     if (key.ctrl && input === "a") { ctx.editSearch(() => ({ cursor: 0 })); return true; }
     if (key.ctrl && input === "e") { ctx.editSearch((v) => ({ cursor: v.length })); return true; }
     // Delete the previous word: Ctrl+Backspace (^H → key.backspace in Ink),
@@ -61,9 +63,14 @@ function handleSearchInputKeys(input: string, key: Key, ctx: Ctx): boolean {
       return true;
     }
     // Delete the previous character: plain Backspace (\x7f → key.delete in Ink).
+    // The whole character, both halves of a surrogate pair (see caret.ts).
     if (key.delete || input === "\x7f") {
       ctx.setCursor(0);
-      ctx.editSearch((v, c) => (c === 0 ? { cursor: 0 } : { text: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
+      ctx.editSearch((v, c) => {
+        if (c === 0) return { cursor: 0 };
+        const i = caretLeft(v, c);
+        return { text: v.slice(0, i) + v.slice(c), cursor: i };
+      });
       return true;
     }
     // Printable means "not a control character", NOT "ASCII". The clone prompt
@@ -76,13 +83,23 @@ function handleSearchInputKeys(input: string, key: Key, ctx: Ctx): boolean {
     // `\p{Cc}` is exactly the C0 and C1 control ranges (U+0000–U+001F,
     // U+007F–U+009F), written as a property escape so the pattern holds no
     // control character of its own (see `no-control-regex` in .oxlintrc.json).
-    // A chunk containing one is still rejected WHOLE rather than stripped —
-    // that is precisely today's behaviour for ASCII, and it is what keeps an
-    // unrecognised escape sequence out of the query: Ink hands those over with
-    // the leading ESC already removed, so stripping the rest would type
-    // `[200~` into the search box instead of ignoring it. clone.ts trades that
-    // away deliberately because a pasted URL with a trailing newline is its
-    // entire job; a search query has no such paste to protect.
+    // A chunk containing one is rejected WHOLE rather than stripped, which is
+    // precisely the old ASCII guard's behaviour.
+    //
+    // Be exact about what that does and does not buy, because it is easy to
+    // overclaim. Ink strips ONE leading ESC before handing the chunk over
+    // (`input.slice(1)` in ink/hooks/use-input.js), so an unrecognised escape
+    // sequence arrives already decapitated: `\x1b[200~` becomes `[200~`, which
+    // holds no control character and is therefore ACCEPTED and typed into the
+    // query. The old ASCII-only guard accepted it too — `[200~` is printable
+    // ASCII — so nothing regressed here, but the guard is not what keeps such
+    // a remnant out, and no guard on this line does. What rejecting-whole does
+    // buy is the chunk that still CONTAINS a control character after that one
+    // strip, e.g. a bracketed paste arriving as `[200~hi\x1b[201~`: stripping
+    // the controls would type the markers as literal text, while rejecting the
+    // chunk types nothing. clone.ts strips instead, deliberately, because a
+    // pasted URL with a trailing newline is its entire job; a search query has
+    // no such paste to protect.
     if (input && !key.ctrl && !key.meta && !/\p{Cc}/u.test(input)) {
       ctx.setCursor(0);
       ctx.editSearch((v, c) => ({ text: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
