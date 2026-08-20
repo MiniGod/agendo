@@ -134,12 +134,55 @@
     },
 
     {
-      // ── temporary exemption: src/index.tsx (2456 lines) ──────────────────
+      // ── temporary exemption: src/index.tsx (1251 lines) ──────────────────
+      // Was 2456. Ten subcommands and the shared formatters now live in
+      // src/cli/; what is left is argv dispatch plus `status` and `list`.
+      //
+      // Those two stay ONLY because e2e/cli.spec.ts:1690 enforces an
+      // architectural rule — index.tsx is the sole file under src/ permitted to
+      // import src/gitrefs.ts — and both call branchSync(). The suite is frozen,
+      // so the allow-list cannot be extended here. That guard is doing its job;
+      // it is not in the way. See the PR description.
+      //
+      // complexity/max-statements are both set by `runStatus`, which is one of
+      // the two the guard pins in place. They drop to 33/47 the moment
+      // "cli/status.ts" and "cli/list.ts" join that allow-list.
       "files": ["src/index.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 2456, "skipBlankLines": false, "skipComments": false }],
+        "max-lines": ["error", { "max": 1251, "skipBlankLines": false, "skipComments": false }],
         "complexity": ["error", 66],
         "max-statements": ["error", 90]
+      }
+    },
+
+    {
+      // ── inherited exemptions: src/cli/send.ts, src/cli/close.ts ──────────
+      // NOT new debt, and NOT a raised threshold: `runSend` and `runClose` had
+      // exactly these shapes while they sat in index.tsx, where its blanket
+      // complexity-66 exemption covered them silently. Moving them out is what
+      // made them visible, and pinning them here is strictly TIGHTER than the
+      // status quo — a cap of 66 spread across 2456 lines becomes 49 on 224
+      // lines and 40 on 287, with index.tsx's own 66 now confined to a third of
+      // its former reach.
+      //
+      // Decomposing them is real work on live control flow (`runSend` alone
+      // drives the socket path, the tmux fallback and the readiness wait), not
+      // the motion this PR is doing. They are the next two ratchet targets.
+      // One block each, not one shared block: pinning both files together
+      // would set complexity at close.ts's 49 and hand send.ts nine points of
+      // free growth it has not earned. Same reason the `src/**` budget is not
+      // pinned at the worst file in the tree.
+      "files": ["src/cli/send.ts"],
+      "rules": {
+        "complexity": ["error", 40], // runSend
+        "max-statements": ["error", 74] // runSend
+      }
+    },
+
+    {
+      "files": ["src/cli/close.ts"],
+      "rules": {
+        "complexity": ["error", 49] // runClose; statements (56) are inside the shared budget
       }
     },
 
