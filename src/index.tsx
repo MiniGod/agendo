@@ -1162,7 +1162,7 @@ function runPlainList(
       "●",
       readyCell(readiness, rowResetAt(readiness, raw), rowCompactionPercent(readiness, raw)),
       KIND_LABEL[kind].padEnd(3),
-      shortId(s.id),
+      shortId(s.id).padEnd(12), // bounds at 12 but does not pad; a shorter id left the rest of the row ragged
       timeAgo(s.lastUsed).padEnd(8),
       padCell(basename(s.cwd) || s.cwd, 24),
       s.title.replace(/\s+/g, " ").slice(0, 44),
