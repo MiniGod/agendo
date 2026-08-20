@@ -34,11 +34,19 @@ export function useLocalRescan({
   // back out of the fresh-session picker on the next tick.
   useEffect(() => {
     let inFlight = false; // a slow disk scan must not overlap the next tick
+    // `clearInterval` stops FUTURE ticks but does nothing about a tick already
+    // awaiting the disk scan, so without this the resolution would still call
+    // `setModel` after unmount. Harmless in React 18 (the setState is dropped)
+    // and the interval is mount-only, so in practice this fires only on exit —
+    // but "the cleanup does not actually cancel the work" is worth closing
+    // rather than relying on a no-op that used to be a warning.
+    let stopped = false;
     const handle = setInterval(async () => {
-      if (inFlight || !modelRef.current) return; // no full model yet, or busy
+      if (inFlight || stopped || !modelRef.current) return; // no full model yet, or busy
       inFlight = true;
       try {
         const local = await loadLocalSessions();
+        if (stopped) return; // unmounted while the scan was running
         setModel((prev) => {
           if (!prev) return prev;
           // The rescan's repos are session-derived only, so re-apply the same
@@ -80,7 +88,10 @@ export function useLocalRescan({
         inFlight = false;
       }
     }, LIVE_POLL_MS);
-    return () => clearInterval(handle);
+    return () => {
+      stopped = true;
+      clearInterval(handle);
+    };
     // All three are stable identities — two `useRef` objects and a `useState`
     // setter — so this array never changes and the interval is still armed
     // exactly once, as it was when the effect lived in App with `[]`. They are
