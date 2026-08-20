@@ -25,7 +25,7 @@
   // max-statements and nothing else) is still measured by the shared max-lines
   // and max-lines-per-function, and currently sets both.
   //
-  // Be precise about what that buys: the budget is per GLOB GROUP, so the 86
+  // Be precise about what that buys: the budget is per GLOB GROUP, so the 82
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
   // is 833 lines against a 1227 cap, and any of them may add a fresh
   // complexity-34 function). It bounds the blast radius; it does not freeze
@@ -132,20 +132,21 @@
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        // NOTE: no max-lines here any more. App.tsx is 1228 lines and now lives
-        // inside the shared src/** budget — the first of the three big files to
-        // get there, and since the sessions.ts split it is the file that SETS
-        // that budget. What remains below is about the `App` FUNCTION, not the
-        // file.
+        // NOTE: no max-lines here any more. App.tsx is 1104 lines and lives
+        // inside the shared src/** budget. It no longer SETS that budget either
+        // — src/index.tsx does, at 1227. What remains below is about the `App`
+        // FUNCTION, not the file.
         //
         // `App` itself, line 100: the eleven mode screens are in src/ui/screens/,
-        // the key handlers in src/ui/keys/, and nine hooks in src/ui/hooks/.
-        "max-lines-per-function": ["error", { "max": 1124, "skipBlankLines": false, "skipComments": false }],
+        // the key handlers in src/ui/keys/, nine hooks in src/ui/hooks/, and the
+        // clone/convert action closures in src/ui/cloneActions.ts and
+        // src/ui/convertAgent.ts.
+        "max-lines-per-function": ["error", { "max": 1011, "skipBlankLines": false, "skipComments": false }],
         // `App` itself is now the worst function in this file; the useInput
         // handler that used to hold these records is down to complexity 14 /
         // 14 statements, and lives in src/ui/keys/.
-        "complexity": ["error", 51],
-        "max-statements": ["error", 109]
+        "complexity": ["error", 48],
+        "max-statements": ["error", 105]
       }
     },
 
@@ -164,7 +165,7 @@
     },
 
     {
-      // ── temporary exemption: src/index.tsx (1251 lines) ──────────────────
+      // ── temporary exemption: src/index.tsx (1227 lines) ──────────────────
       // Was 2456. Ten subcommands and the shared formatters now live in
       // src/cli/; what is left is argv dispatch plus `status` and `list`.
       //

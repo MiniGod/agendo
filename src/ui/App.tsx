@@ -2,13 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import { loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
-import { openSession, launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
+import { launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName } from "../tmux.ts";
 import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
 import { createWorktree, checkoutWorktree, freeWorktreeBranch } from "../worktree.ts";
-import { isOrchestratorSession } from "../orchestrator.ts";
 import { loadState, saveState } from "../config.ts";
 import {
   discoverGitReposUnder,
@@ -16,21 +15,11 @@ import {
   isGitCheckout,
   type RepoInfo,
 } from "../repos.ts";
-import {
-  parseRepoUrl,
-  repoUrlLabel,
-  cloneDirName,
-  enclosingCheckout,
-  findMatchingCheckout,
-  freeCloneDest,
-  startClone,
-} from "../clone.ts";
-import { normalizeCwd } from "../context.ts";
 import { vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../provider.ts";
-import { basename } from "path";
-import { homedir } from "os";
-import { cloneError, homeShort, type Activity } from "./format.ts";
+import { homeShort, type Activity } from "./format.ts";
+import { makeCloneActions } from "./cloneActions.ts";
+import { makeContinueInOtherAgent } from "./convertAgent.ts";
 import { sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "./equality.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import {
@@ -51,7 +40,6 @@ import {
   SessionRow,
   TaskRow,
 } from "./components.tsx";
-import { convertTarget, runConvert } from "./convert.ts";
 import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
 import { useAuthProbe } from "./hooks/useAuthProbe.ts";
 import { useCloneFlow } from "./hooks/useCloneFlow.ts";
@@ -641,125 +629,14 @@ export default function App({
   };
 
   // ── clone a repo that isn't on disk yet ──
-  // Gated on `canClone`: agendo must have been given a target directory, since
-  // that directory is the only place it may write. See docs/cloning.md.
-  //
-  // …and that directory must not be inside a git checkout. The clone lands as a
-  // direct child of it, so scoping to a repo (`agendo .`, `agendo ~/git/myrepo`,
-  // or any path under one — all of which the scoping logic supports) would drop
-  // a nested repository into that repo's working tree, where it sits as
-  // untracked clutter forever. Cloning belongs in a folder OF checkouts, not in
-  // one. `enclosingCheckout` walks up, but stops below $HOME — see there for why.
-  const canClone = scoped && !!filterRoot && !enclosingCheckout(filterRoot, homedir());
-
-  /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
-  const clonedRepo = (root: string): RepoInfo => ({
-    root,
-    name: basename(root) || root,
-    total: 0,
-    claude: 0,
-    copilot: 0,
-    codex: 0,
+  // The handlers live in ./cloneActions.ts; the state they drive lives in the
+  // useCloneFlow hook above. Built here, at the line the block occupied, because
+  // they close over `open` and `chooseRepo` — both defined above this point.
+  const { canClone, beginClone, cancelClone } = makeCloneActions({
+    scoped, filterRoot, cloneRun, cloneNoteRef, setMode, setNotice, setCloned, setCloneNote, chooseRepo,
   });
 
-  /** Remember the checkout and continue into the ordinary session flow. */
-  const adoptClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
-    const repo = clonedRepo(root);
-    setCloned((prev) =>
-      prev.some((r) => normalizeCwd(r.root) === normalizeCwd(root)) ? prev : [...prev, repo],
-    );
-    setNotice(note);
-    setCloneNote(note);
-    cloneNoteRef.current = note;
-    chooseRepo(target, repo, agent);
-  };
-
-  /**
-   * Enter on the URL prompt. Resolves where the repo should live before touching
-   * the network: an existing checkout of the same repo anywhere in the target
-   * directory wins outright (never a second copy), otherwise a free directory
-   * name is chosen and the clone starts.
-   */
-  const beginClone = (target: FreshTarget, agent: AgentSource, raw: string) => {
-    const url = parseRepoUrl(raw);
-    const fail = (...error: string[]) =>
-      setMode({ kind: "clone", target, agent, value: raw, cursor: raw.length, error });
-    if (!url) return fail("Not a recognizable GitHub or Azure DevOps repo URL.");
-
-    const existing = findMatchingCheckout(filterRoot!, url.key);
-    if (existing) {
-      return adoptClonedRepo(target, agent, existing, `already cloned — using ${homeShort(existing)}`);
-    }
-
-    const dest = freeCloneDest(filterRoot!, cloneDirName(url.repo));
-    if (!dest) return fail(`No free directory name for "${url.repo}" in ${homeShort(filterRoot!)}.`);
-
-    setMode({ kind: "cloning", target, agent, url, dest, progress: "starting…", elapsed: 0 });
-    const run = startClone(url.remote, dest, (line) =>
-      setMode((p) => (p.kind === "cloning" ? { ...p, progress: line } : p)),
-    );
-    cloneRun.current = run;
-    run.done.then((res) => {
-      if (cloneRun.current !== run) return; // superseded by a newer attempt
-      cloneRun.current = null;
-      if (res.canceled) {
-        setNotice("Clone cancelled.");
-        return setMode({ kind: "repo", target, agent, cursor: 0 });
-      }
-      if (!res.ok) return fail(...cloneError(res));
-      const landed = basename(dest) === cloneDirName(url.repo) ? "" : ` as ${basename(dest)}`;
-      adoptClonedRepo(target, agent, dest, `cloned ${repoUrlLabel(url)}${landed} into ${homeShort(dest)}`);
-    });
-  };
-
-  /** Cancel an in-flight clone (esc) — kills git and removes the partial dir. */
-  const cancelClone = () => {
-    cloneRun.current?.cancel();
-  };
-
-  // Convert a session's transcript into the other agent's format (via the
-  // external converter) and resume the resulting session. Claude→Copilot keeps
-  // the source cwd (the converter copies it but omits it from JSON); Copilot→
-  // Claude takes the cwd the converter reports. The new claude session lands in
-  // the default ~/.claude config dir (where the converter writes), so no
-  // configDir override is needed for resume.
-  const continueInOtherAgent = async (s: AgentSession) => {
-    const dest = convertTarget(s.source);
-    if (!dest) {
-      setNotice(`No cross-agent convert for ${s.source} sessions (the converter only speaks Claude↔Copilot).`);
-      return;
-    }
-    // Copilot has no `--append-system-prompt` equivalent, so converting an
-    // orchestrator to it would produce a session with none of the coordinate-
-    // don't-implement instructions — an "orchestrator" that just starts editing.
-    // Refuse, the way `launch --orchestrator --copilot` does on the CLI.
-    if (dest === "copilot" && isOrchestratorSession(s.id)) {
-      setNotice("That's an orchestrator session — Copilot can't carry the orchestrator instructions, so it won't convert.");
-      return;
-    }
-    const direction = s.source === "claude" ? "claude-to-copilot" : "copilot-to-claude";
-    setNotice(null);
-    setBusy(`Converting session to ${dest} (npx converter)…`);
-    try {
-      const res = await runConvert(direction, s.id);
-      const converted: AgentSession = {
-        id: res.id,
-        source: dest,
-        cwd: res.cwd ?? s.cwd,
-        branch: s.branch,
-        repository: dest === "copilot" ? s.repository : undefined,
-        title: s.title,
-        lastUsed: new Date(),
-      };
-      setBusy(null);
-      setMode({ kind: "list" });
-      open(openSession(converted));
-    } catch (e: any) {
-      setBusy(null);
-      setMode({ kind: "list" });
-      setNotice(`Convert to ${dest} failed: ${e?.message ?? e}`);
-    }
-  };
+  const continueInOtherAgent = makeContinueInOtherAgent({ open, setMode, setNotice, setBusy });
 
   // ── move a session to another Claude profile ────────────────────────────────
   // Open the picker for the hovered session. Every guard that can be answered
