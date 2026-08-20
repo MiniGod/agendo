@@ -332,8 +332,8 @@ export default function App({
           // index, so a brand-new session's backlink to an item/PR lags until the
           // next full `r` — acceptable for v1 (the session itself still appears and
           // is live-polled). We deliberately DON'T touch limitWindows/resumeFired/
-          // dialogRevealed here: a rescan must never reset a frozen reset instant
-          // or the fire-once guard, or auto-resume could re-fire `continue`.
+          // dialogRevealed (now private to useReadinessPoll): a rescan must never
+          // reset a frozen reset instant or the guard, or auto-resume re-fires it.
           return {
             ...prev,
             sessionGroups: local.sessionGroups,

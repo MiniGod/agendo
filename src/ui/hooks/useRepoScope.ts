@@ -142,5 +142,7 @@ export function useRepoScope({
   // stat the whole list per keypress.
   const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
 
-  return { scoped, inScope, scopedRepos, worktreeRepos, reposForTarget, anyHostableRepo };
+  // `worktreeRepos` stays internal: reposForTarget and anyHostableRepo are the
+  // two answers callers actually want, and App never destructured it.
+  return { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo };
 }

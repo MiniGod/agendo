@@ -62,12 +62,15 @@
     // them. The count is capped by --max-warnings in the "lint" script — the
     // same ratchet as above, expressed as a total.
     //
-    // Honest accounting as of this commit: 8 counted warnings (5
-    // exhaustive-deps + 3 no-array-index-key), plus 2 MORE exhaustive-deps
-    // findings at App.tsx:387 and :709 that are suppressed by inline
-    // disables. Those two predate this PR; this commit adds the `-- <why>` to
-    // each, per the escape-hatch rule in CLAUDE.md. True exhaustive-deps total
-    // is therefore 7, of which 5 are counted.
+    // Honest accounting: 8 counted warnings (5 exhaustive-deps + 3
+    // no-array-index-key), plus 2 MORE exhaustive-deps findings suppressed by
+    // inline disables, each carrying its `-- <why>` per the escape-hatch rule
+    // in CLAUDE.md. True exhaustive-deps total is therefore 7, of which 5 are
+    // counted. The two suppressed ones now live at
+    // src/ui/hooks/useAuthProbe.ts:41 and
+    // src/ui/hooks/useActivityWatchers.ts:86 — they moved out of App.tsx with
+    // the effects they annotate. (An earlier revision of this note cited
+    // App.tsx:387 and :709; those line numbers were wrong even then.)
     "react-hooks/exhaustive-deps": "warn",
     "react/no-array-index-key": "warn"
   },

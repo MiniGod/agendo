@@ -18,6 +18,14 @@ import type { Identity, ProviderName } from "../../types.ts";
  * load effect takes `setModel`, `setNotice` and `noticeRef` as parameters for
  * the same reason, and its dependency array is unchanged — it is the one effect
  * in the tree that already carries an exhaustive-deps finding.
+ *
+ * That finding WIDENED in the move, without the count changing: in App it read
+ * `missing dependency: 'hostSession'`, and now names setModel, hostSession,
+ * setNotice and noticeRef, because as parameters the linter can no longer prove
+ * the two setters are stable. The dependency array is byte-identical and the
+ * behaviour is unchanged — but a wider finding is a worse tripwire, since a
+ * genuinely new missing dep would hide inside it. Narrowing it back is part of
+ * moving `model` ownership here, not a separate cleanup.
  */
 export function useModelLoader({
   provider,
