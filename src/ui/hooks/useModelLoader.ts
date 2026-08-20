@@ -3,6 +3,8 @@ import { loadModel, type LoadedModel } from "../../model.ts";
 import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../../errors.ts";
 import type { RepoInfo } from "../../repos.ts";
 import type { Identity, ProviderName } from "../../types.ts";
+import { vocab } from "../../vocab.ts";
+import { setVocab } from "../vocabState.ts";
 
 /**
  * The data load and its automatic-retry loop, plus the ticker that keeps the
@@ -102,6 +104,19 @@ export function useModelLoader({
         try {
           const m = await loadModel({ provider, identity, hostSession, scopeRepos: discoveredRepos });
           if (cancelled) return;
+          // Repoint the shared vocabulary BEFORE publishing the model it
+          // describes. This used to sit in App's render body, which made it a
+          // side effect during render — React is allowed to start a render and
+          // throw it away, and a discarded render would have left `V` pointing
+          // at a provider no longer on screen. Here it is an ordinary state
+          // transition: `V` and `model` are updated in the same tick, in that
+          // order, so the render that setModel schedules already sees the right
+          // terms and the first paint is never stale.
+          //
+          // This is the ONLY place a load can change the provider. The rescan's
+          // `setModel` merges the local half into `prev` and never touches
+          // `provider`, so it needs no vocabulary update.
+          setVocab(vocab(m.provider));
           setModel(m);
           setRetrying(null);
           // Surface anything reported-and-ignored (a corrupt state file, an

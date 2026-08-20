@@ -15,7 +15,6 @@ import {
   isGitCheckout,
   type RepoInfo,
 } from "../repos.ts";
-import { vocab } from "../vocab.ts";
 import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../provider.ts";
 import { homeShort, type Activity } from "./format.ts";
 import { makeCloneActions } from "./cloneActions.ts";
@@ -49,7 +48,7 @@ import { useRepoScope } from "./hooks/useRepoScope.ts";
 import { useViewport } from "./hooks/useViewport.ts";
 import { useRowModel } from "./hooks/useRowModel.ts";
 import { useSearch } from "./hooks/useSearch.ts";
-import { V, setVocab } from "./vocabState.ts";
+import { V } from "./vocabState.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { handleAgentKeys } from "./keys/agent.ts";
 import { handleBranchKeys } from "./keys/branch.ts";
@@ -220,10 +219,6 @@ export default function App({
       .then((a) => setActivity((p) => new Map(p).set(id, a)))
       .catch(() => setActivity((p) => new Map(p).set(id, "error")));
   };
-
-  // Point the render helpers at the right provider vocabulary before anything
-  // builds rows or renders chrome this pass (see `V` in ./vocabState.ts).
-  if (model) setVocab(vocab(model.provider));
 
   // The actionable rows of the Settings page, in display order. Kept in one
   // place so the input handler (cursor / enter) and the renderer stay in lockstep.

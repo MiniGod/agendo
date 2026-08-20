@@ -132,7 +132,7 @@
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        // NOTE: no max-lines here any more. App.tsx is 1104 lines and lives
+        // NOTE: no max-lines here any more. App.tsx is 1099 lines and lives
         // inside the shared src/** budget. It no longer SETS that budget either
         // — src/index.tsx does, at 1227. What remains below is about the `App`
         // FUNCTION, not the file.
@@ -141,12 +141,12 @@
         // the key handlers in src/ui/keys/, nine hooks in src/ui/hooks/, and the
         // clone/convert action closures in src/ui/cloneActions.ts and
         // src/ui/convertAgent.ts.
-        "max-lines-per-function": ["error", { "max": 1011, "skipBlankLines": false, "skipComments": false }],
+        "max-lines-per-function": ["error", { "max": 1007, "skipBlankLines": false, "skipComments": false }],
         // `App` itself is now the worst function in this file; the useInput
         // handler that used to hold these records is down to complexity 14 /
         // 14 statements, and lives in src/ui/keys/.
-        "complexity": ["error", 48],
-        "max-statements": ["error", 105]
+        "complexity": ["error", 47],
+        "max-statements": ["error", 104]
       }
     },
 
