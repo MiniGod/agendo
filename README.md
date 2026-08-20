@@ -25,11 +25,14 @@ Requires:
 
 ```bash
 bunx agendo            # or: bun x agendo  (npx agendo works too, if bun is installed)
+bunx agendo ~/work     # scope it to one directory and the repos inside it
 bunx agendo --no-tmux  # run the menu inline, without a tmux session
 ```
 
 For Azure DevOps, set your `org` / `project` / `team` / `tenant` in
 `~/.agendo/config.json` first (see [Config](#config)). GitHub needs no config.
+The `[path]` form is covered under
+[One launcher per project](#one-launcher-per-project-or-one-for-everything).
 
 ### Running a pull request
 
@@ -70,6 +73,32 @@ agendo lives in a single canonical `agendo` tmux session: the menu is tab 1, and
 agent you open or resume becomes another tab in the same session. Re-running agendo
 attaches to it rather than spawning a second, so there's only ever one. (`--no-tmux`
 runs it outside tmux, where each agent is a detached session you attach to.)
+
+### One launcher per project, or one for everything
+
+`agendo <path>` scopes a launcher to a directory: it lists only the sessions
+whose cwd is under it, and narrows the work-item / PR / issue views to the git
+repos found inside it. Its agent tabs live in their own host session,
+`agendo-<basename>` — so a launcher per project runs in parallel without any of
+them stepping on each other. Two paths that share a basename derive the *same*
+host session, though, and quietly share its tabs: `~/a/work` and `~/b/work` are
+both `agendo-work`. Give one of them `-s <name>` and they stay apart.
+
+Neither half is a one-way door. The scope line above the list carries both
+switches: `a` toggles between the scoped view and every session on the machine,
+and `f` turns the repo filter on and off without leaving the scope.
+
+```text
+⊙ agendo-work: ~/work  · a show all  · f repo filter: on (3 repos)
+```
+
+The CLI takes the same narrowing, so a script doesn't have to grep the output:
+`agendo list [dir]`, and `--path <dir>` / `--repo <name>` on `list`, `status`,
+`open` and `wait`. `agendo list pr [dir]` and `agendo list issues [dir]` filter
+to the repos inside `dir` too (`--no-repo-filter` opts out) — Azure DevOps work
+items carry no repo of their own, so they are matched through their linked PRs,
+and an item with none is kept rather than guessed at. Design notes:
+[`docs/contexts.md`](docs/contexts.md).
 
 ### Browser-style session restore
 
@@ -131,8 +160,12 @@ reachable too, with no tmux window involved.
 This is an internal, undocumented channel, so agendo treats it as an optimization
 rather than a dependency: a session that doesn't advertise it (Copilot, older Claude
 builds) or whose socket refuses gets the prompt typed into the pane exactly as
-before. A session at its usage limit is refused either way — nothing would read the
-queued message until the cap resets.
+before. A *pane-backed* session at its usage limit is refused either way — nothing
+would read the queued message until the cap resets — and `--force` is what overrides
+that. The refusal reads the **pane**, though, so the windowless case above escapes it:
+the registry can say idle, busy or waiting, but it has no way to say "at the cap", so a
+socket-only peer at its limit is queued to rather than refused. It reads the message
+once the cap lifts; the exit code just can't warn you about the wait.
 
 Delivering a message and *answering a dialog* stay separate jobs. A frame arrives as a
 peer message, which the receiver won't accept as the answer to a pending prompt — so
@@ -203,16 +236,46 @@ What that does and doesn't catch, from real sessions:
 | Session state | Reported as | Caught? |
 | --- | --- | --- |
 | Finished its turn, sitting at an empty input box | `ready` + idle age, `⚠stalled` past the threshold | **Yes**, and it is the case the feature exists for — but only by *duration*. Under the threshold, done-20-minutes-ago and wedged-20-minutes-ago are still the same row. |
-| Parked at a usage cap | `limited` + `limitResetAt` | **Yes** — and deliberately never `⚠stalled`: it resumes on its own. |
+| Parked at a usage cap | `limited` + `limitResetAt` | **Yes** — and deliberately never `⚠stalled`: it is waiting on a quota, not hung. Getting it going again is a separate job (see [below](#sessions-parked-at-a-usage-cap)). |
 | Rewriting its own context | `compacting` + `compactionPercent` | **Yes** — blocked but progressing, and the percentage off the pane's own bar says whether to wait. |
 | Parked on Claude's resume dialog | `ready` + `resumeDialog: true` | **Yes** — never `⚠stalled`; nothing has run yet, so the idle age is the previous run's. |
 | Main agent idle at its prompt, a subagent it spawned still running | `ready`, and never `⚠stalled` | **Yes** — and it is the case one flag could not describe: `send` reaches the prompt (it is genuinely accepting input) while `wait` holds until the subagent finishes, and the idle age never earns a ⚠ however long that takes. The count itself is on `wait --json` as `backgroundAgents`, not on the list row. |
 | Feedback survey on screen (numbered options above a live input box) | `ready` | **Yes** — a menu above a *live* input box is not a dialog; pinned as a negative test. |
-| Busy-waiting: `until [ -f /sentinel ]; do sleep 30; done`, for an hour | `busy` | **No — known gap.** The pane is genuinely active, so neither readiness nor idle age moves. A session can spin forever and look like one that is working. Detecting it needs a signal this PR doesn't have (no assistant turn despite an active pane), and is the obvious next step. |
+| Busy-waiting: `until [ -f /sentinel ]; do sleep 30; done`, for an hour | `busy` | **No — known gap.** The pane is genuinely active, so neither readiness nor idle age moves. A session can spin forever and look like one that is working. Detecting it needs a signal agendo doesn't have (no assistant turn despite an active pane), and is the obvious next step. |
 
 The honest summary: `⚠stalled` answers "has anything happened lately", not "is this
 finished" and not "is this making progress". It catches the session that stopped;
 it does not catch the session that is busy doing nothing.
+
+### Sessions parked at a usage cap
+
+A session that hit its cap reads `limited`, with the reset instant the pane
+stated as `limitResetAt` (`agendo list --json`, `status`, and the wake payload
+from `wait`). Nothing there resumes it: `limited` says the quota window is shut,
+and reopening it is a nudge someone has to send.
+
+```sh
+agendo unblock <id>     # sends <esc>continue<enter>
+```
+
+`unblock` refuses unless the pane is *still* showing the usage-limit notice, so
+it can't type `continue` into a session that has already moved on — `--force`
+overrides that if you disagree. One refusal it does **not** override: a session
+parked on claude's resume dialog, where the leading Escape would cancel the
+resume rather than unblock anything. Use `send` there, which answers the dialog.
+To have agendo do it for you, turn on
+**Auto-resume on usage limit** on the settings page (`,`); it is **off** by
+default, and when on it waits for the stated reset to pass and re-reads the pane
+before sending the same keystrokes.
+
+Both of these read Claude's wording, and **no Codex session reads `limited`
+today**. In the shape that matters — capped but idle, the footer's run-state
+still saying `Ready` — a codex pane reports `ready` and `send` pastes straight
+into it. Codex's "Approaching rate limits" menu is refused, but by luck rather
+than by detection: it reads `dialog`, so nothing types into it, while `status`
+shows no cap and `wait` never wakes with `blocked`. The capture-backed design for
+fixing both is [`docs/codex-usage-limits.md`](docs/codex-usage-limits.md); until
+it lands, treat a codex session's readiness as saying nothing about its quota.
 
 ### Orchestrator mode, one keypress away
 
@@ -242,6 +305,17 @@ agent shouldn't be able to read its way into starting an orchestrator in your ma
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git
 worktree` off the repo's default branch and launches the agent there — so new work
 never disturbs your current checkout.
+
+The repo picker offers the repos your past sessions were in, so a repo you have
+never cloned used to have no way in. It now also carries a **＋ Clone from URL…**
+row (`c` in that picker — not the session list's `c`, which is
+[cross-agent continue](#cross-agent-continue-claude--copilot)): paste a GitHub or
+Azure DevOps URL, agendo clones it into the
+scoped directory, and from there it is an ordinary repo row — same worktree
+rules, same launch path. It is offered only when the launcher is scoped to a
+directory (`agendo <path>`, above) that isn't itself inside a checkout, since
+that directory is where the clone has to land. Design notes:
+[`docs/cloning.md`](docs/cloning.md).
 
 ### Three agents, one list
 
@@ -288,11 +362,14 @@ currently running — exit it first.
 Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `project`,
 `team`, `tenant`. There are no baked-in defaults and nothing is auto-discovered, so
 set them for your own setup (see `src/config.ts` for the shape); the token is fetched
-via `az`, no PAT needed. GitHub needs no config — it scopes to the github.com repos
-found across your local sessions. The stall threshold (`stalledAfterMinutes`, default
-240) lives in the same file, as does `peerSocket` (see
-[Turning the socket off](#turning-the-socket-off)). Your selected backend is remembered
-in `~/.agendo/state.json`.
+via `az`, no PAT needed. `closedStates` lists the work-item states treated as done and
+hidden unless expanded (`Closed`, `Done`, `Removed`, `Resolved`) — override it if your
+process names them differently. GitHub needs no config — it scopes to the github.com
+repos found across your local sessions. The stall threshold (`stalledAfterMinutes`,
+default 240) lives in the same file, as does `peerSocket` (see
+[Turning the socket off](#turning-the-socket-off)). Your selected backend, the identity
+you are viewing as, and the auto-resume toggle are remembered separately in
+`~/.agendo/state.json`.
 
 Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
 platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
@@ -315,6 +392,19 @@ delivering your message.
 
 The dialog's third option, _"Don't ask me again"_, is deliberately not offered:
 it changes your global Claude CLI behaviour permanently, which is your call to make.
+
+## Design notes
+
+`docs/` holds the write-ups behind the larger pieces of behaviour. Two of them
+describe what ships today; two are designs for work that has **not** landed, and
+are here for the reasoning and the captured evidence, not as a feature list:
+
+| Document | Status |
+| --- | --- |
+| [`docs/contexts.md`](docs/contexts.md) — path-scoped launchers | **Shipped**, bar one section. Its "Host session name collisions" describes a `@cl_root` guard that refuses two differently-rooted launchers; that guard is written but cannot fire, so the paths [merge instead](#one-launcher-per-project-or-one-for-everything). |
+| [`docs/cloning.md`](docs/cloning.md) — cloning a repo you don't have locally | Shipped |
+| [`docs/codex-usage-limits.md`](docs/codex-usage-limits.md) — detecting a capped Codex session | **Design.** The pane captures are committed as e2e fixtures; the detection is not written. |
+| [`docs/error-retry.md`](docs/error-retry.md) — recovering a session that stopped on an error | **Design.** Nothing in it is implemented; a turn that dies on an API error still reads `ready`. |
 
 ## Testing
 
