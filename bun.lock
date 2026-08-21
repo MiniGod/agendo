@@ -5,8 +5,10 @@
     "": {
       "name": "agendo",
       "dependencies": {
+        "get-east-asian-width": "^1.6.0",
         "ink": "^5.0.1",
         "react": "^18.3.1",
+        "string-width": "^7.2.0",
       },
       "devDependencies": {
         "@commitlint/cli": "^21.2.0",

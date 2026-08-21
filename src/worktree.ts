@@ -1,6 +1,7 @@
 // Creates git worktrees for fresh sessions, following the user's convention of
 // <repoRoot>/.claude/worktrees/<name> with a `worktree-…` branch name.
 import { spawnSync } from "child_process";
+import { createHash } from "crypto";
 import { existsSync } from "fs";
 import { join } from "path";
 
@@ -22,14 +23,67 @@ export function defaultBranch(workItemId: number, title: string): string {
 
 /**
  * Worktree directory name for a branch: drop the leading "worktree-", then
- * reduce to a clean slug — every run of non-alphanumeric characters (slashes,
- * dots, spaces, …) collapses to a single dash, with no leading/trailing dash.
+ * reduce to a clean slug — every run of characters that is not a letter, a
+ * digit or a combining mark (slashes, dots, spaces, punctuation, …) collapses
+ * to a single dash, with no leading or trailing dash.
+ *
+ * LETTER, not ASCII LETTER. `\p{L}`/`\p{N}` rather than `[a-zA-Z0-9]`, because
+ * the names reaching here are routinely Icelandic — the branch prompt accepts
+ * þ ð æ ö á í ó ú ý (src/ui/keys/branch.ts) and git refnames allow them — and
+ * an ASCII-only class calls every one of those punctuation. That was not a
+ * cosmetic mangling; it produced three separate failures, all reproduced
+ * against the real `createWorktree` in a sandbox repo:
+ *  - EMPTY slug. `worktree-þú` has no ASCII letter at all, so the name reduced
+ *    to "" and `worktreePath` returned the `.claude/worktrees` CONTAINER
+ *    itself. Where that directory did not already exist, `git worktree add`
+ *    SUCCEEDED on it — the container became a worktree, and every later
+ *    worktree was created nested inside it.
+ *  - COLLISION. `worktree-þróun` and `worktree-Þróun` are distinct, legal
+ *    branches that both reduced to `r-un`. The second launch found the first's
+ *    directory, reported `created: false`, and silently opened the WRONG
+ *    branch's checkout — no new branch ever created.
+ *  - Mangling: `útgáfa`→`tg-fa`, `þjónusta`→`j-nusta`, `sía`→`s-a`.
+ * Combining marks (`\p{M}`) are kept and the name is composed to NFC first, so
+ * a decomposed `o`+U+0301 pasted from macOS is one letter here too, not `o-`.
+ *
+ * NEVER EMPTY. A name with no letter or digit anywhere ("...", "---", a bare
+ * `worktree-`, an emoji) falls back to a hash of it, so `worktreePath` can
+ * never resolve to the container directory again — that is an invariant of
+ * this function, not a probability. A constant would close the container hole
+ * just as well, but two such names would then share one directory, which is
+ * exactly the silent wrong-checkout the collision case above describes. `_` is
+ * connector punctuation, never `\p{L}`/`\p{N}`/`\p{M}`, so it cannot occur in a
+ * slug and the fallback can never collide with one.
+ *
+ * The digest is taken over the UTF-16 code units, NOT the default UTF-8. Node
+ * encodes every unpaired surrogate as the same three bytes (U+FFFD), so hashing
+ * the string directly gave `\ud83d` and `\ude00` — and every other lone
+ * surrogate — one identical directory, re-creating the collision this fallback
+ * exists to prevent. Lone surrogates are reachable: `prBranch` is provider JSON,
+ * and `JSON.parse` turns a `\udXXX` escape into a real one.
+ *
+ * The result is therefore letters, digits, interior marks and dashes — or
+ * `_<hex>`. No separator, no `.` (dots become dashes, so no `..` and no
+ * leading dot), no leading dash or mark, nothing that can escape the container.
+ *
+ * NFC has a cost worth naming: a decomposed and a composed spelling of the same
+ * word are two DISTINCT git refs that now share one directory, so launching the
+ * second gets the first's checkout. That is the collision this function
+ * otherwise prevents. It is still the right trade — a paste from a macOS path
+ * is decomposed, and treating it as a different branch from the one the user
+ * typed would be the more surprising failure — but it is a trade, not a free
+ * win.
  */
 export function worktreeDirName(branch: string): string {
-  return branch
-    .replace(/^worktree-/, "")
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const name = branch.replace(/^worktree-/, "").normalize("NFC");
+  const slug = name
+    .replace(/[^\p{L}\p{N}\p{M}]+/gu, "-")
+    // Leading marks go too, not just leading dashes: a mark with no base
+    // character renders over the path separator, and a lone U+FE0F is a
+    // directory that is invisible in `ls`. A name that is ALL marks falls
+    // through to the hash, which is the right home for it.
+    .replace(/^[-\p{M}]+|-+$/gu, "");
+  return slug || `_${createHash("sha256").update(Buffer.from(name, "utf16le")).digest("hex").slice(0, 8)}`;
 }
 
 /** Worktree directory path for a branch. */

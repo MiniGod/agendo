@@ -1,1179 +1,85 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { execFile } from "child_process";
-import { loadModel, loadLocalSessions, isRunning, itemKey, prKey, refreshLiveTmux, filterModelByRepos, type LoadedModel } from "../model.ts";
+import { Box, Text, useApp, useInput } from "ink";
+import { isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
-import { openSession, launchFresh, launchNewSession, freshName, prFreshName, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName, capturePane, capturePaneState, sendResume, sendDialogReveal, paneReadiness, paneResumeSafe, paneLimitDialogActive, paneShells, paneCompactionPercent, stripAnsi, type SessionKind, type Readiness, type LiveTarget } from "../tmux.ts";
-import { formatResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog } from "../usageLimit.ts";
-import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile, type ProfileChoice } from "../profiles.ts";
+import { launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
+import { sessionName } from "../tmux.ts";
+import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
-import { createWorktree, checkoutWorktree, defaultBranch, freeWorktreeBranch, worktreeDirName } from "../worktree.ts";
-import { ORCHESTRATOR_SLUG, isOrchestratorSession } from "../orchestrator.ts";
+import { createWorktree, checkoutWorktree, freeWorktreeBranch } from "../worktree.ts";
 import { loadState, saveState } from "../config.ts";
-import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../errors.ts";
 import {
   discoverGitReposUnder,
-  mergeRepos,
-  repoRootForCwd,
-  bootstrapRepoRoot,
-  ensureRepoAtTop,
   isGitCheckout,
   type RepoInfo,
 } from "../repos.ts";
+import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../provider.ts";
+import { homeShort, type Activity } from "./format.ts";
+import { makeCloneActions } from "./cloneActions.ts";
+import { makeContinueInOtherAgent } from "./convertAgent.ts";
+import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import {
-  parseRepoUrl,
-  repoUrlLabel,
-  cloneDirName,
-  enclosingCheckout,
-  findMatchingCheckout,
-  freeCloneDest,
-  startClone,
-  type CloneOutcome,
-  type CloneRun,
-  type RepoUrl,
-} from "../clone.ts";
-import { isUnderRoot, normalizeCwd } from "../context.ts";
-import { vocab, type Vocab } from "../vocab.ts";
-import { detectProviders, resolveInitialProvider, detectScopeProvider, getProvider, PROVIDER_INFO } from "../provider.ts";
-import { basename } from "path";
-import { homedir } from "os";
-import { AGENTS } from "../types.ts";
+  sessionId,
+  type PrSort,
+  type SessionSort,
+} from "./rows.ts";
+import {
+  ActionRow,
+  ColumnHeader,
+  HEADERS_ITEMS,
+  CaretText,
+  ITEM_WIDTHS,
+  ItemRow,
+  PR_WIDTHS,
+  PrRow,
+  prHeaders,
+  SessionRow,
+  TaskRow,
+} from "./components.tsx";
+import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
+import { useAuthProbe } from "./hooks/useAuthProbe.ts";
+import { useCloneFlow } from "./hooks/useCloneFlow.ts";
+import { useModelLoader } from "./hooks/useModelLoader.ts";
+import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
+import { useRepoScope } from "./hooks/useRepoScope.ts";
+import { useViewport } from "./hooks/useViewport.ts";
+import { useRowModel } from "./hooks/useRowModel.ts";
+import { useSearch } from "./hooks/useSearch.ts";
+import { V } from "./vocabState.ts";
+import { useLocalRescan } from "./hooks/useLocalRescan.ts";
+import type { KeyContext, Mode, View } from "./keys/context.ts";
+import { handleAgentKeys } from "./keys/agent.ts";
+import { handleBranchKeys } from "./keys/branch.ts";
+import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
+import { handleIdentityKeys } from "./keys/identity.ts";
+import { handleListKeys } from "./keys/list.ts";
+import { handleOpenKeys } from "./keys/open.ts";
+import { handleProfileKeys } from "./keys/profile.ts";
+import { handleProviderKeys } from "./keys/provider.ts";
+import { handleQuitKeys } from "./keys/quit.ts";
+import { handleRepoKeys } from "./keys/repo.ts";
+import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
+import { handleSearchKeys } from "./keys/search.ts";
+import { handleSettingsKeys } from "./keys/settings.ts";
+import { AgentScreen } from "./screens/AgentScreen.tsx";
+import { BranchScreen } from "./screens/BranchScreen.tsx";
+import { CloneScreen } from "./screens/CloneScreen.tsx";
+import { CloningScreen } from "./screens/CloningScreen.tsx";
+import { IdentityScreen } from "./screens/IdentityScreen.tsx";
+import { OpenScreen } from "./screens/OpenScreen.tsx";
+import { ProfileScreen } from "./screens/ProfileScreen.tsx";
+import { ProviderScreen } from "./screens/ProviderScreen.tsx";
+import { WtChoiceScreen } from "./screens/WtChoiceScreen.tsx";
+import { SettingsScreen } from "./screens/SettingsScreen.tsx";
+import { RepoScreen } from "./screens/RepoScreen.tsx";
 import type {
-  ActionLine,
   AgentSession,
   AgentSource,
   Identity,
-  LinkedPR,
-  PRWithSessions,
   ProviderName,
-  PullRequest,
-  RepoSessions,
-  ReviewPRWithSessions,
-  SessionActivity,
-  TaskItem,
-  TeamMember,
-  WorkItem,
 } from "../types.ts";
 
-const POLL_MS = 1000;
-const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
-// How often to re-read running sessions' panes for input readiness. Each tick
-// captures one pane per running session (cheap tmux calls), so keep it modest.
-const READINESS_MS = 1500;
-
-// Provider-specific terminology for the current model. Set once per render from
-// `model.provider` (see App), before any row-building runs — so the module-level
-// render helpers below can read it without threading it through every call. Safe
-// because rendering is synchronous and the launcher menu is a single instance.
-let V: Vocab = vocab("ado");
-
-// ── small helpers ─────────────────────────────────────────────────────────────
-
-// The external session converter (Claude ↔ Copilot), run via npx. It rewrites a
-// session's transcript into the other agent's on-disk format and prints the new
-// session id; we then resume that session. Run with `--json` for a machine-
-// readable result. See the gist for the full conversion logic.
-const CONVERT_GIST = "gist:MiniGod/41cc0ab2f52f1577b55b8a0e362fd669";
-
-/** Result of a successful conversion (subset of the converter's JSON output). */
-interface ConvertResult {
-  /** New session id in the destination agent. */
-  id: string;
-  /** Working directory of the new session (only emitted for copilot→claude). */
-  cwd?: string;
-}
-
-/**
- * Convert a session to the other agent via the external converter and resolve
- * with its JSON result. We tolerate npm/npx chatter on stdout by scanning for
- * the last line that parses as a JSON object, and surface a converter-reported
- * `{ "error": … }` as a rejection.
- */
-function runConvert(
-  direction: "claude-to-copilot" | "copilot-to-claude",
-  sessionId: string,
-): Promise<ConvertResult> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "npx",
-      [CONVERT_GIST, direction, sessionId, "--json"],
-      { maxBuffer: 64 * 1024 * 1024, timeout: 180_000 },
-      (err, stdout, stderr) => {
-        const line = (stdout || "")
-          .split("\n")
-          .map((l) => l.trim())
-          .reverse()
-          .find((l) => l.startsWith("{"));
-        if (line) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj?.error) return reject(new Error(String(obj.error)));
-            if (obj?.id) return resolve(obj as ConvertResult);
-          } catch {
-            // fall through to the error path below
-          }
-        }
-        reject(new Error((stderr || "").trim() || err?.message || "converter produced no result"));
-      },
-    );
-  });
-}
-
-function timeAgo(d: Date): string {
-  const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-// Compact gap since the previous action ("+12s", "+3m", …); blank for the first.
-function fmtDelta(ms?: number): string {
-  if (ms == null) return "";
-  const s = Math.round(ms / 1000);
-  if (s <= 0) return "+0s";
-  if (s < 60) return `+${s}s`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `+${m}m`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `+${h}h`;
-  return `+${Math.round(h / 24)}d`;
-}
-
-function verbStyle(verb: string): { color: string } {
-  switch (verb) {
-    case "Write":
-    case "Create":
-      return { color: "green" };
-    case "Edit":
-      return { color: "yellow" };
-    case "Bash":
-    case "Agent":
-      return { color: "cyan" };
-    case "Claude":
-    case "Copilot":
-    case "Codex":
-      return { color: "white" };
-    case "Thinking":
-      return { color: "magenta" };
-    case "AskUser":
-      return { color: "yellow" };
-    default:
-      return { color: "gray" };
-  }
-}
-
-// Cheap structural equality check to skip re-renders when the log hasn't changed.
-// "loading"/"error"/undefined are never equal so any state transition always fires.
-function sameTasks(a: TaskItem[] | undefined, b: TaskItem[] | undefined): boolean {
-  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
-  if (!a || !b) return true;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].label !== b[i].label || a[i].status !== b[i].status) return false;
-  }
-  return true;
-}
-
-function sameActivity(a: Activity | undefined, b: Activity | undefined): boolean {
-  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
-  if (a.lastPrompt !== b.lastPrompt) return false;
-  if (!sameTasks(a.tasks, b.tasks)) return false;
-  if (a.actions.length !== b.actions.length) return false;
-  if (a.actions.length === 0) return true;
-  // Compare both ends of the (capped) rolling window: when the list is pinned at
-  // ACTIVITY_LIMIT, new appends shift the head off even if the tail looks stable,
-  // so checking only the last action could miss a change and freeze the display.
-  const fa = a.actions[0];
-  const fb = b.actions[0];
-  if (fa.timestamp.getTime() !== fb.timestamp.getTime() || fa.verb !== fb.verb || fa.detail !== fb.detail) return false;
-  const la = a.actions[a.actions.length - 1];
-  const lb = b.actions[b.actions.length - 1];
-  return la.timestamp.getTime() === lb.timestamp.getTime() && la.verb === lb.verb && la.detail === lb.detail;
-}
-
-// Set equality, order-independent: same size + every member of `a` is in `b`.
-// Gates the liveness poll's setState so an unchanged tmux state is a no-op.
-function sameLiveTmux(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
-// Map equality on BOTH halves of each live target — a window that moved host keeps
-// its name and changes only the target addressing it. Gates the rescan's setModel.
-function sameLiveWindows(a: Map<string, LiveTarget>, b: Map<string, LiveTarget>): boolean {
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a) if (b.get(k)?.name !== v.name || b.get(k)?.target !== v.target) return false;
-  return true;
-}
-
-// The set of session identities (source:id) present across all repo groups, as a
-// stable signature. Used to detect that a session appeared/vanished between
-// rescans — the trigger for refreshing the (network-free) local half of the model.
-function sessionGroupsSig(groups: RepoSessions[]): string {
-  const ids: string[] = [];
-  for (const g of groups) for (const s of g.sessions) ids.push(`${s.source}:${s.id}`);
-  return ids.sort().join(",");
-}
-
-// Repo-list equality by root (order-sensitive; discoverRepos is deterministically
-// ordered), so a changed repo set for the fresh-session picker triggers a refresh.
-function sameRepos(a: RepoInfo[], b: RepoInfo[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i].root !== b[i].root) return false;
-  return true;
-}
-
-// The activity cache is keyed by session *identity* (same log wherever the
-// session appears, so it loads once). Expansion is keyed by the *row* instead:
-// a session can appear in more than one place at once (e.g. "Running now" and
-// "All sessions"), and expanding one row must not expand its twin. The `sx:`
-// prefix keeps these out of the way of the `wi:`/`pr:` keys in `expanded`.
-const sessionId = (s: AgentSession) => `${s.source}:${s.id}`;
-const sessionExpandKey = (rowKey: string) => `sx:${rowKey}`;
-
-// Repo a session belongs to, for compact display. Copilot stores
-// "org/project/repo"; Claude sessions derive it from the worktree's main repo
-// root (repoRootForCwd is cached, so this is cheap to call during render).
-function sessionRepo(s: AgentSession): string {
-  if (s.repository) return s.repository.split("/").pop() || s.repository;
-  return basename(repoRootForCwd(s.cwd));
-}
-
-// Per-agent session counts for the repo picker ("12 claude, 3 codex"). Agents
-// with no sessions in the repo are omitted, so the line stays short as more
-// agents are supported rather than padding out zeros for all of them.
-function repoBreakdown(r: RepoInfo): string {
-  return AGENTS.filter((a) => r[a] > 0).map((a) => `${r[a]} ${a}`).join(", ");
-}
-
-// Subsequence fuzzy match: every (non-space) character of the query must appear
-// in `text`, in order, but not necessarily contiguously. Case-insensitive.
-function fuzzyMatch(query: string, text: string): boolean {
-  const q = query.toLowerCase().replace(/\s+/g, "");
-  if (!q) return true;
-  const t = text.toLowerCase();
-  let qi = 0;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) qi++;
-  }
-  return qi === q.length;
-}
-
-// Does a session match the Sessions-view search query? Matches against the
-// fields a user would search by: title, repo and branch.
-function sessionMatches(s: AgentSession, query: string): boolean {
-  return fuzzyMatch(query, `${s.title} ${sessionRepo(s)} ${s.branch ?? ""}`);
-}
-
-// Does a work item match the search query? Matches against id (with and without
-// the leading #), title, type, state and board column. The model carries no
-// description / acceptance criteria, so those are not searchable.
-function itemMatches(it: WorkItem, query: string): boolean {
-  return fuzzyMatch(query, `#${it.id} ${it.title} ${it.type} ${it.state} ${it.boardColumn ?? ""}`);
-}
-
-// Does a PR match the search query? Matches against id (with and without the
-// leading !), title, branch and repo, plus the linked work item title / review
-// reason when present (those vary by which section the PR came from).
-function prMatches(pr: PullRequest, query: string): boolean {
-  const p = pr as Partial<LinkedPR> & Partial<ReviewPRWithSessions>;
-  const extra = [p.workItemTitle, p.reviewReason].filter(Boolean).join(" ");
-  return fuzzyMatch(query, `!${pr.id} ${pr.title} ${pr.branch} ${pr.repositoryName ?? ""} ${extra}`);
-}
-
-// Relativize a path to ~ for display (no truncation — the row truncates it).
-function homeShort(p: string): string {
-  return p.replace(/^\/home\/[^/]+\//, "~/").replace(/^\/Users\/[^/]+\//, "~/");
-}
-
-// Why a clone failed, phrased for someone who can act on it. agendo never
-// handles credentials itself, so an auth failure is always "your git couldn't do
-// this" — say that, then quote git verbatim underneath. Two lines rather than
-// one long one: git's own words are the half that identifies the actual problem,
-// and they must not be the half a terminal truncates.
-const CLONE_HINTS: Record<string, string> = {
-  // A consequence of agendo's own BatchMode — ssh would normally *ask*. Says
-  // what to do rather than what went wrong, because the fix is one command.
-  hostkey:
-    "Unknown SSH host — agendo runs git non-interactively, so it can't accept a new " +
-    "host key for you. Run `ssh -T <host>` once, accept it, then try again.",
-  auth:
-    "Authentication — agendo uses your existing git credentials; check your SSH agent, " +
-    "or `gh auth setup-git` / `az repos` for HTTPS.",
-  // Never phrased as "check your credentials" alone: a 404 is what GitHub also
-  // returns for a private repo you can't see, so both readings stay on screen.
-  missing:
-    "Not found — check the URL, or (if it's private) that your git has access to it.",
-};
-
-function cloneError(res: CloneOutcome): string[] {
-  const detail = res.error ?? "git clone failed";
-  const hint = res.failure ? CLONE_HINTS[res.failure] : undefined;
-  return hint ? [hint, detail] : [detail];
-}
-
-// Labeled context lines shown under an expanded session — one [label, value]
-// pair per line, so they read cleanly instead of crowding a single row. Two of
-// them double as action hints: the profile line advertises the move action
-// (press `m`, Claude only — Copilot has no profile), and the final line the
-// cross-agent "continue" action (press `c`).
-function sessionMeta(s: AgentSession): Array<[string, string]> {
-  const out: Array<[string, string]> = [
-    ["dir", homeShort(s.cwd)],
-    ["repo", sessionRepo(s)],
-  ];
-  if (s.branch) out.push(["branch", s.branch]);
-  if (s.source === "claude" && s.configDir)
-    out.push(["profile", `${basename(s.configDir)}  ·  press m → move to another profile`]);
-  const dest = convertTarget(s.source);
-  if (dest) out.push(["continue", `press c → convert & resume in ${dest}`]);
-  return out;
-}
-
-/**
- * The agent a session can be CONVERTED to, or null when there's nowhere to go.
- * The external converter (see CONVERT_GIST) only speaks Claude↔Copilot, so a
- * Codex session has no destination — better to hide the action than to offer a
- * conversion that would fail.
- */
-function convertTarget(source: AgentSource): AgentSource | null {
-  if (source === "claude") return "copilot";
-  if (source === "copilot") return "claude";
-  return null;
-}
-
-type Activity = SessionActivity | "loading" | "error";
-
-// A running session's live pane snapshot: input readiness + how many background
-// shells (e.g. a monitor loop) it has going. Polled together from one capture.
-interface PaneState { readiness: Readiness; shells: number; resetAt?: number | null; compactionPercent?: number | null }
-
-function stateColor(state: string): string {
-  const s = state.toLowerCase();
-  if (s.includes("progress")) return "yellow";
-  if (s.includes("review")) return "cyan";
-  if (s.includes("ready")) return "green";
-  if (s.includes("hold")) return "gray";
-  return "white";
-}
-
-const CI_GLYPH: Record<PullRequest["ci"], string> = {
-  pass: "✓",
-  fail: "✗",
-  running: "●",
-  queued: "⧗",
-  expired: "⌛",
-  conflict: "⚠",
-  none: "",
-};
-
-function approvalsMet(pr: PullRequest): boolean {
-  return pr.requiredCount > 0 && pr.approvedCount >= pr.requiredCount;
-}
-
-function prBadge(pr: PullRequest): { text: string; color: string } {
-  const ratio =
-    pr.requiredCount > 0
-      ? `${pr.approvedCount}/${pr.requiredCount}`
-      : pr.approvedCount > 0
-        ? `✓${pr.approvedCount}`
-        : "·";
-  const ci = CI_GLYPH[pr.ci] ? ` ${CI_GLYPH[pr.ci]}` : "";
-  const draft = pr.isDraft ? " draft" : "";
-  const bad = pr.rejections > 0 || pr.ci === "fail" || pr.ci === "conflict";
-  const color =
-    pr.status !== "active" ? "gray" : bad ? "red" : approvalsMet(pr) && pr.ci !== "running" ? "green" : "magenta";
-  return { text: `${V.prPrefix}${pr.id} ${ratio}${ci}${draft}`, color };
-}
-
-// PR-view column cells: approval progress (X/Y) and CI / merge-gate status.
-function approvalCell(pr: PullRequest): Cell {
-  if (pr.requiredCount === 0 && pr.approvedCount === 0) return { text: "—", color: "gray" };
-  const color = pr.rejections > 0 ? "red" : approvalsMet(pr) ? "green" : "yellow";
-  return { text: `✓ ${pr.approvedCount}/${pr.requiredCount}`, color };
-}
-
-function ciCell(pr: PullRequest): Cell {
-  switch (pr.ci) {
-    case "pass": return { text: "✓ pass", color: "green" };
-    case "fail": return { text: "✗ fail", color: "red" };
-    case "running": return { text: "● running", color: "yellow" };
-    case "queued": return { text: "⧗ queued", color: "yellow" };
-    // Build result aged out (shown as "queued" by ADO). Leading glyph carries
-    // the last known result; "expired" flags that it's stale and needs a re-run.
-    case "expired":
-      if (pr.ciExpiredResult === "pass") return { text: "✓ expired", color: "yellow" };
-      if (pr.ciExpiredResult === "fail") return { text: "✗ expired", color: "red" };
-      return { text: "⌛ expired", color: "gray" };
-    case "conflict": return { text: "⚠ conflict", color: "red" };
-    default: return { text: "— no CI", color: "gray" };
-  }
-}
-
-// A target for the fresh-session flow — derived from either a work item or a PR.
-// Work items create a NEW branch off origin/HEAD (so we prompt for its name);
-// PRs check out the PR's EXISTING branch from origin (no prompt — there's no new
-// branch to name).
-interface FreshTarget {
-  tmuxName: string;
-  title: string;
-  /** Repo name to pre-select (skips the picker) — e.g. the PR's repository. */
-  preferRepo?: string;
-  /** "new" → prompt for a new branch; "pr" → check out prBranch from origin; "free" → arbitrary session. */
-  kind: "new" | "pr" | "free";
-  /** New-branch default name (kind "new"). */
-  defaultBranch: string;
-  /** The PR's source branch to check out (kind "pr"). */
-  prBranch?: string;
-  /**
-   * Launch this session in orchestrator mode — it coordinates and delegates
-   * instead of implementing (see src/orchestrator.ts). Only set on "free"
-   * targets, and it forces Claude (Copilot can't carry the instructions), so the
-   * flow skips the agent picker.
-   */
-  orchestrator?: boolean;
-}
-function wiTarget(item: WorkItem): FreshTarget {
-  return {
-    kind: "new",
-    // Scope the tmux name by repo on GitHub (issue numbers collide across repos).
-    tmuxName: freshName(item.id, V.repoScopedFresh ? item.project : undefined),
-    defaultBranch: defaultBranch(item.id, item.title),
-    title: `#${item.id} — ${item.title}`,
-  };
-}
-function prTarget(pr: PRWithSessions): FreshTarget {
-  return {
-    kind: "pr",
-    tmuxName: prFreshName(pr.id, V.repoScopedFresh ? pr.repositoryId : undefined),
-    defaultBranch: pr.branch,
-    prBranch: pr.branch,
-    title: `PR ${V.prPrefix}${pr.id} — ${pr.title}`,
-    preferRepo: pr.repositoryName,
-  };
-}
-function freeTarget(): FreshTarget {
-  return { kind: "free", tmuxName: "", defaultBranch: "", title: "New session" };
-}
-/**
- * A free target that runs in orchestrator mode. `defaultBranch` prefills the
- * worktree/branch prompt with the launcher's own orchestrator slug — the
- * worktree is a coordination desk, so it's named after the role, not the work.
- */
-function orchestratorTarget(): FreshTarget {
-  return {
-    kind: "free",
-    orchestrator: true,
-    tmuxName: "",
-    defaultBranch: ORCHESTRATOR_SLUG,
-    title: "Orchestrator session",
-  };
-}
-
-// What the "open in browser" (o) dialog can open for a given row. A row may
-// offer the PR, the work item, or both — sessions inherit their parent's.
-interface OpenTargets {
-  pr?: { id: number; url: string };
-  workItem?: { id: number; url: string };
-}
-// Each target is included only when it actually has a URL: a PullRequest/WorkItem
-// whose `url` is "" carries no link (see types.ts), and offering it would open
-// the browser on an empty address.
-function wiOpen(item: WorkItem): OpenTargets {
-  const primary = item.prs[0];
-  return {
-    ...(item.url ? { workItem: { id: item.id, url: item.url } } : {}),
-    ...(primary?.url ? { pr: { id: primary.id, url: primary.url } } : {}),
-  };
-}
-function prOpen(pr: PRWithSessions): OpenTargets {
-  const linked = pr as Partial<LinkedPR>;
-  return {
-    ...(pr.url ? { pr: { id: pr.id, url: pr.url } } : {}),
-    ...(linked.workItemId != null && linked.workItemUrl
-      ? { workItem: { id: linked.workItemId, url: linked.workItemUrl } }
-      : {}),
-  };
-}
-
-// ── row model for keyboard navigation (list mode) ─────────────────────────────
-type Row =
-  | { kind: "header"; label: string; sub?: string }
-  | { kind: "spacer" }
-  | { kind: "item"; item: WorkItem; expanded: boolean; running: number; open: OpenTargets }
-  | { kind: "pr"; pr: PRWithSessions; expanded: boolean; running: number; contextCell?: Cell; open: OpenTargets }
-  | { kind: "session"; key: string; session: AgentSession; running: boolean; expanded: boolean; open?: OpenTargets; timeField?: "lastUsed" | "created"; showLink?: boolean; placeholder?: boolean }
-  | { kind: "sessmeta"; key: string; label: string; value: string }
-  | { kind: "sessprompt"; key: string; prompt: string }
-  | { kind: "task"; key: string; task: TaskItem }
-  | { kind: "action"; key: string; action: ActionLine }
-  | { kind: "sessnote"; key: string; text: string }
-  | { kind: "fresh"; key: string; target: FreshTarget }
-  | { kind: "newsess" }
-  | { kind: "toggle"; id: string; label: string; count: number; open: boolean; sub?: string; indent?: number };
-
-const SELECTABLE = new Set(["item", "pr", "session", "fresh", "toggle", "newsess"]);
-
-// ── shared row builders ─────────────────────────────────────────────────────
-// Push a session row plus, when it's expanded, its activity sub-rows (the last
-// prompt and recent actions, or a loading/empty/error note). `expanded` is the
-// raw key-set; `activity` is the lazy cache keyed by session identity. `open`
-// carries the parent work item / PR browser targets (a session inherits its
-// parent's) so the `o` action works on a session row too.
-function pushSession(
-  rows: Row[],
-  s: AgentSession,
-  key: string,
-  live: Set<string>,
-  expanded: Set<string>,
-  activity: Map<string, Activity>,
-  open?: OpenTargets,
-  timeField: "lastUsed" | "created" = "lastUsed",
-  showLink = false,
-  placeholder = false,
-) {
-  const isOpen = expanded.has(sessionExpandKey(key));
-  rows.push({ kind: "session", key, session: s, running: isRunning(s, live), expanded: isOpen, open, timeField, showLink, placeholder });
-  if (!isOpen) return;
-  // Structural context (dir / repo / branch / profile), one labeled line each —
-  // known synchronously, so it shows immediately even while activity loads.
-  for (const [label, value] of sessionMeta(s))
-    rows.push({ kind: "sessmeta", key: `${key}:meta:${label}`, label, value });
-  const act = activity.get(sessionId(s));
-  if (act === undefined || act === "loading") {
-    rows.push({ kind: "sessnote", key: `${key}:note`, text: "loading activity…" });
-    return;
-  }
-  if (act === "error") {
-    rows.push({ kind: "sessnote", key: `${key}:note`, text: "couldn't read session log" });
-    return;
-  }
-  if (act.lastPrompt) rows.push({ kind: "sessprompt", key: `${key}:prompt`, prompt: act.lastPrompt });
-  // The task checklist (Claude only) sits above the action stream so it reads as
-  // the session's overall plan rather than another recent-action line.
-  if (act.tasks?.length) act.tasks.forEach((t, i) => rows.push({ kind: "task", key: `${key}:t${i}`, task: t }));
-  if (act.actions.length === 0) {
-    // Tasks alone are still worth showing; only note "empty" when nothing at all.
-    if (!act.tasks?.length) rows.push({ kind: "sessnote", key: `${key}:note`, text: "no recent activity" });
-    return;
-  }
-  act.actions.forEach((a, i) => rows.push({ kind: "action", key: `${key}:a${i}`, action: a }));
-}
-
-function pushSessions(
-  rows: Row[],
-  sessions: AgentSession[],
-  live: Set<string>,
-  target: FreshTarget,
-  prefix: string,
-  expanded: Set<string>,
-  activity: Map<string, Activity>,
-  open?: OpenTargets,
-) {
-  for (const s of sessions) pushSession(rows, s, `${prefix}:${s.source}:${s.id}`, live, expanded, activity, open);
-  rows.push({ kind: "fresh", key: `${prefix}:fresh`, target });
-}
-
-function pushItem(
-  rows: Row[],
-  item: WorkItem,
-  expanded: Set<string>,
-  live: Set<string>,
-  activity: Map<string, Activity>,
-  inScope: (cwd: string) => boolean,
-) {
-  const isOpen = expanded.has(`wi:${itemKey(item)}`);
-  // Path scoping filters the session LIST (and its running count), but keeps the
-  // work-item row — items are backend-scoped and may have no in-scope sessions.
-  const sessions = item.sessions.filter((s) => inScope(s.cwd));
-  const running = sessions.filter((s) => isRunning(s, live)).length;
-  const open = wiOpen(item);
-  rows.push({ kind: "item", item, expanded: isOpen, running, open });
-  if (isOpen) pushSessions(rows, sessions, live, wiTarget(item), `wi${itemKey(item)}`, expanded, activity, open);
-}
-
-function pushPr(
-  rows: Row[],
-  pr: PRWithSessions,
-  expanded: Set<string>,
-  live: Set<string>,
-  activity: Map<string, Activity>,
-  inScope: (cwd: string) => boolean,
-  contextCell?: Cell,
-) {
-  const isOpen = expanded.has(`pr:${prKey(pr)}`);
-  const sessions = pr.sessions.filter((s) => inScope(s.cwd));
-  const running = sessions.filter((s) => isRunning(s, live)).length;
-  const open = prOpen(pr);
-  rows.push({ kind: "pr", pr, expanded: isOpen, running, contextCell, open });
-  if (isOpen) pushSessions(rows, sessions, live, prTarget(pr), `pr${prKey(pr)}`, expanded, activity, open);
-}
-
-// ── per-view row models ─────────────────────────────────────────────────────
-// Every row renders as exactly one terminal line (blank separators are explicit
-// "spacer" rows), so the viewport windowing in App is an exact 1 row = 1 line.
-function buildItemsRows(
-  model: LoadedModel,
-  expanded: Set<string>,
-  toggles: Set<string>,
-  activity: Map<string, Activity>,
-  query: string,
-  inScope: (cwd: string) => boolean,
-): Row[] {
-  const rows: Row[] = [];
-  const live = model.liveTmux;
-
-  // Search mode: a single flat, fuzzy-filtered list across all sections (primary
-  // / secondary / linked via PRs), de-duped by work item id.
-  const q = query.trim();
-  if (q) {
-    const seen = new Set<string>();
-    const matches = [...model.current, ...model.other, ...model.prLinked].filter((it) => {
-      if (seen.has(itemKey(it)) || !itemMatches(it, q)) return false;
-      seen.add(itemKey(it));
-      return true;
-    });
-    rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
-    if (matches.length === 0) {
-      rows.push({ kind: "header", label: `  (no matching ${V.itemsTab.toLowerCase()})` });
-      return rows;
-    }
-    matches.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
-    return rows;
-  }
-
-  rows.push({
-    kind: "header",
-    label: `▌ ${V.primaryHeader}`,
-    sub: V.primaryShowsIteration ? model.currentIterationName ?? undefined : undefined,
-  });
-  if (model.current.length === 0) rows.push({ kind: "header", label: `  ${V.primaryEmpty}` });
-  model.current.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
-
-  rows.push({ kind: "spacer" });
-  const otherOpen = toggles.has("other");
-  rows.push({ kind: "toggle", id: "other", label: V.secondaryToggle, count: model.other.length, open: otherOpen });
-  if (otherOpen) model.other.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
-
-  if (model.prLinked.length > 0) {
-    rows.push({ kind: "spacer" });
-    rows.push({ kind: "header", label: "▌ Linked via your PRs", sub: "not assigned to you" });
-    model.prLinked.forEach((it) => pushItem(rows, it, expanded, live, activity, inScope));
-  }
-
-  return rows;
-}
-
-type PrSort = "created" | "updated";
-type SessionSort = "created" | "updated";
-
-function sessionSortTime(s: AgentSession, sort: SessionSort): number {
-  const d = sort === "created" ? (s.createdAt ?? s.lastUsed) : s.lastUsed;
-  return d.getTime();
-}
-function sortSessions(sessions: AgentSession[], sort: SessionSort): AgentSession[] {
-  return [...sessions].sort((a, b) => sessionSortTime(b, sort) - sessionSortTime(a, sort));
-}
-
-// Active PRs first (drafts always sink to the bottom), then newest-first by the
-// chosen date (creation or last-update).
-function sortPrs<T extends PullRequest>(prs: T[], sort: PrSort): T[] {
-  return [...prs].sort((a, b) => {
-    if (a.isDraft !== b.isDraft) return Number(a.isDraft) - Number(b.isDraft);
-    const da = sort === "updated" ? a.updatedDate : a.createdDate;
-    const db = sort === "updated" ? b.updatedDate : b.createdDate;
-    return db - da;
-  });
-}
-
-// Render a list of PRs as collapsible per-repo subgroups (collapsed by default),
-// each sorted (drafts last). Used when repo grouping (g) is on.
-function pushPrsByRepo<T extends PRWithSessions>(
-  rows: Row[],
-  prs: T[],
-  expanded: Set<string>,
-  toggles: Set<string>,
-  live: Set<string>,
-  activity: Map<string, Activity>,
-  sectionKey: string,
-  sort: PrSort,
-  inScope: (cwd: string) => boolean,
-  contextCellFor?: (pr: T) => Cell | undefined,
-) {
-  const byRepo = new Map<string, T[]>();
-  for (const pr of prs) {
-    const repo = pr.repositoryName || "(unknown repo)";
-    const arr = byRepo.get(repo);
-    if (arr) arr.push(pr);
-    else byRepo.set(repo, [pr]);
-  }
-  // Busiest repo first, then alphabetical.
-  const repos = [...byRepo.entries()].sort(
-    (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
-  );
-  for (const [repo, list] of repos) {
-    const id = `prgrp:${sectionKey}:${repo}`;
-    const open = toggles.has(id);
-    const active = list.filter((p) => !p.isDraft).length;
-    rows.push({ kind: "toggle", id, label: repo, count: list.length, open, indent: 2, sub: `${active} active` });
-    if (open) for (const pr of sortPrs(list, sort)) pushPr(rows, pr, expanded, live, activity, inScope, contextCellFor?.(pr));
-  }
-}
-
-function buildPrsRows(
-  model: LoadedModel,
-  expanded: Set<string>,
-  toggles: Set<string>,
-  grouped: boolean,
-  sort: PrSort,
-  activity: Map<string, Activity>,
-  query: string,
-  inScope: (cwd: string) => boolean,
-): Row[] {
-  const rows: Row[] = [];
-  const live = model.liveTmux;
-  const linkedCtx = (pr: LinkedPR): Cell => ({ text: `#${pr.workItemId} ${pr.workItemType}`, color: "gray" });
-  const reviewCtx = (pr: ReviewPRWithSessions): Cell => ({ text: pr.reviewReason, color: "cyan" });
-
-  // Search mode: a single flat, fuzzy-filtered list across all sections (linked /
-  // awaiting review / orphan), de-duped by PR id. Each PR keeps the context cell
-  // of the first section it appears in (linked → work item, review → reason).
-  const q = query.trim();
-  if (q) {
-    const seen = new Set<string>();
-    const ctxFor = (pr: PullRequest): Cell | undefined =>
-      "workItemId" in pr
-        ? linkedCtx(pr as LinkedPR)
-        : "reviewReason" in pr
-          ? reviewCtx(pr as ReviewPRWithSessions)
-          : undefined;
-    const matches = sortPrs(
-      [...model.linkedPrs, ...model.reviewPrs, ...model.orphanPrs].filter((pr) => {
-        if (seen.has(prKey(pr)) || !prMatches(pr, q)) return false;
-        seen.add(prKey(pr));
-        return true;
-      }),
-      sort,
-    );
-    rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
-    if (matches.length === 0) {
-      rows.push({ kind: "header", label: "  (no matching PRs)" });
-      return rows;
-    }
-    matches.forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, ctxFor(pr)));
-    return rows;
-  }
-
-  // ── PRs on your work items / issues ──
-  rows.push({ kind: "header", label: `▌ ${V.linkedHeader}` });
-  if (model.linkedPrs.length === 0) rows.push({ kind: "header", label: `  ${V.linkedEmpty}` });
-  else if (grouped) pushPrsByRepo(rows, model.linkedPrs, expanded, toggles, live, activity, "linked", sort, inScope, linkedCtx);
-  else sortPrs(model.linkedPrs, sort).forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, linkedCtx(pr)));
-
-  // ── Awaiting your review ──
-  rows.push({ kind: "spacer" });
-  rows.push({ kind: "header", label: "▌ Awaiting your review", sub: V.reviewSub });
-  if (model.reviewPrs.length === 0) {
-    rows.push({ kind: "header", label: `  ${V.reviewEmpty}` });
-  } else if (grouped) {
-    pushPrsByRepo(rows, model.reviewPrs, expanded, toggles, live, activity, "review", sort, inScope, reviewCtx);
-  } else {
-    // Active PRs up top (sorted); drafts (sorted) tucked into a collapsed group.
-    const sorted = sortPrs(model.reviewPrs, sort);
-    sorted.filter((p) => !p.isDraft).forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, reviewCtx(pr)));
-    const drafts = sorted.filter((p) => p.isDraft);
-    if (drafts.length) {
-      const open = toggles.has("review-drafts");
-      rows.push({ kind: "toggle", id: "review-drafts", label: "Drafts", count: drafts.length, open, indent: 2 });
-      if (open) drafts.forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope, reviewCtx(pr)));
-    }
-  }
-
-  // ── PRs without a work item / issue ──
-  rows.push({ kind: "spacer" });
-  rows.push({ kind: "header", label: `▌ ${V.orphanHeader}` });
-  if (model.orphanPrs.length === 0) rows.push({ kind: "header", label: `  ${V.orphanEmpty}` });
-  else if (grouped) pushPrsByRepo(rows, model.orphanPrs, expanded, toggles, live, activity, "orphan", sort, inScope);
-  else sortPrs(model.orphanPrs, sort).forEach((pr) => pushPr(rows, pr, expanded, live, activity, inScope));
-
-  return rows;
-}
-
-function buildSessionsRows(
-  model: LoadedModel,
-  toggles: Set<string>,
-  grouped: boolean,
-  expanded: Set<string>,
-  activity: Map<string, Activity>,
-  sort: SessionSort,
-  query: string,
-  inScope: (cwd: string) => boolean,
-): Row[] {
-  const rows: Row[] = [];
-  const live = model.liveTmux;
-  const timeField = sort === "created" ? "created" : "lastUsed";
-  // The PR / work item this session links back to (Sessions view shows it and
-  // `o` opens it). Other views nest sessions under their parent, so they don't.
-  const linkOf = (s: AgentSession) => model.sessionLinks.get(`${s.source}:${s.id}`);
-  // A session with a live-but-dormant restore placeholder window (idle bash
-  // awaiting a keypress) — shown as restored-but-unopened, not running.
-  const isPlaceholder = (s: AgentSession) => model.livePlaceholders.has(sessionName(s));
-
-  // Apply the path scope up front: filter each group's sessions and drop groups
-  // that end up empty. Everything below reads `groups` instead of the raw model,
-  // so the running section, flat list, and per-repo groups all scope uniformly.
-  const groups = model.sessionGroups
-    .map((g) => ({ ...g, sessions: g.sessions.filter((s) => inScope(s.cwd)) }))
-    .filter((g) => g.sessions.length > 0);
-
-  const q = query.trim();
-
-  if (!q) rows.push({ kind: "newsess" });
-
-  if (groups.length === 0) {
-    rows.push({ kind: "header", label: "  (no local sessions found)" });
-    return rows;
-  }
-
-  // Search mode: a single flat, fuzzy-filtered list across all repos (grouping
-  // and the running section are suppressed so results read top-to-bottom).
-  if (q) {
-    const matches = sortSessions(
-      groups.flatMap((g) => g.sessions).filter((s) => sessionMatches(s, q)),
-      sort,
-    );
-    rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
-    if (matches.length === 0) {
-      rows.push({ kind: "header", label: "  (no matching sessions)" });
-      return rows;
-    }
-    for (const s of matches) pushSession(rows, s, `sess:${s.source}:${s.id}`, live, expanded, activity, linkOf(s), timeField, true);
-    return rows;
-  }
-
-  // Running section (above the lists, always expanded): every open tmux
-  // window/session across all repos, sorted by active sort, so you can jump
-  // straight to it. Includes dormant restore placeholders — an open window is
-  // "running now" semantically; they're badged ⏸ so they read as open-but-not-
-  // yet-resumed. Additive — these also appear in the grouped/flat lists below.
-  const openWindows = sortSessions(
-    groups.flatMap((g) => g.sessions).filter((s) => isRunning(s, live) || isPlaceholder(s)),
-    sort,
-  );
-  if (openWindows.length > 0) {
-    rows.push({ kind: "header", label: "▌ Running now", sub: `(${openWindows.length}) — enter to attach` });
-    for (const s of openWindows) pushSession(rows, s, `run:${s.source}:${s.id}`, live, expanded, activity, linkOf(s), timeField, true, isPlaceholder(s));
-    rows.push({ kind: "spacer" });
-  }
-
-  if (!grouped) {
-    // Flat: every session across all repos, sorted by active sort.
-    const all = sortSessions(groups.flatMap((g) => g.sessions), sort);
-    rows.push({ kind: "header", label: "▌ All sessions", sub: `(${all.length})` });
-    for (const s of all) pushSession(rows, s, `sess:${s.source}:${s.id}`, live, expanded, activity, linkOf(s), timeField, true, isPlaceholder(s));
-    return rows;
-  }
-
-  // Grouped by repo: collapsible, collapsed by default (empty `toggles`).
-  groups.forEach((g, gi) => {
-    if (gi > 0) rows.push({ kind: "spacer" });
-    const id = `grp:${g.root}`;
-    const open = toggles.has(id);
-    // Sort a copy so we never mutate g.sessions (shared reference).
-    const sorted = sortSessions(g.sessions, sort);
-    rows.push({ kind: "toggle", id, label: g.name, count: sorted.length, open, sub: timeAgo(new Date(sessionSortTime(sorted[0], sort))) });
-    if (open) {
-      for (const s of sorted) pushSession(rows, s, `sess:${s.source}:${s.id}`, live, expanded, activity, linkOf(s), timeField, true, isPlaceholder(s));
-    }
-  });
-
-  return rows;
-}
-
-// ── column layout ─────────────────────────────────────────────────────────────
-// Rows are rendered as a single Text with each cell padded/truncated to a fixed
-// width, so columns line up and the selection highlight stays continuous.
-// Items and PRs share the leading column widths. The PR view adds a narrow
-// sort-time column (created/updated — whichever sort is active) before AGENT,
-// so its title/context columns are a touch narrower to make room.
-const ITEM_WIDTHS = [11, 11, 13, 46, 22, 11];
-const PR_WIDTHS = [11, 11, 13, 42, 18, 8, 11];
-const HEADERS_ITEMS = ["  ID", "TYPE", "STATE", "TITLE", "PR", "AGENT"];
-// PR headers are built per render: the sort-time column's label is the active sort.
-function prHeaders(sort: PrSort): string[] {
-  return ["  ID", "APPROVE", "CI / MERGE", "TITLE", "CONTEXT", sort.toUpperCase(), "AGENT"];
-}
-
-function fit(s: string, w: number): string {
-  // Reserve a 1-column gap so truncated cells never touch the next column.
-  const max = w - 1;
-  const t = s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
-  return t.padEnd(w);
-}
-
-interface Cell { text: string; color?: string }
-
-function ColRow({ cells, widths, selected }: { cells: Cell[]; widths: number[]; selected: boolean }) {
-  // wrap="truncate" keeps each row on one line in narrow terminals, so the
-  // viewport windowing (1 row = 1 line) stays accurate instead of overflowing.
-  return (
-    <Text wrap="truncate" backgroundColor={selected ? "cyan" : undefined}>
-      {cells.map((c, i) => (
-        <Text key={i} color={selected ? "black" : c.color}>{fit(c.text, widths[i])}</Text>
-      ))}
-    </Text>
-  );
-}
-
-function ColumnHeader({ headers, widths }: { headers: string[]; widths: number[] }) {
-  return <Text wrap="truncate" dimColor>{headers.map((h, i) => fit(h, widths[i])).join("")}</Text>;
-}
-
-function agentCell(running: number, total: number): Cell {
-  if (total === 0) return { text: "—", color: "gray" };
-  if (running > 0) return { text: `● ${running}/${total}`, color: "green" };
-  return { text: `${total} sess`, color: "gray" };
-}
-
-function ItemRow({
-  item,
-  expanded,
-  running,
-  selected,
-}: { item: WorkItem; expanded: boolean; running: number; selected: boolean }) {
-  const caret = expanded ? "▾" : "▸";
-  const primary = item.prs[0];
-  const prCell: Cell = primary
-    ? {
-        text: prBadge(primary).text + (item.prs.length > 1 ? ` +${item.prs.length - 1}` : ""),
-        color: prBadge(primary).color,
-      }
-    : { text: "—", color: "gray" };
-  const cells: Cell[] = [
-    { text: `${caret} #${item.id}`, color: "gray" },
-    { text: item.type, color: "gray" },
-    { text: item.state, color: stateColor(item.state) },
-    { text: item.title },
-    prCell,
-    agentCell(running, item.sessions.length),
-  ];
-  return <Box><ColRow cells={cells} widths={ITEM_WIDTHS} selected={selected} /></Box>;
-}
-
-function PrRow({
-  pr,
-  expanded,
-  running,
-  selected,
-  contextCell,
-  sort,
-}: { pr: PRWithSessions; expanded: boolean; running: number; selected: boolean; contextCell?: Cell; sort: PrSort }) {
-  const caret = expanded ? "▾" : "▸";
-  // The sort-time column tracks the active sort: created vs last-updated time.
-  const tNum = sort === "updated" ? pr.updatedDate : pr.createdDate;
-  const cells: Cell[] = [
-    { text: `${caret} ${V.prPrefix}${pr.id}`, color: prBadge(pr).color },
-    approvalCell(pr),
-    pr.isDraft ? { text: "draft", color: "gray" } : ciCell(pr),
-    { text: pr.title },
-    contextCell ?? { text: `${pr.repositoryName ?? ""}:${pr.branch}`.replace(/^:/, ""), color: "gray" },
-    { text: tNum ? timeAgo(new Date(tNum)) : "—", color: "gray" },
-    agentCell(running, pr.sessions.length),
-  ];
-  return <Box><ColRow cells={cells} widths={PR_WIDTHS} selected={selected} /></Box>;
-}
-
-// Short badge marking how a running session was launched, for at-a-glance
-// context (background = agent-spawned; new = launched manually from the menu).
-const KIND_BADGE: Partial<Record<SessionKind, string>> = { background: "bg", new: "new" };
-
-// How a running session's input pane reads right now, as a colored trailing tag.
-// `busy` = mid-turn; `compacting` = rewriting its own context, blocked but making
-// progress; `dialog` = waiting on a prompt/choice (wants you); `ready` = idle and
-// attachable. `undefined` (not yet sampled / unknown) keeps the plain
-// "running → attach" so a row never looks stalled before the first poll lands.
-//
-// `compacting` used to fall through to that default and render as the green
-// "running → attach", i.e. a blocked session looked idle and attachable — the one
-// state the CLI's readiness column reported and the menu did not.
-function runningStatus(r: Readiness | undefined): { label: string; color: string } {
-  switch (r) {
-    case "ready": return { label: "ready → attach", color: "green" };
-    case "busy": return { label: "busy…", color: "yellow" };
-    case "compacting": return { label: "compacting…", color: "yellow" };
-    case "queued": return { label: "queued", color: "cyan" };
-    case "dialog": return { label: "needs input", color: "magenta" };
-    case "limited": return { label: "usage limit", color: "red" };
-    default: return { label: "running → attach", color: "green" };
-  }
-}
-
-// Trailing detail for a compacting row: how far the progress bar has got. Absent
-// when the pane isn't drawing one yet — the bar appears a beat after the verb line,
-// and " · 0%" would be a claim we can't make from a screen that hasn't said it.
-function compactionSuffix(percent: number | null | undefined): string {
-  return percent == null ? "" : ` · ${percent}%`;
-}
-
-// Trailing detail for a usage-limited row: the reset time (local clock) when we
-// could parse one, else a note that we can't (and so won't auto-resume).
-function limitSuffix(resetAt: number | null | undefined): string {
-  if (resetAt == null) return " · no reset time";
-  // The same clock `agendo list` prints: one formatter, one locale rule, so the
-  // menu and the CLI can't disagree (unpadded hour, 24h vs 12h per the locale).
-  const t = formatResetTime(resetAt);
-  return resetAt <= Date.now() ? ` · reset passed ${t}` : ` · resets ${t}`;
-}
-
-// The PR / work item a session links back to, as a compact one-line badge
-// (e.g. `!76896 → WI 234309`, or just one side when only one is known).
-function linkBadge(open: OpenTargets | undefined): string | null {
-  if (!open) return null;
-  const parts: string[] = [];
-  if (open.pr) parts.push(`!${open.pr.id}`);
-  if (open.workItem) parts.push(`WI ${open.workItem.id}`);
-  return parts.length ? parts.join(" → ") : null;
-}
-
-function SessionRow({
-  session,
-  running,
-  kind,
-  pane,
-  expanded,
-  selected,
-  timeField = "lastUsed",
-  open,
-  showLink,
-  placeholder,
-}: { session: AgentSession; running: boolean; kind?: SessionKind; pane?: PaneState; expanded: boolean; selected: boolean; timeField?: "lastUsed" | "created"; open?: OpenTargets; showLink?: boolean; placeholder?: boolean }) {
-  const caret = expanded ? "▾ " : "▸ ";
-  const displayTime = timeField === "created" ? (session.createdAt ?? session.lastUsed) : session.lastUsed;
-  const badge = kind ? KIND_BADGE[kind] : undefined;
-  const status = running ? runningStatus(pane?.readiness) : null;
-  const shells = running ? pane?.shells ?? 0 : 0;
-  const link = showLink ? linkBadge(open) : null;
-  return (
-    <Box marginLeft={4}>
-      <Text wrap="truncate" color={selected ? "black" : undefined} backgroundColor={selected ? "cyan" : undefined}>
-        <Text color={selected ? "black" : "gray"}>{caret}</Text>
-        <Text color={selected ? "black" : status ? status.color : "gray"}>{running ? "● " : placeholder ? "⏸ " : "○ "}</Text>
-        <Text dimColor={!selected}>{`[${session.source}] `}</Text>
-        {badge ? <Text color={selected ? "black" : "cyan"}>{`{${badge}} `}</Text> : null}
-        <Text>{session.title.replace(/\s+/g, " ").slice(0, 50)}</Text>
-        {link ? <Text color={selected ? "black" : "magenta"}>{`  ${link}`}</Text> : null}
-        <Text dimColor={!selected}>{`  ${timeAgo(displayTime)}`}</Text>
-        {status ? <Text color={selected ? "black" : status.color}>{`  (${status.label}${pane?.readiness === "limited" ? limitSuffix(pane.resetAt) : pane?.readiness === "compacting" ? compactionSuffix(pane.compactionPercent) : ""})`}</Text> : null}
-        {shells > 0 ? <Text color={selected ? "black" : "blue"}>{`  ⛁ ${shells} shell${shells > 1 ? "s" : ""}`}</Text> : null}
-        {placeholder ? <Text color={selected ? "black" : "gray"} dimColor={!selected}>{"  restored · press to resume"}</Text> : null}
-      </Text>
-    </Box>
-  );
-}
-
-// A single activity line under an expanded session: relative time + the gap
-// since the previous action, then a colored verb and a one-line detail.
-function ActionRow({ action }: { action: ActionLine }) {
-  const { color } = verbStyle(action.verb);
-  return (
-    <Box marginLeft={6}>
-      <Text wrap="truncate">
-        <Text color="gray">{timeAgo(action.timestamp).padStart(8)}</Text>
-        <Text color="gray" dimColor>{("  " + fmtDelta(action.deltaMs)).padEnd(8)}</Text>
-        <Text color={color}>{action.verb.slice(0, 9).padEnd(10)}</Text>
-        <Text dimColor>{action.detail.replace(/\s+/g, " ")}</Text>
-      </Text>
-    </Box>
-  );
-}
-
-// A single task-checklist line under an expanded session: a status checkbox and
-// the item text. The three states are distinguished by both glyph and color so
-// progress reads at a glance (and stays legible without color).
-const TASK_STYLE: Record<TaskItem["status"], { glyph: string; color: string; dim: boolean }> = {
-  completed: { glyph: "✔", color: "green", dim: true },
-  in_progress: { glyph: "◐", color: "yellow", dim: false },
-  pending: { glyph: "☐", color: "gray", dim: true },
-};
-
-function TaskRow({ task }: { task: TaskItem }) {
-  const style = TASK_STYLE[task.status] ?? TASK_STYLE.pending;
-  return (
-    <Box marginLeft={6}>
-      <Text wrap="truncate">
-        <Text color={style.color}>{`${style.glyph} `}</Text>
-        <Text color={task.status === "in_progress" ? "yellow" : undefined} dimColor={style.dim} bold={task.status === "in_progress"}>
-          {task.label.replace(/\s+/g, " ")}
-        </Text>
-      </Text>
-    </Box>
-  );
-}
-
-// ── top-level views & fresh-session flow state ────────────────────────────────
-type View = "items" | "prs" | "sessions";
-
-type Mode =
-  | { kind: "list" }
-  | { kind: "settings"; cursor: number }
-  // `fromSettings` routes the picker back to the Settings page (not the list)
-  // on cancel, so Settings acts as a hub you drill into and return to.
-  | { kind: "provider"; cursor: number; fromSettings?: boolean }
-  | { kind: "identity"; cursor: number; fromSettings?: boolean }
-  | { kind: "agent"; target: FreshTarget; cursor: number }
-  | { kind: "repo"; target: FreshTarget; agent: AgentSource; cursor: number }
-  // Clone flow — only reachable from a scoped launcher (see `canClone`). `clone`
-  // is the URL prompt; `cloning` is the live `git clone`, cancellable with esc.
-  | { kind: "clone"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string[] }
-  | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
-  | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
-  // `seed` is the value the field was PREFILLED with (orchestrator flow only).
-  // Kept so submit can tell an untouched default from a name the user chose, and
-  // re-derive a free one — the prefill was computed when the screen opened, which
-  // may be minutes before enter is pressed.
-  | { kind: "branch"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; value: string; cursor: number; worktree: boolean; seed?: string }
-  // "move this session to another Claude profile". `choices` is every discovered
-  // profile with the session's own flagged (see profileChoices) — shown for
-  // orientation but skipped by the cursor, since moving somewhere you already are
-  // is not a choice.
-  | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
-  | { kind: "open"; targets: OpenTargets; title: string };
-
-/**
- * Modes where `q` / ctrl-c must NOT quit the app.
- *
- * `branch` and `clone` are text inputs — `q` is an ordinary character in a
- * branch name, and in a repo URL it's unavoidable (`github.com/qmk/qmk_firmware`,
- * anything with "quarkus", "requests", "sequelize" in it). Quitting on it would
- * make those repos literally untypeable.
- *
- * `cloning` is in this set for a different reason: a `git clone` is mid-write,
- * so `q` should not walk away from it — esc cancels, which cleans up.
- *
- * Note this only holds `q`. Ink handles ctrl-c itself (`exitOnCtrlC` defaults
- * on) and never forwards it here, so ctrl-c still quits from every mode — the
- * `key.ctrl` half below is unreachable, kept only to mirror the `branch`
- * prompt's long-standing shape. What makes that safe is the unmount cleanup,
- * which kills the clone and removes the partial directory on the way out.
- */
-const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
-
-/**
- * Cursor value for the repo picker's "＋ Clone from URL…" row. A sentinel rather
- * than `repos.length`, so a background rescan that grows the repo list can't
- * slide the cursor off it onto a real repo.
- */
-const CLONE_ROW = -1;
-
-/** Agents offered by the fresh-session picker, in display order. */
-const AGENT_CHOICES: { source: AgentSource; label: string; desc: string }[] = [
-  { source: "claude", label: "Claude", desc: "claude --session-id …" },
-  { source: "copilot", label: "Copilot", desc: "copilot --session-id …" },
-  { source: "codex", label: "Codex", desc: "codex … (assigns its own session id)" },
-];
 
 // ── main app ──────────────────────────────────────────────────────────────────
 /**
@@ -1193,21 +99,6 @@ export default function App({
 }) {
   const { exit } = useApp();
   const [model, setModel] = useState<LoadedModel | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Set while a failed load is waiting to try again: which attempt just failed,
-  // out of how many, when the next one fires, and why the last one didn't.
-  const [retrying, setRetrying] = useState<{
-    attempt: number;
-    attempts: number;
-    resumeAt: number;
-    reason: string;
-    /** True while counting down; false once the next attempt is actually in
-     *  flight — otherwise the screen would sit on "retrying in 0s" for the whole
-     *  duration of a load, which is the frozen screen this feature replaces. */
-    waiting: boolean;
-  } | null>(null);
-  // Bumped by a timer purely to re-render the retry countdown (see below).
-  const [, setRetryTick] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [toggles, setToggles] = useState<Set<string>>(new Set());
   const [view, setView] = useState<View>("items");
@@ -1221,19 +112,6 @@ export default function App({
   // Repos cloned during this run, merged into the picker until a reload
   // discovers them for real (see `scopedRepos`).
   const [cloned, setCloned] = useState<RepoInfo[]>([]);
-  // What the clone step did, carried into the screens that follow it. `notice`
-  // is a list-view banner, and a clone hands off directly to the next dialog —
-  // without this, "reused the checkout you already had" would be invisible until
-  // the user found their way back to the list. Cleared when a fresh flow starts.
-  const [cloneNote, setCloneNote] = useState<string | null>(null);
-  // The same value, readable synchronously. A PR target routes clone → checkout
-  // → launch inside one keystroke, and `open()` overwrites the notice on the way
-  // out; without a ref the note set moments earlier would still be the stale
-  // render value there, so the PR flow would never report what it cloned.
-  const cloneNoteRef = useRef<string | null>(null);
-  // The in-flight `git clone`, so esc can cancel it and unmount can't orphan it.
-  const cloneRun = useRef<CloneRun | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
   const [grouped, setGrouped] = useState(true); // Sessions view: group by repo
   // Path-scope toggle: when a filterRoot exists, `a` flips between the scoped
   // view (sessions under the root) and the global view (every session). Bare
@@ -1246,19 +124,8 @@ export default function App({
   const [prsGrouped, setPrsGrouped] = useState(false); // PRs view: repo subgroups
   const [prSort, setPrSort] = useState<PrSort>("created"); // PRs view: sort order
   const [sessionSort, setSessionSort] = useState<SessionSort>("updated"); // Sessions view: sort order
-  // Fuzzy search (works on every list view: sessions, PRs, work items).
-  // `searchFocus` is the three-state mode:
-  //   null    — not searching
-  //   "input" — the text box is focused; keystrokes edit the query
-  //   "list"  — a query is active but the results list is focused for navigation
-  // `search` holds the query text plus a caret position for in-place editing.
-  const [searchFocus, setSearchFocus] = useState<"input" | "list" | null>(null);
-  const [search, setSearch] = useState<{ text: string; cursor: number }>({ text: "", cursor: 0 });
+  const { searchFocus, setSearchFocus, search, clearSearch, editSearch } = useSearch();
   const [activity, setActivity] = useState<Map<string, Activity>>(new Map());
-  // Live pane snapshot (input readiness + background-shell count) per running
-  // session, by canonical name. Polled on a short timer independent of the
-  // ADO-backed model reload.
-  const [panes, setPanes] = useState<Map<string, PaneState>>(new Map());
   // Auto-resume a session once its usage-limit window reopens (default OFF,
   // toggled on the Settings page). Persisted in LauncherState.
   const [autoResume, setAutoResume] = useState<boolean>(() => loadState().autoResumeOnUsageLimit ?? false);
@@ -1290,10 +157,6 @@ export default function App({
       filterRoot ? detectScopeProvider(filterRoot, discoveredRepos) : null,
     ),
   );
-  // Per-backend auth status for the Settings page: absent ⇒ not yet probed,
-  // "checking" ⇒ probe in flight, boolean ⇒ result. Refreshed each time the
-  // Settings page opens (auth can change out from under us between opens).
-  const [authStatus, setAuthStatus] = useState<Map<ProviderName, "checking" | boolean>>(new Map());
   // Persisted "who am I / filter" state (Work items & PRs views only).
   const [identity, setIdentity] = useState<Identity | null>(() => {
     const s = loadState();
@@ -1301,94 +164,16 @@ export default function App({
       ? { id: s.identityId, displayName: s.identityName ?? "?", uniqueName: s.identityUniqueName ?? "" }
       : null;
   });
-  const [reloadKey, setReloadKey] = useState(0);
-  const { stdout } = useStdout();
 
-  // Reload whenever the backend, identity, or a manual refresh changes.
-  //
-  // A failed load retries itself with bounded exponential backoff instead of
-  // parking on the "Press r to retry" screen, which needs a human — an
-  // unattended launcher would sit there dead. Two guard rails matter more than
-  // the happy path:
-  //   • only failures `isRetryable` recognises as transient are retried at all,
-  //     so a permanent one (a 404 from a team with no sprints, an expired
-  //     login) still stops on the first attempt rather than looping forever;
-  //   • the retry count is capped, after which the error is shown as before.
-  // Attempts are strictly sequential and each is a whole `loadModel`, so the
-  // per-load cache invalidation (Provider.beginLoad) still runs exactly once
-  // per attempt and nothing is fetched concurrently.
-  useEffect(() => {
-    setError(null);
-    setModel(null);
-    setRetrying(null);
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    // Resolves the backoff wait early. Cleanup calls it so a cancelled loop
-    // *resumes* and exits on its `cancelled` check, rather than being left
-    // suspended forever on a timer that was cleared out from under it.
-    let wake: (() => void) | undefined;
-
-    (async () => {
-      const attempts = retryAttempts();
-      for (let attempt = 1; !cancelled; attempt++) {
-        try {
-          const m = await loadModel({ provider, identity, hostSession, scopeRepos: discoveredRepos });
-          if (cancelled) return;
-          setModel(m);
-          setRetrying(null);
-          // Surface anything reported-and-ignored (a corrupt state file, an
-          // unparseable transcript record) rather than losing it silently — but
-          // only into an EMPTY notice slot. `open()` sets a notice and then
-          // reloads, so writing unconditionally here would wipe the message the
-          // user is meant to read. Not draining when we can't show means the
-          // diagnostic waits for the next load instead of being thrown away.
-          // Only the first couple, summarised: the notice is one line of chrome,
-          // not a log — several bad files would wrap over the list.
-          if (!noticeRef.current) {
-            const warnings = takeWarnings();
-            if (warnings.length) {
-              const shown = warnings.slice(0, 2);
-              if (warnings.length > shown.length) shown.push(`+${warnings.length - shown.length} more`);
-              setNotice(shown.join(" · "));
-            }
-          }
-          return;
-        } catch (e) {
-          if (cancelled) return;
-          const reason = messageOf(e);
-          if (!isRetryable(e) || attempt >= attempts) {
-            setRetrying(null);
-            setError(reason);
-            return;
-          }
-          const delay = retryDelayMs(attempt);
-          setRetrying({ attempt, attempts, resumeAt: Date.now() + delay, reason, waiting: true });
-          await new Promise<void>((resolve) => {
-            wake = resolve;
-            timer = setTimeout(resolve, delay);
-          });
-          if (cancelled) return;
-          // The wait is over — flip to "retrying now" so the next attempt shows
-          // as in-flight rather than as a countdown stuck at zero.
-          setRetrying((r) => (r ? { ...r, waiting: false } : r));
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      wake?.();
-    };
-  }, [provider, identity, reloadKey, discoveredRepos]);
-
-  // Tick twice a second while a retry is counting down, so the countdown on the
-  // retry screen actually counts down instead of freezing on its first value.
-  useEffect(() => {
-    if (!retrying?.waiting) return;
-    const t = setInterval(() => setRetryTick((n) => n + 1), 500);
-    return () => clearInterval(t);
-  }, [retrying]);
+  const { error, retrying, reload } = useModelLoader({
+    provider,
+    identity,
+    hostSession,
+    discoveredRepos,
+    setModel,
+    setNotice,
+    noticeRef,
+  });
 
   useEffect(() => {
     modelRef.current = model;
@@ -1398,27 +183,7 @@ export default function App({
     noticeRef.current = notice;
   }, [notice]);
 
-  // Probe each backend's auth status whenever the Settings page opens. Not-
-  // installed backends resolve to false immediately (no CLI to ask); installed
-  // ones show "checking" until their async probe lands.
-  useEffect(() => {
-    if (mode.kind !== "settings") return;
-    let cancelled = false;
-    for (const info of PROVIDER_INFO) {
-      if (!available.has(info.name)) {
-        setAuthStatus((m) => new Map(m).set(info.name, false));
-        continue;
-      }
-      setAuthStatus((m) => new Map(m).set(info.name, "checking"));
-      getProvider(info.name)
-        .checkAuth()
-        .then((ok) => !cancelled && setAuthStatus((m) => new Map(m).set(info.name, ok)))
-        .catch(() => !cancelled && setAuthStatus((m) => new Map(m).set(info.name, false)));
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [mode.kind]); // eslint-disable-line react-hooks/exhaustive-deps -- probe-on-open, not a subscription: keyed to entering the Settings page. Adding `available` re-probes every backend each time that map is rebuilt.
+  const authStatus = useAuthProbe({ mode, available });
 
   const persist = (next: { provider?: ProviderName; identity?: Identity | null; autoResume?: boolean }) => {
     const p = next.provider !== undefined ? next.provider : provider;
@@ -1433,41 +198,16 @@ export default function App({
     });
   };
 
-  // Re-run the data load (bumping the key the load effect depends on). Used by
-  // the inline `open` (to refresh running badges) and the `r` refresh key.
-  const reload = () => setReloadKey((k) => k + 1);
-
   // Lazily parse a session's recent activity the first time it's expanded, then
   // cache it (keyed by session identity). A ref dedupes in-flight requests so
   // it's safe to call on every expand/collapse — it fetches each session once.
   const requested = useRef<Set<string>>(new Set());
-  // Live-poll timers: one setInterval per expanded session identity.
-  const watchers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
-  const inFlight = useRef<Set<string>>(new Set());
   // Mirror `model` into a ref so the mount-only liveness interval reads the
   // current sessions without a stale closure and without re-arming the timer.
   const modelRef = useRef<LoadedModel | null>(null);
-  // Mirror the setting into a ref so the readiness poll's interval closure reads
-  // the current value without re-arming the timer.
-  const autoResumeRef = useRef(autoResume);
-  useEffect(() => { autoResumeRef.current = autoResume; }, [autoResume]);
   // Same, for the path context's repos — an `r` rescan can replace them.
   const discoveredReposRef = useRef(discoveredRepos);
   useEffect(() => { discoveredReposRef.current = discoveredRepos; }, [discoveredRepos]);
-  // Per-limited-session bookkeeping for auto-resume, keyed by canonical name:
-  //   • limitWindows — the frozen reset instant for the current limit window
-  //     (null when no reset time was parseable, so we know not to auto-resume);
-  //   • resumeFired  — the reset instant we've already sent `continue` for, so a
-  //     single window fires at most once.
-  //   • dialogRevealed — canonical names we've already sent the one reveal Escape
-  //     to (the numbered dialog hides its reset time; one Escape reveals it). Kept
-  //     SEPARATE from resumeFired so the reveal can't be confused with the later
-  //     Escape→continue→Enter resume, and so a reset time that never appears just
-  //     parks (no repeat Escape). All three are cleared when a session leaves the
-  //     limited state, so its next limit window starts fresh.
-  const limitWindows = useRef<Map<string, number | null>>(new Map());
-  const resumeFired = useRef<Map<string, number>>(new Map());
-  const dialogRevealed = useRef<Set<string>>(new Set());
   const ensureActivity = (s: AgentSession) => {
     const id = sessionId(s);
     if (requested.current.has(id)) return;
@@ -1478,129 +218,17 @@ export default function App({
       .catch(() => setActivity((p) => new Map(p).set(id, "error")));
   };
 
-  // Point the render helpers at the right provider vocabulary before anything
-  // builds rows or renders chrome this pass (see the module-level `V`).
-  if (model) V = vocab(model.provider);
-
   // The actionable rows of the Settings page, in display order. Kept in one
   // place so the input handler (cursor / enter) and the renderer stay in lockstep.
   const settingsItems: Array<"provider" | "identity" | "autoResume"> = ["provider", "identity", "autoResume"];
   const providerLabel = PROVIDER_INFO.find((p) => p.name === provider)?.label ?? provider;
 
-  // Whether the path filter is active right now (a root exists and the global
-  // toggle is off), and the predicate that decides if a session cwd is in scope.
-  // Applied as a pure display overlay — tmux reconciliation stays global, so
-  // window→session attribution is never gated by the filter.
-  const scoped = !!filterRoot && !globalView;
-  const inScope = useMemo<(cwd: string) => boolean>(
-    () => (scoped ? (cwd: string) => isUnderRoot(cwd, filterRoot!) : () => true),
-    [scoped, filterRoot],
-  );
-  // Repos offered by the fresh-session picker, scoped the same way: a repo is in
-  // scope if its root is under the filter root (parent-folder case) or the filter
-  // root is under it (inside-a-repo case).
-  // Repos cloned this run are offered immediately. A reload only discovers a
-  // repo once a session has actually run in it, so without this, backing out of
-  // the post-clone flow with esc would hide the clone the user just waited for.
-  // Applied in BOTH views: toggling `a` to global must not make a fresh clone
-  // disappear either.
-  const withCloned = (repos: RepoInfo[]) => [
-    ...repos,
-    ...cloned.filter((c) => !repos.some((r) => normalizeCwd(r.root) === normalizeCwd(c.root))),
-  ];
-  const scopedRepos = useMemo<RepoInfo[]>(() => {
-    if (!model) return [];
-    if (!scoped) {
-      if (model.repos.length > 0) return withCloned(model.repos);
-      // Bootstrap: the unscoped list is derived ENTIRELY from where past sessions
-      // ran, so a fresh install (no sessions anywhere — a new machine, or a first
-      // WSL setup whose Claude history lives on the Windows side) has nothing to
-      // offer and the picker dead-ends. That locks the user out for good: the only
-      // way a repo enters the list is by already having a session in it.
-      // Fall back to where the launcher was started — its enclosing checkout, or
-      // the directory itself when it isn't one — which is the one place we know
-      // the user is standing in. `filterRoot` wins when there is one (only
-      // reachable with `a` toggled to the global view, where the scoped folder is
-      // still the better guess than an unrelated cwd), and goes through
-      // `repoRootForCwd` directly: an explicit path IS intent, so its walk-up
-      // needs none of `bootstrapRepoRoot`'s guard against climbing into $HOME.
-      // Deliberately ONLY when the list is empty: an install with sessions keeps
-      // its session-count ranking exactly as before.
-      return withCloned(
-        ensureRepoAtTop([], filterRoot ? repoRootForCwd(filterRoot) : bootstrapRepoRoot(process.cwd())),
-      );
-    }
-    const inScopeRepos = withCloned(
-      model.repos.filter((r) => isUnderRoot(r.root, filterRoot!) || isUnderRoot(filterRoot!, r.root)),
-    );
-    // Always offer the scoped folder itself, ranked FIRST — above child repos
-    // that already have sessions. Scoping to a folder is a statement that the
-    // folder is what you're working on, so a new session there is the "supervise
-    // this whole scope" entry point: `agendo ~/git` → a new session in ~/git
-    // supervises the agendo sessions running in ~/git/*. That intent outranks any
-    // individual child repo, so it takes cursor 0.
-    // "Supervise" here is informal, and is NOT the formal orchestrator mode (the
-    // `O` key / `--orchestrator`): that one integrates by merging branches, so it
-    // needs a real checkout and is routed to `worktreeRepos` instead — see
-    // `reposForTarget`, which excludes it from this ranking on purpose.
-    // The folder needn't be a git checkout — a bare parent like ~/git is a
-    // legitimate place to run a session via the run-in-place path (see the
-    // wtchoice default, which steers non-repos there).
-    // Resolved through repoRootForCwd so scoping INSIDE a checkout still offers
-    // the repo root, and worktrees land at the root rather than a subdir.
-    return ensureRepoAtTop(inScopeRepos, repoRootForCwd(filterRoot!));
-  }, [model, scoped, filterRoot, cloned]);
-
-  // The same list, reordered for targets that MUST create a worktree. Work-item
-  // ("new") and PR flows structurally cannot run in place — `pr` goes straight
-  // to startCheckout, `new` launches with `worktree: true` — so a scoped folder
-  // that isn't a git checkout can only ever produce "fatal: not a git
-  // repository" for them. A plain free session has no such constraint (running in
-  // place IS the supervise-this-scope entry point), which is why it keeps the
-  // scoped folder first unconditionally. An ORCHESTRATOR target is free-kind but
-  // uses this list too: it squash-merges into a main branch, so a non-checkout is
-  // just as useless to it as to a work item (see `reposForTarget`).
-  // Demoted below every hostable repo, not dropped: still selectable for someone
-  // who knows they're about to `git init`, just never the enter-key default.
-  const worktreeRepos = useMemo<RepoInfo[]>(() => {
-    // Scoped only. The unscoped ranking is pre-existing behavior this PR leaves
-    // alone: bare `agendo` can still default to a folder that can't host a
-    // worktree (a plain folder accumulates sessions and out-counts every real
-    // repo), but that predates the scoped picker and fixing it is a separate
-    // change. Confining the reorder here keeps this PR to the scope it claims.
-    if (!scoped) return scopedRepos;
-    // The ONLY question is whether a root can host a worktree, so ask exactly
-    // that — of EVERY entry, not just the head. Session count says nothing about
-    // repo-ness in either direction: repoRootForCwd falls back to the raw cwd
-    // when its walk-up finds no `.git`, so a session run in a plain folder yields
-    // a discovered entry with a real count — precisely what the orchestrator
-    // session in ~/git creates. A plain folder can therefore outrank a real
-    // checkout mid-list, so checking only index 0 would just hand cursor 0 to the
-    // next unhostable entry.
-    // Stable partition, so hostable repos keep their session-count ranking among
-    // themselves and the rest keep theirs.
-    const hostable: RepoInfo[] = [];
-    const rest: RepoInfo[] = [];
-    for (const r of scopedRepos) (isGitCheckout(r.root) ? hostable : rest).push(r);
-    // Nothing to demote (or nowhere to demote it to) — keep the array identity.
-    return rest.length === 0 || hostable.length === 0 ? scopedRepos : [...hostable, ...rest];
-  }, [scoped, scopedRepos]);
-  /**
-   * Repo choices for a fresh-session target — see `worktreeRepos` for why they
-   * differ by kind. An orchestrator is a `free` target but needs the worktree
-   * ranking anyway: `scopedRepos` deliberately puts a NON-git scoped folder
-   * first, and an orchestrator must land in a real checkout — that's where it
-   * does its integration merges, and where a worktree could be cut for it.
-   */
-  const reposForTarget = (target: FreshTarget): RepoInfo[] =>
-    target.kind === "free" && !target.orchestrator ? scopedRepos : worktreeRepos;
-  // Whether ANY offered repo can host a worktree — what the work-item / PR
-  // picker warns about when none can. Memoized on the list it asks about
-  // (`worktreeRepos` is exactly what `reposForTarget` answers for every target
-  // except a plain free session): every `isGitCheckout` is an `existsSync`, and
-  // the picker re-renders on each cursor keystroke, so asking per render would
-  // stat the whole list per keypress.
-  const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
+  const { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo } = useRepoScope({
+    model,
+    filterRoot,
+    globalView,
+    cloned,
+  });
 
   // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
   // chatty once it's transferring, but silent while it resolves DNS, completes
@@ -1616,343 +244,45 @@ export default function App({
     return () => clearInterval(t);
   }, [cloning]);
 
-  // Never leave a `git clone` (and its half-written directory) behind on
-  // unmount. `immediate` because the child's exit will never be observed here.
-  useEffect(() => () => cloneRun.current?.cancel({ immediate: true }), []);
+  const { cloneNote, setCloneNote, cloneNoteRef, cloneRun, cloneUrl, resolved } = useCloneFlow({
+    mode,
+    filterRoot,
+  });
 
-  // What the typed URL means. Two halves, split by cost: parsing is pure string
-  // work and belongs in render, but resolving *where it would land* reads the
-  // filesystem — an `origin` per sibling checkout (spawned git), a stat per
-  // candidate directory. In a folder holding dozens of checkouts that is long
-  // enough to see, so it runs in an effect and lands as state: the identity
-  // appears the instant you type, the destination a beat later, and the render
-  // path never blocks.
-  const cloneValue = mode.kind === "clone" ? mode.value : null;
-  const cloneUrl = useMemo(
-    () => (cloneValue?.trim() ? parseRepoUrl(cloneValue) : null),
-    [cloneValue],
-  );
-  const [cloneDest, setCloneDest] = useState<{ key: string; match: string | null; dest: string | null } | null>(null);
-  useEffect(() => {
-    // Clearing on the way out matters: leaving the resolution behind would let a
-    // later visit to the prompt match it by key and show a pre-clone answer
-    // ("clones into …" for a repo that is now on disk) until the effect caught up.
-    if (!cloneUrl || !filterRoot) {
-      setCloneDest(null);
-      return;
-    }
-    const match = findMatchingCheckout(filterRoot, cloneUrl.key);
-    setCloneDest({
-      key: cloneUrl.key,
-      match,
-      dest: match ? null : freeCloneDest(filterRoot, cloneDirName(cloneUrl.repo)),
-    });
-  }, [cloneUrl, filterRoot]);
-  // Only trust a resolution that belongs to the URL currently on screen — the
-  // previous one is about a different repo, and a stale destination is worse
-  // than none.
-  const resolved = cloneUrl && cloneDest?.key === cloneUrl.key ? cloneDest : null;
-
-  // Whether the repo filter is doing anything right now: it needs a path context
-  // with at least one repo inside it (model.repoScope is null otherwise) and the
-  // `f` toggle on. Applied as a display overlay over the loaded model, so the
-  // fetched data — and every count derived from it — narrows in one place.
-  const repoFiltered = !!model?.repoScope && repoFilterOn;
-  const viewModel = useMemo<LoadedModel | null>(
-    () => (model ? filterModelByRepos(model, repoFiltered ? model.repoScope : null) : null),
-    [model, repoFiltered],
-  );
-
-  const rows = useMemo(() => {
-    if (!viewModel) return [];
-    if (view === "prs") return buildPrsRows(viewModel, expanded, toggles, prsGrouped, prSort, activity, search.text, inScope);
-    if (view === "sessions") return buildSessionsRows(viewModel, toggles, grouped, expanded, activity, sessionSort, search.text, inScope);
-    return buildItemsRows(viewModel, expanded, toggles, activity, search.text, inScope);
-  }, [viewModel, view, expanded, toggles, grouped, prsGrouped, prSort, sessionSort, activity, search.text, inScope]);
-  const selectableIdx = useMemo(
-    () => rows.map((r, i) => (SELECTABLE.has(r.kind) ? i : -1)).filter((i) => i >= 0),
-    [rows],
-  );
-
-  // The identity-switcher roster: the team's members, with the authenticated
-  // user guaranteed present (in case they aren't on the configured team).
-  const roster = useMemo<TeamMember[]>(() => {
-    if (!model) return [];
-    const list = [...model.teamMembers];
-    if (!list.some((m) => m.id === model.me.id)) list.unshift(model.me);
-    return list;
-  }, [model]);
+  const { rows, selectableIdx, roster } = useRowModel({
+    model,
+    repoFilterOn,
+    view,
+    expanded,
+    toggles,
+    grouped,
+    prsGrouped,
+    prSort,
+    sessionSort,
+    activity,
+    search,
+    inScope,
+  });
 
   useEffect(() => {
     if (selectableIdx.length === 0) return;
     if (!selectableIdx.includes(cursor)) setCursor(selectableIdx[0]);
   }, [selectableIdx, cursor]);
 
-  // Derive the set of session identities that are currently expanded (and have a
-  // log to poll), plus a lookup map and a stable string key for the effect dep.
-  const openSessionInfo = useMemo(() => {
-    const ids = new Set<string>();
-    const lookup = new Map<string, AgentSession>();
-    for (const r of rows) {
-      if (r.kind === "session" && r.expanded && r.session.logPath) {
-        const id = sessionId(r.session);
-        ids.add(id);
-        lookup.set(id, r.session);
-      }
-    }
-    const key = [...ids].sort().join(",");
-    return { openSessionIds: ids, sessionLookup: lookup, key };
-  }, [rows]);
+  useActivityWatchers({ rows, setActivity });
 
-  // Reconcile live-poll timers whenever the set of open sessions changes.
-  useEffect(() => {
-    const { openSessionIds, sessionLookup } = openSessionInfo;
-    // Start a timer for each newly-opened session.
-    for (const id of openSessionIds) {
-      if (watchers.current.has(id)) continue;
-      const s = sessionLookup.get(id);
-      if (!s) continue;
-      const handle = setInterval(async () => {
-        if (inFlight.current.has(id)) return;
-        inFlight.current.add(id);
-        try {
-          const a = await loadActivity(s);
-          if (!watchers.current.has(id)) return; // timer cleared mid-read
-          setActivity((p) => {
-            const prev = p.get(id);
-            if (sameActivity(prev, a)) return p;
-            const next = new Map(p);
-            next.set(id, a);
-            return next;
-          });
-        } catch {
-          // leave last good data on error
-        } finally {
-          inFlight.current.delete(id);
-        }
-      }, POLL_MS);
-      watchers.current.set(id, handle);
-    }
-    // Clear timers for sessions that are no longer open.
-    for (const id of watchers.current.keys()) {
-      if (!openSessionIds.has(id)) {
-        clearInterval(watchers.current.get(id));
-        watchers.current.delete(id);
-      }
-    }
-  }, [openSessionInfo.key]); // eslint-disable-line react-hooks/exhaustive-deps -- `.key` is the sorted id digest built above precisely so this reconciles timers when the id SET changes; the object itself changes on every `rows` recompute, which would tear down live timers.
+  // Background LOCAL rescan on a timer; see ./hooks/useLocalRescan.ts.
+  useLocalRescan({ modelRef, discoveredReposRef, setModel });
 
-  // Leak-proof teardown: clear all timers when the component unmounts.
-  useEffect(() => {
-    return () => {
-      for (const t of watchers.current.values()) clearInterval(t);
-      watchers.current.clear();
-    };
-  }, []);
+  const panes = useReadinessPoll({ model, autoResume });
 
-  // Background LOCAL rescan every LIVE_POLL_MS: re-run the cheap, network-free
-  // session scan (loadLocalSessions → SessionIndex.build + discoverRepos +
-  // refreshLiveTmux) and merge its fresh session groups / repos / live-tmux state
-  // into the model the app already has. This is what makes a session started
-  // AFTER the last full `loadModel` appear in the list — and, critically, puts its
-  // window into `liveWindows` — without a manual `r`, so the readiness poll and
-  // #8 auto-resume can act on it. The SLOW backend fetch (work items / PRs / team)
-  // stays on the `r` / provider-change cadence; nothing here touches the network.
-  // Mount-only: reads `model` via modelRef; merges via setModel so the
-  // network-derived fields (items, PRs, teamMembers, sessionLinks) are preserved.
-  // `discoveredRepos` is read through a ref: an `r` rescan can replace it, and a
-  // mount-only interval closing over the old array would drop a just-cloned repo
-  // back out of the fresh-session picker on the next tick.
-  useEffect(() => {
-    let inFlight = false; // a slow disk scan must not overlap the next tick
-    const handle = setInterval(async () => {
-      if (inFlight || !modelRef.current) return; // no full model yet, or busy
-      inFlight = true;
-      try {
-        const local = await loadLocalSessions();
-        setModel((prev) => {
-          if (!prev) return prev;
-          // The rescan's repos are session-derived only, so re-apply the same
-          // merge loadModel does — otherwise a path-discovered repo that has
-          // never hosted a session would drop out of the fresh-session picker a
-          // tick after every load.
-          const repos = mergeRepos(local.repos, discoveredReposRef.current);
-          // Only re-render when something the list / readiness effect cares about
-          // actually changed — an unchanged local scan is a no-op, so a stable
-          // limited session doesn't thrash the readiness effect (which re-arms on
-          // every `model` change and would otherwise re-sample constantly).
-          const unchanged =
-            sessionGroupsSig(prev.sessionGroups) === sessionGroupsSig(local.sessionGroups) &&
-            sameLiveTmux(prev.liveTmux, local.live) &&
-            sameLiveTmux(prev.livePlaceholders, local.livePlaceholders) &&
-            sameLiveWindows(prev.liveWindows, local.liveWindows) &&
-            sameRepos(prev.repos, repos);
-          if (unchanged) return prev;
-          // Merge the fresh LOCAL half; keep the NETWORK half from the last full
-          // load. NB: item.sessions / pr.sessions were associated against the OLD
-          // index, so a brand-new session's backlink to an item/PR lags until the
-          // next full `r` — acceptable for v1 (the session itself still appears and
-          // is live-polled). We deliberately DON'T touch limitWindows/resumeFired/
-          // dialogRevealed here: a rescan must never reset a frozen reset instant
-          // or the fire-once guard, or auto-resume could re-fire `continue`.
-          return {
-            ...prev,
-            sessionGroups: local.sessionGroups,
-            repos,
-            liveTmux: local.live,
-            liveKinds: local.liveKinds,
-            liveWindows: local.liveWindows,
-            livePlaceholders: local.livePlaceholders,
-          };
-        });
-      } catch {
-        // Leave the last good model in place on a transient scan error.
-      } finally {
-        inFlight = false;
-      }
-    }, LIVE_POLL_MS);
-    return () => clearInterval(handle);
-  }, []);
-
-  // Poll input readiness for every running session by reading its tmux pane.
-  // Re-armed whenever the model reloads (the live-window set may have changed);
-  // captures are synchronous and only over running sessions, so no overlap.
-  useEffect(() => {
-    const windows = model?.liveWindows;
-    if (!windows || windows.size === 0) {
-      setPanes((p) => (p.size === 0 ? p : new Map()));
-      // No live windows to attribute to — drop all auto-resume bookkeeping so a
-      // relaunched session can't inherit a stale (possibly past) reset instant.
-      limitWindows.current.clear();
-      resumeFired.current.clear();
-      dialogRevealed.current.clear();
-      return;
-    }
-    const sample = () => {
-      // Capture each pane once (outside the state updater, which must stay pure)
-      // and derive readiness, shell count, and — when limited — the reset time
-      // from the same snapshot. Auto-resume is folded in here so it rides the
-      // same cadence and the same fresh capture.
-      const next = new Map<string, PaneState>();
-      for (const [canon, win] of windows) {
-        const { raw, cursor } = capturePaneState(win.target);
-        const readiness = paneReadiness(raw, cursor);
-        let resetAt: number | null | undefined;
-        if (readiness === "limited") {
-          // Freeze the reset instant on first *successful* parse of this limit
-          // window: a bare "3pm" parses as the next 3pm, which would jump to
-          // tomorrow the moment the clock passes it — freezing keeps a stable
-          // target to fire on. Re-parse while still null (a first capture can
-          // race the TUI paint and miss the reset line) so a transient miss
-          // doesn't permanently disable auto-resume for the window.
-          const frozen = limitWindows.current.get(canon);
-          if (frozen != null) resetAt = frozen;
-          else {
-            resetAt = paneResetAt(stripAnsi(raw));
-            limitWindows.current.set(canon, resetAt ?? null);
-          }
-          // Auto-resume: once the frozen reset has passed (plus grace) and we
-          // haven't already fired for it, re-verify the pane is STILL safely
-          // limited — empty input box, no open dialog (guarding the sample→act
-          // gap and never clobbering a draft/dialog) — then send `continue`.
-          if (autoResumeRef.current) {
-            const fired = resumeFired.current.get(canon) ?? null;
-            if (shouldAutoResume({ enabled: true, readiness, resetAt: resetAt ?? null, now: Date.now(), firedFor: fired })) {
-              const fresh = capturePaneState(win.target);
-              if (paneResumeSafe(fresh.raw, fresh.cursor)) {
-                sendResume(win.target);
-                resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
-              }
-            } else if (
-              // No reset time yet AND we're parked in the numbered dialog (which
-              // hides it): send ONE Escape to reveal the "resets <time>" notice, so
-              // the NEXT poll can parse+freeze it and shouldAutoResume can fire.
-              // Never sends `continue` this tick — just reveals.
-              shouldRevealDialog({
-                enabled: true,
-                readiness,
-                dialogActive: paneLimitDialogActive(raw),
-                resetAt: resetAt ?? null,
-                revealed: dialogRevealed.current.has(canon),
-              })
-            ) {
-              // Re-capture fresh to guard the sample→act gap, and confirm it's STILL
-              // the active dialog before pressing Escape (only ever Escape a pane
-              // whose own "Esc to cancel" affordance is showing).
-              if (paneLimitDialogActive(capturePane(win.target))) {
-                sendDialogReveal(win.target);
-                dialogRevealed.current.add(canon);
-              }
-            }
-          }
-        } else if (readiness !== "busy" && readiness !== "unknown") {
-          // Definitively recovered (ready / queued / dialog / compacting): drop
-          // the frozen window + fire record so a *future* limit window starts
-          // fresh. We deliberately keep them through "busy" (the generation our
-          // own `continue` kicks off) and "unknown" (a transient blank capture),
-          // so a single flicker can't wipe the fire-once guard and re-fire.
-          limitWindows.current.delete(canon);
-          resumeFired.current.delete(canon);
-          dialogRevealed.current.delete(canon);
-        }
-        next.set(canon, {
-          readiness,
-          shells: paneShells(raw),
-          resetAt,
-          // Read from the same snapshot as the readiness it belongs to, so the
-          // percent shown can never be a different frame's than the state word.
-          compactionPercent: readiness === "compacting" ? paneCompactionPercent(raw) : null,
-        });
-      }
-      // A window that vanished between reloads leaves stale bookkeeping; prune it.
-      for (const canon of limitWindows.current.keys()) if (!windows.has(canon)) limitWindows.current.delete(canon);
-      for (const canon of resumeFired.current.keys()) if (!windows.has(canon)) resumeFired.current.delete(canon);
-      for (const canon of dialogRevealed.current) if (!windows.has(canon)) dialogRevealed.current.delete(canon);
-      setPanes((prev) => {
-        const same =
-          prev.size === next.size &&
-          [...next].every(
-            ([k, v]) =>
-              prev.get(k)?.readiness === v.readiness &&
-              prev.get(k)?.shells === v.shells &&
-              prev.get(k)?.resetAt === v.resetAt &&
-              // Load-bearing: without it the map is judged "same" for the whole
-              // compaction and the percent freezes at whatever the first poll saw.
-              prev.get(k)?.compactionPercent === v.compactionPercent,
-          );
-        return same ? prev : next;
-      });
-    };
-    sample(); // paint without waiting a full interval
-    const handle = setInterval(sample, READINESS_MS);
-    return () => clearInterval(handle);
-  }, [model]);
-
-  // ── viewport windowing ──
-  // Render only a slice of rows so the list never overflows the terminal (which
-  // breaks Ink's redraw and scrolls the cursor off-screen). One row = one line.
-  // Reserve lines for the tab strip, hint, scroll indicators, column header
-  // (items/prs only) and an occasional notice line.
-  const termRows = stdout?.rows ?? 24;
-  // Non-sessions views also reserve a line for the "viewing as / filter" status.
-  // The search box (shown while a search is active) takes one extra line, and a
-  // path-scoped launcher shows one scope line.
-  const pageSize = Math.max(
-    3,
-    termRows - (view === "sessions" ? 6 : 8) - (searchFocus ? 1 : 0) - (filterRoot ? 1 : 0),
-  );
-  useEffect(() => {
-    setScrollTop((prev) => {
-      let next = prev;
-      if (cursor < next) next = cursor;
-      else if (cursor >= next + pageSize) next = cursor - pageSize + 1;
-      const maxTop = Math.max(0, rows.length - pageSize);
-      return Math.min(Math.max(0, next), maxTop);
-    });
-  }, [cursor, pageSize, rows.length]);
-  const visible = rows.slice(scrollTop, scrollTop + pageSize);
-  const moreAbove = scrollTop;
-  const moreBelow = Math.max(0, rows.length - (scrollTop + pageSize));
+  const { scrollTop, visible, moreAbove, moreBelow } = useViewport({
+    rows,
+    cursor,
+    view,
+    searchFocus,
+    filterRoot,
+  });
 
   const move = (dir: 1 | -1) => {
     if (selectableIdx.length === 0) return;
@@ -1974,19 +304,6 @@ export default function App({
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
-    });
-
-  // ── sessions search helpers ──
-  const clearSearch = () => {
-    setSearchFocus(null);
-    setSearch({ text: "", cursor: 0 });
-  };
-  // Edit the query text + caret together so batched keystrokes each apply
-  // against the latest value instead of a stale snapshot.
-  const editSearch = (fn: (text: string, cursor: number) => { text?: string; cursor: number }) =>
-    setSearch((s) => {
-      const r = fn(s.text, s.cursor);
-      return { text: r.text ?? s.text, cursor: r.cursor };
     });
 
   const switchView = (v: View) => {
@@ -2244,125 +561,14 @@ export default function App({
   };
 
   // ── clone a repo that isn't on disk yet ──
-  // Gated on `canClone`: agendo must have been given a target directory, since
-  // that directory is the only place it may write. See docs/cloning.md.
-  //
-  // …and that directory must not be inside a git checkout. The clone lands as a
-  // direct child of it, so scoping to a repo (`agendo .`, `agendo ~/git/myrepo`,
-  // or any path under one — all of which the scoping logic supports) would drop
-  // a nested repository into that repo's working tree, where it sits as
-  // untracked clutter forever. Cloning belongs in a folder OF checkouts, not in
-  // one. `enclosingCheckout` walks up, but stops below $HOME — see there for why.
-  const canClone = scoped && !!filterRoot && !enclosingCheckout(filterRoot, homedir());
-
-  /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
-  const clonedRepo = (root: string): RepoInfo => ({
-    root,
-    name: basename(root) || root,
-    total: 0,
-    claude: 0,
-    copilot: 0,
-    codex: 0,
+  // The handlers live in ./cloneActions.ts; the state they drive lives in the
+  // useCloneFlow hook above. Built here, at the line the block occupied, because
+  // they close over `open` and `chooseRepo` — both defined above this point.
+  const { canClone, beginClone, cancelClone } = makeCloneActions({
+    scoped, filterRoot, cloneRun, cloneNoteRef, setMode, setNotice, setCloned, setCloneNote, chooseRepo,
   });
 
-  /** Remember the checkout and continue into the ordinary session flow. */
-  const adoptClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
-    const repo = clonedRepo(root);
-    setCloned((prev) =>
-      prev.some((r) => normalizeCwd(r.root) === normalizeCwd(root)) ? prev : [...prev, repo],
-    );
-    setNotice(note);
-    setCloneNote(note);
-    cloneNoteRef.current = note;
-    chooseRepo(target, repo, agent);
-  };
-
-  /**
-   * Enter on the URL prompt. Resolves where the repo should live before touching
-   * the network: an existing checkout of the same repo anywhere in the target
-   * directory wins outright (never a second copy), otherwise a free directory
-   * name is chosen and the clone starts.
-   */
-  const beginClone = (target: FreshTarget, agent: AgentSource, raw: string) => {
-    const url = parseRepoUrl(raw);
-    const fail = (...error: string[]) =>
-      setMode({ kind: "clone", target, agent, value: raw, cursor: raw.length, error });
-    if (!url) return fail("Not a recognizable GitHub or Azure DevOps repo URL.");
-
-    const existing = findMatchingCheckout(filterRoot!, url.key);
-    if (existing) {
-      return adoptClonedRepo(target, agent, existing, `already cloned — using ${homeShort(existing)}`);
-    }
-
-    const dest = freeCloneDest(filterRoot!, cloneDirName(url.repo));
-    if (!dest) return fail(`No free directory name for "${url.repo}" in ${homeShort(filterRoot!)}.`);
-
-    setMode({ kind: "cloning", target, agent, url, dest, progress: "starting…", elapsed: 0 });
-    const run = startClone(url.remote, dest, (line) =>
-      setMode((p) => (p.kind === "cloning" ? { ...p, progress: line } : p)),
-    );
-    cloneRun.current = run;
-    run.done.then((res) => {
-      if (cloneRun.current !== run) return; // superseded by a newer attempt
-      cloneRun.current = null;
-      if (res.canceled) {
-        setNotice("Clone cancelled.");
-        return setMode({ kind: "repo", target, agent, cursor: 0 });
-      }
-      if (!res.ok) return fail(...cloneError(res));
-      const landed = basename(dest) === cloneDirName(url.repo) ? "" : ` as ${basename(dest)}`;
-      adoptClonedRepo(target, agent, dest, `cloned ${repoUrlLabel(url)}${landed} into ${homeShort(dest)}`);
-    });
-  };
-
-  /** Cancel an in-flight clone (esc) — kills git and removes the partial dir. */
-  const cancelClone = () => {
-    cloneRun.current?.cancel();
-  };
-
-  // Convert a session's transcript into the other agent's format (via the
-  // external converter) and resume the resulting session. Claude→Copilot keeps
-  // the source cwd (the converter copies it but omits it from JSON); Copilot→
-  // Claude takes the cwd the converter reports. The new claude session lands in
-  // the default ~/.claude config dir (where the converter writes), so no
-  // configDir override is needed for resume.
-  const continueInOtherAgent = async (s: AgentSession) => {
-    const dest = convertTarget(s.source);
-    if (!dest) {
-      setNotice(`No cross-agent convert for ${s.source} sessions (the converter only speaks Claude↔Copilot).`);
-      return;
-    }
-    // Copilot has no `--append-system-prompt` equivalent, so converting an
-    // orchestrator to it would produce a session with none of the coordinate-
-    // don't-implement instructions — an "orchestrator" that just starts editing.
-    // Refuse, the way `launch --orchestrator --copilot` does on the CLI.
-    if (dest === "copilot" && isOrchestratorSession(s.id)) {
-      setNotice("That's an orchestrator session — Copilot can't carry the orchestrator instructions, so it won't convert.");
-      return;
-    }
-    const direction = s.source === "claude" ? "claude-to-copilot" : "copilot-to-claude";
-    setNotice(null);
-    setBusy(`Converting session to ${dest} (npx converter)…`);
-    try {
-      const res = await runConvert(direction, s.id);
-      const converted: AgentSession = {
-        id: res.id,
-        source: dest,
-        cwd: res.cwd ?? s.cwd,
-        branch: s.branch,
-        repository: dest === "copilot" ? s.repository : undefined,
-        title: s.title,
-        lastUsed: new Date(),
-      };
-      setBusy(null);
-      setMode({ kind: "list" });
-      open(openSession(converted));
-    } catch (e: any) {
-      setBusy(null);
-      setMode({ kind: "list" });
-      setNotice(`Convert to ${dest} failed: ${e?.message ?? e}`);
-    }
-  };
+  const continueInOtherAgent = makeContinueInOtherAgent({ open, setMode, setNotice, setBusy });
 
   // ── move a session to another Claude profile ────────────────────────────────
   // Open the picker for the hovered session. Every guard that can be answered
@@ -2464,555 +670,50 @@ export default function App({
     setNotice(`Moved “${s.title}” → ${target.name}${extras.length ? ` (${extras.join("; ")})` : ""}`);
   };
 
+  // Everything the ./keys handlers read or drive, rebuilt each render so they
+  // always see this pass's state. Each handler narrows it to a `Pick` of the
+  // members it actually touches, so a module's signature documents its reach.
+  const ctx: KeyContext = {
+    exit, model, filterRoot,
+    mode, setMode, view, switchView, cursor, setCursor, rows, selectableIdx, move,
+    toggleExpand, toggleSection, ensureActivity,
+    searchFocus, setSearchFocus, search, editSearch, clearSearch,
+    setGlobalView, setRepoFilterOn, setGrouped, setPrsGrouped, setPrSort, setSessionSort,
+    setNotice, setActivity, requested, setRescanKey, reload,
+    enterFresh, enterNewSession, enterOrchestrator, proceedFresh, reposForTarget,
+    chooseRepo, startFresh, open, openInBrowser,
+    canClone, beginClone, cancelClone, setCloneNote, cloneNoteRef,
+    settingsItems, enterSettings, enterProvider, enterIdentity, applyProvider,
+    setAutoResume, persist, roster, setIdentity,
+    continueInOtherAgent, enterProfilePicker, moveToProfile,
+  };
+
   useInput((input, key) => {
-    // ── open-in-browser dialog (p = PR, i = issue, esc/q = cancel) ──
-    if (mode.kind === "open") {
-      if (key.escape || input === "q") return setMode({ kind: "list" });
-      if (input === "p" && mode.targets.pr) return openInBrowser(mode.targets.pr, `PR ${V.prPrefix}${mode.targets.pr.id}`);
-      if (input === "i" && mode.targets.workItem) return openInBrowser(mode.targets.workItem, `#${mode.targets.workItem.id}`);
-      if (key.ctrl && input === "c") exit();
-      return;
-    }
+    if (handleOpenKeys(input, key, ctx)) return;
+    if (handleSearchKeys(input, key, ctx)) return;
 
-    // ── fuzzy search (sessions / PRs / work items) ───────────────────────────
-    // A search owns one query shared by two focus states. These blocks sit ahead
-    // of the global q/esc handlers but ONLY handle the keys that differ while
-    // searching — caret editing and focus changes. Every real list action (o, g,
-    // s, n, enter, arrows, expand) is left to fall through to its single handler
-    // below; it is never reimplemented here. All three list views search the same
-    // way, so these blocks gate on `searchFocus` (set only while searching) rather
-    // than a specific view.
+    if (handleQuitKeys(input, key, ctx)) return;
 
-    // Shared: esc cancels the search from either focus; ctrl-c still quits.
-    if (mode.kind === "list" && searchFocus) {
-      if (key.ctrl && input === "c") { exit(); return; }
-      if (key.escape) { clearSearch(); setCursor(0); return; }
-    }
+    if (handleAgentKeys(input, key, ctx)) return;
 
-    // INPUT focused: keystrokes edit the query. ←/→ move the caret (the list is
-    // not focused while typing); ↓ hands focus to the results; enter/tab fall
-    // through (resume the top match / switch view); everything else is swallowed.
-    if (mode.kind === "list" && searchFocus === "input") {
-      if (key.downArrow) {
-        if (selectableIdx.length > 0) { setSearchFocus("list"); setCursor(selectableIdx[0]); }
-        return;
-      }
-      if (key.upArrow) return; // single-line input — nothing above
-      if (key.leftArrow) return editSearch((_v, c) => ({ cursor: Math.max(0, c - 1) }));
-      if (key.rightArrow) return editSearch((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
-      if (key.ctrl && input === "a") return editSearch(() => ({ cursor: 0 }));
-      if (key.ctrl && input === "e") return editSearch((v) => ({ cursor: v.length }));
-      // Delete the previous word: Ctrl+Backspace (^H → key.backspace in Ink),
-      // Alt/Meta+Backspace, or Ctrl+W.
-      if (key.backspace || (key.meta && key.delete) || (key.ctrl && input === "w")) {
-        setCursor(0);
-        return editSearch((v, c) => {
-          let i = c;
-          while (i > 0 && /\s/.test(v[i - 1]!)) i--;
-          while (i > 0 && !/\s/.test(v[i - 1]!)) i--;
-          return { text: v.slice(0, i) + v.slice(c), cursor: i };
-        });
-      }
-      // Delete the previous character: plain Backspace (\x7f → key.delete in Ink).
-      if (key.delete || input === "\x7f") {
-        setCursor(0);
-        return editSearch((v, c) => (c === 0 ? { cursor: 0 } : { text: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      }
-      if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input)) {
-        setCursor(0);
-        return editSearch((v, c) => ({ text: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
-      }
-      // With an empty query there is no top match to resume, so swallow enter
-      // rather than act on the (hidden) list selection. With a query it falls
-      // through to resume the top result; tab falls through to switch view.
-      if (key.return && !search.text.trim()) return;
-      // enter (resume top match) and tab (switch view) fall through; swallow the rest
-      if (!(key.return || key.tab)) return;
-    }
+    if (handleRepoKeys(input, key, ctx)) return;
 
-    // LIST focused (query active): only the search-specific keys are handled
-    // here — `q` cancels, `/` re-focuses the input, and ↑ on the first result
-    // hands focus back to the input. Everything else falls through to the normal
-    // list handlers (o, g, s, n, enter, arrows, expand) below — not duplicated.
-    if (mode.kind === "list" && searchFocus === "list") {
-      if (input === "q") { clearSearch(); setCursor(0); return; }
-      if (input === "/") { setSearchFocus("input"); return; }
-      if ((key.upArrow || input === "k") && cursor === selectableIdx[0]) { setSearchFocus("input"); return; }
-    }
+    if (handleCloneKeys(input, key, ctx)) return;
+    if (handleCloningKeys(input, key, ctx)) return;
 
-    if (!HOLDS_QUIT_KEYS.has(mode.kind) && (input === "q" || (key.ctrl && input === "c"))) {
-      exit();
-      return;
-    }
-    if (mode.kind === "list" && key.escape) {
-      exit();
-      return;
-    }
+    if (handleWtchoiceKeys(input, key, ctx)) return;
 
-    // ── agent picker (first step of every fresh flow) ──
-    if (mode.kind === "agent") {
-      const len = AGENT_CHOICES.length;
-      if (key.escape) {
-        // Last exit from the fresh flow, so it's where an unconsumed clone note
-        // dies. Escaping all the way out (wtchoice → repo → agent → list) and
-        // then resuming some existing session would otherwise prefix that
-        // launch with "✓ cloned …", crediting it to an unrelated clone.
-        setCloneNote(null);
-        cloneNoteRef.current = null;
-        return setMode({ kind: "list" });
-      }
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "agent" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "agent" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) return proceedFresh(mode.target, AGENT_CHOICES[mode.cursor].source);
-      return;
-    }
+    if (handleBranchKeys(input, key, ctx)) return;
 
-    // ── repo picker ──
-    if (mode.kind === "repo") {
-      const repos = reposForTarget(mode.target);
-      const len = repos.length || 1;
-      const openClone = () =>
-        setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
-      // The clone row is rendered last but addressed by a SENTINEL, never by
-      // `repos.length`: the background rescan replaces `model.repos` while the
-      // picker is open (a sibling session starting in a new repo grows the list),
-      // and a positional index would slide off the clone row onto whatever repo
-      // took its place — enter would then launch a session instead of cloning.
-      const onClone = mode.cursor === CLONE_ROW;
-      // ↑/↓ treat the clone row as one past the end, wrapping through it.
-      const move = (d: 1 | -1) =>
-        setMode((p) => {
-          if (p.kind !== "repo") return p;
-          if (!canClone) return { ...p, cursor: (p.cursor + d + len) % len };
-          if (p.cursor === CLONE_ROW) return { ...p, cursor: d === 1 ? 0 : len - 1 };
-          const next = p.cursor + d;
-          return { ...p, cursor: next < 0 || next >= len ? CLONE_ROW : next };
-        });
-      // The orchestrator flow entered here directly (no agent step to go back to),
-      // which makes THIS the last exit out of the fresh flow for it — so it also
-      // takes on the agent step's job of dropping an unconsumed clone note. Without
-      // that, escaping out after a clone and then resuming some existing session
-      // would prefix that launch with "✓ cloned …", crediting it to a clone it had
-      // nothing to do with (same failure the agent-mode escape guards against).
-      if (key.escape) {
-        if (mode.target.orchestrator) {
-          setCloneNote(null);
-          cloneNoteRef.current = null;
-          return setMode({ kind: "list" });
-        }
-        return setMode({ kind: "agent", target: mode.target, cursor: 0 });
-      }
-      if (key.upArrow || input === "k") return move(-1);
-      if (key.downArrow || input === "j") return move(1);
-      if (input === "c" && canClone) return openClone();
-      if (key.return && onClone && canClone) return openClone();
-      if (key.return && repos[mode.cursor]) {
-        // Picking a repo off the list is not the result of a clone. Without
-        // this, backing out of the post-clone flow and choosing a different repo
-        // would carry "✓ cloned ada/newthing…" onto a dialog about another one.
-        setCloneNote(null);
-        cloneNoteRef.current = null;
-        return chooseRepo(mode.target, repos[mode.cursor], mode.agent);
-      }
-      return;
-    }
+    if (handleSettingsKeys(input, key, ctx)) return;
 
-    // ── clone: paste a repo URL ──
-    // Same editable single-line input as the branch prompt (see there for why the
-    // updates are functional).
-    if (mode.kind === "clone") {
-      if (key.escape) return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
-      if (key.return) {
-        if (mode.value.trim()) beginClone(mode.target, mode.agent, mode.value.trim());
-        return;
-      }
-      const edit = (fn: (v: string, c: number) => { value?: string; cursor: number }) =>
-        setMode((p) => {
-          if (p.kind !== "clone") return p;
-          const r = fn(p.value, p.cursor);
-          // Any edit clears a stale error — it described the *previous* value.
-          return { ...p, value: r.value ?? p.value, cursor: r.cursor, error: undefined };
-        });
-      if (key.leftArrow) return edit((v, c) => ({ cursor: Math.max(0, c - 1) }));
-      if (key.rightArrow) return edit((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
-      if (key.ctrl && input === "a") return edit(() => ({ cursor: 0 }));
-      if (key.ctrl && input === "e") return edit((v) => ({ cursor: v.length }));
-      if (key.ctrl && input === "u") return edit(() => ({ value: "", cursor: 0 }));
-      if (key.backspace || key.delete || input === "\x7f" || input === "\b")
-        return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      // A PASTE arrives as one chunk, and copying a URL as a whole line brings
-      // its trailing newline along. Ink doesn't read that chunk as Enter (the
-      // `\r` isn't alone), so a printable-only guard like the branch prompt's
-      // would reject the entire paste and insert nothing at all — on the one
-      // prompt whose whole instruction is "paste a URL". Strip the control
-      // characters and keep the rest. Deliberately NOT treated as submit: the
-      // destination preview exists so no clone starts unreviewed.
-      if (input && !key.ctrl && !key.meta) {
-        // Only CONTROL characters are dropped — deliberately not "everything
-        // outside printable ASCII". An ADO project name is routinely non-ASCII
-        // (`…/innovamps/Þróun/_git/hmi-framework`, and Chrome's omnibox hands
-        // that over unencoded), and stripping those letters doesn't reject the
-        // URL — it quietly turns it into a *different, still valid* one
-        // (`…/innovamps/run/_git/…`), which then previews a destination for a
-        // repo the user never named and fails at clone time as "not found".
-        const text = input.replace(/[\x00-\x1f\x7f]+/g, "");
-        if (!text) return;
-        return edit((v, c) => ({ value: v.slice(0, c) + text + v.slice(c), cursor: c + text.length }));
-      }
-      return;
-    }
+    if (handleProviderKeys(input, key, ctx)) return;
 
-    // ── clone in progress ── (esc kills git and removes the partial directory;
-    // everything else is ignored so a stray keystroke can't abandon the clone)
-    if (mode.kind === "cloning") {
-      if (key.escape) cancelClone();
-      return;
-    }
+    if (handleIdentityKeys(input, key, ctx)) return;
 
-    // ── worktree-vs-main choice (free sessions only) ──
-    if (mode.kind === "wtchoice") {
-      if (key.escape) return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor - 1 + 2) % 2 } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor + 1) % 2 } : p));
-      if (key.return) {
-        const worktree = mode.cursor === 0;
-        // Orchestrator in the main checkout: nothing to name (the main-repo path
-        // discards the name anyway, and it has no branch of its own), so launch
-        // straight away instead of showing a prompt whose value is thrown out.
-        if (!worktree && mode.target.orchestrator) {
-          return startFresh(mode.target, mode.repo, ORCHESTRATOR_SLUG, false, mode.agent);
-        }
-        // A plain free session has no default name (defaultBranch is ""), so this
-        // still opens an empty prompt; an orchestrator prefills its own role slug,
-        // stepped past any orchestrator worktree already in this repo. Only a
-        // preview — `startFresh` re-derives it at create time, since the user may
-        // sit on this screen for a while. (Moot for the main-repo option, which
-        // ignores the name entirely.)
-        const seed =
-          worktree && mode.target.defaultBranch
-            ? freeWorktreeBranch(mode.repo.root, mode.target.defaultBranch)
-            : mode.target.defaultBranch;
-        return setMode({
-          kind: "branch",
-          target: mode.target,
-          agent: mode.agent,
-          repo: mode.repo,
-          value: seed,
-          cursor: seed.length,
-          worktree,
-          seed: seed || undefined,
-        });
-      }
-      return;
-    }
+    if (handleProfileKeys(input, key, ctx)) return;
 
-    // ── new-branch / session name prompt — editable, with a movable cursor ──
-    if (mode.kind === "branch") {
-      if (key.escape) {
-        if (mode.target.kind === "free") return setMode({ kind: "wtchoice", target: mode.target, agent: mode.agent, repo: mode.repo, cursor: mode.worktree ? 0 : 1 });
-        return setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 });
-      }
-      if (key.return) {
-        if (mode.value.trim()) startFresh(mode.target, mode.repo, mode.value, mode.worktree, mode.agent, mode.seed);
-        return;
-      }
-      // Functional updates so batched keystrokes (e.g. two Lefts in one chunk)
-      // each apply against the latest value/cursor instead of a stale snapshot.
-      const edit = (fn: (v: string, c: number) => { value?: string; cursor: number }) =>
-        setMode((p) => {
-          if (p.kind !== "branch") return p;
-          const r = fn(p.value, p.cursor);
-          return { ...p, value: r.value ?? p.value, cursor: r.cursor };
-        });
-      if (key.leftArrow) return edit((v, c) => ({ cursor: Math.max(0, c - 1) }));
-      if (key.rightArrow) return edit((v, c) => ({ cursor: Math.min(v.length, c + 1) }));
-      // Ctrl-A / Ctrl-E jump to start / end (terminals rarely send Home/End cleanly).
-      if (key.ctrl && input === "a") return edit(() => ({ cursor: 0 }));
-      if (key.ctrl && input === "e") return edit((v) => ({ cursor: v.length }));
-      // Backspace (and Delete, which many terminals send for Backspace) removes
-      // the character before the cursor.
-      if (key.backspace || key.delete || input === "\x7f" || input === "\b")
-        return edit((v, c) => (c === 0 ? { cursor: 0 } : { value: v.slice(0, c - 1) + v.slice(c), cursor: c - 1 }));
-      if (input && !key.ctrl && !key.meta && /^[\x20-\x7e]+$/.test(input))
-        return edit((v, c) => ({ value: v.slice(0, c) + input + v.slice(c), cursor: c + input.length }));
-      return;
-    }
-
-    // ── settings page ──
-    if (mode.kind === "settings") {
-      const len = settingsItems.length;
-      if (key.escape) return setMode({ kind: "list" });
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "settings" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "settings" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return || input === " ") {
-        const item = settingsItems[mode.cursor];
-        if (item === "provider") return enterProvider(true);
-        if (item === "identity") return enterIdentity(true);
-        if (item === "autoResume") {
-          setAutoResume((v) => {
-            const nv = !v;
-            persist({ autoResume: nv });
-            return nv;
-          });
-          return;
-        }
-      }
-      return;
-    }
-
-    // ── backend picker ──
-    if (mode.kind === "provider") {
-      const back: Mode = mode.fromSettings ? { kind: "settings", cursor: 0 } : { kind: "list" };
-      const len = PROVIDER_INFO.length;
-      if (key.escape) return setMode(back);
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "provider" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "provider" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) return applyProvider(PROVIDER_INFO[mode.cursor].name, back);
-      return;
-    }
-
-    // ── identity picker ──
-    if (mode.kind === "identity") {
-      const back: Mode = mode.fromSettings ? { kind: "settings", cursor: 0 } : { kind: "list" };
-      if (key.escape) return setMode(back);
-      const len = roster.length;
-      if (len === 0) return;
-      // Functional updates so rapidly-arriving keys (batched in one stdin chunk)
-      // each advance the cursor instead of all reading the same stale value.
-      if (key.upArrow || input === "k")
-        return setMode((p) => (p.kind === "identity" ? { ...p, cursor: (p.cursor - 1 + len) % len } : p));
-      if (key.downArrow || input === "j")
-        return setMode((p) => (p.kind === "identity" ? { ...p, cursor: (p.cursor + 1) % len } : p));
-      if (key.return) {
-        const picked = roster[mode.cursor];
-        if (picked) {
-          // Selecting the authenticated user clears the override so the launcher
-          // tracks whoever is logged in via az.
-          const next = model && picked.id === model.me.id ? null : picked;
-          setIdentity(next);
-          persist({ identity: next });
-          setCursor(0);
-        }
-        // A picked identity reloads the data, so always land on the list.
-        return setMode({ kind: "list" });
-      }
-      return;
-    }
-
-    // ── Claude profile picker (move a session between ~/.claude* dirs) ──
-    if (mode.kind === "profile") {
-      if (key.escape) return setMode({ kind: "list" });
-      // Only the profiles the session ISN'T in are selectable; its own is on
-      // screen for orientation, so the cursor steps over it in both directions.
-      const targets = mode.choices.flatMap((c, i) => (c.current ? [] : [i]));
-      if (targets.length === 0) return;
-      const step = (dir: number) =>
-        setMode((p) => {
-          if (p.kind !== "profile") return p;
-          const at = targets.indexOf(p.cursor);
-          const next = at < 0 ? targets[0] : targets[(at + dir + targets.length) % targets.length];
-          return { ...p, cursor: next };
-        });
-      if (key.upArrow || input === "k") return step(-1);
-      if (key.downArrow || input === "j") return step(1);
-      if (key.return) {
-        const picked = mode.choices[mode.cursor];
-        if (picked && !picked.current) moveToProfile(mode.session, picked.profile);
-        return;
-      }
-      return;
-    }
-
-    // ── list mode ──
-    // view switching (Tab forward, Shift-Tab back)
-    if (key.tab) {
-      const order: View[] = ["items", "prs", "sessions"];
-      const dir = key.shift ? -1 : 1;
-      const next = order[(order.indexOf(view) + dir + order.length) % order.length];
-      return switchView(next);
-    }
-    if (input === "1") return switchView("items");
-    if (input === "2") return switchView("prs");
-    if (input === "3") return switchView("sessions");
-
-    // toggle path scope ↔ global (only when the launcher is scoped to a path;
-    // bare `agendo` is already global, so there's nothing to toggle). `a` = "all".
-    if (input === "a" && filterRoot) {
-      setCursor(0);
-      return setGlobalView((v) => !v);
-    }
-
-    // toggle the repo filter on the work-item / PR views (only when scoped to a
-    // path — with no root there are no repos to narrow to). `f` = "filter".
-    if (input === "f" && filterRoot) {
-      setCursor(0);
-      return setRepoFilterOn((v) => !v);
-    }
-
-    // toggle repo grouping (Sessions: whole view · PRs: subgroups per section)
-    if (input === "g" && (view === "sessions" || view === "prs")) {
-      setCursor(0);
-      if (view === "sessions") return setGrouped((v) => !v);
-      return setPrsGrouped((v) => !v);
-    }
-
-    // new arbitrary session (sessions view only)
-    if (input === "n" && view === "sessions") { enterNewSession(); return; }
-
-    // new ORCHESTRATOR session (sessions view only) — a session that delegates
-    // every unit of work to further background sessions instead of implementing.
-    // Capital O, so the lowercase `o` open-in-browser binding is untouched.
-    if (input === "O" && view === "sessions") { enterOrchestrator(); return; }
-
-    // focus the fuzzy-search input (all list views)
-    if (input === "/") { setSearchFocus("input"); return; }
-
-    // toggle PR sort order (created ↔ last updated); drafts stay at the bottom
-    if (input === "s" && view === "prs") {
-      setCursor(0);
-      return setPrSort((s) => (s === "created" ? "updated" : "created"));
-    }
-
-    // toggle session sort order (updated ↔ created)
-    if (input === "s" && view === "sessions") {
-      setCursor(0);
-      return setSessionSort((s) => (s === "updated" ? "created" : "updated"));
-    }
-
-    // open the Settings page (backend · identity · filters · auth status)
-    if (input === ",") { enterSettings(); return; }
-
-    // quick shortcut (also in Settings): switch who you are — Work items & PRs only
-    if (input === "u") { enterIdentity(); return; }
-
-    if (input === "r") {
-      setNotice(null);
-      setActivity(new Map()); // drop cached activity so expanded sessions refetch
-      requested.current.clear();
-      setRescanKey((k) => k + 1); // re-walk the path context for new checkouts
-      reload();
-      return;
-    }
-
-    // continue the hovered session in the other agent: convert its transcript
-    // and resume the result. Works on a session row in any view. Guard against
-    // ctrl-c (handled earlier as quit) so a bare `c` is required.
-    if (input === "c" && !key.ctrl && !key.meta) {
-      const row = rows[cursor];
-      if (!row || row.kind !== "session") {
-        setNotice("Select a session row first to continue it in another agent.");
-        return;
-      }
-      continueInOtherAgent(row.session);
-      return;
-    }
-
-    // move the hovered session to another Claude profile (~/.claude*). Works on
-    // a session row in any view, like `c`.
-    if (input === "m" && !key.ctrl && !key.meta) {
-      const row = rows[cursor];
-      if (!row || row.kind !== "session") {
-        setNotice("Select a session row first to move it to another profile.");
-        return;
-      }
-      enterProfilePicker(row.session);
-      return;
-    }
-
-    // open the hovered work item / PR / session in the browser
-    if (input === "o") {
-      const row = rows[cursor];
-      if (!row || (row.kind !== "item" && row.kind !== "pr" && row.kind !== "session")) {
-        setNotice("Nothing to open in the browser for this row.");
-        return;
-      }
-      const targets = row.open;
-      if (!targets || (!targets.pr && !targets.workItem)) {
-        setNotice("Nothing to open in the browser for this row.");
-        return;
-      }
-      const title =
-        row.kind === "item"
-          ? `#${row.item.id} — ${row.item.title}`
-          : row.kind === "pr"
-            ? `PR ${V.prPrefix}${row.pr.id} — ${row.pr.title}`
-            : row.session.title;
-      setNotice(null);
-      setMode({ kind: "open", targets, title });
-      return;
-    }
-
-    if (key.upArrow || input === "k") return move(-1);
-    if (key.downArrow || input === "j") return move(1);
-
-    // ── expand/collapse with →/← (or l/h) ──
-    const isExpandable = (row: Row) =>
-      row.kind === "item" || row.kind === "pr" || row.kind === "toggle" || row.kind === "session";
-    const isOpen = (row: Row) =>
-      row.kind === "item" || row.kind === "pr" || row.kind === "session"
-        ? row.expanded
-        : row.kind === "toggle"
-          ? row.open
-          : false;
-    const flipOpen = (row: Row) => {
-      if (row.kind === "item") toggleExpand(`wi:${itemKey(row.item)}`);
-      else if (row.kind === "pr") toggleExpand(`pr:${prKey(row.pr)}`);
-      else if (row.kind === "toggle") toggleSection(row.id);
-      else if (row.kind === "session") {
-        ensureActivity(row.session); // kick off the lazy parse on first expand
-        toggleExpand(sessionExpandKey(row.key));
-      }
-    };
-    // Nesting depth: sections/groups (toggle) = 0, work items / PRs = 1, the
-    // sessions & fresh rows under them = 2. Used to climb one level on ←.
-    const depthOf = (row: Row) =>
-      row.kind === "session" || row.kind === "fresh" ? 2 : row.kind === "item" || row.kind === "pr" ? 1 : 0;
-
-    if (key.rightArrow || input === "l") {
-      const row = rows[cursor];
-      if (!row || !isExpandable(row)) return;
-      if (!isOpen(row)) return flipOpen(row); // expand
-      // already open → select the first child (the row right below it)
-      const child = rows[cursor + 1];
-      if (child && SELECTABLE.has(child.kind)) setCursor(cursor + 1);
-      return;
-    }
-    if (key.leftArrow || input === "h") {
-      const row = rows[cursor];
-      if (!row) return;
-      // An open expandable collapses first; only once it's collapsed (or it's a
-      // leaf) does ← climb to the nearest selectable ancestor one level up
-      // (child → work item/PR → its section/group).
-      if (isExpandable(row) && isOpen(row)) return flipOpen(row);
-      const d = depthOf(row);
-      for (let i = cursor - 1; i >= 0; i--) {
-        if (depthOf(rows[i]) < d && SELECTABLE.has(rows[i].kind)) return setCursor(i);
-      }
-      return;
-    }
-
-    if (key.return) {
-      const row = rows[cursor];
-      if (!row) return;
-      if (row.kind === "item") toggleExpand(`wi:${itemKey(row.item)}`);
-      else if (row.kind === "pr") toggleExpand(`pr:${prKey(row.pr)}`);
-      else if (row.kind === "toggle") toggleSection(row.id);
-      else if (row.kind === "session") {
-        open(openSession(row.session, model?.liveWindows.get(sessionName(row.session))));
-      } else if (row.kind === "fresh") {
-        enterFresh(row.target);
-      } else if (row.kind === "newsess") {
-        enterNewSession();
-      }
-    }
+    handleListKeys(input, key, ctx); // last link: nothing left to guard
   });
 
   // ── render ──
@@ -3047,372 +748,85 @@ export default function App({
   if (!model) return <Text><Text color="cyan">⟳</Text> Loading work items, PRs & sessions…</Text>;
   if (busy) return <Text><Text color="cyan">⟳</Text> {busy}</Text>;
 
-  if (mode.kind === "agent") {
-    const isFree = mode.target.kind === "free";
-    return (
-      <Box flexDirection="column">
-        <Text bold>{isFree ? `New session — pick an agent` : `Fresh session — ${mode.target.title.slice(0, 54)}`}</Text>
-        <Text dimColor>{`Which agent should run this session?  ·  ↑/↓ move · enter select · esc back`}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {AGENT_CHOICES.map((a, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={a.source} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text bold>{a.label.padEnd(10).slice(0, 10)}</Text>
-                <Text dimColor={!sel}>{`  ${a.desc}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
-  }
+  if (mode.kind === "agent") return <AgentScreen target={mode.target} cursor={mode.cursor} />;
 
   if (mode.kind === "repo") {
-    const isFree = mode.target.kind === "free";
-    const orch = !!mode.target.orchestrator;
-    const repoChoices = reposForTarget(mode.target);
-    // Work-item / PR flows MUST create a worktree, so a list with no git checkout
-    // in it can only ever produce "fatal: not a git repository" — the bootstrap
-    // case, where the only offer is the launcher's own non-repo cwd. Say what
-    // would actually unblock it instead of letting enter dead-end. A plain free
-    // session is exempt: running in place is a legitimate outcome there (see
-    // wtchoice). An ORCHESTRATOR is not exempt, even though it is a free target —
-    // it integrates by merging branches, which a non-repo folder cannot do, so
-    // for it "run in place here" is just as dead an end as for a work item.
-    const noCheckout = (!isFree || orch) && !anyHostableRepo;
     return (
-      <Box flexDirection="column">
-        <Text bold>
-          {orch ? `Orchestrator session — pick a repo` : isFree ? `New session — pick a repo` : `Fresh session — ${mode.target.title.slice(0, 54)}`}
-        </Text>
-        <Text dimColor>
-          {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
-        </Text>
-        {orch ? (
-          <Text color="magenta">{"It will delegate every unit of work to background sessions — it writes no code itself."}</Text>
-        ) : null}
-        {noCheckout ? (
-          <Text color="yellow">
-            {canClone
-              ? "No git checkout here — press c to clone one, or run `agendo <dir>` pointing at a repo."
-              : "No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
-          </Text>
-        ) : null}
-        <Box marginTop={1} flexDirection="column">
-          {repoChoices.map((r, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={r.root} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text bold>{r.name.padEnd(22).slice(0, 22)}</Text>
-                {r.total === 0 ? (
-                  <Text color={sel ? "black" : "gray"}>{`  (no sessions yet)         `}</Text>
-                ) : (
-                  <>
-                    <Text color={sel ? "black" : "green"}>{` ${String(r.total).padStart(3)} sessions`}</Text>
-                    <Text color={sel ? "black" : "gray"}>{` (${repoBreakdown(r)})`}</Text>
-                  </>
-                )}
-                <Text dimColor={!sel}>{`  ${r.root}`}</Text>
-              </Text>
-            );
-          })}
-          {canClone ? (
-            <Text
-              color={mode.cursor === CLONE_ROW ? "black" : undefined}
-              backgroundColor={mode.cursor === CLONE_ROW ? "cyan" : undefined}
-            >
-              {mode.cursor === CLONE_ROW ? "❯ " : "  "}
-              <Text bold>{"＋ Clone from URL…".padEnd(21).slice(0, 21)}</Text>
-              <Text dimColor={mode.cursor !== CLONE_ROW}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
-            </Text>
-          ) : null}
-        </Box>
-      </Box>
+      <RepoScreen
+        target={mode.target}
+        cursor={mode.cursor}
+        repoChoices={reposForTarget(mode.target)}
+        anyHostableRepo={anyHostableRepo}
+        canClone={canClone}
+        filterRoot={filterRoot}
+      />
     );
   }
 
   if (mode.kind === "clone") {
-    // Live read of what's typed so far (see `cloneUrl` / `cloneDest`): the exact
-    // directory that will be created is on screen *before* enter, so no clone is
-    // ever a surprise. An existing checkout of the same repo is reported here
-    // too — the reuse then reads as expected rather than as a clone that
-    // silently didn't happen.
-    const preview: { text: string; color: string } = cloneUrl
-      ? !resolved
-        ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  …`, color: "gray" }
-        : resolved.match
-          ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  already cloned at ${homeShort(resolved.match)}`, color: "green" }
-          : resolved.dest
-            ? { text: `→ ${repoUrlLabel(cloneUrl)}  ·  clones into ${homeShort(resolved.dest)}`, color: "cyan" }
-            : { text: `→ ${repoUrlLabel(cloneUrl)}  ·  no free directory name in ${homeShort(filterRoot!)}`, color: "yellow" }
-      : mode.value.trim()
-        ? { text: "not a recognizable GitHub or Azure DevOps repo URL", color: "yellow" }
-        : { text: "e.g. https://github.com/owner/repo · https://dev.azure.com/org/proj/_git/repo", color: "gray" };
     return (
-      <Box flexDirection="column">
-        <Text bold>{`Clone a repo into ${homeShort(filterRoot!)}`}</Text>
-        <Text dimColor>{"Paste a GitHub or Azure DevOps repo URL  ·  enter clone · esc back"}</Text>
-        <Box marginTop={1} flexDirection="column">
-          <Text>
-            {"  "}
-            <Text>{mode.value.slice(0, mode.cursor)}</Text>
-            <Text inverse>{mode.value[mode.cursor] ?? " "}</Text>
-            <Text>{mode.value.slice(mode.cursor + 1)}</Text>
-          </Text>
-          <Text color={preview.color}>{`  ${preview.text}`}</Text>
-          {(mode.error ?? []).map((line, i) => (
-            <Text key={i} color="red">{`  ${line}`}</Text>
-          ))}
-        </Box>
-      </Box>
+      <CloneScreen
+        value={mode.value}
+        cursor={mode.cursor}
+        error={mode.error}
+        cloneUrl={cloneUrl}
+        resolved={resolved}
+        filterRoot={filterRoot}
+      />
     );
   }
 
   if (mode.kind === "cloning") {
-    return (
-      <Box flexDirection="column">
-        <Text bold>
-          <Text color="cyan">⟳</Text>
-          {` Cloning ${repoUrlLabel(mode.url)}  `}
-          <Text dimColor>{`(${mode.elapsed}s)`}</Text>
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          <Text dimColor wrap="truncate">{`  from  ${mode.url.displayRemote}`}</Text>
-          <Text dimColor wrap="truncate">{`  into  ${homeShort(mode.dest)}`}</Text>
-          <Text wrap="truncate">{`  ${mode.progress}`}</Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text dimColor>{"  esc cancels (the partial clone is removed)"}</Text>
-        </Box>
-      </Box>
-    );
+    return <CloningScreen url={mode.url} dest={mode.dest} progress={mode.progress} elapsed={mode.elapsed} />;
   }
 
   if (mode.kind === "identity") {
-    const curId = (identity ?? model.me).id;
-    return (
-      <Box flexDirection="column">
-        <Text bold>Switch who you are</Text>
-        <Text dimColor>
-          {"Work items & PRs reload for the selected person  ·  ↑/↓ move · enter select · esc back"}
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          {roster.map((m, i) => {
-            const sel = i === mode.cursor;
-            const isCur = m.id === curId;
-            const isMe = m.id === model.me.id;
-            return (
-              <Text key={m.id} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text color={sel ? "black" : isCur ? "green" : "gray"}>{isCur ? "● " : "○ "}</Text>
-                <Text bold>{m.displayName.padEnd(28).slice(0, 28)}</Text>
-                {isMe ? <Text color={sel ? "black" : "magenta"}>{" (you)"}</Text> : null}
-                <Text dimColor={!sel}>{`  ${m.uniqueName}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <IdentityScreen cursor={mode.cursor} identity={identity} me={model.me} roster={roster} />;
   }
 
   if (mode.kind === "settings") {
-    const settingValue = (item: "provider" | "identity" | "autoResume"): { text: string; color?: string } =>
-      item === "provider"
-        ? { text: providerLabel, color: "cyan" }
-        : item === "identity"
-          ? { text: `${model.identity.displayName}${model.identity.id === model.me.id ? " (you)" : ""}` }
-          : { text: autoResume ? "on" : "off", color: autoResume ? "green" : "gray" };
-    const settingLabel = (item: "provider" | "identity" | "autoResume") =>
-      item === "provider" ? "Backend" : item === "identity" ? "Viewing as" : "Auto-resume on usage limit";
     return (
-      <Box flexDirection="column">
-        <Text bold>Settings</Text>
-        <Text dimColor>{"↑/↓ move · enter change/toggle · esc back"}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {settingsItems.map((item, i) => {
-            const sel = i === mode.cursor;
-            const v = settingValue(item);
-            return (
-              <Text key={item} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text bold>{settingLabel(item).padEnd(28).slice(0, 28)}</Text>
-                <Text color={sel ? "black" : v.color}>{v.text}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-        <Box marginTop={1} flexDirection="column">
-          <Text bold color="blue">Authentication</Text>
-          {PROVIDER_INFO.map((info) => {
-            const installed = available.has(info.name);
-            const st = authStatus.get(info.name);
-            const detail: { text: string; color: string } = !installed
-              ? { text: `${info.cli} not installed — ${info.authHint}`, color: "yellow" }
-              : st === undefined || st === "checking"
-                ? { text: `${info.cli} installed · checking…`, color: "gray" }
-                : st
-                  ? { text: `${info.cli} installed · authenticated ✓`, color: "green" }
-                  : { text: `${info.cli} installed · not authenticated ✗ — ${info.authHint}`, color: "red" };
-            return (
-              <Box key={info.name} marginLeft={2}>
-                <Text wrap="truncate">
-                  <Text bold>{info.label.padEnd(16).slice(0, 16)}</Text>
-                  <Text color={detail.color}>{detail.text}</Text>
-                </Text>
-              </Box>
-            );
-          })}
-        </Box>
-      </Box>
+      <SettingsScreen
+        cursor={mode.cursor}
+        settingsItems={settingsItems}
+        providerLabel={providerLabel}
+        identity={model.identity}
+        meId={model.me.id}
+        autoResume={autoResume}
+        available={available}
+        authStatus={authStatus}
+      />
     );
   }
 
   if (mode.kind === "provider") {
-    return (
-      <Box flexDirection="column">
-        <Text bold>Switch backend</Text>
-        <Text dimColor>
-          {"Everything reloads from the selected backend  ·  ↑/↓ move · enter select · esc back"}
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          {PROVIDER_INFO.map((info, i) => {
-            const sel = i === mode.cursor;
-            const isCur = info.name === provider;
-            const ok = available.has(info.name);
-            return (
-              <Text key={info.name} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text color={sel ? "black" : isCur ? "green" : "gray"}>{isCur ? "● " : "○ "}</Text>
-                <Text bold color={sel ? "black" : ok ? undefined : "gray"}>{info.label.padEnd(16).slice(0, 16)}</Text>
-                {ok ? (
-                  <Text dimColor={!sel}>{`  via ${info.cli}`}</Text>
-                ) : (
-                  <Text color={sel ? "black" : "yellow"}>{`  ${info.cli} not installed — ${info.authHint}`}</Text>
-                )}
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <ProviderScreen cursor={mode.cursor} provider={provider} available={available} />;
   }
 
   if (mode.kind === "wtchoice") {
-    const opts = ["New git worktree", "Main repo checkout"];
-    const descs = [
-      `branch + worktree under ${mode.repo.root}/.claude/worktrees/`,
-      `runs directly in ${mode.repo.root}`,
-    ];
-    return (
-      <Box flexDirection="column">
-        <Text bold>{`${mode.target.orchestrator ? "Orchestrator" : "New"} session in ${mode.repo.name} — choose where to run`}</Text>
-        <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
-        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
-        {mode.target.orchestrator ? (
-          <Text color="magenta">
-            {"An orchestrator squash-merges finished branches into the main branch, and git keeps that"}
-          </Text>
-        ) : null}
-        {mode.target.orchestrator ? (
-          <Text color="magenta">{"branch in one working tree only — so the main checkout is the right home for it."}</Text>
-        ) : null}
-        <Box marginTop={1} flexDirection="column">
-          {opts.map((label, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={i} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text bold>{label.padEnd(22).slice(0, 22)}</Text>
-                <Text dimColor={!sel}>{`  ${descs[i]}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <WtChoiceScreen target={mode.target} repo={mode.repo} cursor={mode.cursor} cloneNote={cloneNote} />;
   }
 
   if (mode.kind === "branch") {
-    const { value, cursor } = mode;
-    const isFree = mode.target.kind === "free";
-    // Free sessions get a `cl-new-<id>` name assigned at launch, so we can only
-    // preview the prefix; item/PR launches already know their target name.
-    const tmuxPreview = isFree ? "cl-new-…" : mode.target.tmuxName;
-    const orch = !!mode.target.orchestrator;
     return (
-      <Box flexDirection="column">
-        <Text bold>
-          {orch ? `Orchestrator session in ${mode.repo.name}` : isFree ? `New session in ${mode.repo.name}` : `Fresh session in ${mode.repo.name} — ${mode.target.title.slice(0, 40)}`}
-        </Text>
-        <Text dimColor>{mode.worktree ? "New branch off origin/HEAD · ←/→ move · ⌃a/⌃e start/end · enter create & launch · esc back" : "Session name · ←/→ move · ⌃a/⌃e start/end · enter launch · esc back"}</Text>
-        {cloneNote ? <Text color="green" wrap="truncate">{`✓ ${cloneNote}`}</Text> : null}
-        <Box marginTop={1}>
-          <Text>{mode.worktree ? "branch: " : "name:   "}</Text>
-          <Text color="cyan">{value.slice(0, cursor)}</Text>
-          <Text inverse>{value[cursor] ?? " "}</Text>
-          <Text color="cyan">{value.slice(cursor + 1)}</Text>
-        </Box>
-        <Box marginTop={1}>
-          {mode.worktree
-            ? <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · worktree at ${mode.repo.root}/.claude/worktrees/${worktreeDirName(value)}`}</Text>
-            : <Text dimColor>{`→ ${mode.agent}${orch ? " (orchestrator mode)" : ""} · runs in ${mode.repo.root}  · tmux ${tmuxPreview}`}</Text>
-          }
-        </Box>
-      </Box>
+      <BranchScreen
+        target={mode.target}
+        agent={mode.agent}
+        repo={mode.repo}
+        value={mode.value}
+        cursor={mode.cursor}
+        worktree={mode.worktree}
+        cloneNote={cloneNote}
+      />
     );
   }
 
   if (mode.kind === "profile") {
-    return (
-      <Box flexDirection="column">
-        <Text bold>{`Move to another Claude profile — ${mode.session.title.slice(0, 44)}`}</Text>
-        <Text dimColor>
-          {"Relocates the transcript + its sidecar files  ·  ↑/↓ move · enter move · esc cancel"}
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          {mode.choices.map((c, i) => {
-            const sel = i === mode.cursor;
-            return (
-              <Text key={c.profile.configDir} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>
-                {sel ? "❯ " : "  "}
-                <Text color={sel ? "black" : c.current ? "green" : "gray"}>{c.current ? "● " : "○ "}</Text>
-                <Text bold color={sel ? "black" : c.current ? "gray" : undefined}>{c.profile.name.padEnd(18).slice(0, 18)}</Text>
-                <Text color={sel ? "black" : c.current ? "gray" : "cyan"}>{c.current ? "lives here now" : "move here    "}</Text>
-                <Text dimColor={!sel}>{`  ${homeShort(c.profile.projects)}`}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      </Box>
-    );
+    return <ProfileScreen title={mode.session.title} choices={mode.choices} cursor={mode.cursor} />;
   }
 
   if (mode.kind === "open") {
-    const { pr, workItem } = mode.targets;
-    return (
-      <Box flexDirection="column">
-        <Text bold>{`Open in browser — ${mode.title.slice(0, 54)}`}</Text>
-        <Text dimColor>{"Pick what to open · esc/q cancel"}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {pr ? (
-            <Text>
-              <Text bold color="magenta">{"  p"}</Text>
-              <Text>{`  PR ${V.prPrefix}${pr.id}`}</Text>
-            </Text>
-          ) : null}
-          {workItem ? (
-            <Text>
-              <Text bold color="cyan">{"  i"}</Text>
-              <Text>{`  issue #${workItem.id}`}</Text>
-            </Text>
-          ) : null}
-        </Box>
-      </Box>
-    );
+    return <OpenScreen targets={mode.targets} title={mode.title} />;
   }
 
   // list view
@@ -3477,9 +891,7 @@ export default function App({
             <Text color={searchFocus === "input" ? "cyan" : "gray"}>{"search "}</Text>
             {searchFocus === "input" ? (
               <Text>
-                {search.text.slice(0, search.cursor)}
-                <Text inverse>{search.text[search.cursor] ?? " "}</Text>
-                {search.text.slice(search.cursor + 1)}
+                <CaretText value={search.text} cursor={search.cursor} />
               </Text>
             ) : (
               <Text dimColor>{search.text}</Text>

@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "types": ["bun-types", "react"]
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }
