@@ -25,9 +25,10 @@ import {
   type RepoInfo,
 } from "../src/repos.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent } from "../src/tmux.ts";
+import { isStalled } from "../src/idle.ts";
+import { type ManagedTarget, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
-import { envLocale, formatResetTime, parseResetTime, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
+import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
 import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
 import { SessionIndex } from "../src/sessions.ts";
@@ -39,6 +40,15 @@ function sess(id: string, cwd: string, lastUsedMs: number, source: AgentSession[
   return { id, source, cwd, title: id, lastUsed: new Date(lastUsedMs) };
 }
 type Managed = { name: string; cwd: string; placeholder: boolean };
+/**
+ * Fixture shape → producer shape. `liveManagedPaths` now pairs every managed
+ * name with the target that ADDRESSES it, because a bare window name resolves
+ * only inside the caller's own tmux session (#39). These fixtures all model a
+ * single host, where the addressable target IS the exact-pinned bare name — so
+ * the fixtures keep saying exactly what they said, and this fills in the half
+ * that used to be implicit. Multi-host targets are asserted separately below.
+ */
+const qualify = (m: Managed): ManagedTarget => ({ ...m, target: `=${m.name}` });
 
 test.describe("managedKind: name-prefix → launch kind", () => {
   test("classifies every known prefix and rejects unknown ones", () => {
@@ -262,10 +272,10 @@ test.describe("dotted-basename contexts detect running sessions", () => {
     const s = sess("keppni7id", DOT_WT, 5_000);
     const canon = sessionName(s); // cl-claude-keppni7id
     const managed: Managed[] = [{ name: "cl-wi-42", cwd: DOT_WT, placeholder: false }];
-    const r = reconcileLive(new Set(["cl-wi-42"]), managed, [s]);
+    const r = reconcileLive(new Set(["cl-wi-42"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
     expect(r.liveKinds.get(canon)).toBe("workitem");
-    expect(r.liveWindows.get(canon)).toBe("cl-wi-42");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-wi-42");
   });
 
   test("attribution survives cwd representation drift (trailing slash / dot segments)", () => {
@@ -275,9 +285,9 @@ test.describe("dotted-basename contexts detect running sessions", () => {
     const s = sess("driftid", DOT_WT, 5_000);
     const canon = sessionName(s);
     const managed: Managed[] = [{ name: "cl-pr-9", cwd: DOT_WT + "/", placeholder: false }];
-    const r = reconcileLive(new Set(["cl-pr-9"]), managed, [s]);
+    const r = reconcileLive(new Set(["cl-pr-9"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
-    expect(r.liveWindows.get(canon)).toBe("cl-pr-9");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-pr-9");
   });
 
   test("resolveContext derives a slugified host session for a dotted path", () => {
@@ -293,10 +303,10 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
   test("id-bearing window marks its exact session running", () => {
     const s = sess("abc123def", "/x", 1_000);
     const canon = sessionName(s); // cl-claude-abc123def
-    const r = reconcileLive(new Set(), [{ name: canon, cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: canon, cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
     expect(r.liveKinds.get(canon)).toBe("resumed");
-    expect(r.liveWindows.get(canon)).toBe(canon);
+    expect(r.liveWindows.get(canon)?.name).toBe(canon);
     expect(r.livePlaceholders.size).toBe(0);
   });
 
@@ -304,14 +314,14 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     const older = sess("old", "/repo", 1_000);
     const newer = sess("new", "/repo", 5_000);
     const managed: Managed[] = [{ name: "cl-wi-101", cwd: "/repo", placeholder: false }];
-    const r = reconcileLive(new Set(["cl-wi-101"]), managed, [older, newer]);
+    const r = reconcileLive(new Set(["cl-wi-101"]), managed.map(qualify), [older, newer]);
 
     const canon = sessionName(newer);
     expect(r.live.has(canon)).toBe(true);
     expect(r.liveKinds.get(canon)).toBe("workitem");
     // The recorded window is the LEGACY name — this is what the app attaches to,
     // so it never spawns a duplicate cl-claude-<id> window for the session.
-    expect(r.liveWindows.get(canon)).toBe("cl-wi-101");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-wi-101");
     // Only the MRU session is attributed; the older one in the same cwd is not.
     expect(r.live.has(sessionName(older))).toBe(false);
   });
@@ -320,7 +330,7 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     const s = sess("xyz", "/x", 1_000);
     const canon = sessionName(s);
     // `base` counted the placeholder window as live (it carries the canonical name).
-    const r = reconcileLive(new Set([canon]), [{ name: canon, cwd: "/x", placeholder: true }], [s]);
+    const r = reconcileLive(new Set([canon]), [{ name: canon, cwd: "/x", placeholder: true }].map(qualify), [s]);
     expect(r.live.has(canon)).toBe(false); // not actually running
     expect(r.livePlaceholders.has(canon)).toBe(true); // badged restored-but-unopened
     expect(r.liveKinds.has(canon)).toBe(false);
@@ -336,10 +346,10 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
       { name: canon, cwd: "/repo", placeholder: true }, // placeholder first
       { name: "cl-wi-9", cwd: "/repo", placeholder: false }, // real window, same session by cwd
     ];
-    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed, [s]);
+    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true); // real window vouched → running
     expect(r.livePlaceholders.has(canon)).toBe(false); // not a dormant tab
-    expect(r.liveWindows.get(canon)).toBe("cl-wi-9"); // attached via the real window
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-wi-9"); // attached via the real window
   });
 
   test("same, with the real window listed BEFORE the placeholder", () => {
@@ -349,14 +359,14 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
       { name: "cl-wi-9", cwd: "/repo", placeholder: false },
       { name: canon, cwd: "/repo", placeholder: true },
     ];
-    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed, [s]);
+    const r = reconcileLive(new Set([canon, "cl-wi-9"]), managed.map(qualify), [s]);
     expect(r.live.has(canon)).toBe(true);
     expect(r.livePlaceholders.has(canon)).toBe(false);
   });
 
   test("windows with an unknown cl- kind are ignored", () => {
     const s = sess("s", "/x", 1_000);
-    const r = reconcileLive(new Set(), [{ name: "cl-bogus-1", cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: "cl-bogus-1", cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.size).toBe(0);
     expect(r.liveWindows.size).toBe(0);
   });
@@ -366,14 +376,14 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     // back to that session. Guards the shortId slug rule the names depend on.
     const s = sess("a1b2-c3d4-e5f6-long", "/x", 1_000, "copilot");
     expect(sessionName(s)).toBe(`cl-copilot-${shortId(s.id)}`);
-    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
   });
 
   test("a resumed codex window attributes by its canonical id-bearing name", () => {
     const s = sess("019cde00-1111-7000-8000-00000000cde0", "/x", 1_000, "codex");
     expect(sessionName(s)).toBe("cl-codex-019cde001111");
-    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
     expect(r.liveKinds.get(sessionName(s))).toBe("resumed");
   });
@@ -382,10 +392,10 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     // The window name carries no session id, so this is the path that makes a
     // `agendo launch --agent codex` session show up as running at all.
     const s = sess("019cde00-1111-7000-8000-00000000cde0", "/wt", 1_000, "codex");
-    const r = reconcileLive(new Set(), [{ name: "cl-bg-codex-9f8e7d6c", cwd: "/wt", placeholder: false }], [s]);
+    const r = reconcileLive(new Set(), [{ name: "cl-bg-codex-9f8e7d6c", cwd: "/wt", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
     expect(r.liveKinds.get(sessionName(s))).toBe("background");
-    expect(r.liveWindows.get(sessionName(s))).toBe("cl-bg-codex-9f8e7d6c");
+    expect(r.liveWindows.get(sessionName(s))?.name).toBe("cl-bg-codex-9f8e7d6c");
   });
 });
 
@@ -1205,11 +1215,15 @@ const GHOST_CURSOR = (() => {
   const m = GHOST_CURSOR_READOUT.match(/cursor_x=(\d+)\s+cursor_y=(\d+)/)!;
   return { x: Number(m[1]), y: Number(m[2]) };
 })();
-// The capture also has a sub-agent status row below the box carrying a live
-// `↓ 99.9k tokens` counter, so the WHOLE pane legitimately reads "busy" (it was
-// waiting on a background agent) and that verdict outranks the input-box read.
-// Dropping those trailing rows — and nothing above them, so every row index the
-// caret refers to is untouched — exposes the input read the fix is about.
+// The capture also has a sub-agent panel below the box carrying a per-agent
+// `↓ 99.9k tokens` total. That counter USED to be read as the live turn counter
+// and pinned the whole pane to "busy" (#44); the panel is now excised from the
+// status region, so the input read this block is about is what decides the raw
+// capture too. The trim is kept — it drops those trailing rows and nothing above
+// them, so every row index the caret refers to is untouched. The first test below
+// asserts that the trim no longer changes the cursor-less verdict; the rest still
+// use the trimmed pane, because they vary the caret and need the row indices to
+// keep meaning what they meant when the capture was taken.
 const idlePane = (pane: string) => pane.split("\n").slice(0, 45).join("\n");
 const GHOST_IDLE = idlePane(GHOST_PANE);
 const GHOST_IDLE_PLAIN = idlePane(GHOST_PANE_PLAIN);
@@ -1222,10 +1236,18 @@ const TYPED_IDLE = GHOST_IDLE.split("\n")
 const TYPED_CURSOR = { x: GHOST_CURSOR.x + TYPED_TEXT.length, y: GHOST_CURSOR.y };
 
 test.describe("paneReadiness: a greyed-out autocomplete suggestion is NOT typed input", () => {
-  test("the raw capture is 'busy' — the sub-agent counter below the box outranks the box", () => {
+  test("the raw capture reads the same as the trimmed one — the panel decides nothing", () => {
     // Pinned so the trimming the rest of this block does is honest about what it
-    // removes: the busy verdict comes from below the input box, not from it.
-    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+    // removes: dropping the sub-agent panel must not change any verdict, because
+    // the panel is not evidence about the input box (#44). Before the fix this
+    // read "busy" and every other assertion in this block was reachable only via
+    // the trim.
+    expect(paneReadiness(GHOST_PANE)).toBe("ready");
+    expect(paneReadiness(GHOST_PANE)).toBe(paneReadiness(GHOST_IDLE));
+    // …and the session is nonetheless doing work: the panel's rows are stale, but
+    // the status line above the box says so in words, and THAT is what holds
+    // `agendo wait` open. One flag could not say both.
+    expect(paneBackgroundAgents(GHOST_PANE)).toBe(1);
   });
 
   test("color signal: the faint suggestion reads 'ready' (no caret needed)", () => {
@@ -1274,6 +1296,296 @@ test.describe("paneReadiness: a greyed-out autocomplete suggestion is NOT typed 
     expect(paneReadiness(empty)).toBe("ready");
     expect(paneReadiness(empty, { x: 4, y: 1 })).toBe("ready");
     expect(paneReadiness(empty, { x: 99, y: 9 })).toBe("ready");
+  });
+});
+
+// #44: ONE FLAG COULD NOT SAY BOTH. `busy` was doing two jobs — "the main agent
+// is mid-turn" and "something in this session is still working" — and the two
+// disagree constantly:
+//
+//   |                     | wait should settle | send should deliver |
+//   |---------------------|--------------------|---------------------|
+//   | main agent busy     | no                 | no                  |
+//   | subagent running    | NO                 | YES                 |
+//   | monitor / bg shell  | YES                | YES                 |
+//
+// Row 2 is what the single flag got wrong, and row 3 is what it would have got
+// wrong next: a monitor is an `until` loop that re-wakes claude BY DESIGN, so a
+// session running one would never have settled for anyone.
+//
+// panel-*.{ansi,cursor}: `tmux capture-pane -p -e` of three real idle claude
+// panes plus the `#{cursor_x} #{cursor_y} …` readout taken with each (2026-08-17,
+// pane 383 wide), then sterilized. Sterilized MORE than the other fixtures in
+// this file, and the difference matters when reading them as evidence: home dir →
+// /home/user, repo/branch names and the PR link genericised, all real transcript
+// replaced with one line of filler, AND the two elements these fixtures are
+// evidence about were themselves rewritten — the panel's task titles and the
+// ghost text in the input box were someone's real work. Column alignment is
+// therefore not preserved (a real 383-wide capture right-aligns the panel's
+// trailing column; these no longer line up).
+//
+// The captures are also TRIMMED to the rows that matter, so the row count no
+// longer matches the `height=` in the `.cursor` readout beside it (that is the
+// original pane's height). `cursor_y` still addresses the row it addressed,
+// which is what the tests read.
+//
+// What IS byte-for-byte is every escape sequence and the ROW SHAPE: the
+// spinner line, the box rules, the `\e[2m` on the ghost text, and the counters on
+// the hint row (`· 1 monitor`, `· 6 shells`). The status bar and the hint row keep
+// their shape but not their text — the path, branch and PR link in them are the
+// substitutions listed above, and the status bar's wall-clock time and usage-quota
+// figures were replaced with round synthetic ones (they are account telemetry, and
+// this repo is public; nothing reads them). Those are what the code reads. All three panes are
+// IDLE: the main agent is at its prompt and `agendo send` must reach it.
+//   - panel-agents-finished  the #44 report itself: two `◯` panel rows left over
+//                            from subagents that have ALREADY finished.
+//   - panel-monitor          `· 1 monitor` — an armed watcher, indefinite.
+//   - panel-shells           `· 6 shells` — six background shells.
+const panelPane = (name: string) => fullPane(`${name}.ansi`);
+const panelCursor = (name: string) => {
+  const m = fullPane(`${name}.cursor`).match(/cursor_x=(\d+)\s+cursor_y=(\d+)/)!;
+  return { x: Number(m[1]), y: Number(m[2]) };
+};
+const PANEL_FIXTURES = ["panel-agents-finished", "panel-monitor", "panel-shells"] as const;
+
+test.describe("#44: main-agent readiness vs work still running in the session", () => {
+  for (const name of PANEL_FIXTURES) {
+    test(`${name}: the main agent is idle, so send must be accepted`, () => {
+      const raw = panelPane(name);
+      // `panel-agents-finished` read "busy" before the fix, and `agendo send`
+      // refuses a non-ready pane, so that session was unreachable for as long as
+      // the panel stayed on screen — which is forever, since nothing clears it.
+      // The other two already read "ready" and are here as the guard on row 3:
+      // whatever makes a session hold `wait` open must never sweep them in, or
+      // an armed watcher becomes a session nobody can wait on.
+      expect(paneReadiness(raw)).toBe("ready");
+      expect(paneReadiness(raw, panelCursor(name))).toBe("ready");
+      expect(paneAcceptsPaste(raw, panelCursor(name))).toBe(true);
+    });
+
+    test(`${name}: the box holds a GHOST, and only the color says so`, () => {
+      // The SGR-2 trap. The TUI draws un-typed box content faint —
+      // `\e[39m❯ \e[2m<text>\e[0m` — and `stripAnsi` discards the attribute, so
+      // any check that asks "is there text in the box?" of the plain capture
+      // reads it as a half-typed draft. Two independent signals have to survive
+      // that: the faint attribute in the `-e` capture, and the caret resting at
+      // the first cell after `❯ `.
+      const raw = panelPane(name);
+      const cursor = panelCursor(name);
+      const plain = stripAnsi(raw).split("\n")[cursor.y];
+      // The trap is real on this capture: plain text after the prompt marker.
+      expect(plain).toMatch(/❯\s+\S/);
+      // The attribute is what tells the truth, and it IS present in the capture.
+      expect(raw.split("\n")[cursor.y]).toContain("\x1b[2m");
+      // Colour alone: correct. Colour discarded: the caret alone is enough.
+      expect(paneReadiness(raw)).toBe("ready");
+      expect(paneReadiness(stripAnsi(raw), cursor)).toBe("ready");
+      // …and with neither signal it must fail SAFE — a draft, never a clean box.
+      expect(paneReadiness(stripAnsi(raw), null)).toBe("queued");
+    });
+  }
+
+  test("a finished subagent's panel row is not evidence that anything is running", () => {
+    // The #44 capture. The rows persist after their agents exit, so the panel
+    // says "this session once spawned subagents", not "one is running now".
+    //
+    // Honest about what this pins: the counts here would read 0 with the fix
+    // reverted too, because the panel contains no such sentence to miscount —
+    // the load-bearing assertion is the `ready` verdict in the first test above,
+    // and the band split itself is pinned by the panel-row loop in "REVIEW: below
+    // the box, a token counter is never the LIVE counter".
+    expect(paneBackgroundAgents(panelPane("panel-agents-finished"))).toBe(0);
+    expect(paneShells(panelPane("panel-agents-finished"))).toBe(0);
+    // The rows really are there — otherwise the assertion above is vacuous.
+    expect(stripAnsi(panelPane("panel-agents-finished"))).toContain("◯ general-purpose");
+  });
+
+  test("a RUNNING subagent is counted — in words, from the status line", () => {
+    // The other half of row 2: `send` is accepted (asserted above), but `wait`
+    // must not settle, and the signal for that is the TUI's own sentence above
+    // the input box. GHOST_PANE is the capture that has one.
+    expect(stripAnsi(GHOST_PANE)).toContain("Waiting for 1 background agent to finish");
+    expect(paneBackgroundAgents(GHOST_PANE)).toBe(1);
+    expect(paneReadiness(GHOST_PANE)).toBe("ready");
+  });
+
+  test("monitors and background shells hold nothing open", () => {
+    // Row 3, and the reason it needs no counter of its own: neither pane ever
+    // produces the sentence, so both settle. Asserted on captures that really do
+    // have one running — `· 1 monitor` and `· 6 shells` are on screen — so this
+    // is "not counted", not "nothing there to count".
+    expect(stripAnsi(panelPane("panel-monitor"))).toContain("1 monitor still running");
+    expect(paneBackgroundAgents(panelPane("panel-monitor"))).toBe(0);
+    expect(paneShells(panelPane("panel-shells"))).toBe(6);
+    expect(paneBackgroundAgents(panelPane("panel-shells"))).toBe(0);
+    // A monitor is not a background shell, and must not be counted as one.
+    expect(paneShells(panelPane("panel-monitor"))).toBe(0);
+    // Note the two `paneBackgroundAgents` zeros above hold under any
+    // implementation — neither pane contains the sentence. They are here to say
+    // what these captures ARE, not to pin the counter; the counter is pinned by
+    // the region test below and by the ghost capture, which has a real one.
+  });
+
+  test("REVIEW: below the box, a token counter is never the LIVE counter", () => {
+    // Two rounds of review killed two shape tests here, and the second is why
+    // there is no shape test left at all.
+    //
+    // Recognizing the panel by its GLYPH swallowed the interrupt hint under any
+    // status line opening with `●` — the row under the box is the user's own
+    // `statusLine` script, arbitrary text — so a pane mid-turn read "ready" and
+    // `send` would paste into a running turn. Recognizing it by its trailing
+    // `<time> · ↓ <n> tokens` column failed BOTH ways: it missed panel rows whose
+    // column was worded or wrapped differently (so #44 survived on those), and it
+    // still matched a status line that printed one — and claude hands those
+    // scripts the session's own duration and token counts, so that is an ordinary
+    // thing for one to print.
+    //
+    // What is true without recognizing anything: there is no live turn counter
+    // below the box. It lives on the spinner row above it. So numbers below the
+    // box are read as evidence of nothing, and the busy signal down there is the
+    // PHRASE the TUI prints while generating.
+    const rule = "  ────────────────────────────────────────────────";
+    const boxed = (...belowBox: string[]) => ["  ✻ Crunched for 12s", rule, "  ❯ ", rule, ...belowBox].join("\n");
+
+    // A status line printing a token column, with a genuine interrupt hint under
+    // it. The hint must survive — this is the regression the first attempt caused.
+    expect(paneReadiness(boxed("  ● myrepo/main  1m 30s · ↓ 12.4k tokens", "  esc to interrupt"))).toBe("busy");
+
+    // Panel rows in four shapes the trailing-column matcher missed. Every one of
+    // these read "busy" — the original #44 symptom — under the second attempt.
+    for (const row of [
+      "  ◯ general-purpose  Review  5m 39s · ↓ 12,345 tokens", // comma-grouped
+      "  ◯ general-purpose  Review  2h 5m · ↓ 99.9k tokens",   // elapsed, no trailing `s`
+      "  ◯ general-purpose  Review  1s · ↓ 1 token",           // singular
+    ]) {
+      expect(paneReadiness(boxed("  ● main", row))).toBe("ready");
+    }
+    // …and one wrapped onto a continuation line, which no row-shaped test can see.
+    expect(paneReadiness(boxed("  ● main", "  ◯ general-purpose  A very long task title", "  5m 39s · ↓ 99.9k tokens"))).toBe("ready");
+
+    // The two directions that must NOT move: the phrase below the box still means
+    // busy, and the live counter above the box still means busy.
+    expect(paneReadiness(boxed("  esc to interrupt"))).toBe("busy");
+    expect(paneReadiness(["  ✢ Tinkering… (58s · ↓ 3.9k tokens)", rule, "  ❯ ", rule, "  ? for shortcuts"].join("\n"))).toBe("busy");
+  });
+
+  test("REVIEW: a pane with no bounded input box counts nothing", () => {
+    // Found in review. `liveStatusRegions` falls back to the WHOLE capture when
+    // there is no box to anchor on — and claude's resume dialog replaces the box
+    // while still reading as a settled state. A transcript merely discussing
+    // background agents would then have held `agendo wait` open until its timeout
+    // on a session that was finished: the exact blocked-forever failure the
+    // resume-dialog path exists to prevent. Reading nothing is the safe answer.
+    expect(paneReadiness(RESUME_DIALOG_PANE)).toBe("ready");
+    // The probe sentence has to be one the ANCHOR would otherwise accept, or this
+    // pins the anchor rather than the guard — which is what the first version of
+    // this test did (it led with "I am waiting…", and passed with the guard
+    // deleted). It is the TUI's exact line, quoted back inside a transcript.
+    const probe = "✻ Waiting for 3 background agents to finish";
+    expect(paneBackgroundAgents(`${RESUME_DIALOG_PANE}\n  ${probe}`)).toBe(0);
+    // Not vacuous: the same sentence in a pane that DOES have a box is counted.
+    const rule = "  ────────────────────────────────────────────────";
+    expect(paneBackgroundAgents([`  ${probe}`, rule, "  ❯ ", rule].join("\n"))).toBe(3);
+  });
+
+  test("REVIEW: the interrupt hint must be a HINT, not a phrase in someone's text", () => {
+    // Found in the third review, and it is #44 all over again through the one
+    // check still reading the whole region. A subagent row carries the agent's
+    // TASK DESCRIPTION — model-authored free text — and in this repo that text is
+    // routinely about the interrupt hint itself. The row outlives the agent, so
+    // `busy` would have been permanent: `wait` never settles, `send` refused.
+    const rule = "  ────────────────────────────────────────────────";
+    const boxed = (...belowBox: string[]) => ["  ✻ Crunched for 12s", rule, "  ❯ ", rule, ...belowBox].join("\n");
+    expect(paneReadiness(boxed("  ● main", "  ◯ general-purpose  Fix the esc to interrupt hint  5m 39s · ↓ 9k tokens"))).toBe("ready");
+    // Same through the user's status line, describing a keybinding. `|` is the
+    // separator status-line scripts use; `·` is the one the TUI's own footers use.
+    expect(paneReadiness(boxed("  ● repo | esc to interrupt: off | Opus 5"))).toBe("ready");
+    // Every real form still reads busy: opening the line, after the footer's
+    // middot, and inside the spinner's parens (claude above, codex below).
+    expect(paneReadiness(boxed("  esc to interrupt"))).toBe("busy");
+    expect(paneReadiness(boxed("  ⏵⏵ auto mode on · esc to interrupt"))).toBe("busy");
+    expect(paneReadiness(boxed("  • Working (25s • esc to interrupt)"))).toBe("busy");
+    expect(paneReadiness(["  ✻ Working… (12s · ↑ 2.1k tokens · esc to interrupt)", rule, "  ❯ ", rule].join("\n"))).toBe("busy");
+  });
+
+  test("REVIEW: the sentence must BE the line — an agent narrating its own fan-out is not evidence", () => {
+    // The count is read from the block directly above the box, and a transcript
+    // line reaches that block when it butts against the box. The sentence is
+    // ordinary English that an orchestrator prints verbatim about itself, so it is
+    // anchored at BOTH ends and the assistant's own bullet is excluded.
+    const rule = "  ────────────────────────────────────────────────";
+    const boxed = (l: string) => [l, rule, "  ❯ ", rule].join("\n");
+    expect(paneBackgroundAgents(boxed("  ● Waiting for 3 background agents to finish"))).toBe(0);
+    expect(paneBackgroundAgents(boxed("  ⏺ Waiting for 3 background agents to finish"))).toBe(0);
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 3 background agents to finish, then I'll commit."))).toBe(0);
+    // The TUI's own line, which is the whole line, still counts — one and many,
+    // with or without the spinner glyph.
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 1 background agent to finish"))).toBe(1);
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 12 background agents to finish"))).toBe(12);
+    expect(paneBackgroundAgents(boxed("  Waiting for 2 background agents to finish"))).toBe(2);
+    // …and so does the same sentence carrying the chrome claude's spinner rows
+    // habitually append. Under-count is the destructive direction — `wait`
+    // settles and `close` kills a session that is still working — so a trailing
+    // ellipsis or a parenthesized/middot-led suffix must not lose the count.
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 1 background agent to finish…"))).toBe(1);
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 2 background agents to finish (3m 12s)"))).toBe(2);
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 3 background agents to finish · esc to interrupt"))).toBe(3);
+    // The tail is chrome only. More WORDS after the sentence is prose again.
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 3 background agents to finish before I commit."))).toBe(0);
+  });
+
+  test("REVIEW: two claims of a count take the higher one", () => {
+    // Pins the `Math.max` the docblock argues for, which nothing else did. Not a
+    // shape the TUI produces today; the point is which way it fails if it ever
+    // does — an over-count wakes late and loudly, an under-count wakes early and
+    // silently on a session that is still working.
+    const rule = "  ────────────────────────────────────────────────";
+    // Descending on purpose: listed the other way round, "last one wins" and
+    // "highest one wins" are indistinguishable and this pins neither.
+    const pane = ["  ✻ Waiting for 5 background agents to finish", "  ✻ Waiting for 2 background agents to finish", rule, "  ❯ ", rule].join("\n");
+    expect(paneBackgroundAgents(pane)).toBe(5);
+  });
+
+  test("a session working through a subagent is never ⚠stalled", () => {
+    // The other caller of the shared "has this stopped working?" predicate. The
+    // transcript mtime stands still for as long as the subagent takes — on a
+    // fan-out run that is hours, which is exactly the scale the default threshold
+    // is set at — so readiness alone would have flagged the busiest sessions in
+    // the fleet as hung. `agendo list` prints ⚠stalled off this.
+    const HOUR = 3_600_000;
+    const working = { running: true, readiness: "ready" as const, resumeDialog: false, backgroundAgents: 1, idleSeconds: 9 * 3600 };
+    expect(isStalled(working, 4 * HOUR)).toBe(false);
+    // Not vacuous: the identical session with no subagent running IS stalled, so
+    // this pins the count and not the threshold or the readiness.
+    expect(isStalled({ ...working, backgroundAgents: 0 }, 4 * HOUR)).toBe(true);
+    // …and the count doesn't invent a stall in the other direction either.
+    expect(isStalled({ ...working, backgroundAgents: 0, idleSeconds: 60 }, 4 * HOUR)).toBe(false);
+  });
+
+  test("the count is read from the STATUS region, never from the transcript", () => {
+    // Same failure the busy markers already had (see BUSY-MARKER POSITION below):
+    // this phrase is ordinary English, and the session most likely to print it is
+    // one working on this file. Held to the block directly above the box.
+    const rule = "  ────────────────────────────────────────────────";
+    const boxed = (...above: string[]) => [...above, rule, "  ❯ ", rule].join("\n");
+    const prose = "  ● Yes — agendo is waiting for 9 background agents to finish, in its own words.";
+    expect(paneBackgroundAgents(boxed(prose, "", "  ✻ Crunched for 12s"))).toBe(0);
+    // The same sentence where the TUI actually prints it does count.
+    expect(paneBackgroundAgents(boxed(prose, "", "  ✻ Waiting for 2 background agents to finish"))).toBe(2);
+    // A transcript line CAN land in the status block when it sits directly above
+    // the box, so the sentence has to BE the line, past at most a one-character
+    // spinner glyph — not merely start it after some punctuation.
+    expect(paneBackgroundAgents(boxed("  ## Waiting for 3 background agents to finish"))).toBe(0);
+    expect(paneBackgroundAgents(boxed('  > "Waiting for 2 background agents to finish"'))).toBe(0);
+    // The TUI's actual form, glyph and all, still counts — including two digits.
+    expect(paneBackgroundAgents(boxed("  ✻ Waiting for 12 background agents to finish"))).toBe(12);
+    // And the panel below the box never contributes, however it is worded.
+    expect(paneBackgroundAgents([boxed("  ✻ Crunched for 12s"), "  ● main", "❯ ◯ general-purpose  waiting for 4 background agents to finish  5m"].join("\n"))).toBe(0);
+    // That row is rejected by its shape as much as by its band, so it pins the
+    // band on its own. This one is the TUI's exact sentence, whole-line, below the
+    // box — the form a user's status-line script or a panel row could genuinely
+    // print — and ONLY the band read keeps it at 0.
+    expect(paneBackgroundAgents([boxed("  ✻ Crunched for 12s"), "  ✻ Waiting for 4 background agents to finish"].join("\n"))).toBe(0);
   });
 });
 
@@ -1546,13 +1858,22 @@ test.describe("paneReadiness: busy is read from the live status line, not the tr
     expect(paneReadiness(pane(quoted, "", ...Array.from({ length: 12 }, (_, i) => `  ● step ${i}`), "", hint))).toBe("ready");
   });
 
-  test("below the box: busy — nothing under the input box is ever transcript", () => {
-    // Both real forms: the footer interrupt hint, and the sub-agent panel's own
-    // live counter (a finished turn waiting on a background agent is still busy).
+  test("below the box: live state, not transcript — but the agent panel is neither", () => {
+    // The footer interrupt hint is the real form of "below the box, and busy".
     expect(paneReadiness([...box, "  esc to interrupt"].join("\n"))).toBe("busy");
-    expect(paneReadiness([...box, "  ● main", "❯ ◯ general-purpose  Review  5m 39s · ↓ 99.9k tokens"].join("\n"))).toBe("busy");
-    // Pinned on the real capture too (this is what makes GHOST_PANE busy).
-    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+    // The sub-agent panel is the counter-example (#44). It sits in the same
+    // region and it is still not transcript — but its `↓ 99.9k tokens` is a
+    // per-agent TOTAL, not the live turn counter, and its rows outlive the agents
+    // they name. Reading it as busy pinned every session that ever spawned a
+    // subagent to busy forever: `wait` never settled, `send` refused an idle
+    // prompt. Nothing recognizes the panel; the counter checks simply do not read
+    // this band, because no live counter is ever drawn in it.
+    expect(paneReadiness([...box, "  ● main", "❯ ◯ general-purpose  Review  5m 39s · ↓ 99.9k tokens"].join("\n"))).toBe("ready");
+    // …while the interrupt hint is read from this band, panel or no panel — it is
+    // a hint, not a number, and there is no positional distinction between them.
+    expect(paneReadiness([...box, "  esc to interrupt", "  ● main", "❯ ◯ general-purpose  Review  5m 39s"].join("\n"))).toBe("busy");
+    // Pinned on the real capture too.
+    expect(paneReadiness(GHOST_PANE)).toBe("ready");
   });
 
   test("typed INTO the box: queued, not busy — a draft is not a state", () => {
@@ -1810,10 +2131,237 @@ test.describe("paneReadiness: Codex CLI panes (real captures)", () => {
   test("claude panes are not hijacked by the codex path", () => {
     // codexPane sniffs the CONTENT (the window name never carries the agent for
     // a `cl-wi-…` window), so the two classifiers share every capture. These are
-    // the verdicts the claude fixtures had before codex existed.
-    expect(paneReadiness(GHOST_PANE)).toBe("busy");
+    // the verdicts the claude classifier gives; the codex path must not change
+    // one of them. (GHOST_PANE read "busy" here until #44 — the change is in the
+    // claude path, and this assertion tracks it rather than pinning it.)
+    expect(paneReadiness(GHOST_PANE)).toBe("ready");
     expect(paneReadiness(REAL_CLEAR_HINT_PANE)).toBe("limited");
     expect(paneReadiness(REAL_MENU_PANE)).toBe("limited");
+  });
+});
+
+// CODEX USAGE-LIMIT fixtures: raw `tmux capture-pane -p -e` output plus the
+// matching `#{cursor_x} #{cursor_y}` readout, captured live from a REAL capped
+// account (codex v0.148.0, `gpt-5.6-sol high`, pane 383x96, 2026-08-20) during a
+// single `codex resume`. Sterilized — home dir → /home/user, session id zeroed,
+// the two long user prompts in scrollback replaced with filler — but the footer,
+// the notice and the dialogs are byte-for-byte as captured. Five states, in the
+// order the resume produced them:
+//   - codex-trust.ansi              codex's own folder-trust prompt.
+//   - codex-resume-cwd.ansi         codex's own "which working directory?" resume
+//                                   prompt — the analogue of claude's resume
+//                                   dialog, and it means NO turn has run yet.
+//   - codex-limit-idle.ansi         capped, idle at the input box. THE one: the
+//                                   footer reads `Ready` AND `weekly 0% left`.
+//   - codex-limit-model-switch.ansi capped, a message sent, codex's "Approaching
+//                                   rate limits / Switch to gpt-5.6-luna?" menu
+//                                   raised. NO footer — the dialog replaces it.
+//   - codex-limit-dismissed.ansi    that menu dismissed with Esc: back to the
+//                                   codex-limit-idle shape.
+// See docs/codex-usage-limits.md for the full reasoning. In short: the footer's
+// run-state word LIES (`Ready` at a hard cap), the truth is a different field of
+// that same line (`weekly 0% left`), the reset time is a wall-clock time of day
+// rather than a countdown and can already be past, and the `■ You've hit your
+// usage limit…` notice is TRANSCRIPT — it scrolls, so detection must not need it.
+//
+// Codex's selection marker is `›` (U+203A), not claude's `❯` — the same glyph it
+// uses for the input-box prompt.
+
+/** The `■ You've hit your usage limit…` notice, read out of a fixture rather than
+ *  retyped, so a re-sterilization that changed the wording can't leave these
+ *  tests asserting against a string the fixture no longer contains. */
+const codexLimitNotice = (name: string) => {
+  const line = stripAnsi(fullPane(name)).split("\n").find((l) => /hit your usage limit/i.test(l));
+  expect(line, `${name} must carry the usage-limit notice`).toBeTruthy();
+  return line!.trim();
+};
+
+/**
+ * Rewrite the footer's quota field — `weekly 0% left` ⇄ `weekly 99% left` — on a
+ * real capture. The field is contiguous inside its SGR run, so a plain replace
+ * reaches it; every caller asserts the edit took, so a silently-missed edit can't
+ * turn one of these into a test that passes for the wrong reason.
+ *
+ * Used in BOTH directions on purpose. Patching a healthy capture down to `0%`
+ * proves the footer alone is sufficient evidence (that pane has no notice on
+ * screen at all); patching a capped one back up proves the notice alone is not.
+ */
+const patchQuota = (raw: string, from: string, to: string) => {
+  expect(stripAnsi(raw), `the capture must carry the quota field "${from}"`).toContain(from);
+  const out = raw.replaceAll(from, to);
+  expect(stripAnsi(out)).toContain(to);
+  expect(stripAnsi(out)).not.toContain(from);
+  return out;
+};
+
+test.describe("paneReadiness: Codex CLI usage limits (real captures)", () => {
+  test("the footer states two contradictory things on one line", () => {
+    // The fixture guard the whole design rests on. `Ready` and `weekly 0% left`
+    // are separate ` · ` fields of the SAME status bar, and it is their
+    // DISAGREEMENT that identifies the state — neither field alone can.
+    for (const name of ["codex-limit-idle.ansi", "codex-limit-dismissed.ansi"]) {
+      const footer = stripAnsi(fullPane(name)).split("\n").filter((l) => l.trim()).pop()!;
+      const fields = footer.split(" · ").map((f) => f.trim());
+      expect(fields, name).toContain("Ready");
+      expect(fields, name).toContain("weekly 0% left");
+    }
+    // …and every healthy codex capture in this repo carries the same field with a
+    // healthy value, which is what makes `0% left` a discriminator rather than a
+    // marker. Without this, "has a quota field" would look like a cap signal.
+    for (const name of ["codex-idle.ansi", "codex-draft.ansi", "codex-busy.ansi", "codex-busy-approval.ansi", "codex-done.ansi"]) {
+      const footer = stripAnsi(fullPane(name)).split("\n").filter((l) => l.trim()).pop()!;
+      expect(footer, name).toMatch(/\bweekly (?:9\d|100)% left\b/);
+    }
+    // And NOT via colour: codex paints `weekly 0% left` and `weekly 99% left` in
+    // the same pink, so the SGR run is no help and the text is all there is.
+    const colour = /\x1b\[38;2;233;144;169m(weekly \d+% left)/;
+    expect(fullPane("codex-limit-idle.ansi")).toMatch(colour);
+    expect(fullPane("codex-idle.ansi")).toMatch(colour);
+  });
+
+  test("a healthy idle codex pane still reads 'ready'", () => {
+    // The negative case a fix must not break. `codex-idle` sits at `weekly 99%
+    // left`; treating the field's presence (rather than its value) as a cap would
+    // make every codex session permanently unsendable.
+    expect(stripAnsi(fullPane("codex-idle.ansi"))).toContain("weekly 99% left");
+    expect(paneReadiness(fullPane("codex-idle.ansi"), codexCursor("codex-idle.cursor"))).toBe("ready");
+    expect(paneAcceptsPaste(fullPane("codex-idle.ansi"), codexCursor("codex-idle.cursor"))).toBe(true);
+    // Nothing pins where between 99% and 0% the field stops meaning "fine" — no
+    // capture exists at a low-but-nonzero quota (see the gaps in
+    // docs/codex-usage-limits.md). The assumption under test is that ONLY a
+    // literal `0% left` is a cap, so a merely low quota stays sendable.
+    for (const quota of ["weekly 9% left", "weekly 1% left"]) {
+      const low = patchQuota(fullPane("codex-idle.ansi"), "weekly 99% left", quota);
+      expect(paneReadiness(low, codexCursor("codex-idle.cursor")), quota).toBe("ready");
+    }
+  });
+
+  test("a recovered footer outranks a limit notice left in scrollback", () => {
+    // The notice is TRANSCRIPT: it stays on screen after the quota rolls over.
+    // So a detector keyed on the notice would report a recovered session as
+    // limited forever — the codex form of the staleness `paneUsageLimited`'s
+    // last-content-block walk exists to avoid on the claude side.
+    const recovered = patchQuota(fullPane("codex-limit-idle.ansi"), "weekly 0% left", "weekly 96% left");
+    expect(stripAnsi(recovered)).toContain("hit your usage limit");
+    expect(paneReadiness(recovered, codexCursor("codex-limit-idle.cursor"))).toBe("ready");
+    expect(paneUsageLimited(recovered)).toBe(false);
+  });
+
+  test("busy outranks the quota field", () => {
+    // Precedence: a session that is GENERATING is busy, whatever the quota field
+    // says — same order as the claude path, where paneUsageLimited is checked
+    // after the busy read. Synthesized (no capture exists of a busy pane at a
+    // cap; see docs/codex-usage-limits.md), so this pins the intended ordering
+    // rather than an observed one.
+    const busyCapped = patchQuota(fullPane("codex-busy.ansi"), "weekly 95% left", "weekly 0% left");
+    expect(paneReadiness(busyCapped, codexCursor("codex-busy.cursor"))).toBe("busy");
+  });
+
+  test("codex's own startup prompts are the CLI asking, not the agent asking", () => {
+    // Neither the folder-trust prompt nor the resume-cwd prompt is a question
+    // about the WORK — codex is asking how to start. They are never `ready`,
+    // never paste-safe (a message pasted into either picks a numbered option),
+    // and carry no cap of their own.
+    for (const state of ["trust", "resume-cwd"]) {
+      const raw = fullPane(`codex-${state}.ansi`);
+      const cursor = codexCursor(`codex-${state}.cursor`);
+      // The `›` selection cursor on option 1 — codex's marker, not claude's `❯`.
+      expect(stripAnsi(raw), state).toMatch(/^›\s*1\./m);
+      expect(paneReadiness(raw, cursor), state).not.toBe("ready");
+      expect(paneAcceptsPaste(raw, cursor), state).toBe(false);
+      expect(paneResumeSafe(raw, cursor), state).toBe(false);
+      expect(paneUsageLimited(raw), state).toBe(false);
+    }
+  });
+
+  test("the model-switch menu is never safe to paste into", () => {
+    // The safety floor for state 04, and it holds TODAY (via the generic dialog
+    // check) — pinned so a limit-detection change can't cost it. sendToPane is
+    // keystroke injection plus Enter: a message containing `1` switches the
+    // user's model, and `3` permanently suppresses future rate-limit warnings.
+    const raw = fullPane("codex-limit-model-switch.ansi");
+    const plain = stripAnsi(raw);
+    expect(plain).toContain("Approaching rate limits");
+    expect(plain).toMatch(/^›\s*1\.\s+Switch to /m);
+    expect(plain).toMatch(/^\s*3\.\s+Keep current model \(never show again\)/m);
+    const cursor = codexCursor("codex-limit-model-switch.cursor");
+    expect(paneReadiness(raw, cursor)).not.toBe("ready");
+    expect(paneAcceptsPaste(raw, cursor)).toBe(false);
+    // The resume keystrokes lead with Escape, which HERE is this dialog's own
+    // "esc to go back" — and the `continue` + Enter behind it would land in
+    // whatever the Escape revealed. No codex pane is resume-safe yet.
+    expect(paneResumeSafe(raw, cursor)).toBe(false);
+  });
+
+  test("capped and idle reads 'limited', not 'ready'", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    const raw = fullPane("codex-limit-idle.ansi");
+    const cursor = codexCursor("codex-limit-idle.cursor");
+    // The footer's own run-state word says `Ready`; the account is capped. Today
+    // paneReadiness believes the word, and paneAcceptsPaste therefore returns
+    // TRUE — `agendo send` delivers straight into a session that cannot answer.
+    expect(stripAnsi(raw)).toContain("Ready");
+    expect(paneUsageLimited(raw)).toBe(true);
+    expect(paneReadiness(raw, cursor)).toBe("limited");
+    expect(paneReadiness(raw)).toBe("limited");
+    expect(paneAcceptsPaste(raw, cursor)).toBe(false);
+  });
+
+  test("dismissing the model-switch menu leaves it capped, not ready", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // Esc is a safe dismissal — it returns the pane to the codex-limit-idle
+    // shape. Nothing about the cap changed, so neither may the verdict.
+    const raw = fullPane("codex-limit-dismissed.ansi");
+    const cursor = codexCursor("codex-limit-dismissed.cursor");
+    expect(paneUsageLimited(raw)).toBe(true);
+    expect(paneReadiness(raw, cursor)).toBe("limited");
+    expect(paneAcceptsPaste(raw, cursor)).toBe(false);
+  });
+
+  test("the model-switch menu is a LIMIT state, not merely a dialog", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // Today this reads `dialog` — safe by luck, not by detection: nothing knows
+    // the session is capped, so `agendo status` shows no cap and `agendo wait`
+    // never wakes with `blocked`. It must read `limited`, which on the claude
+    // path already outranks `dialog`.
+    //
+    // The structural wrinkle: this state has NO footer status bar (the dialog
+    // replaces it), so `codexFooter` rejects the pane and `codexPane` returns
+    // null — the capture never reaches `codexReadiness` at all. Codex limit
+    // detection cannot live only inside that classifier.
+    const raw = fullPane("codex-limit-model-switch.ansi");
+    const footer = stripAnsi(raw).split("\n").filter((l) => l.trim()).pop()!;
+    expect(footer.split(" · ").length, "no status bar to read a quota field from").toBe(1);
+    expect(paneUsageLimited(raw)).toBe(true);
+    expect(paneReadiness(raw, codexCursor("codex-limit-model-switch.cursor"))).toBe("limited");
+  });
+
+  test("the footer quota field alone is enough — with no notice on screen", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // The load-bearing claim of the design: the notice SCROLLS, so once it is
+    // gone `weekly 0% left` is the only evidence left, and it must suffice.
+    // `codex-idle` is a healthy capture with no notice anywhere in it; drop its
+    // quota to zero and the pane must read limited on the footer alone.
+    const capped = patchQuota(fullPane("codex-idle.ansi"), "weekly 99% left", "weekly 0% left");
+    expect(stripAnsi(capped)).not.toMatch(/usage limit/i);
+    expect(paneUsageLimited(capped)).toBe(true);
+    expect(paneReadiness(capped, codexCursor("codex-idle.cursor"))).toBe("limited");
+  });
+
+  test("a limit notice replayed above the resume-cwd prompt is the PREVIOUS run", () => {
+    test.fixme(true, "Codex usage-limit detection is not implemented — see docs/codex-usage-limits.md");
+    // The codex analogue of paneResumeDialogActive's whole reason for existing
+    // (#30). A session parked at "which working directory?" has run NO turn yet;
+    // everything above the prompt is the previous run's replayed transcript, and
+    // that transcript routinely ends in the very notice that made the user
+    // resume. Judged as current state it reads `limited` today — so `agendo
+    // status` would print a stale reset time and `agendo wait` would never
+    // settle, which is the blocked-forever reporting this must not reintroduce.
+    const notice = codexLimitNotice("codex-limit-idle.ansi");
+    const replayed = [notice, "", fullPane("codex-resume-cwd.ansi")].join("\n");
+    expect(stripAnsi(replayed)).toContain("hit your usage limit");
+    expect(paneReadiness(replayed, codexCursor("codex-resume-cwd.cursor"))).not.toBe("limited");
+    expect(paneUsageLimited(replayed)).toBe(false);
   });
 });
 
@@ -1979,6 +2527,55 @@ test.describe("parseResetTime: extract the reset instant from the notice", () =>
     expect(d.getDate()).toBe(15); // today (already reopened)
     expect(d.getHours()).toBe(1);
     expect(at!).toBeLessThan(now.getTime());
+  });
+});
+
+test.describe("parseResetTime: Codex's `try again at <time>` wording", () => {
+  test("the reset time parses out of the codex notice", () => {
+    test.fixme(true, "parseResetTime has no codex arm — see docs/codex-usage-limits.md");
+    // Claude says "Your limit will reset at 3pm (America/Santiago)"; codex says
+    // "…or try again at 1:22 PM." — no `reset` anchor, no timezone. parseResetTime
+    // returns null on it today, which leaves resetAt unknown and auto-resume
+    // unreachable even once the pane classifies as limited.
+    const notice = codexLimitNotice("codex-limit-idle.ansi");
+    expect(notice).toContain("try again at 1:22 PM");
+    // 09:00 local, before the stated reset → today at 13:22, still ahead.
+    const before = new Date(2026, 4, 15, 9, 0);
+    const at = parseResetTime(notice, before, RESET_LOOKBACK_MS);
+    expect(at).not.toBeNull();
+    expect(at!).toBe(new Date(2026, 4, 15, 13, 22).getTime());
+    // …and the pane-level read agrees, since that's what callers actually use.
+    expect(paneResetAt(stripAnsi(fullPane("codex-limit-idle.ansi")), before)).toBe(at);
+  });
+
+  test("an already-past reset does not report an indefinite live limit", () => {
+    test.fixme(true, "parseResetTime has no codex arm — see docs/codex-usage-limits.md");
+    // The hazard this capture demonstrates in the wild: it was taken at 10:14 the
+    // morning AFTER the notice was printed, so `1:22 PM` was already long past
+    // while the notice sat on screen. Two rules, both already established for
+    // claude's bare-time form and inherited unchanged here:
+    const notice = codexLimitNotice("codex-limit-idle.ansi");
+    // (a) JUST past — inside BARE_TIME_LOOKBACK_MS — is returned as-is, so the
+    //     caller can act now rather than waiting another whole day.
+    const justAfter = new Date(2026, 4, 15, 14, 30);
+    const recent = parseResetTime(notice, justAfter, RESET_LOOKBACK_MS);
+    expect(recent).toBe(new Date(2026, 4, 15, 13, 22).getTime());
+    expect(recent!).toBeLessThan(justAfter.getTime());
+    // (b) LONG past — beyond that lookback — rolls forward to tomorrow rather
+    //     than being handed back as a stale instant that would fire auto-resume
+    //     into a session which is still capped.
+    const longAfter = new Date(2026, 4, 15, 23, 0);
+    const rolled = parseResetTime(notice, longAfter, RESET_LOOKBACK_MS);
+    expect(rolled).toBe(new Date(2026, 4, 16, 13, 22).getTime());
+    expect(rolled!).toBeGreaterThan(longAfter.getTime());
+    // And the liveness verdict never comes from the notice regardless: the pane
+    // above stays limited only while its FOOTER says so. A past reset time on a
+    // still-capped footer is limited; the same past time over a recovered footer
+    // is not. Neither reading is "limited forever because a clock time elapsed".
+    const stillCapped = fullPane("codex-limit-idle.ansi");
+    const recovered = patchQuota(stillCapped, "weekly 0% left", "weekly 96% left");
+    expect(paneUsageLimited(stillCapped)).toBe(true);
+    expect(paneUsageLimited(recovered)).toBe(false);
   });
 });
 
@@ -2693,5 +3290,56 @@ test.describe("bootstrapRepoRoot: the cwd fallback never climbs into $HOME", () 
     const plain = join(nestedHome, "work");
     mkdirSync(plain, { recursive: true });
     expect(bootstrapRepoRoot(plain)).toBe(plain);
+  });
+});
+// ── #39: a window's name and the target that addresses it are not the same ───
+// `liveWindows()` used to yield a bare window name, and tmux resolves one of
+// those only inside the caller's own session. With several launcher hosts live,
+// every capture of a window in another host failed outright, so `list`/`status`
+// reported that whole host's sessions as `unknown`. The CLI-level regression is
+// pinned in cli.spec.ts; these fix the pieces it is built out of.
+test.describe("#39: window targets carry their host session", () => {
+  test("windowTarget pins BOTH halves of a compound target", () => {
+    expect(windowTarget("agendo-mc-applications", "cl-claude-ec3d3fb21f62")).toBe(
+      "=agendo-mc-applications:=cl-claude-ec3d3fb21f62",
+    );
+    // Unpinned, tmux resolves exact → unique-prefix → fnmatch, and these names
+    // are prefixes of each other in BOTH positions: `agendo` ⊂ `agendo-agendo`
+    // ⊂ `agendo-mc-applications`, and `cl-pr-5` ⊂ `cl-pr-50`.
+    expect(windowTarget("agendo", "cl-pr-5")).toBe("=agendo:=cl-pr-5");
+  });
+
+  test("reconcileLive keeps the attribution name and the addressable target apart", () => {
+    const s = sess("ec3d3fb21f62", "/x", 1_000);
+    const canon = sessionName(s);
+    const target = `=agendo-mc-applications:=${canon}`;
+    const r = reconcileLive(new Set([canon]), [{ name: canon, target, cwd: "/x", placeholder: false }], [s]);
+    // The name is what everything attributes, displays and kills by…
+    expect(r.liveWindows.get(canon)?.name).toBe(canon);
+    // …and the target is the only form that may be handed to tmux. Collapsing
+    // the two into one string is exactly what #39 was.
+    expect(r.liveWindows.get(canon)?.target).toBe(target);
+  });
+
+  test("the recorded target is the REAL window's, not a same-named placeholder's", () => {
+    // A restored-but-unopened tab in one host carries the same canonical name as
+    // the live window in another — the duplicate-name case this launcher creates
+    // by design. Recording the placeholder's target would point every readiness
+    // read at an idle bash and report it as the session's own screen.
+    const s = sess("dupehost1", "/x", 1_000);
+    const canon = sessionName(s);
+    const real = `=agendo-mc-applications:=${canon}`;
+    const r = reconcileLive(
+      new Set([canon]),
+      [
+        { name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: true },
+        { name: canon, target: real, cwd: "/x", placeholder: false },
+      ],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveWindows.get(canon)?.target).toBe(real);
+    // A real window vouched for the name, so it is not a dormant tab.
+    expect(r.livePlaceholders.has(canon)).toBe(false);
   });
 });

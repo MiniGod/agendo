@@ -25,7 +25,7 @@
 // point where it's plausibly still the same working block, while still catching
 // a session that died mid-afternoon on the same day.
 import { DEFAULT_STALLED_AFTER_MINUTES, loadConfig } from "./config.ts";
-import { isSettledReadiness, type Readiness } from "./tmux.ts";
+import { sessionFinished, type Readiness } from "./tmux.ts";
 
 /**
  * The effective stall threshold in ms. Precedence: an explicit
@@ -64,6 +64,13 @@ export interface StallInput {
    * session looks like.
    */
   resumeDialog: boolean;
+  /**
+   * How many background agents the session is waiting on, from
+   * `paneBackgroundAgents` on the same capture — the same signal `wait --json`
+   * reports, for the same reason `resumeDialog` is read here rather than
+   * re-derived: the two verdicts must not disagree about one pane.
+   */
+  backgroundAgents: number;
   /** Seconds since the session's last recorded activity. */
   idleSeconds: number;
 }
@@ -78,7 +85,7 @@ export interface StallInput {
  *    running — flagging those would make every session on disk permanently
  *    "stalled" as it ages. For them, `running: false` plus the idle age (and
  *    `git.unpushed`, see src/gitrefs.ts) already tells the story.
- *  • The settled test is `isSettledReadiness`, the SAME predicate `agendo wait`
+ *  • The settled test is `sessionFinished`, the SAME predicate `agendo wait`
  *    uses for "has this session stopped working" (tmux.ts) — not a second
  *    lookalike rule. So a busy/compacting session is never stalled however old
  *    its transcript looks; neither is one reading `unknown`, because a blank or
@@ -94,6 +101,15 @@ export interface StallInput {
  *    invert the meaning: it isn't a session that stopped, it's one that never
  *    started, waiting on an answer `send` can now give it automatically. The
  *    signal is `wait`'s own `resumeDialog`, not a second guess at the same pane.
+ *  • A session whose main agent is idle at its prompt while a SUBAGENT it spawned
+ *    is still running is not stalled either — it is working, and its transcript
+ *    mtime stands still for as long as the subagent takes, which on a fan-out run
+ *    is exactly the multi-hour scale the default threshold is set at. This is the
+ *    same split `agendo wait` makes (#44): the settled test alone would call the
+ *    pane done, so the count is consulted beside it. Without this the two callers
+ *    of `sessionFinished` would answer "has this stopped working?" differently
+ *    for the same pane, which is why the count is part of that predicate rather
+ *    than checked separately here.
  *  • An unreadable pane (`readiness === null` while nominally running — a live
  *    window we couldn't capture) is the same case one step earlier: no evidence,
  *    so no verdict. Restored-but-unopened placeholder tabs never even reach this
@@ -104,7 +120,7 @@ export interface StallInput {
 export function isStalled(o: StallInput, thresholdMs: number): boolean {
   if (!o.running || o.readiness === null) return false;
   if (o.resumeDialog) return false;
-  if (!isSettledReadiness(o.readiness)) return false;
+  if (!sessionFinished(o.readiness, o.backgroundAgents)) return false;
   return o.idleSeconds * 1000 >= thresholdMs;
 }
 

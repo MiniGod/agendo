@@ -9,6 +9,7 @@ import {
   sessionName,
   shortId,
   kindName,
+  type LiveTarget,
   liveTargetForShortId,
   hasSession,
   newDetached,
@@ -287,8 +288,9 @@ export function llmGuide(): string {
     "",
     `Be told when it needs you (DON'T poll):`,
     `              ${SELF_CMD} wait <id...> --any --json --timeout 30m`,
-    "  Blocks until a session settles — a non-busy state that isn't limited or unknown, or",
-    "  its window closing (\"exited\") — then exits. A session parked at its usage cap does",
+    "  Blocks until a session settles — a non-busy state that isn't limited or unknown and",
+    "  has no background agent still running — or its window closing (\"exited\"), then exits.",
+    "  A session parked at its usage cap does",
     "  NOT count as settled: it is paused, not finished. You are still woken promptly, but",
     "  with a non-zero exit and woke=\"blocked\" plus limitResetAt (which can already be past,",
     "  if it is parked beyond its own reset), so you can back off until then.",
@@ -299,9 +301,12 @@ export function llmGuide(): string {
     "         can't hide the others. Without it, every target must settle.",
     "  --json prints what you woke up to find out: why it woke (satisfied / timeout /",
     "         unsatisfiable / blocked) and per session its from → state, changed,",
-    "         satisfied, cwd, limitResetAt, and resumeDialog — true means it woke you at",
-    "         claude's resume dialog, so nothing has run yet and any activity you read is",
-    "         the PREVIOUS run's.",
+    "         satisfied, cwd, limitResetAt, resumeDialog and backgroundAgents.",
+    "         resumeDialog true means it woke you at claude's resume dialog, so nothing has",
+    "         run yet and any activity you read is the PREVIOUS run's. backgroundAgents > 0",
+    "         means a subagent is still running, so the default wait does not treat the",
+    "         session as done — usually with the main agent idle at its prompt, in which",
+    "         case state is `ready` and send reaches it. Check state, not the count.",
     "  Instead of ids: --all, or --prefix <p>. --repo <name> / --path <dir> scope it to",
     "         one project, and narrow --all and explicit ids too rather than replacing them.",
     "  --state <s> waits for one exact state (ready, busy, queued, dialog, limited,",
@@ -611,8 +616,10 @@ export function runInline(plan: OpenPlan): void {
  * cwd. Without it, a session shown as running under such a window would resume a
  * duplicate instead of attaching.
  */
-export function openSession(s: AgentSession, liveWindow?: string): OpenPlan {
-  const target = liveWindow ?? liveTargetForShortId(shortId(s.id)) ?? sessionName(s);
+export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan {
+  // The NAME half: `openTarget` re-resolves the location itself (via
+  // `windowLocation`), so it is already host-agnostic and wants the name.
+  const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
   return openTarget(target, s.cwd, resumeArgv(s));
 }
 

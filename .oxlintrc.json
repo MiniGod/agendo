@@ -109,8 +109,17 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        "max-lines": ["error", { "max": 1227, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx, src/index.tsx (tied)
-        "max-lines-per-function": ["error", { "max": 210, "skipBlankLines": false, "skipComments": false }], // src/index.tsx runStatus
+        // DROPPED 1227 -> 1036 in the merge with master. index.tsx grew to 1234
+        // there (#44's stall verdict reads a background-agent count at three
+        // sites, and `--help` documents the new `wait --json` field), so rather
+        // than raise this for everyone it took its own block below — an exempt
+        // file must never be what the rest of src/ is measured against. What is
+        // left here is App.tsx's own 1036, and everything else got 191 lines
+        // tighter.
+        "max-lines": ["error", { "max": 1036, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
+        // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
+        // and is now pinned in index.tsx's own block at its true 215.
+        "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
         // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
         // three-way tie between src/activity.ts `claudeAction`, src/activity.ts
         // `loadCodexActivity` and src/ui/components.tsx `SessionRow`. Three
@@ -166,7 +175,7 @@
     },
 
     {
-      // ── temporary exemption: src/index.tsx (1227 lines) ──────────────────
+      // ── temporary exemption: src/index.tsx (1234 lines) ──────────────────
       // Was 2456. Ten subcommands and the shared formatters now live in
       // src/cli/; what is left is argv dispatch plus `status` and `list`.
       //
@@ -179,8 +188,20 @@
       // complexity/max-statements are both set by `runStatus`, which is one of
       // the two the guard pins in place. They drop to 33/47 the moment
       // "cli/status.ts" and "cli/list.ts" join that allow-list.
+      // max-lines and max-lines-per-function are RAISED here relative to what
+      // this branch measured (1227 / 210) — by seven and five lines, and not by
+      // this branch's own work. Both come from #44 landing on master while this
+      // was in flight: the stall verdict now reads a background-agent count off
+      // the capture it had already taken (3 sites in `status`/`list`), and
+      // `--help` documents the new `wait --json` field and the new default
+      // predicate. All of it has nowhere else to live — the verdict is computed
+      // here and the help text IS this file. Pinned to the exact merged sizes,
+      // and carved out rather than pushed into the shared budget, which DROPPED
+      // to 1036 / 198 in the same change.
       "files": ["src/index.tsx"],
       "rules": {
+        "max-lines": ["error", { "max": 1234, "skipBlankLines": false, "skipComments": false }],
+        "max-lines-per-function": ["error", { "max": 215, "skipBlankLines": false, "skipComments": false }], // runStatus
         "complexity": ["error", 66],
         "max-statements": ["error", 90]
       }
@@ -213,17 +234,29 @@
     {
       "files": ["src/cli/close.ts"],
       "rules": {
-        "complexity": ["error", 49] // runClose; statements (56) are inside the shared budget
+        // LOWERED 49 -> 47. #44's close guard (refuse a session whose subagent is
+        // still writing) landed on master while this was in flight and would have
+        // pushed `runClose` to 53 inline; lifting it into `refuseIfWorkInFlight`
+        // paid for itself and then some. Statements are inside the shared budget.
+        "complexity": ["error", 47] // runClose
       }
     },
 
     {
-      // ── temporary exemption: src/tmux.ts (2033 lines) ────────────────────
+      // ── temporary exemption: src/tmux.ts (2301 lines) ────────────────────
       // Note it needs exactly ONE line: tmux.ts is a big file made of
       // reasonably sized functions, so only the file-length budget is blown.
+      //
+      // 2033 -> 2301 is NOT this branch's doing: it touches no line of tmux.ts.
+      // The file grew on master while this was in flight — #39 added the
+      // LiveTarget/ManagedTarget pair and windowTarget(), #44 split the live
+      // status region in two and added paneBackgroundAgents/sessionFinished —
+      // and this is that number carried across unchanged. It is the last of the
+      // three dismantling targets still growing, and the PR that splits it
+      // deletes this block outright rather than lowering it.
       "files": ["src/tmux.ts"],
       "rules": {
-        "max-lines": ["error", { "max": 2033, "skipBlankLines": false, "skipComments": false }]
+        "max-lines": ["error", { "max": 2301, "skipBlankLines": false, "skipComments": false }]
       }
     },
 

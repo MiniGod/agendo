@@ -1,6 +1,7 @@
 import type { RepoInfo } from "../repos.ts";
 import type { Activity } from "./format.ts";
 import type { RepoSessions, TaskItem } from "../types.ts";
+import type { LiveTarget } from "../tmux.ts";
 
 // Cheap structural equality check to skip re-renders when the log hasn't changed.
 // "loading"/"error"/undefined are never equal so any state transition always fires.
@@ -38,11 +39,11 @@ export function sameLiveTmux(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
-// Map equality (same keys → same values). Gates the rescan's setModel on the
-// live-window map, whose changes drive the readiness/auto-resume effect.
-export function sameLiveWindows(a: Map<string, string>, b: Map<string, string>): boolean {
+// Map equality on BOTH halves of each live target — a window that moved host keeps
+// its name and changes only the target addressing it. Gates the rescan's setModel.
+export function sameLiveWindows(a: Map<string, LiveTarget>, b: Map<string, LiveTarget>): boolean {
   if (a.size !== b.size) return false;
-  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  for (const [k, v] of a) if (b.get(k)?.name !== v.name || b.get(k)?.target !== v.target) return false;
   return true;
 }
 

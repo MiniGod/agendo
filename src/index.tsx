@@ -3,7 +3,7 @@ import { spawnSync } from "child_process";
 import { basename } from "path";
 import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
-  liveManagedPaths, managedKind, capturePaneState, paneReadiness, paneShells, stripAnsi,
+  liveManagedPaths, managedKind, capturePaneState, paneReadiness, paneBackgroundAgents, paneShells, stripAnsi,
   sessionRoot, currentSessionName,
   paneResumeDialogActive, RESUME_DIALOG_WAIT_MS,
   type SessionKind, type Readiness,
@@ -616,7 +616,7 @@ async function runStatus(
     // session that may well be in another repo.
     const live = scope ? null : liveTargetForShortId(sid);
     if (live) {
-      console.log(`● running (${live}) — no activity logged yet; it may still be starting.`);
+      console.log(`● running (${live.name}) — no activity logged yet; it may still be starting.`);
       process.exit(0);
     }
     console.error(`No session found for "${token}"${scopeNote(scope)}.`);
@@ -645,12 +645,17 @@ async function runStatus(
   // below) because the stall qualifier needs readiness — a session that is
   // mid-turn is never stalled, however old its transcript looks — and it prints
   // above the readiness line.
-  const pane = target ? capturePaneState(target) : null;
+  const pane = target ? capturePaneState(target.target) : null;
   const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
   // A pane parked on claude's own resume dialog reads as `ready` but hasn't run
   // yet, so its idle age belongs to the PREVIOUS run — never a stall (idle.ts).
   // Same signal `wait --json` reports as `resumeDialog`, not a second guess.
-  const resumeDialog = pane ? paneResumeDialogActive(pane.raw) : false;
+  // Both read off the ONE capture, in the one branch that already tested for it —
+  // a second `pane ? … : …` would cost this function a complexity point for a
+  // question it has already asked.
+  const { resumeDialog, backgroundAgents } = pane
+    ? { resumeDialog: paneResumeDialogActive(pane.raw), backgroundAgents: paneBackgroundAgents(pane.raw) }
+    : { resumeDialog: false, backgroundAgents: 0 };
   const idle = idleSeconds(s.lastUsed);
   const thresholdMs = resolveStalledAfterMs(stalledAfterMs);
   // A peer with no window arrives here as running-but-`readiness: null`, which
@@ -659,7 +664,7 @@ async function runStatus(
   // documents: the registry's own `status` is not the settled/busy test `wait`
   // uses, so treating it as one would let a stall verdict rest on a signal the
   // rest of agendo doesn't share.
-  const stalled = isStalled({ running, readiness, resumeDialog, idleSeconds: idle }, thresholdMs);
+  const stalled = isStalled({ running, readiness, resumeDialog, backgroundAgents, idleSeconds: idle }, thresholdMs);
   // Both config-derived values are resolved BEFORE the single drain below: the
   // stall threshold here, and the resume choice the dialog line prints further
   // down. A malformed config.json queues its complaint once per read, and
@@ -1001,15 +1006,17 @@ async function runList(opts: ListOptions): Promise<void> {
     const window = liveWindows.get(canon);
     let readiness: Readiness | null = null;
     let shells = 0;
+    let backgroundAgents = 0;
     // Parked on claude's own resume dialog: reads `ready`, but nothing has run
     // yet, so its idle age is the previous run's and it is never stalled.
     let resumeDialog = false;
     let resetAt: number | null = null;
     let compactionPercent: number | null = null;
     if (running && window) {
-      const { raw, cursor } = capturePaneState(window);
+      const { raw, cursor } = capturePaneState(window.target);
       readiness = paneReadiness(raw, cursor);
       shells = paneShells(raw);
+      backgroundAgents = paneBackgroundAgents(raw);
       resumeDialog = paneResumeDialogActive(raw);
       resetAt = rowResetAt(readiness, raw);
       compactionPercent = rowCompactionPercent(readiness, raw);
@@ -1037,7 +1044,7 @@ async function runList(opts: ListOptions): Promise<void> {
       title: s.title.replace(/\s+/g, " ").trim(),
       lastUsed: s.lastUsed.toISOString(),
       idleSeconds: idle,
-      stalled: isStalled({ running, readiness, resumeDialog, idleSeconds: idle }, thresholdMs),
+      stalled: isStalled({ running, readiness, resumeDialog, backgroundAgents, idleSeconds: idle }, thresholdMs),
       // Exact, NOT floored: a consumer re-deriving `idleSeconds >= stalledAfterSeconds`
       // must reach the same verdict this row already carries, including for
       // sub-second thresholds.
@@ -1128,7 +1135,7 @@ function runPlainList(
   // Cells, not finished lines: the readiness column's width isn't known until
   // every row is in (a `limited <time>` cell is wider than the state words).
   const rows: string[][] = [];
-  for (const { name, cwd, placeholder } of liveManagedPaths()) {
+  for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
     // Skip restored-but-unopened placeholder windows — they're idle bash waiting
@@ -1144,7 +1151,7 @@ function runPlainList(
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const { raw, cursor } = capturePaneState(name);
+    const { raw, cursor } = capturePaneState(target);
     const shells = paneShells(raw);
     const readiness = paneReadiness(raw, cursor);
     // Running-workflow marker (◆N): the session is live here by construction.
@@ -1155,7 +1162,7 @@ function runPlainList(
     // cell beside this already says when its cap lifts, so the two never both
     // describe the same pause.
     const stalled = isStalled(
-      { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), idleSeconds: idleSeconds(s.lastUsed) },
+      { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), backgroundAgents: paneBackgroundAgents(raw), idleSeconds: idleSeconds(s.lastUsed) },
       thresholdMs,
     );
     rows.push([

@@ -21,7 +21,7 @@ export async function runUnblock(token: string | undefined, force: boolean): Pro
     console.error(notRunningHint(token, "then unblock it"));
     process.exit(1);
   }
-  const { raw, cursor } = capturePaneState(target);
+  const { raw, cursor } = capturePaneState(target.target);
   const readiness = paneReadiness(raw, cursor);
   // The resume keystrokes lead with Escape, which on claude's own resume dialog
   // is its "Esc to cancel" — it would cancel the resume rather than unblock
@@ -39,9 +39,9 @@ export async function runUnblock(token: string | undefined, force: boolean): Pro
     console.error(`Not unblocking: session looks "${readiness}", not limited. Pass --force to send anyway.`);
     process.exit(2);
   }
-  sendResume(target);
+  sendResume(target.target);
   const resetAt = readiness === "limited" ? paneResetAt(stripAnsi(raw)) : null;
   console.log(
-    `▸ unblocked ${target}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
+    `▸ unblocked ${target.name}${readiness !== "limited" ? ` (forced; was "${readiness}")` : resetAt !== null ? ` (reset was ${new Date(resetAt).toISOString()})` : ""}`,
   );
 }

@@ -118,7 +118,7 @@ export async function runSend(token: string | undefined, prompt: string, force: 
         queued: o.route === "socket",
         id: sid,
         sessionId: peer?.sessionId ?? null,
-        target: target ?? null,
+        target: target ? target.name : null,
         pid: peer?.pid ?? null,
         socket: routeInfo,
         ...(o.reason ? { reason: o.reason } : {}),
@@ -173,7 +173,7 @@ export async function runSend(token: string | undefined, prompt: string, force: 
   // Pane state only exists when there IS a pane. Where it exists it is what the
   // dialog step below reads — that step is not advisory, and only a pane can
   // satisfy it.
-  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target) : { raw: "", cursor: null };
+  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target.target) : { raw: "", cursor: null };
   let readiness: Readiness | null = target ? paneReadiness(raw, cursor) : null;
   // ── Step 1: answer claude's resume dialog. Keystrokes only, and BEFORE any
   // delivery — a queued frame can't answer it, and a session parked here hasn't
@@ -195,14 +195,14 @@ export async function runSend(token: string | undefined, prompt: string, force: 
     // Nothing was confirmed and the menu is still up — the cursor wouldn't move,
     // or we couldn't read it. Stop here rather than wait out the whole timeout;
     // either way not one character of the message has been sent.
-    if (!answerResumeDialog(target, option) && paneResumeDialogActive(capturePane(target))) {
+    if (!answerResumeDialog(target.target, option) && paneResumeDialogActive(capturePane(target.target))) {
       console.error(
         `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
           `selection keys). Nothing was pasted — answer it yourself, then retry.`,
       );
       return finish({ ok: false, route: null, reason: "resume-dialog-unanswered", extra: { resumeDialog: true } }, 2);
     }
-    const settled = await waitForInputBox(target, dialogWaitMs);
+    const settled = await waitForInputBox(target.target, dialogWaitMs);
     if (!settled) {
       console.error(
         `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
@@ -224,7 +224,7 @@ export async function runSend(token: string | undefined, prompt: string, force: 
     return finish({ ok: false, route: null, reason: "limited", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
   }
   if (peer) {
-    const where = target ?? `pid ${peer.pid}`;
+    const where = target ? target.name : `pid ${peer.pid}`;
     // Each path names the state in its own vocabulary — the pane classifier's
     // ("ready", "compacting") when there is a pane, the receiver's own
     // ("idle", "busy", "waiting") when there is not. Both spell idle-ness
@@ -276,12 +276,12 @@ export async function runSend(token: string | undefined, prompt: string, force: 
     );
     return finish({ ok: false, route: null, reason: "resume-menu-suspect", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
   }
-  sendToPane(target!, prompt); // non-null: reaching here means the peer path didn't return
+  sendToPane(target!.target, prompt); // non-null: reaching here means the peer path didn't return
   // Name the route, and — where it isn't obvious — why this one. A caller that
   // expected the socket needs to know it got keystroke semantics instead: this
   // message is in the pane NOW, and it was only allowed there because the pane
   // was idle (or --force said to anyway).
   const why = socketFellBack ? " (socket fallback)" : !socket.enabled ? ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})` : "";
-  say(`▸ pasted into pane ${target}${why}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
+  say(`▸ pasted into pane ${target!.name}${why}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
   return finish({ ok: true, route: "pane", extra: { state: readiness, resumeDialog: dialogAnswered, socketFellBack } }, 0);
 }

@@ -100,6 +100,33 @@ export function managedKind(name: string): SessionKind | null {
 }
 
 /**
+ * A live managed target: the bare `name` it is known and attributed by, and the
+ * fully-qualified `target` that addresses it from ANY host session.
+ *
+ * These are NOT interchangeable, and conflating them is what #39 was: tmux
+ * resolves a bare window-name target only inside the caller's own session, so
+ * with several launcher hosts live, every read of a window in another host
+ * failed and readiness fell through to `unknown` — `list`/`status` reported a
+ * whole host's sessions as unknown, and `close`/`unblock` refused targets they
+ * "could not read".
+ *
+ * `name` stays the attribution and display key (`windowLocations`,
+ * `killManagedTarget`, `openTarget`, restore snapshots and user-facing output
+ * are all written against it); `target` is the only form that may be handed to
+ * tmux as `-t`. Carrying both makes a caller say which it means.
+ */
+export interface LiveTarget {
+  name: string;
+  target: string;
+}
+
+/** A `LiveTarget` paired with the working directory of the pane running in it. */
+export interface ManagedTarget extends LiveTarget {
+  cwd: string;
+  placeholder: boolean;
+}
+
+/**
  * A live managed target whose name embeds this session short id under any
  * id-bearing kind prefix (`cl-claude-`, `cl-copilot-`, `cl-codex-`, `cl-bg-`,
  * `cl-new-`) — so attach can navigate to the *actual* window a session runs in,
@@ -107,10 +134,10 @@ export function managedKind(name: string): SessionKind | null {
  * Work-item / PR targets embed an item id rather than a session id, and tagged
  * id-less fresh names carry no session id at all, so both are excluded.
  */
-export function liveTargetForShortId(sid: string): string | null {
-  for (const name of liveTargets()) {
+export function liveTargetForShortId(sid: string): LiveTarget | null {
+  for (const [name, target] of liveTargets()) {
     const m = name.match(ID_BEARING_NAME);
-    if (m && m[1] === sid) return name;
+    if (m && m[1] === sid) return { name, target };
   }
   return null;
 }
@@ -319,16 +346,42 @@ const NOT_SETTLED: ReadonlySet<Readiness> = new Set<Readiness>(["unknown", "limi
  * Whether a state is *known, settled and unblocked*: not working, not unreadable,
  * not parked at a usage cap.
  *
- * Kept as one predicate with two callers — `agendo wait`'s default predicate
- * (wait.ts) and the stalled-session qualifier (idle.ts) — rather than two
- * lookalike rules that can drift. Both are answering the same question, "has this
- * session stopped working in a way that means something?", and they must never
- * disagree about it. Note `wait` also admits its synthetic `exited` state through
- * this (neither working nor in NOT_SETTLED), which is correct: a session whose
- * window is gone is as settled as it will ever get.
+ * This is the READINESS half of the question only, and module-private for that
+ * reason. Everything that really wants "has this session stopped working?" asks
+ * `sessionFinished` below instead: readiness alone stopped answering it when #44
+ * split the flag, because the main agent can be back at its prompt while a
+ * subagent it spawned runs on.
+ *
+ * Note `wait` also admits its synthetic `exited` state through this (neither
+ * working nor in NOT_SETTLED), which is correct: a session whose window is gone is
+ * as settled as it will ever get.
  */
-export function isSettledReadiness(r: Readiness): boolean {
+function isSettledReadiness(r: Readiness): boolean {
   return !WORKING_READINESS.has(r) && !NOT_SETTLED.has(r);
+}
+
+/**
+ * Whether a session has stopped working — the whole question, both halves.
+ *
+ * Readiness describes the MAIN agent, and after #44 that is deliberately all it
+ * describes: a session whose subagent is still running reads `ready`, because the
+ * prompt genuinely is accepting input and `agendo send` must reach it. It is not
+ * finished, though. Two callers ask exactly this question and so ask it here,
+ * rather than each pairing readiness with its own lookalike count check:
+ *
+ *  - `agendo wait`'s default predicate (wait.ts) — whether to settle.
+ *  - the stalled-session qualifier (idle.ts) — whether to print `⚠stalled`.
+ *
+ * `agendo close`'s work-in-flight guard is a THIRD consumer of the same count but
+ * deliberately not a caller of this: it asks "would ending this lose something?",
+ * which is a different question with a different state set (it refuses `queued`
+ * and `dialog`, which both of the above consider done). It pairs its own states
+ * with the same `paneBackgroundAgents` read — see UNSAFE_CLOSE_STATES. Missing it
+ * on the first pass would have hard-killed a session whose subagent was mid-write,
+ * which is the most expensive way for these three to disagree.
+ */
+export function sessionFinished(r: Readiness, backgroundAgents: number): boolean {
+  return isSettledReadiness(r) && backgroundAgents === 0;
 }
 
 /**
@@ -454,7 +507,8 @@ export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readines
   // comparison table whose cell read `inferred (esc to interrupt, token counter)`,
   // and `agendo list` called the finished, idle session "busy" — which makes
   // `send` refuse and leaves it unreachable until the text scrolls off.
-  const status = liveStatusLines(raw).join("\n");
+  const { above, below } = liveStatusRegions(raw);
+  const status = [...above, ...below].join("\n");
   // Compacting the conversation — a distinct, blocking state. Must be checked
   // *before* the input-box read below: compaction shows no token counter and no
   // "esc to interrupt" hint, and leaves the box empty, so it would otherwise
@@ -474,10 +528,50 @@ export function paneReadiness(raw: string, cursor?: PaneCursor | null): Readines
   // `agendo send`. The arrow is a *content* guard on top of the positional one,
   // and still needed: the status region legitimately holds a finished turn's
   // summary between turns.
+  //
+  // WHICH BAND each check reads is the other half of the positional guard, and it
+  // is what #44 got wrong. The counter is only ever a LIVE counter above the box.
+  // Below the box the same shape means something else entirely: a subagent row's
+  // `↓ 99.9k tokens` is that agent's running TOTAL and outlives the agent, and the
+  // row above it is the user's `statusLine` script, which may print anything —
+  // claude hands those scripts the session's own duration and token counts, so
+  // `1m 30s · ↓ 12.4k tokens` is a perfectly ordinary thing for one to say. Read
+  // as the live counter, either pinned the pane to `busy` with nothing to clear
+  // it: `wait` never settled and `send` refused a prompt sitting there idle.
+  //
+  // The interrupt hint keeps the whole region, but it does NOT get to appear just
+  // anywhere in a line. Below the box the text is model- and user-authored — a
+  // subagent's task description, the user's status line — and this repo is full of
+  // agents whose task is literally "fix the esc to interrupt hint". A row like
+  //   ◯ general-purpose  Fix the esc to interrupt hint   5m 39s · ↓ 9k tokens
+  // outlives the agent it names, so reading the phrase there is #44 again, exactly:
+  // busy forever, `wait` never settles, `send` refused. So the phrase must sit
+  // where the TUI puts a HINT — opening the line, or after the separator its
+  // footers and spinner parens use (`(58s · esc to interrupt)`), never mid-sentence.
+  // Note `|` is deliberately NOT a separator here: `·` is what the TUI's own
+  // footers use, `|` is what status-line scripts use, and `repo | esc to
+  // interrupt: off | Opus 5` is a status line describing a keybinding, not a
+  // session generating.
+  // That asymmetry — numbers from above, hints from anywhere — is
+  // deliberately not a test of what a panel row LOOKS like. Trying to recognize
+  // the panel by its glyph swallowed the interrupt hint under any status line
+  // starting with `●`; trying to recognize it by its trailing token column missed
+  // every panel row whose column was worded or wrapped differently, and still
+  // matched a status line that printed one. There is nothing to recognize: the
+  // band simply does not carry this kind of evidence.
+  //
+  // Evidence rather than assertion, as far as it goes: across every capture in
+  // e2e/fixtures, no CLAUDE pane has any busy evidence at all below its box, and
+  // the only below-box matches for the counter shape are agent-panel rows. (Two
+  // codex captures do carry the interrupt phrase below the box, but they return
+  // from the codex branch above and never reach this check, so they are not
+  // evidence for this decision either way.) A corpus is not a proof: if claude
+  // ever draws a live counter under the box, this reads it as ready.
+  const live = above.join("\n");
   if (
-    /[↑↓]\s*[\d.,]+\s*k?\s*tokens?\b/i.test(status) ||
-    /\(\s*\d[^)]*[↑↓][^)]*\btokens?\b[^)]*\)/i.test(status) ||
-    /esc to interrupt/i.test(status)
+    /[↑↓]\s*[\d.,]+\s*k?\s*tokens?\b/i.test(live) ||
+    /\(\s*\d[^)]*[↑↓][^)]*\btokens?\b[^)]*\)/i.test(live) ||
+    /(?:^|[·•(]\s*)esc to interrupt\b/im.test(status)
   )
     return "busy";
   // Usage/token window exhausted — the 5-hour or weekly cap. Only when the notice
@@ -956,11 +1050,20 @@ const STATUS_ABOVE_MAX_LINES = 3;
  *    collecting one would end the walk at the next blank and the live spinner above
  *    would never be seen — a busy pane reading `ready`, the direction that lets
  *    `send` paste into a running turn and `close` kill it.
- *  - BELOW its bottom rule: the footer, the mode bar and the sub-agent panel
+ *  - BELOW its bottom rule: the footer, the mode bar, the user's own `statusLine`
+ *    script and the sub-agent panel
  *    (`❯ ◯ general-purpose  Review …  5m 39s · ↓ 99.9k tokens`). Nothing below the
- *    box is ever transcript, so the whole band counts — and it is load-bearing: a
- *    session whose own turn has finished but whose background agent is still
- *    running is busy, and only that band says so.
+ *    box is ever transcript, so the whole band counts.
+ *
+ * The two bands are returned separately by `liveStatusRegions` because they do not
+ * carry the same KIND of evidence, and one caller needs to tell them apart: there
+ * is no live turn counter below the box. The counter lives on the spinner row
+ * above it; a `↓ 99.9k tokens` below the box is either a subagent's running total
+ * on a panel row or a number the user's own status line chose to print. Reading
+ * either as the live counter is #44 — it pinned every session that had ever
+ * spawned a subagent to `busy` forever, so `wait` never settled and `send`
+ * refused an idle prompt. Below the box the busy signal is a PHRASE (`esc to
+ * interrupt`), never a number. See `paneReadiness`.
  *
  * Two cases fall back to returning the WHOLE capture — the pre-existing behaviour —
  * and they are not equally free:
@@ -996,11 +1099,23 @@ const STATUS_ABOVE_MAX_LINES = 3;
  * `looksLikeTaskPanel`, not in the bound — widening the bound trades the miss for
  * the false positive this exists to remove.
  */
-function liveStatusLines(raw: string): string[] {
+/**
+ * The input box, but only when it is BOUNDED — both rules on screen, so the band
+ * above it is a measured region and not a guess. One definition, because two
+ * callers depend on the same condition (`liveStatusRegions` decides whether it has
+ * a region at all; `paneBackgroundAgents` refuses to read the whole capture) and a
+ * copy of the rule that drifted would silently un-guard the second one.
+ */
+function boundedBox(raw: string): RuledInputBox | null {
+  const box = inputBox(raw);
+  return box === null || !box.topRuleFound ? null : box;
+}
+
+function liveStatusRegions(raw: string): { above: string[]; below: string[] } {
   const lines = raw.replace(/\r/g, "").split("\n");
   const plain = lines.map((l) => stripAnsi(l).trim());
-  const box = inputBox(raw);
-  if (box === null || !box.topRuleFound) return plain;
+  const box = boundedBox(raw);
+  if (box === null) return { above: plain, below: [] };
   const taskPanel = taskPanelLines(plain, LOOSE_TASK_PANEL_HEADER_RE);
   const above = blockAbove(
     plain,
@@ -1008,7 +1123,13 @@ function liveStatusLines(raw: string): string[] {
     STATUS_ABOVE_MAX_LINES,
     (line, i) => line === "" || isBoxSideHint(line) || taskPanel.has(i) || looksLikeTaskPanelRow(line),
   );
-  return [...above, ...plain.slice(box.bottomRule + 1)];
+  return { above, below: plain.slice(box.bottomRule + 1) };
+}
+
+/** The two bands joined, for the callers that don't care which is which. */
+function liveStatusLines(raw: string): string[] {
+  const { above, below } = liveStatusRegions(raw);
+  return [...above, ...below];
 }
 
 /**
@@ -1606,6 +1727,85 @@ export function paneCompactionPercent(raw: string): number | null {
 }
 
 /**
+ * How many background AGENTS the session is currently waiting on, read from the
+ * TUI's own words: `✻ Waiting for 1 background agent to finish`.
+ *
+ * This is the signal `busy` used to stand in for, and the two are not the same
+ * thing (#44). A running subagent means the session IS working — so `agendo wait`
+ * must not settle — while the main agent is idle at its prompt, so `agendo send`
+ * must still deliver. One flag could not say both. Monitors and background shells
+ * are a third case again: legitimately long-running (a dev server, an armed
+ * watcher), so they hold neither — `wait` would never return for anyone running
+ * one. They need no counter of their own for that: they simply never produce this
+ * sentence, so a session running one settles.
+ *
+ * Read from the live status region, NOT the whole pane: this phrase is ordinary
+ * English and a session whose transcript merely *discusses* background agents (a
+ * pane documenting this very detection layer, say) would otherwise be held open
+ * forever. The panel's own rows are deliberately not counted — they persist after
+ * their agents finish, so they say "this session once spawned agents", not "an
+ * agent is running now".
+ *
+ * Matched on the TUI's exact wording, and on its exact POSITION, which is the weak
+ * point. It reads 0 — `wait` settles, `⚠stalled` becomes possible — whenever the
+ * sentence is reworded ("Waiting on", "background-agents"), truncated on a narrow
+ * pane, pushed further than STATUS_ABOVE_MAX_LINES rows above the box, separated
+ * from the box by a chrome row `blockAbove` doesn't recognize, prefixed by more
+ * than a one-character glyph, or followed on the same row by anything that is not
+ * TUI chrome (a right-aligned `/clear to save 172.1k tokens` hint would do it). Neither
+ * direction of a misread is safe: an over-count holds `wait` to its timeout on a
+ * finished session, an under-count settles it on one that is still working. So it
+ * is worth re-checking against a real capture whenever claude's status line
+ * changes, rather than loosened into something that would match prose.
+ *
+ * One shape would break the split rather than this function: if the TUI ever drew
+ * a live counter on this same row (`✻ Waiting for 1 background agent to finish
+ * (2m · ↓ 4.2k tokens)`), the pane would read `busy` AND count 1, and `send` would
+ * refuse a prompt that is idle. Today's captures carry no counter there.
+ *
+ * Returns 0 when the TUI is not waiting on any.
+ */
+export function paneBackgroundAgents(raw: string): number {
+  // Without a bounded box `liveStatusLines` falls back to the WHOLE capture, and
+  // this phrase is ordinary English — a resume dialog (which replaces the box,
+  // and which `paneReadiness` calls settled) over a transcript discussing
+  // background agents would hold `agendo wait` open until its timeout, on a
+  // session that is finished. Read nothing rather than read the transcript.
+  if (boundedBox(raw) === null) return 0;
+  let max = 0;
+  // The ABOVE band only: this sentence is part of the turn status the TUI draws
+  // over the box, and the band below it holds a panel whose rows carry model- and
+  // user-authored text (a subagent's task title, the user's status line).
+  for (const line of liveStatusRegions(raw).above) {
+    // The sentence has to BE the whole line, past at most a one-character spinner
+    // glyph: anchored at both ends, and with the assistant's own bullet (`●`/`⏺`)
+    // excluded up front. A transcript line CAN reach this band — `blockAbove`
+    // collects up to STATUS_ABOVE_MAX_LINES rows when the transcript butts against
+    // the box — and the sentence is ordinary English that an orchestrator narrating
+    // its own fan-out will print verbatim. Three separate holes were closed here:
+    // `\W*` admitted `## Waiting for 3…` and `> "Waiting for 2…"`, a bare `\S\s+`
+    // admitted `● Waiting for 3…`, and no end anchor admitted `● Waiting for 3
+    // background agents to finish before I commit.`
+    // The tail is the other half of that: the sentence may be followed by the
+    // TUI's own chrome — an ellipsis, or a parenthesized/middot-led suffix like
+    // `(3m 12s)` or `· esc to interrupt`, which claude's spinner rows habitually
+    // carry — but never by more words. `…to finish, then I'll commit.` is prose
+    // and reads 0; `…to finish (2m · ↓ 4.2k tokens)` is the TUI and reads the
+    // count. An anchor that admitted neither under-counted, which is the
+    // destructive direction: `wait` settles and `close` kills a working session.
+    const m = line.match(
+      /^(?!●|⏺)(?:\S\s+)?waiting for\s+(\d+)\s+background\s+agents?\s+to\s+finish(?:\s*[.…]+)?(?:\s*[(·•].*)?$/i,
+    );
+    // Two lines both claiming a count is not a shape the TUI produces; if it
+    // ever does, the higher number is the survivable misread — an over-count
+    // wakes late and loudly (a timeout, non-zero exit), an under-count wakes
+    // early and silently on a session that is still working.
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max;
+}
+
+/**
  * Number of background shells the session has running, read from the TUI's
  * `· N shell(s) ·` indicator (the footer's clickable "view background shells"
  * button, also echoed in the turn summary as `N shell still running`). This is
@@ -1634,16 +1834,59 @@ export function liveSessions(): Set<string> {
   return new Set(tmuxLines(["list-sessions", "-F", "#{session_name}"]));
 }
 
-/** Names of all windows across all sessions. */
-export function liveWindows(): Set<string> {
-  return new Set(tmuxLines(["list-windows", "-a", "-F", "#{window_name}"]));
+/**
+ * Every live window across all sessions, bare name → addressable target (#39).
+ *
+ * tmux allows duplicate window names and this launcher creates them BY DESIGN: a
+ * restored-but-unopened placeholder tab carries the canonical `cl-…` name in one
+ * host while the real agent window runs under it in another. So a name can have
+ * several locations, and they are not interchangeable — a placeholder is an idle
+ * bash waiting on a keypress (see restore.ts), not the session's pane.
+ *
+ * A REAL window therefore always wins over a placeholder, whichever order tmux
+ * lists them in. Getting this wrong is worse than the bug this function exists to
+ * fix: `liveTargetForShortId` feeds `send` and `unblock`, which WRITE to the pane
+ * they resolve — pasting a prompt into a placeholder wakes it into a second agent
+ * on the same transcript, and `unblock`'s leading Escape closes the tab outright.
+ * `reconcileLive` skips placeholders for the same reason; these two must agree.
+ *
+ * Among several REAL windows of one name the first sighting wins, which is a
+ * genuine ambiguity this cannot resolve — `close` is the caller that must not
+ * guess, and it enumerates `windowLocations` and refuses instead.
+ */
+export function liveWindows(): Map<string, string> {
+  const out = new Map<string, string>();
+  const provisional = new Set<string>(); // names whose target came from a placeholder
+  for (const line of tmuxLines([
+    "list-windows",
+    "-a",
+    "-F",
+    `#{session_name}\t#{window_name}\t#{?${PLACEHOLDER_OPTION},1,0}`,
+  ])) {
+    const [session, window, placeholder] = line.split("\t");
+    if (!window) continue;
+    const isPlaceholder = placeholder === "1";
+    // Keep what we have unless this is a real window displacing a placeholder.
+    if (out.has(window) && (isPlaceholder || !provisional.has(window))) continue;
+    // No session reported is not a case tmux produces, but the fallback is the
+    // pre-#39 bare name: still correct for a single host, and never worse.
+    out.set(window, session ? windowTarget(session, window) : exactTarget(window));
+    if (isPlaceholder) provisional.add(window);
+    else provisional.delete(window);
+  }
+  return out;
 }
 
-/** Union of live session and window names — every managed target that's live. */
-export function liveTargets(): Set<string> {
-  const s = liveSessions();
-  for (const w of liveWindows()) s.add(w);
-  return s;
+/**
+ * Every live session and window name → the target that addresses it. A session
+ * addresses itself; a window needs its host session as qualifier. A session name
+ * wins over a window of the same name, as it did when this returned a set.
+ */
+export function liveTargets(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const s of liveSessions()) out.set(s, exactTarget(s));
+  for (const [name, target] of liveWindows()) if (!out.has(name)) out.set(name, target);
+  return out;
 }
 
 /**
@@ -1653,8 +1896,8 @@ export function liveTargets(): Set<string> {
  * item / PR (`cl-wi-…`, `cl-pr-…`) rather than a session id — back to the
  * session actually running in them, so they register as running.
  */
-export function liveManagedPaths(): { name: string; cwd: string; placeholder: boolean }[] {
-  const out: { name: string; cwd: string; placeholder: boolean }[] = [];
+export function liveManagedPaths(): ManagedTarget[] {
+  const out: ManagedTarget[] = [];
   for (const line of tmuxLines([
     "list-panes",
     "-a",
@@ -1666,8 +1909,20 @@ export function liveManagedPaths(): { name: string; cwd: string; placeholder: bo
     // The marker is a *window* option, so it only attributes to the window name
     // (a restored placeholder is always a window); a managed session name is
     // never a placeholder.
-    for (const [name, isPlaceholder] of [[session, false], [window, placeholder === "1"]] as const) {
-      if (name?.startsWith("cl-")) out.push({ name, cwd, placeholder: isPlaceholder });
+    //
+    // Each name carries the target that ADDRESSES it alongside it (see
+    // `LiveTarget`): a session addresses itself, a window needs its host session
+    // as qualifier or it is unreadable from anywhere else (#39).
+    for (const [name, isWindow, isPlaceholder] of [
+      [session, false, false],
+      [window, true, placeholder === "1"],
+    ] as const) {
+      // Built only for a name we keep: `exactTarget("")` is `=`, which tmux reads
+      // as the `{mouse}` target — it would silently address wherever the pointer
+      // last was rather than fail.
+      if (!name?.startsWith("cl-")) continue;
+      const target = isWindow && session ? windowTarget(session, name) : exactTarget(name);
+      out.push({ name, target, cwd, placeholder: isPlaceholder });
     }
   }
   return out;
@@ -1684,6 +1939,19 @@ export function liveManagedPaths(): { name: string; cwd: string; placeholder: bo
  */
 export function exactTarget(name: string): string {
   return `=${name}`;
+}
+
+/**
+ * Exact-pinned `session:window` target — the form that addresses a window from
+ * any host session, and the one this file hands to `capture-pane`.
+ *
+ * BOTH halves are pinned: host names are prefixes of each other (`agendo` ⊂
+ * `agendo-agendo` ⊂ `agendo-mc-applications`) and so are managed window names
+ * (`cl-pr-5` ⊂ `cl-pr-50`), so an unpinned half lets tmux's prefix/fnmatch
+ * fallback bind it to the wrong thing — the `exactTarget` hazard, twice over.
+ */
+export function windowTarget(session: string, window: string): string {
+  return `${exactTarget(session)}:${exactTarget(window)}`;
 }
 
 export function hasSession(name: string): boolean {

@@ -388,6 +388,28 @@ const READY_PANE = [
   "  ? for shortcuts",
 ].join("\n");
 
+/** An IDLE claude TUI that is nonetheless still working: the main agent is back
+ *  at its prompt (empty box, no interrupt hint, no live counter) while a subagent
+ *  it spawned runs on, which the TUI says in words on its status line. The two
+ *  halves of #44 pull in opposite directions here — `agendo send` must deliver,
+ *  because the prompt is genuinely accepting input, and `agendo wait` must NOT
+ *  settle, because the session is not finished. One readiness value cannot say
+ *  both, so the sentence is read separately from the verdict.
+ *
+ *  The panel row below the box is the shape that used to be mistaken for a live
+ *  turn counter: `↓ 99.9k tokens` is that subagent's running TOTAL, and the row
+ *  outlives the agent it names. */
+export const SUBAGENT_PANE = [
+  "  ● Implement login form",
+  "  ✻ Waiting for 1 background agent to finish",
+  "  ─────────────────────────────────────────────",
+  "  ❯ ",
+  "  ─────────────────────────────────────────────",
+  "  ? for shortcuts",
+  "  ● main",
+  "❯ ◯ general-purpose  Review the login form  5m 39s · ↓ 99.9k tokens",
+].join("\n");
+
 /** A mid-generation claude TUI. The live token counter's directional ↑ arrow is
  *  the signal `paneReadiness` keys on, so this classifies as "busy" — not
  *  sendable, not settled. Shared by every spec/driver that needs a session to

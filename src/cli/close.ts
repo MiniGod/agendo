@@ -5,8 +5,48 @@ import { forgetRestoreTab, idBearingName } from "../restore.ts";
 import { SessionIndex } from "../sessions.ts";
 import {
   exactTarget, isPlaceholderWindow, killManagedTarget, liveManagedPaths, liveTargetForShortId, managedKind,
-  paneReadiness, readPaneState, sessionName, shortId, stripAnsi, windowLocations, type Readiness,
+  paneBackgroundAgents, paneReadiness, readPaneState, sessionName, shortId, stripAnsi, windowLocations,
+  type PaneSnapshot, type Readiness,
 } from "../tmux.ts";
+
+/**
+ * Why closing this pane would destroy work in flight, phrased for the refusal
+ * message — or null when closing it is safe.
+ *
+ * TWO independent reasons, because readiness answers only half the question.
+ * Since #44 it describes the MAIN agent alone, so a session whose subagent is
+ * still writing reads "ready" here; closing it is exactly the destructive misread
+ * this command exists to prevent. The count is read off the SAME capture as the
+ * readiness, so the two can never describe different frames.
+ *
+ * Deliberately NOT routed through `sessionFinished`, which pairs the same two
+ * facts for `wait` and the stall verdict: those treat "queued" and "dialog" as
+ * done, and this command must refuse both. Same inputs, different question.
+ */
+function unsafeCloseReason(readiness: Readiness, agents: number): string | null {
+  if (UNSAFE_CLOSE_STATES.has(readiness)) return `session looks "${readiness}"`;
+  if (agents > 0) return `session is idle but ${agents} background agent${agents === 1 ? " is" : "s are"} still running`;
+  return null;
+}
+
+/**
+ * Refuse the close, with the pane's own last lines as evidence, when the session
+ * still has work in flight. Exits; returns only when closing is safe.
+ *
+ * Its own function rather than a branch in `runClose`: the count is a second,
+ * independent reason to refuse (#44), and folding it inline pushed `runClose`
+ * past its complexity budget. Everything it needs is already read — no extra
+ * tmux call — and lifting it out let that budget DROP rather than rise.
+ */
+function refuseIfWorkInFlight(pane: PaneSnapshot | null, readiness: Readiness | null, force: boolean): void {
+  if (!pane || !readiness || force) return;
+  const refusal = unsafeCloseReason(readiness, paneBackgroundAgents(pane.raw));
+  if (!refusal) return;
+  console.error(`Not closing: ${refusal} — work is in flight. Pass --force to close it anyway.`);
+  console.error(`\n  current screen (tail):`);
+  for (const l of stripAnsi(pane.raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
+  process.exit(2);
+}
 
 /**
  * Readiness states where closing a session would destroy work in flight, so
@@ -99,12 +139,12 @@ export async function runClose(token: string | undefined, force: boolean, verb =
   // For one too new to be indexed: the live id-bearing window named after this
   // very short id — which is only ever that session's own window, so it's as
   // safe a target as the canonical name.
-  const canon = s ? sessionName(s) : liveTargetForShortId(sid);
+  const canon = s ? sessionName(s) : (liveTargetForShortId(sid)?.name ?? null);
   if (!canon) {
     console.error(`No session found for "${token}" — refusing to close anything.`);
     process.exit(1);
   }
-  const liveWindow = s ? liveWindows.get(canon) : canon;
+  const liveWindow = s ? liveWindows.get(canon)?.name : canon;
   // A placeholder squats the canonical name with no agent behind it; close it by
   // that name (it's a real tmux window) when no live window vouches for the session.
   const placeholder = !liveWindow && livePlaceholders.has(canon);
@@ -172,12 +212,7 @@ export async function runClose(token: string | undefined, force: boolean, verb =
     process.exit(2);
   }
   const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
-  if (pane && readiness && UNSAFE_CLOSE_STATES.has(readiness) && !force) {
-    console.error(`Not closing: session looks "${readiness}" — work is in flight. Pass --force to close it anyway.`);
-    console.error(`\n  current screen (tail):`);
-    for (const l of stripAnsi(pane.raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
-    process.exit(2);
-  }
+  refuseIfWorkInFlight(pane, readiness, force);
   // `how === "none"` means tmux listed the target a moment ago but can now place
   // it in neither a window nor a session — so nothing was killed, whatever the
   // (vacuously true) `gone` check says. Report the failure rather than the

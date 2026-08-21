@@ -85,7 +85,7 @@ export function useReadinessPoll({
       // same cadence and the same fresh capture.
       const next = new Map<string, PaneState>();
       for (const [canon, win] of windows) {
-        const { raw, cursor } = capturePaneState(win);
+        const { raw, cursor } = capturePaneState(win.target);
         const readiness = paneReadiness(raw, cursor);
         let resetAt: number | null | undefined;
         if (readiness === "limited") {
@@ -108,9 +108,9 @@ export function useReadinessPoll({
           if (autoResumeRef.current) {
             const fired = resumeFired.current.get(canon) ?? null;
             if (shouldAutoResume({ enabled: true, readiness, resetAt: resetAt ?? null, now: Date.now(), firedFor: fired })) {
-              const fresh = capturePaneState(win);
+              const fresh = capturePaneState(win.target);
               if (paneResumeSafe(fresh.raw, fresh.cursor)) {
-                sendResume(win);
+                sendResume(win.target);
                 resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
               }
             } else if (
@@ -129,8 +129,8 @@ export function useReadinessPoll({
               // Re-capture fresh to guard the sample→act gap, and confirm it's STILL
               // the active dialog before pressing Escape (only ever Escape a pane
               // whose own "Esc to cancel" affordance is showing).
-              if (paneLimitDialogActive(capturePane(win))) {
-                sendDialogReveal(win);
+              if (paneLimitDialogActive(capturePane(win.target))) {
+                sendDialogReveal(win.target);
                 dialogRevealed.current.add(canon);
               }
             }
