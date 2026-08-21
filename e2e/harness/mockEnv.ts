@@ -29,7 +29,11 @@ export interface MockEnv {
   /** Read the fake-tmux state back — mutating commands (new-window, kill-window)
    *  write to it, so this is how a test asserts what is still live afterwards. */
   getTmuxState(): Promise<any>;
-  /** Overwrite the fake-`gh` state (auth flag + user + issue/PR fixtures). */
+  /** Overwrite the fake-`gh` state (auth flag + user + issue/PR/GraphQL fixtures).
+   *  Also clears the fake's GraphQL sequence counter, so re-seeding mid-test
+   *  starts any array fixture from its first element again — without that, a
+   *  second `setGhState` in one test would resume the previous call count and
+   *  overrun a fresh sequence immediately. */
   setGhState(state: unknown): Promise<void>;
   /** Switch the persisted backend (writes ~/.agendo/state.json). */
   setProvider(name: "ado" | "github"): Promise<void>;
@@ -103,7 +107,13 @@ export async function createMockEnv(): Promise<MockEnv> {
     ado,
     setTmuxState: (state) => writeFile(tmuxStatePath, JSON.stringify(state, null, 2)),
     getTmuxState: async () => JSON.parse(await readFile(tmuxStatePath, "utf-8")),
-    setGhState: (state) => writeFile(ghStatePath, JSON.stringify(state, null, 2)),
+    setGhState: async (state) => {
+      // Order matters: drop the counters first, so a `gh` call that races the
+      // re-seed can only ever see (old state, old counter) or (new, reset) —
+      // never the new fixtures indexed by the old call count.
+      await rm(`${ghStatePath}.seq`, { recursive: true, force: true });
+      await writeFile(ghStatePath, JSON.stringify(state, null, 2));
+    },
     setProvider: (name) => writeFile(join(home, ".agendo", "state.json"), JSON.stringify({ provider: name }, null, 2)),
     setAdoPr: (id, patch) => ado.setPr(id, patch),
     setAdoResponse: (match, response) => ado.setResponse(match, response),
