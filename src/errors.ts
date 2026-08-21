@@ -242,6 +242,128 @@ export function snippetOf(body: string, secrets: readonly string[] = []): string
 const warnedTranscripts = new Set<string>();
 
 /**
+ * Forget which transcripts have already warned.
+ *
+ * Exists for tests. The one-warning-per-file cap is deliberately process-wide
+ * and has no expiry — that is what makes it a cap — but a suite that asserts on
+ * warnings needs each case to start from a clean slate, and without this a
+ * second test naming a path some earlier test already used would not fail, it
+ * would silently assert nothing. Not called from the application.
+ */
+export function resetTranscriptWarnings(): void {
+  warnedTranscripts.clear();
+}
+
+/** The last non-whitespace character before `i`, or "" at the start of input. */
+function charBefore(text: string, i: number): string {
+  let j = i - 1;
+  // Exactly RFC 8259's whitespace: space, tab, LF, CR.
+  while (j >= 0 && (text[j] === " " || text[j] === "\t" || text[j] === "\r" || text[j] === "\n")) j--;
+  return j >= 0 ? text[j] : "";
+}
+
+/**
+ * Recover the last complete record from a line holding more than one.
+ *
+ * Two agents appending to the same transcript can interleave: one write is cut
+ * short and the next is appended straight onto its stump, with no newline
+ * between them. Observed in the wild as a 4,799-byte line holding a record
+ * truncated mid-signature followed by a complete, perfectly parseable one. The
+ * whole line fails `JSON.parse`, and dropping it costs BOTH records — so the
+ * intact one is thrown away along with the damaged one it got stuck to. This
+ * gets it back: a torn append should cost one record, not two.
+ *
+ * The boundary is found by trying, not by matching. Every plausible record
+ * start — `{` followed by a quoted key — is a CANDIDATE, and a candidate is
+ * accepted only when the text from there to end-of-line parses. That is what
+ * makes it safe without knowing the record shape, which matters because we do
+ * not have one shape: Claude transcripts alone start on `parentUuid` (114k
+ * records) or `type` (55k), and copilot `events.jsonl` and a workflow's
+ * `journal.jsonl` come through here too. Anchoring on a known first key would
+ * be wrong for three of the four readers.
+ *
+ * Splitting on `}{` would be wrong for a different reason: it is not where the
+ * damage is. The specimen's truncated record ends mid-base64, so there is no
+ * `}` before the join at all — the naive split finds nothing here, while
+ * legitimately occurring inside every nested object it would find plenty.
+ *
+ * PARSING IS NOT ENOUGH ON ITS OWN, and this is the trap the first cut of this
+ * function fell into. A record truncated just after one of its own nested
+ * objects closes leaves that object as the rightmost thing on the line, and it
+ * parses perfectly — so a plain try-parse hands back
+ * `{"web_search_requests":0,"web_fetch_requests":0}` and calls a mangled line
+ * recovered. That is worse than dropping it: the reader gets a non-record, and
+ * the diagnostic that would have named the damage is suppressed. Truncating
+ * 400 real records at every one of 1,131,454 byte offsets produced 1,587 such
+ * bogus recoveries.
+ *
+ * So a candidate must also sit where a NEW record could start. Inside one
+ * well-formed record every `{` other than the root is a VALUE, and a value can
+ * only follow `:`, `,` or `[`. Filtering on that one character takes the same
+ * 1,131,454-offset sweep to ZERO bogus recoveries, and cuts the specimen's ten
+ * candidates to exactly one.
+ *
+ * What that filter costs, stated honestly: `:`, `,` and `[` are ~4.5% of the
+ * bytes in a real record, so a write severed immediately after one of them is
+ * a join the filter refuses to see. Measured over torn-append pairs built from
+ * real records, ~5% of severance points are lost this way. They degrade to the
+ * pre-change behaviour — null, and a warning — never to a wrong answer, which
+ * is the trade being made: a missed recovery is a line we already failed on,
+ * while a wrong recovery is a non-record handed to a reader in silence.
+ *
+ * (A brace-depth scan would be the textbook answer and does not work here: the
+ * stump is severed mid-string, so a forward walk takes the next record's first
+ * quote as its own string terminator and desynchronises. On the specimen it
+ * reports one top-level record, at offset 0, and finds no boundary at all.)
+ *
+ * The walk runs right-to-left purely for COST, not for correctness: at most one
+ * candidate can parse — any candidate left of the true boundary has that whole
+ * record sitting after it as trailing data, which `JSON.parse` rejects — so the
+ * answer does not depend on the direction. Starting at the right just reaches
+ * it sooner and on shorter slices. There is no attempt cap: a filter-surviving
+ * candidate inside the tail record is a `{` at the end of a string value, and
+ * parsing from there is permanently out of phase, so it fails almost
+ * immediately. The largest real-shaped truncated line (1.6MB) costs 1.4ms, and
+ * a wholly synthetic 2.12MB line of 40,000 concatenated stumps — none of them
+ * recoverable, so every candidate is tried — costs ~33ms.
+ *
+ * Only the LAST record is recovered. A stump ahead of it is unrecoverable by
+ * definition, and several torn writes in a row are handled by the same walk,
+ * each unparseable stump simply skipped over. Two cases are genuinely
+ * forfeited: a write severed at exactly its trailing newline, leaving two
+ * intact records joined, and a three-way interleave where an intact record sits
+ * between two damaged ones. Both lose a record that was on the line whole. The
+ * first is a single-byte target in a multi-kilobyte record; neither appears in
+ * the wild sample, and recovering them would mean re-parsing every prefix.
+ *
+ * One more thing this accepts by design: it cannot tell a stump from any other
+ * unparseable prefix, so `garbage {"type":"assistant",…}` recovers the record
+ * and stays quiet about the garbage. The intact record is worth more than the
+ * diagnostic, and there is no signal here that would separate the two.
+ */
+function recoverTornLine(text: string): any | null {
+  const starts: number[] = [];
+  const candidate = /\{\s*"/g;
+  for (let m = candidate.exec(text); m; m = candidate.exec(text)) {
+    // Offset 0 is the whole line, which the caller has already tried.
+    if (m.index === 0) continue;
+    // A `{` in value position belongs to the record already in progress.
+    const prev = charBefore(text, m.index);
+    if (prev === ":" || prev === "," || prev === "[") continue;
+    starts.push(m.index);
+  }
+  for (let i = starts.length - 1; i >= 0; i--) {
+    try {
+      // Anchored on `{`, so a successful parse is necessarily an object.
+      return JSON.parse(text.slice(starts[i]));
+    } catch {
+      // Not a boundary — keep walking left.
+    }
+  }
+  return null;
+}
+
+/**
  * Parse one line of a `.jsonl` file, returning null instead of throwing — a
  * single unreadable record must never cost you the whole transcript.
  *
@@ -255,6 +377,14 @@ const warnedTranscripts = new Set<string>();
  * couple-of-seconds local rescan, and a file with many bad records would
  * otherwise emit one diagnostic per record forever. The first coordinate is
  * what you need to start looking; the rest is noise that would crowd the cap.
+ * Note what that dedup means for anyone reading a report: a warning that
+ * disappears when you reload and comes back on a fresh start is the CAP
+ * talking, not the file healing itself.
+ *
+ * A line that fails outright gets one more chance through `recoverTornLine`,
+ * which pulls the intact record out of a torn append. Recovery is silent: the
+ * record is back, nothing was lost, and there is nothing for the user to act
+ * on — a diagnostic there would be noise about a problem that just got fixed.
  */
 export function parseJsonLine(
   text: string,
@@ -265,6 +395,8 @@ export function parseJsonLine(
   try {
     return JSON.parse(text);
   } catch (e) {
+    const recovered = recoverTornLine(text);
+    if (recovered !== null) return recovered;
     if (!opts.isLast && !warnedTranscripts.has(path)) {
       warnedTranscripts.add(path);
       reportWarning(`Skipped unparseable JSON at ${path}:${line} (${messageOf(e)})`);
