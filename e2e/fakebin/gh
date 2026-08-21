@@ -1,25 +1,62 @@
 #!/usr/bin/env node
 // Fake `gh` (GitHub CLI) for the e2e harness. Like the fake az/tmux, it touches
 // no network: `auth status` reflects a flag, and `api user` / `issue list` /
-// `pr list` are answered from a JSON state file (FAKE_GH_STATE). Every call is
-// appended to FAKE_CALL_LOG so tests can assert what the GitHub backend invoked.
+// `pr list` / `api graphql` are answered from a JSON state file (FAKE_GH_STATE).
+// Every call is appended to FAKE_CALL_LOG so tests can assert what the GitHub
+// backend invoked.
+//
+// ── UNRECOGNISED CALLS FAIL, AND THAT IS THE POINT ───────────────────────────
+// This file used to end with a bare `process.exit(0)` for anything it did not
+// implement. That is the most dangerous shape a fake can have, because it is
+// indistinguishable from success: `gh()` in src/github.ts resolves empty stdout
+// to `null` rather than throwing, so a subcommand the fake had never heard of
+// returned "no data" and the backend carried on. A GraphQL query the fake could
+// not answer would have left the whole suite green while the code under test
+// received nothing at all — a passing run implying coverage that did not exist.
+//
+// So every unhandled path now exits non-zero with a message naming exactly what
+// was not recognised. A fake that green-lights what it does not understand is
+// worse than no fake.
 //
 // FAKE_GH_STATE shape (all optional):
 //   {
 //     "authed": true,
 //     "user": { "login": "ada", "name": "Ada Lovelace" },
 //     "issues": { "ada/appweb": [ { ...issue json... } ] },
-//     "prs":    { "ada/appweb": { "author:ada": [ {...} ], "review-requested:ada": [ {...} ] } }
+//     "prs":    { "ada/appweb": { "author:ada": [ {...} ], "review-requested:ada": [ {...} ] } },
+//     "graphql": {
+//       "OperationName": { "data": { ... } },
+//       "PagedOperation": [ { "data": { ...page 1... } }, { "data": { ...page 2... } } ]
+//     }
 //   }
 // `issues`/`prs` are keyed by the `--repo` slug; `prs` is further keyed by a
 // substring of the `--search` query (author: / review-requested: / involves:),
 // so the three PR queries the backend makes can return distinct sets. A missing
 // key yields an empty array — the backend treats that repo as having nothing.
+//
+// `graphql` is keyed by the query's OPERATION NAME, not by a substring of the
+// query text. That is deliberate: substring matching silently picks the wrong
+// entry when two queries share a fragment, and it gives no answer at all for
+// "which query was this?" when a test fails. Naming the operation is a one-word
+// requirement on production queries and it makes routing exact. An anonymous
+// query (`{ viewer { login } }`) is rejected with that instruction rather than
+// guessed at.
+//
+// An array value is a SEQUENCE: successive calls to the same operation return
+// successive elements, which is how a paginated fetch is modelled. Running off
+// the end of the sequence fails rather than repeating the last page, because
+// repeating it is exactly the shape that spins a `hasNextPage` loop forever.
+// The per-operation counter lives in a sidecar next to FAKE_GH_STATE, since
+// every invocation is a fresh process with no memory of the last one.
+//
+// A response carrying a non-empty `errors` array is served the way the real CLI
+// serves one: the JSON body on stdout, `gh: <first message>` on stderr, exit 1.
+// That is what lets a test drive the GraphQL failure paths — a missing
+// `read:project` scope above all — without a token that can reach the real API.
 import fs from "node:fs";
 
 const argv = process.argv.slice(2);
 const LOG = process.env.FAKE_CALL_LOG;
-if (LOG) { try { fs.appendFileSync(LOG, "gh " + JSON.stringify(argv) + "\n"); } catch {} }
 
 function state() {
   try { return JSON.parse(fs.readFileSync(process.env.FAKE_GH_STATE, "utf-8")); } catch { return {}; }
@@ -29,13 +66,121 @@ function flag(name) {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/** Exit non-zero with a `gh: `-prefixed stderr line, as the real CLI does. */
+function fail(message) {
+  process.stderr.write(`gh: ${message}\n`);
+  process.exit(1);
+}
+
+// ── argv logging ─────────────────────────────────────────────────────────────
+// Logged before anything can fail, so a test that asserts on a REJECTED call
+// still sees it. A GraphQL query is a multi-kilobyte string and would bury the
+// log, so the `query=` value is replaced by its operation name — the argv shape
+// (and every variable passed alongside it) is otherwise untouched, so existing
+// `startsWith("gh ")` / `includes(...)` assertions are unaffected.
+function logArgv(operationName) {
+  if (!LOG) return;
+  const shown = operationName
+    ? argv.map((a) => (a.startsWith("query=") ? `query=${operationName}` : a))
+    : argv;
+  try { fs.appendFileSync(LOG, "gh " + JSON.stringify(shown) + "\n"); } catch { /* logging is best-effort */ }
+}
+
 const s = state();
 const [cmd, sub] = argv;
+
+// ── gh api graphql ───────────────────────────────────────────────────────────
+// Handled before the generic log call so the query can be collapsed to its
+// operation name (see logArgv).
+if (cmd === "api" && sub === "graphql") {
+  // `-f k=v` / `-F k=v` / `--field k=v` / `--raw-field k=v`. `@file` values are
+  // NOT supported: the backend passes its query inline, and a fake that quietly
+  // mishandled a file reference would be the very failure this rewrite removes.
+  // Anything using it lands in the `fail` below instead.
+  const fields = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (!["-f", "-F", "--field", "--raw-field"].includes(argv[i])) continue;
+    const pair = argv[i + 1] ?? "";
+    const eq = pair.indexOf("=");
+    if (eq > 0) fields[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+
+  const query = fields.query;
+  if (!query) {
+    logArgv(null);
+    fail("api graphql called with no -f query=… argument");
+  }
+  if (query.startsWith("@")) {
+    logArgv(null);
+    fail("the fake gh does not support reading a query from a file (-f query=@path); pass it inline");
+  }
+
+  const named = query.match(/\b(?:query|mutation)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  if (!named) {
+    logArgv(null);
+    fail(
+      "could not find an operation name in the GraphQL query. The fake routes by " +
+        "operation name, so production queries must be named — write " +
+        "`query AgendoSomething(...) { ... }`, not an anonymous `{ ... }`.",
+    );
+  }
+  const op = named[1];
+  logArgv(op);
+
+  const registry = s.graphql ?? {};
+  if (!Object.prototype.hasOwnProperty.call(registry, op)) {
+    const known = Object.keys(registry);
+    fail(
+      `no fixture registered for GraphQL operation "${op}". ` +
+        (known.length ? `Known operations: ${known.join(", ")}.` : "FAKE_GH_STATE has no `graphql` key at all.") +
+        " Add it to FAKE_GH_STATE rather than letting the call succeed with no data.",
+    );
+  }
+
+  let payload = registry[op];
+  if (Array.isArray(payload)) {
+    // Sequence: one element per call, in order. The counter has to outlive the
+    // process, so it goes in a sidecar keyed by operation.
+    const seqPath = `${process.env.FAKE_GH_STATE}.seq.json`;
+    let seq = {};
+    try { seq = JSON.parse(fs.readFileSync(seqPath, "utf-8")); } catch { /* first call */ }
+    const n = seq[op] ?? 0;
+    if (n >= payload.length) {
+      fail(
+        `GraphQL operation "${op}" was called ${n + 1} times but only ${payload.length} ` +
+          "response(s) are registered. Serving the last page again would spin a " +
+          "pagination loop forever, so this fails instead.",
+      );
+    }
+    seq[op] = n + 1;
+    try { fs.writeFileSync(seqPath, JSON.stringify(seq)); } catch { /* best-effort */ }
+    payload = payload[n];
+  }
+
+  const body = JSON.stringify(payload);
+  if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+    // The real CLI prints the body AND a `gh: <message>` line, then exits 1.
+    process.stdout.write(body);
+    process.stderr.write(`gh: ${payload.errors[0]?.message ?? "GraphQL error"}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+logArgv(null);
 
 // `gh auth status` — exit 0 iff authenticated (stderr text is what the real CLI
 // prints; the backend only reads the exit code).
 if (cmd === "auth" && sub === "status") {
-  if (s.authed) { process.stderr.write("✓ Logged in to github.com as " + (s.user?.login ?? "user") + "\n"); process.exit(0); }
+  if (s.authed) {
+    process.stderr.write("✓ Logged in to github.com as " + (s.user?.login ?? "user") + "\n");
+    // Token scopes, in the real CLI's format. Nothing reads them today; they are
+    // here so the shape a scope check would parse is the shape the fake emits,
+    // rather than being invented alongside the first consumer.
+    if (s.scopes) process.stderr.write("  - Token scopes: " + s.scopes.map((x) => `'${x}'`).join(", ") + "\n");
+    process.exit(0);
+  }
   process.stderr.write("You are not logged into any GitHub hosts.\n");
   process.exit(1);
 }
@@ -68,5 +213,9 @@ if (cmd === "pr" && sub === "list") {
   process.exit(0);
 }
 
-// Any other subcommand: succeed silently.
-process.exit(0);
+// Anything else: FAIL. See the header — a silent exit 0 here is what let an
+// unimplemented call look like a successful one that happened to return nothing.
+fail(
+  `the fake gh does not implement \`gh ${argv.join(" ")}\`. ` +
+    "Add a branch for it rather than letting the call succeed with no output.",
+);
