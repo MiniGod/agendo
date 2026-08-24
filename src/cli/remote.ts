@@ -76,6 +76,29 @@ function paneField(host: string, field: string): Map<string, string> {
   return out;
 }
 
+/**
+ * Look a pane field up for a managed target.
+ *
+ * `liveManagedPaths` reports a name that is EITHER a window (agendo running
+ * inside tmux — the usual case, and every window on the vm) or a whole SESSION
+ * (agendo started outside tmux names the session `cl-…` instead). The two
+ * address differently — `=session:=window` versus `=session` — so the session
+ * half has to come from the target, and the session case has no window name to
+ * key on at all.
+ *
+ * The fallback is therefore gated on `name === session`: for a managed session,
+ * any pane in it is the right one, since it has exactly the one. Ungated, a
+ * window whose key merely missed would silently inherit a DIFFERENT window's
+ * session id and title — a wrong answer dressed as a right one.
+ */
+export function paneLookup(map: Map<string, string>, target: string, name: string): string | undefined {
+  const session = target.replace(/^=/, "").split(":")[0] ?? "";
+  const exact = map.get(`${session}\t${name}`);
+  if (exact !== undefined || name !== session) return exact;
+  for (const [k, v] of map) if (k.startsWith(`${session}\t`)) return v;
+  return undefined;
+}
+
 /** Full session id and provider from a pane's launch argv, when it has one. */
 export function identify(cmd: string | undefined): { id: string | null; source: string | null } {
   if (!cmd) return { id: null, source: null };
@@ -106,10 +129,9 @@ function readHost(host: string): RemoteWindow[] {
   const now = Math.floor(Date.now() / 1000);
   for (const { name, target, cwd, placeholder } of liveManagedPaths(host)) {
     if (!managedKind(name)) continue;
-    const key = `${target.slice(1).split(":")[0]}\t${name}`;
-    const { id, source } = identify(starts.get(key));
-    const title = titles.get(key) || null;
-    const actAt = Number(acts.get(key));
+    const { id, source } = identify(paneLookup(starts, target, name));
+    const title = paneLookup(titles, target, name) || null;
+    const actAt = Number(paneLookup(acts, target, name));
     // tmux's activity clock is the REMOTE machine's. Differencing it against a
     // local `now` is only honest while the two agree — they do here (checked:
     // identical `date +%s`), but this is a stated assumption, not a guarantee.

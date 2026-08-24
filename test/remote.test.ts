@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { TRANSPORT_EXIT, knownHost, loadHosts, tmuxArgv } from "../src/remote.ts";
-import { identify } from "../src/cli/remote.ts";
+import { identify, paneLookup } from "../src/cli/remote.ts";
 
 // The transport seam decides, for every tmux call agendo makes, which machine it
 // runs on. The e2e suite cannot reach this: its `fakebin/tmux` stub IS the tmux
@@ -195,5 +195,29 @@ describe("identify — session identity from a pane's launch argv", () => {
   test("a uuid-shaped string that is not an id argument is not taken as one", () => {
     // The cwd of a worktree can contain a uuid. Only the flag forms count.
     expect(identify("bash -c 'cd /tmp/0fe53844-cc68-4f89-aac2-3ff54a04d1a4'").id).toBeNull();
+  });
+});
+
+describe("paneLookup — window targets vs session targets", () => {
+  const map = new Map([
+    ["agendo-git\tcl-bg-aaa", "A"],
+    ["agendo-git\tlauncher", "L"],
+    ["cl-bg-solo\tbash", "S"],
+  ]);
+
+  test("a window target keys on session + window", () => {
+    expect(paneLookup(map, "=agendo-git:=cl-bg-aaa", "cl-bg-aaa")).toBe("A");
+  });
+
+  test("a SESSION target falls back to the session's only pane", () => {
+    // agendo started outside tmux names the tmux SESSION `cl-…`, so there is no
+    // window name to key on. The session has exactly one managed pane.
+    expect(paneLookup(map, "=cl-bg-solo", "cl-bg-solo")).toBe("S");
+  });
+
+  test("a window that misses does NOT inherit a sibling's identity", () => {
+    // The whole reason the fallback is gated. Ungated, this would return "A" —
+    // a different session's id and title, rendered as though it were this one's.
+    expect(paneLookup(map, "=agendo-git:=cl-bg-zzz", "cl-bg-zzz")).toBeUndefined();
   });
 });
