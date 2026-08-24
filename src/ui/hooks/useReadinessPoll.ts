@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { LoadedModel } from "../../model.ts";
+import { isRemoteKey, type LoadedModel } from "../../model.ts";
 import {
   capturePane,
   capturePaneState,
@@ -70,7 +70,8 @@ export function useReadinessPoll({
   useEffect(() => {
     const windows = model?.liveWindows;
     if (!windows || windows.size === 0) {
-      setPanes((p) => (p.size === 0 ? p : new Map()));
+      const seed = model?.remotePanes ?? new Map<string, PaneState>();
+      setPanes((p) => (p.size === 0 && seed.size === 0 ? p : new Map(seed)));
       // No live windows to attribute to — drop all auto-resume bookkeeping so a
       // relaunched session can't inherit a stale (possibly past) reset instant.
       limitWindows.current.clear();
@@ -83,8 +84,23 @@ export function useReadinessPoll({
       // and derive readiness, shell count, and — when limited — the reset time
       // from the same snapshot. Auto-resume is folded in here so it rides the
       // same cadence and the same fresh capture.
-      const next = new Map<string, PaneState>();
+      // Seeded with the remote rows' readiness, which the sweep computed on the
+      // last full load — this loop cannot produce it (see the skip below), and
+      // without it a remote row would render with no state at all.
+      const next = new Map<string, PaneState>(model?.remotePanes);
       for (const [canon, win] of windows) {
+        // Remote windows are in this map so that enter can attach to them, but
+        // their panes live on another machine's tmux server and MUST NOT be
+        // captured here. Two reasons, and the first is a correctness one:
+        // `win.target` is a target on the FAR machine, so capturing it locally
+        // reads whatever local session happens to share that name — a wrong
+        // readiness on the row, and auto-resume acting on a pane that is not the
+        // one shown. The second is cost: this is a polling loop, and a beam call
+        // is ~45 ms (docs/remote-machines.md §11.2).
+        //
+        // Remote readiness comes from the sweep instead (`model.remotePanes`),
+        // refreshed on a full load. See loadLocalSessions.
+        if (isRemoteKey(canon)) continue;
         const { raw, cursor } = capturePaneState(win.target);
         const readiness = paneReadiness(raw, cursor);
         let resetAt: number | null | undefined;

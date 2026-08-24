@@ -135,6 +135,30 @@ export function linkBadge(open: OpenTargets | undefined): string | null {
   return parts.length ? parts.join(" → ") : null;
 }
 
+/**
+ * The short tags between a session's agent name and its title: which machine it
+ * is on, and how it was launched.
+ *
+ * `@<machine>` appears only for a session on ANOTHER machine. A remote row is
+ * otherwise indistinguishable from a local one in the flat "Running now"
+ * section — which is exactly where enter attaches, and attaching to the wrong
+ * machine is the mistake worth a few columns to prevent. A badge on every local
+ * row saying "here" would be noise.
+ *
+ * Its own component rather than two more ternaries inline: SessionRow was
+ * already at its complexity ceiling, and a row's tags are a thing in their own
+ * right now that there is more than one of them.
+ */
+function RowTags({ host, kind, selected }: { host?: string; kind?: SessionKind; selected: boolean }) {
+  const badge = kind ? KIND_BADGE[kind] : undefined;
+  return (
+    <>
+      {host ? <Text color={selected ? "black" : "magenta"}>{`@${host} `}</Text> : null}
+      {badge ? <Text color={selected ? "black" : "cyan"}>{`{${badge}} `}</Text> : null}
+    </>
+  );
+}
+
 export function SessionRow({
   session,
   running,
@@ -149,7 +173,6 @@ export function SessionRow({
 }: { session: AgentSession; running: boolean; kind?: SessionKind; pane?: PaneState; expanded: boolean; selected: boolean; timeField?: "lastUsed" | "created"; open?: OpenTargets; showLink?: boolean; placeholder?: boolean }) {
   const caret = expanded ? "▾ " : "▸ ";
   const displayTime = timeField === "created" ? (session.createdAt ?? session.lastUsed) : session.lastUsed;
-  const badge = kind ? KIND_BADGE[kind] : undefined;
   const status = running ? runningStatus(pane?.readiness) : null;
   const shells = running ? pane?.shells ?? 0 : 0;
   const link = showLink ? linkBadge(open) : null;
@@ -159,7 +182,7 @@ export function SessionRow({
         <Text color={selected ? "black" : "gray"}>{caret}</Text>
         <Text color={selected ? "black" : status ? status.color : "gray"}>{running ? "● " : placeholder ? "⏸ " : "○ "}</Text>
         <Text dimColor={!selected}>{`[${session.source}] `}</Text>
-        {badge ? <Text color={selected ? "black" : "cyan"}>{`{${badge}} `}</Text> : null}
+        <RowTags host={session.host} kind={kind} selected={selected} />
         <Text>{session.title.replace(/\s+/g, " ").slice(0, 50)}</Text>
         {link ? <Text color={selected ? "black" : "magenta"}>{`  ${link}`}</Text> : null}
         <Text dimColor={!selected}>{`  ${timeAgo(displayTime)}`}</Text>

@@ -9,6 +9,7 @@ import {
 import { captureRestore, resolveWindowSession } from "./restore.ts";
 import { discoverRepos, mergeRepos, repoRootForCwd, repoScopeKeys, type RepoInfo } from "./repos.ts";
 import { remoteSession, sweepRemotes } from "./remoteSessions.ts";
+import type { PaneState } from "./ui/format.ts";
 import { basename } from "path";
 import type {
   AgentSession,
@@ -57,6 +58,9 @@ export interface LoadedModel {
   currentIterationName: string | null;
   /** tmux session names that are currently live. */
   liveTmux: Set<string>;
+  /** Readiness for remote windows, from the sweep — see `LocalSessions`. Empty
+   *  without `--remote`. */
+  remotePanes: Map<string, PaneState>;
   /** How each currently-running session was launched, by canonical name (for UI badges). */
   liveKinds: Map<string, SessionKind>;
   /** The live tmux window each running session occupies, by canonical name (for pane reads). */
@@ -350,6 +354,13 @@ export interface LocalSessions {
   livePlaceholders: Set<string>;
   /** One line per machine that could not be read; empty without `--remote`. */
   remoteWarnings: string[];
+  /**
+   * Readiness for the remote windows, keyed by `liveKey`, as the sweep computed
+   * it. The local readiness poll cannot produce this — it captures panes on THIS
+   * machine's tmux — so a remote row would otherwise render with no state at
+   * all. Refreshed on a full load, like everything else remote.
+   */
+  remotePanes: Map<string, PaneState>;
 }
 
 export async function loadLocalSessions(remote: string[] | null = null): Promise<LocalSessions> {
@@ -362,6 +373,7 @@ export async function loadLocalSessions(remote: string[] | null = null): Promise
   // section, the readiness badge, the attach action — works on a remote row
   // without knowing one exists. `liveKey` is what makes that safe.
   const warnings: string[] = [];
+  const remotePanes = new Map<string, PaneState>();
   if (remote) {
     const sweep = sweepRemotes(remote);
     warnings.push(...sweep.warnings);
@@ -376,6 +388,11 @@ export async function loadLocalSessions(remote: string[] | null = null): Promise
         liveKinds.set(key, managedKind(w.name) ?? "resumed");
         liveWindows.set(key, { name: w.name, target: w.target });
       }
+      remotePanes.set(key, {
+        readiness: w.readiness,
+        shells: w.shells,
+        resetAt: w.limitResetAt === null ? null : Date.parse(w.limitResetAt),
+      });
       const list = byHost.get(w.host);
       if (list) list.push(s);
       else byHost.set(w.host, [s]);
@@ -388,7 +405,7 @@ export async function loadLocalSessions(remote: string[] | null = null): Promise
       sessionGroups.push({ root: `${host}:`, name: host, sessions });
     }
   }
-  return { index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders, remoteWarnings: warnings };
+  return { index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders, remoteWarnings: warnings, remotePanes };
 }
 
 export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
@@ -577,6 +594,7 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     liveKinds,
     liveWindows,
     livePlaceholders,
+    remotePanes: local.remotePanes,
     repos,
     repoScope,
     sessionGroups,

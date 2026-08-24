@@ -3,7 +3,6 @@ import { Box, Text, useApp, useInput } from "ink";
 import { isRunning, itemKey, liveKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
-import { sessionName } from "../tmux.ts";
 import { discoverProfiles, moveSessionToProfile, profileChoices, type ClaudeProfile } from "../profiles.ts";
 import { retargetRestoreProfile } from "../restore.ts";
 import { openUrl } from "../browser.ts";
@@ -954,7 +953,7 @@ export default function App({
               session={row.session}
               running={row.running}
               kind={row.running ? model?.liveKinds.get(liveKey(row.session)) : undefined}
-              pane={row.running ? panes.get(sessionName(row.session)) : undefined}
+              pane={row.running ? panes.get(liveKey(row.session)) : undefined}
               expanded={row.expanded}
               selected={selected}
               timeField={row.timeField}

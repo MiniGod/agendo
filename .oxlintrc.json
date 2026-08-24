@@ -116,7 +116,7 @@
         // file must never be what the rest of src/ is measured against. What is
         // left here is App.tsx's own 1036, and everything else got 191 lines
         // tighter.
-        "max-lines": ["error", { "max": 1035, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
+        "max-lines": ["error", { "max": 1034, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
