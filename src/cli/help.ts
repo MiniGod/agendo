@@ -10,6 +10,13 @@ Usage:
                                 the a key, the repo filter with f.
       --session, -s <name>      Override the derived host session name (e.g. on a
                                 basename collision between two paths)
+      --remote                  EXPERIMENTAL. Also show sessions running on the
+                                machines beam has registered, grouped by machine,
+                                and let enter attach to one (a local window
+                                running an ssh into that machine's tmux — nested,
+                                so the remote end detaches with prefix prefix d).
+                                Remote rows refresh on r, not on the 2s poll.
+      --remote=<machine>        Just that machine. Repeat for several.
   agendo --no-tmux             Open the menu inline, without a tmux session
   agendo launch [opts] <prompt>
                               Start a background session: own git worktree + a
@@ -83,6 +90,15 @@ Usage:
                                 cwd is under dir. Combines with --repo.
       --repo <name>             Only sessions in that repo — a bare name or an
                                 owner/repo slug. Worktrees count as their repo.
+      --remote                  EXPERIMENTAL. Also list sessions on the machines
+                                beam has registered, with a machine column
+                                (local rows read "local"). Needs beam on PATH.
+                                Without this flag nothing off this machine is
+                                read or spawned.
+      --remote=<machine>        Just that machine. Repeat for several. The "="
+                                is required: [dir] and --remote share the
+                                command line, so a bare value would be
+                                ambiguous.
   agendo list pr, prs [dir]    List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
                                 approvals, branch, session, title). With a dir, only

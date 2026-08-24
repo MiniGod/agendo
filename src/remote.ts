@@ -221,3 +221,58 @@ export function probeHost(host: string): HostProbe {
   }
   return { ok: false, missingBeam: false, error: err || `exit ${r.status}` };
 }
+
+/**
+ * The argv that ATTACHES a terminal to a window on `host`.
+ *
+ * Not pass-through, and that distinction is the whole of it. Pass-through
+ * (`tmuxArgv`) deliberately allocates no tty — `-t` would let the line
+ * discipline rewrite `\n` as `\r\n` and destroy the byte-exactness every pane
+ * read depends on. An attach needs exactly the tty pass-through refuses, so it
+ * goes through beam's own `attach` verb instead of through tmux.
+ *
+ * The target is beam's own `host:session:window` grammar, NOT a tmux target
+ * string: beam splits the host at the first colon and the session at the next
+ * (tmux forbids `:` in a session name, so that split is unambiguous), and
+ * applies its own `=`-exact-match discipline to both halves. Handing it a
+ * pre-built `=session:=window` would double that up.
+ *
+ * Two flags, and agendo needs both on every attach:
+ *
+ * - `--exec` replaces this process with the attach rather than opening a window.
+ *   agendo has already made the local tmux window and beam is its command, so
+ *   without this beam would see `$TMUX` set and open a SECOND window inside it.
+ * - `--no-create` makes a missing target fail instead of being created. A stale
+ *   row or a mistyped name must never spawn a session on someone else's machine.
+ *   (A window target never creates in any case; this covers the session form.)
+ *
+ * Landing on the right window costs no extra round trip: tmux resolves the `-t`
+ * target BEFORE opening the terminal, so `attach-session -t '=session:=window'`
+ * selects that window as part of attaching. Verified here on a throwaway server
+ * and again by beam's own suite. No `select-window` is sent — one would move the
+ * active window for everyone else attached there even when the attach then fails.
+ *
+ * KNOWN LIMIT, inherited from tmux and not from beam: a window name containing a
+ * `.` breaks tmux's own target parsing (it reads the dot as the start of a pane
+ * part). agendo's managed names are `cl-<kind>-<hex>`, so none can contain one.
+ */
+export function beamAttachArgv(host: string, session: string, window: string | null): string[] {
+  const target = window === null ? `${host}:${session}` : `${host}:${session}:${window}`;
+  return [...beamCommand(), "attach", "--exec", "--no-create", target];
+}
+
+/**
+ * Split a tmux target of the form `=session:=window` (or a bare `=session`) back
+ * into its two plain names.
+ *
+ * agendo builds those targets to address tmux directly; beam wants the names.
+ * Rather than keep a second copy of the session/window pair on every row, the
+ * one target each row already carries is taken apart here.
+ */
+export function splitTarget(target: string): { session: string; window: string | null } {
+  const unpin = (x: string) => (x.startsWith("=") ? x.slice(1) : x);
+  const colon = target.indexOf(":");
+  if (colon === -1) return { session: unpin(target), window: null };
+  const window = target.slice(colon + 1);
+  return { session: unpin(target.slice(0, colon)), window: window === "" ? null : unpin(window) };
+}

@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { NO_TMUX_EXIT, TRANSPORT_EXIT, knownHost, loadHosts, tmuxArgv } from "../src/remote.ts";
-import { identify, paneLookup } from "../src/cli/remote.ts";
+import { NO_TMUX_EXIT, TRANSPORT_EXIT, beamAttachArgv, knownHost, loadHosts, splitTarget, tmuxArgv } from "../src/remote.ts";
+import { identify, paneLookup } from "../src/remoteSessions.ts";
 
 // The transport seam decides, for every tmux call agendo makes, which machine it
 // runs on. The e2e suite cannot reach this: its `fakebin/tmux` stub IS the tmux
@@ -243,5 +243,61 @@ describe("paneLookup — window targets vs session targets", () => {
     // The whole reason the fallback is gated. Ungated, this would return "A" —
     // a different session's id and title, rendered as though it were this one's.
     expect(paneLookup(map, "=agendo-git:=cl-bg-zzz", "cl-bg-zzz")).toBeUndefined();
+  });
+});
+
+describe("beamAttachArgv — beam's target grammar, not tmux's", () => {
+  // The attach path is the one place agendo does NOT drive tmux through
+  // pass-through: it needs a tty, which pass-through deliberately refuses. So it
+  // speaks beam's own `host:session:window`, and handing it a pre-built tmux
+  // target would double up the `=`-pinning beam applies itself.
+  test("a window target becomes host:session:window with both flags", () => {
+    expect(beamAttachArgv("vm", "agendo-git", "cl-claude-abc")).toEqual([
+      "beam", "attach", "--exec", "--no-create", "vm:agendo-git:cl-claude-abc",
+    ]);
+  });
+
+  test("a session-only target omits the window part", () => {
+    expect(beamAttachArgv("vm", "cl-bg-abc", null)).toEqual([
+      "beam", "attach", "--exec", "--no-create", "vm:cl-bg-abc",
+    ]);
+  });
+
+  // Both flags are load-bearing and neither is a default: without --exec beam
+  // sees $TMUX (agendo's own window) and opens a second window inside it;
+  // without --no-create a stale row could spawn a session on someone's machine.
+  test("neither flag is optional", () => {
+    const argv = beamAttachArgv("vm", "s", "w");
+    expect(argv).toContain("--exec");
+    expect(argv).toContain("--no-create");
+  });
+
+  test("AGENDO_BEAM overrides the executable here too", () => {
+    process.env.AGENDO_BEAM = "bun /w/beam.ts";
+    expect(beamAttachArgv("vm", "s", "w").slice(0, 2)).toEqual(["bun", "/w/beam.ts"]);
+  });
+});
+
+describe("splitTarget — a tmux target back into plain names", () => {
+  test("splits and unpins both halves", () => {
+    expect(splitTarget("=agendo-git:=cl-claude-abc")).toEqual({ session: "agendo-git", window: "cl-claude-abc" });
+  });
+
+  test("a bare session target has no window", () => {
+    expect(splitTarget("=cl-bg-abc")).toEqual({ session: "cl-bg-abc", window: null });
+    expect(splitTarget("cl-bg-abc")).toEqual({ session: "cl-bg-abc", window: null });
+  });
+
+  // `=session:` is the form tmux needs for a pane read of a whole session
+  // (docs/remote-machines.md §5.4). Its window half is empty, not a window named
+  // "" — which beam would reject.
+  test("a trailing colon is not a window", () => {
+    expect(splitTarget("=cl-bg-abc:")).toEqual({ session: "cl-bg-abc", window: null });
+  });
+
+  // tmux resolves a numeric window half as an INDEX, and agendo leaves those
+  // unpinned on purpose (see exactKillTarget). Round-tripping must not add a `=`.
+  test("a numeric window index survives", () => {
+    expect(splitTarget("=agendo-git:3")).toEqual({ session: "agendo-git", window: "3" });
   });
 });

@@ -1,6 +1,5 @@
 import { basename } from "path";
-import { isRunning, itemKey, prKey, type LoadedModel } from "../model.ts";
-import { sessionName } from "../tmux.ts";
+import { isRunning, itemKey, liveKey, prKey, type LoadedModel } from "../model.ts";
 import { convertTarget } from "./convert.ts";
 import { homeShort, sessionRepo, timeAgo, type Activity, type Cell } from "./format.ts";
 import { prTarget, prOpen, wiTarget, wiOpen, type FreshTarget, type OpenTargets } from "./targets.ts";
@@ -364,7 +363,7 @@ export function buildSessionsRows(
   const linkOf = (s: AgentSession) => model.sessionLinks.get(`${s.source}:${s.id}`);
   // A session with a live-but-dormant restore placeholder window (idle bash
   // awaiting a keypress) — shown as restored-but-unopened, not running.
-  const isPlaceholder = (s: AgentSession) => model.livePlaceholders.has(sessionName(s));
+  const isPlaceholder = (s: AgentSession) => model.livePlaceholders.has(liveKey(s));
 
   // Apply the path scope up front: filter each group's sessions and drop groups
   // that end up empty. Everything below reads `groups` instead of the raw model,

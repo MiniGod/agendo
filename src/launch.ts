@@ -20,6 +20,7 @@ import {
 } from "./tmux.ts";
 import { slugify, createWorktree, freeWorktreeBranch } from "./worktree.ts";
 import { repoRootForCwd } from "./repos.ts";
+import { beamAttachArgv, splitTarget } from "./remote.ts";
 import {
   ORCHESTRATOR_SLUG,
   isOrchestratorSession,
@@ -617,10 +618,52 @@ export function runInline(plan: OpenPlan): void {
  * duplicate instead of attaching.
  */
 export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan {
+  if (s.host) return openRemoteSession(s, s.host, liveWindow);
   // The NAME half: `openTarget` re-resolves the location itself (via
   // `windowLocation`), so it is already host-agnostic and wants the name.
   const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
   return openTarget(target, s.cwd, resumeArgv(s));
+}
+
+/**
+ * Open a session running on ANOTHER machine.
+ *
+ * There is no `switch-client` to a window on another host: a tmux client can
+ * only display windows served by the tmux it is attached to. So attaching to a
+ * remote session means putting a LOCAL window in front of you whose command is
+ * an ssh carrying a remote tmux client — nested tmux, which is what beam already
+ * does for a human and what it is being asked to do for a window.
+ *
+ * That nesting is real and worth knowing about rather than discovering: the
+ * inner tmux draws its own status bar inside the outer window, its panes resize
+ * to the outer client, and the inner session takes a doubled prefix (`prefix
+ * prefix d` to detach the remote end). None of it is a bug and none of it is
+ * hidden.
+ *
+ * The window is named `<host>/<window>` — beam's own convention, and it keeps a
+ * remote window visibly distinct from the local one it may share a name with.
+ * `resumeArgv` is NOT used: this attaches to a session already running over
+ * there, it does not start one, and the far machine's agent needs no argv from
+ * us.
+ */
+function openRemoteSession(s: AgentSession, host: string, liveWindow?: LiveTarget): OpenPlan {
+  // The tmux target on the FAR machine, from the far machine's own tmux — never
+  // rebuilt from `sessionName`, whose `source` half is a guess for a remote row.
+  const remoteTarget = liveWindow?.target ?? sessionName(s);
+  const local = `${host}/${liveWindow?.name ?? sessionName(s)}`;
+  const { session, window } = splitTarget(remoteTarget);
+  const argv = beamAttachArgv(host, session, window);
+  if (insideTmux()) {
+    const loc = windowLocation(local);
+    if (loc) return { alreadyRunning: true, tmuxName: local, mode: "inline", handover: ["tmux", "switch-client", "-t", loc] };
+    // `cwd` is a path on the OTHER machine and would not exist here, so the
+    // local window starts in the launcher's own directory. It is a host for an
+    // ssh; nothing runs in it locally.
+    newWindow(local, process.cwd(), argv);
+    return { alreadyRunning: false, tmuxName: local, mode: "inline", handover: ["tmux", "select-window", "-t", local] };
+  }
+  // Outside tmux there is no window to make: hand the terminal straight to beam.
+  return { alreadyRunning: false, tmuxName: local, mode: "handover", handover: argv };
 }
 
 /**

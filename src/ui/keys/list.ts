@@ -1,7 +1,6 @@
 import type { Key } from "ink";
-import { itemKey, prKey } from "../../model.ts";
+import { itemKey, liveKey, prKey } from "../../model.ts";
 import { openSession } from "../../launch.ts";
-import { sessionName } from "../../tmux.ts";
 import { SELECTABLE, sessionExpandKey, type Row } from "../rows.ts";
 import { V } from "../vocabState.ts";
 import type { KeyContext, View } from "./context.ts";
@@ -249,7 +248,7 @@ function handleListNavKeys(input: string, key: Key, ctx: NavCtx): boolean {
     else if (row.kind === "pr") ctx.toggleExpand(`pr:${prKey(row.pr)}`);
     else if (row.kind === "toggle") ctx.toggleSection(row.id);
     else if (row.kind === "session") {
-      ctx.open(openSession(row.session, ctx.model?.liveWindows.get(sessionName(row.session))));
+      ctx.open(openSession(row.session, ctx.model?.liveWindows.get(liveKey(row.session))));
     } else if (row.kind === "fresh") {
       ctx.enterFresh(row.target);
     } else if (row.kind === "newsess") {

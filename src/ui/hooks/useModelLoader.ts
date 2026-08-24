@@ -40,6 +40,7 @@ export function useModelLoader({
   provider,
   identity,
   hostSession,
+  remote,
   discoveredRepos,
   setModel,
   setNotice,
@@ -48,6 +49,9 @@ export function useModelLoader({
   provider: ProviderName;
   identity: Identity | null;
   hostSession: string | undefined;
+  /** Machines to sweep beside this one; null = local only. Swept on a FULL load
+   *  only — never on the 2s rescan, see useLocalRescan. */
+  remote: string[] | null;
   discoveredRepos: RepoInfo[];
   setModel: React.Dispatch<React.SetStateAction<LoadedModel | null>>;
   setNotice: React.Dispatch<React.SetStateAction<string | null>>;
@@ -102,7 +106,7 @@ export function useModelLoader({
       const attempts = retryAttempts();
       for (let attempt = 1; !cancelled; attempt++) {
         try {
-          const m = await loadModel({ provider, identity, hostSession, scopeRepos: discoveredRepos });
+          const m = await loadModel({ provider, identity, hostSession, remote, scopeRepos: discoveredRepos });
           if (cancelled) return;
           // Repoint the shared vocabulary BEFORE publishing the model it
           // describes. This used to sit in App's render body, which made it a
@@ -163,7 +167,7 @@ export function useModelLoader({
       if (timer) clearTimeout(timer);
       wake?.();
     };
-  }, [provider, identity, reloadKey, discoveredRepos, hostSession, setModel, setNotice, noticeRef]);
+  }, [provider, identity, reloadKey, discoveredRepos, hostSession, remote, setModel, setNotice, noticeRef]);
 
   // Tick twice a second while a retry is counting down, so the countdown on the
   // retry screen actually counts down instead of freezing on its first value.

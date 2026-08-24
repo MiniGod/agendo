@@ -22,6 +22,19 @@ export interface AgentSession {
   source: AgentSource;
   /** Working directory the session ran in (where resume must be invoked). */
   cwd: string;
+  /**
+   * The machine this session is running on, as beam names it — absent for a
+   * local session, which is every session unless the launcher was started with
+   * `--remote`.
+   *
+   * A remote session is discovered from the far machine's tmux server rather
+   * than from a transcript (see remoteSessions.ts), so it carries the five
+   * fields tmux knows — id, source, cwd, title, lastUsed — and none of the ones
+   * that live in files: `branch`, `repository`, `createdAt`, `logPath` and
+   * `workflows` are all absent. They were already optional, which is why a
+   * remote session fits this type at all.
+   */
+  host?: string;
   /** git branch the session was last on, if known. */
   branch?: string;
   /**

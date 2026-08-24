@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
-import { isRunning, itemKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
+import { isRunning, itemKey, liveKey, prKey, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { loadActivity } from "../sessions.ts";
 import { launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
 import { sessionName } from "../tmux.ts";
@@ -88,14 +88,25 @@ import type {
  * in — passed to loadModel so restore snapshots the right session's tabs. The
  * `a` key toggles the runtime scoped↔global view (see `globalView`).
  */
+/** A new set with `k` added if absent, removed if present — the shape both the
+ *  expanded-row set and the collapsed-section set need. */
+function flip<T>(prev: Set<T>, k: T): Set<T> {
+  const next = new Set(prev);
+  if (!next.delete(k)) next.add(k);
+  return next;
+}
+
 export default function App({
   onOpen,
   filterRoot = null,
   hostSession,
+  remote,
 }: {
   onOpen: (plan: OpenPlan) => void;
   filterRoot?: string | null;
   hostSession?: string;
+  /** Machines to include beside this one (`--remote`); null = local only. */
+  remote: string[] | null;
 }) {
   const { exit } = useApp();
   const [model, setModel] = useState<LoadedModel | null>(null);
@@ -169,6 +180,7 @@ export default function App({
     provider,
     identity,
     hostSession,
+    remote,
     discoveredRepos,
     setModel,
     setNotice,
@@ -290,21 +302,8 @@ export default function App({
     setCursor(selectableIdx[(pos + dir + selectableIdx.length) % selectableIdx.length]);
   };
 
-  const toggleExpand = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-
-  const toggleSection = (id: string) =>
-    setToggles((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const toggleExpand = (key: string) => setExpanded((prev) => flip(prev, key));
+  const toggleSection = (id: string) => setToggles((prev) => flip(prev, id));
 
   const switchView = (v: View) => {
     setView(v);
@@ -954,7 +953,7 @@ export default function App({
               key={row.key}
               session={row.session}
               running={row.running}
-              kind={row.running ? model?.liveKinds.get(sessionName(row.session)) : undefined}
+              kind={row.running ? model?.liveKinds.get(liveKey(row.session)) : undefined}
               pane={row.running ? panes.get(sessionName(row.session)) : undefined}
               expanded={row.expanded}
               selected={selected}

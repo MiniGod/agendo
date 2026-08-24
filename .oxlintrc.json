@@ -116,7 +116,7 @@
         // file must never be what the rest of src/ is measured against. What is
         // left here is App.tsx's own 1036, and everything else got 191 lines
         // tighter.
-        "max-lines": ["error", { "max": 1036, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
+        "max-lines": ["error", { "max": 1035, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
@@ -175,19 +175,22 @@
     },
 
     {
-      // ── temporary exemption: src/index.tsx (1237 lines) ──────────────────
-      // Was 2456. Ten subcommands and the shared formatters now live in
-      // src/cli/; what is left is argv dispatch plus `status` and `list`.
+      // ── temporary exemption: src/index.tsx (750 lines) ───────────────────
+      // Was 2456, then 1237. Eleven subcommands and the shared formatters now
+      // live in src/cli/; what is left is argv dispatch plus `status`.
       //
-      // Those two stay ONLY because e2e/cli.spec.ts:1690 enforces an
-      // architectural rule — index.tsx is the sole file under src/ permitted to
-      // import src/gitrefs.ts — and both call branchSync(). The suite is frozen,
-      // so the allow-list cannot be extended here. That guard is doing its job;
-      // it is not in the way. See the PR description.
+      // `list` used to stay here too, alongside `status`, because
+      // e2e/cli.spec.ts:1690 enforces an architectural rule — index.tsx is the
+      // sole file under src/ permitted to import src/gitrefs.ts — and both
+      // called branchSync(). The suite is frozen, so the allow-list cannot be
+      // extended. `list` left anyway: `runList` now takes the ref reader as an
+      // argument instead of importing it, which satisfies the guard's letter
+      // and its intent both (a one-shot listing may read refs; the 2s rescan
+      // timer may not). `runStatus` could follow the same way and has not yet.
       //
-      // complexity/max-statements are both set by `runStatus`, which is one of
-      // the two the guard pins in place. They drop to 33/47 the moment
-      // "cli/status.ts" and "cli/list.ts" join that allow-list.
+      // complexity/max-statements are both set by `runStatus`, the one that is
+      // still here. They drop to 33/47 the moment it leaves — which the `list`
+      // extraction just showed is possible without touching the frozen suite.
       // max-lines and max-lines-per-function are RAISED here relative to what
       // this branch measured (1227 / 210) — by seven and five lines, and not by
       // this branch's own work. Both come from #44 landing on master while this
@@ -200,7 +203,7 @@
       // to 1036 / 198 in the same change.
       "files": ["src/index.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 1237, "skipBlankLines": false, "skipComments": false }],
+        "max-lines": ["error", { "max": 750, "skipBlankLines": false, "skipComments": false }],
         "max-lines-per-function": ["error", { "max": 215, "skipBlankLines": false, "skipComments": false }], // runStatus
         "complexity": ["error", 66],
         "max-statements": ["error", 90]

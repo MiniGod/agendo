@@ -1,9 +1,37 @@
 import React, { useEffect } from "react";
-import { loadLocalSessions, type LoadedModel } from "../../model.ts";
+import { isRemoteKey, loadLocalSessions, type LoadedModel } from "../../model.ts";
 import { mergeRepos, type RepoInfo } from "../../repos.ts";
+import type { LiveTarget, SessionKind } from "../../tmux.ts";
+import type { RepoSessions } from "../../types.ts";
 import { sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "../equality.ts";
 
 const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
+
+/** A session group belonging to another machine — see `loadLocalSessions`. */
+const isRemoteGroup = (g: RepoSessions) => g.sessions.some((x) => x.host);
+
+/**
+ * Fold a fresh LOCAL scan onto the remote half of the model already loaded.
+ *
+ * A remote entry is any key carrying a `<host>\0` prefix — `liveKey`'s doing, and
+ * the reason it exists: local and remote live in the same maps and are still
+ * told apart by their keys. The local scan is authoritative for everything else,
+ * so its maps are the base and only the remote keys are carried over.
+ */
+function mergeRemote(
+  prev: LoadedModel,
+  local: { live: Set<string>; liveKinds: Map<string, SessionKind>; liveWindows: Map<string, LiveTarget>; livePlaceholders: Set<string> },
+): { live: Set<string>; liveKinds: Map<string, SessionKind>; liveWindows: Map<string, LiveTarget>; livePlaceholders: Set<string> } {
+  const live = new Set(local.live);
+  const liveKinds = new Map(local.liveKinds);
+  const liveWindows = new Map(local.liveWindows);
+  const livePlaceholders = new Set(local.livePlaceholders);
+  for (const k of prev.liveTmux) if (isRemoteKey(k)) live.add(k);
+  for (const k of prev.livePlaceholders) if (isRemoteKey(k)) livePlaceholders.add(k);
+  for (const [k, v] of prev.liveKinds) if (isRemoteKey(k)) liveKinds.set(k, v);
+  for (const [k, v] of prev.liveWindows) if (isRemoteKey(k)) liveWindows.set(k, v);
+  return { live, liveKinds, liveWindows, livePlaceholders };
+}
 
 /**
  * The background LOCAL rescan. Extracted from App unchanged apart from the
@@ -49,6 +77,20 @@ export function useLocalRescan({
         if (stopped) return; // unmounted while the scan was running
         setModel((prev) => {
           if (!prev) return prev;
+          // Remote machines are NOT re-swept here, and must not be. This timer
+          // fires every 2 seconds; a beam call costs ~45 ms and a sweep is
+          // ~2 calls per remote window (docs/remote-machines.md §11.2), so a
+          // handful of remote sessions would put most of a second of subprocess
+          // work on a 2-second timer — the same CPU regression the gitrefs
+          // import guard exists to prevent, an order of magnitude worse.
+          //
+          // So the fresh LOCAL scan is folded onto whatever the last FULL load
+          // found remotely, rather than replacing it. Remote rows therefore keep
+          // their readiness until the next `r`; local rows stay live at 2 s.
+          // That difference is real and is the honest trade — a stale remote row
+          // beats a launcher that stalls for a second at a time.
+          const remoteGroups = prev.sessionGroups.filter(isRemoteGroup);
+          const carried = mergeRemote(prev, local);
           // The rescan's repos are session-derived only, so re-apply the same
           // merge loadModel does — otherwise a path-discovered repo that has
           // never hosted a session would drop out of the fresh-session picker a
@@ -59,10 +101,10 @@ export function useLocalRescan({
           // limited session doesn't thrash the readiness effect (which re-arms on
           // every `model` change and would otherwise re-sample constantly).
           const unchanged =
-            sessionGroupsSig(prev.sessionGroups) === sessionGroupsSig(local.sessionGroups) &&
-            sameLiveTmux(prev.liveTmux, local.live) &&
-            sameLiveTmux(prev.livePlaceholders, local.livePlaceholders) &&
-            sameLiveWindows(prev.liveWindows, local.liveWindows) &&
+            sessionGroupsSig(prev.sessionGroups) === sessionGroupsSig([...local.sessionGroups, ...remoteGroups]) &&
+            sameLiveTmux(prev.liveTmux, carried.live) &&
+            sameLiveTmux(prev.livePlaceholders, carried.livePlaceholders) &&
+            sameLiveWindows(prev.liveWindows, carried.liveWindows) &&
             sameRepos(prev.repos, repos);
           if (unchanged) return prev;
           // Merge the fresh LOCAL half; keep the NETWORK half from the last full
@@ -74,12 +116,12 @@ export function useLocalRescan({
           // reset a frozen reset instant or the guard, or auto-resume re-fires it.
           return {
             ...prev,
-            sessionGroups: local.sessionGroups,
+            sessionGroups: [...local.sessionGroups, ...remoteGroups],
             repos,
-            liveTmux: local.live,
-            liveKinds: local.liveKinds,
-            liveWindows: local.liveWindows,
-            livePlaceholders: local.livePlaceholders,
+            liveTmux: carried.live,
+            liveKinds: carried.liveKinds,
+            liveWindows: carried.liveWindows,
+            livePlaceholders: carried.livePlaceholders,
           };
         });
       } catch {

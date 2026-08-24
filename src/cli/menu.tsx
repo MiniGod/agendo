@@ -18,11 +18,11 @@ import type { OpenPlan } from "../launch.ts";
  * statement sequence does NOT show, and the seam where an import-time side
  * effect added later would first bite.
  */
-export function runMenu(ctx: LauncherContext): Promise<OpenPlan | null> {
+export function runMenu(ctx: LauncherContext, remote: string[] | null = null): Promise<OpenPlan | null> {
   return new Promise((resolve) => {
     const chosen: { plan: OpenPlan | null } = { plan: null };
     const { waitUntilExit } = render(
-      <App onOpen={(p) => { chosen.plan = p; }} filterRoot={ctx.filterRoot} hostSession={ctx.hostSession} />,
+      <App onOpen={(p) => { chosen.plan = p; }} filterRoot={ctx.filterRoot} hostSession={ctx.hostSession} remote={remote} />,
     );
     waitUntilExit().then(() => resolve(chosen.plan));
   });

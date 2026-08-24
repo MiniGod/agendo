@@ -8,6 +8,7 @@ import {
 } from "./tmux.ts";
 import { captureRestore, resolveWindowSession } from "./restore.ts";
 import { discoverRepos, mergeRepos, repoRootForCwd, repoScopeKeys, type RepoInfo } from "./repos.ts";
+import { remoteSession, sweepRemotes } from "./remoteSessions.ts";
 import { basename } from "path";
 import type {
   AgentSession,
@@ -105,6 +106,12 @@ export interface LoadModelOptions {
    */
   hostSession?: string;
   /**
+   * Machines to sweep beside this one, as beam names them; null (the default)
+   * means local only and spawns no beam at all. Only a FULL load sweeps them —
+   * the 2s local rescan deliberately does not, see useLocalRescan.
+   */
+  remote?: string[] | null;
+  /**
    * The git repos found under the launcher's path context (repos.ts'
    * `discoverGitReposUnder`). They widen the fetch scope — backends that query
    * per repo (GitHub) must see a repo inside the target even if no session ever
@@ -115,7 +122,40 @@ export interface LoadModelOptions {
 }
 
 export function isRunning(s: AgentSession, live: Set<string>): boolean {
-  return live.has(sessionName(s));
+  return live.has(liveKey(s));
+}
+
+/**
+ * The key a session is filed under in `live` / `liveKinds` / `liveWindows`.
+ *
+ * For a local session this is exactly `sessionName(s)` — the tmux window name —
+ * which is what these maps have always been keyed by, so nothing local moves.
+ *
+ * A remote session needs the machine folded in, because `sessionName` is NOT
+ * unique across machines: the same session resumed on two of them carries the
+ * same `cl-<source>-<shortid>` on both. Keyed by name alone, one machine's
+ * window would answer for the other's — and pressing enter would attach you to
+ * the wrong machine, which is the failure that matters here.
+ */
+export function liveKey(s: AgentSession): string {
+  return s.host ? `${s.host}${REMOTE_KEY_SEP}${sessionName(s)}` : sessionName(s);
+}
+
+/**
+ * Separator between the machine and the window name in a remote `liveKey`.
+ *
+ * A NUL, and deliberately not something readable like `/` or `:`. These maps
+ * also hold RAW tmux session and window names (`reconcileLive` seeds them from
+ * `liveTargets()`), and a local window may legitimately be named with a slash —
+ * in fact agendo names its own remote-attach windows `<host>/<window>`, so a
+ * slash test would classify the local half of a remote attach as remote. tmux
+ * cannot put a NUL in a name, so this cannot collide with anything real.
+ */
+export const REMOTE_KEY_SEP = "\u0000";
+
+/** Whether a `live`/`liveWindows` key belongs to another machine. */
+export function isRemoteKey(k: string): boolean {
+  return k.includes(REMOTE_KEY_SEP);
 }
 
 /**
@@ -308,14 +348,47 @@ export interface LocalSessions {
   liveKinds: Map<string, SessionKind>;
   liveWindows: Map<string, LiveTarget>;
   livePlaceholders: Set<string>;
+  /** One line per machine that could not be read; empty without `--remote`. */
+  remoteWarnings: string[];
 }
 
-export async function loadLocalSessions(): Promise<LocalSessions> {
+export async function loadLocalSessions(remote: string[] | null = null): Promise<LocalSessions> {
   const index = await SessionIndex.build();
   const repos = discoverRepos(index.all);
   const { live, liveKinds, liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
   const sessionGroups = groupSessionsByRepo(index.all);
-  return { index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders };
+  // Remote machines, when asked for. Merged into the SAME maps the local half
+  // uses rather than kept alongside them, so every consumer — the running
+  // section, the readiness badge, the attach action — works on a remote row
+  // without knowing one exists. `liveKey` is what makes that safe.
+  const warnings: string[] = [];
+  if (remote) {
+    const sweep = sweepRemotes(remote);
+    warnings.push(...sweep.warnings);
+    const byHost = new Map<string, AgentSession[]>();
+    for (const w of sweep.windows) {
+      const s = remoteSession(w);
+      const key = liveKey(s);
+      if (w.placeholder) {
+        livePlaceholders.add(key);
+      } else {
+        live.add(key);
+        liveKinds.set(key, managedKind(w.name) ?? "resumed");
+        liveWindows.set(key, { name: w.name, target: w.target });
+      }
+      const list = byHost.get(w.host);
+      if (list) list.push(s);
+      else byHost.set(w.host, [s]);
+    }
+    // One group per machine, named for it. `root` is the machine rather than a
+    // path because that is what a remote group IS — the sessions over there are
+    // in directories on a filesystem this process cannot see, so grouping them
+    // by repo root would invent a shared identity they do not have.
+    for (const [host, sessions] of [...byHost].sort(([a], [b]) => a.localeCompare(b))) {
+      sessionGroups.push({ root: `${host}:`, name: host, sessions });
+    }
+  }
+  return { index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders, remoteWarnings: warnings };
 }
 
 export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
@@ -327,7 +400,7 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   // to where you work, like GitHub) the fetch set, so build it up front. This is
   // the cheap, network-free local scan the App also polls on its own (see
   // loadLocalSessions) — reused here so the local half is computed one way.
-  const [me, local] = await Promise.all([provider.getMe(), loadLocalSessions()]);
+  const [me, local] = await Promise.all([provider.getMe(), loadLocalSessions(opts.remote ?? null)]);
   const { index } = local;
   const identity = opts.identity ?? me;
   // Fetch scope: the session-derived repos plus any repo found under the path
