@@ -58,22 +58,38 @@ interface RemoteWindow {
 }
 
 /**
- * The launch argv of every pane, keyed `session\twindow`.
+ * Pane fields for every pane, keyed `session\twindow`.
  *
- * A separate call from the metadata below because BOTH fields can contain the
- * separator, and a format may only have one variable-width field — which has to
- * be last. Same rule beam applies to its own `tmux ls` format, and for the same
- * reason. Two 20 ms calls beats one ambiguous parse.
+ * `fixed` are fields whose value cannot contain the tab separator (a numeric
+ * clock, a flag); `tail` is the one that can — a pane title or a launch argv —
+ * and it therefore goes last and takes the whole remainder of the line. This is
+ * a parsing rule, not a tmux limit: tmux is happy to interpolate any number of
+ * fields, but only the last one can be recovered unambiguously. It is the same
+ * rule beam applies to its own `tmux ls` format, for the same reason.
+ *
+ * So an arbitrary-valued field costs a call and a bounded one rides along free.
+ * That matters more over beam than it does locally: a beam call is ~45 ms of
+ * which ~30 ms is process startup (see docs/remote-machines.md §11.2), so a read
+ * folded in here is 45 ms that is simply not spent.
  */
-function paneField(host: string, field: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const line of tmuxLines(["list-panes", "-a", "-F", `#{session_name}\t#{window_name}\t${field}`], host)) {
-    const i = line.indexOf("\t");
-    const j = line.indexOf("\t", i + 1);
-    if (i === -1 || j === -1) continue;
-    out.set(line.slice(0, j), line.slice(j + 1));
+function paneFields(host: string, fixed: string[], tail: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const format = ["#{session_name}", "#{window_name}", ...fixed, tail].join("\t");
+  for (const line of tmuxLines(["list-panes", "-a", "-F", format], host)) {
+    const parts = line.split("\t");
+    // 2 key fields + the fixed ones + at least an (empty) tail.
+    if (parts.length < fixed.length + 3) continue;
+    const key = `${parts[0]}\t${parts[1]}`;
+    const head = parts.slice(2, 2 + fixed.length);
+    // Anything past the fixed fields is the tail, tabs and all.
+    out.set(key, [...head, parts.slice(2 + fixed.length).join("\t")]);
   }
   return out;
+}
+
+/** One field of `paneFields`, by index, for a managed target. */
+function fieldAt(map: Map<string, string[]>, target: string, name: string, i: number): string | undefined {
+  return paneLookup(map, target, name)?.[i];
 }
 
 /**
@@ -91,7 +107,7 @@ function paneField(host: string, field: string): Map<string, string> {
  * window whose key merely missed would silently inherit a DIFFERENT window's
  * session id and title — a wrong answer dressed as a right one.
  */
-export function paneLookup(map: Map<string, string>, target: string, name: string): string | undefined {
+export function paneLookup<T>(map: Map<string, T>, target: string, name: string): T | undefined {
   const session = target.replace(/^=/, "").split(":")[0] ?? "";
   const exact = map.get(`${session}\t${name}`);
   if (exact !== undefined || name !== session) return exact;
@@ -123,15 +139,16 @@ export function identify(cmd: string | undefined): { id: string | null; source: 
  */
 function readHost(host: string): RemoteWindow[] {
   const out: RemoteWindow[] = [];
-  const starts = paneField(host, "#{pane_start_command}");
-  const titles = paneField(host, "#{pane_title}");
-  const acts = paneField(host, "#{window_activity}");
+  // Two reads, not three: `window_activity` is a bare epoch second, so it cannot
+  // contain the separator and rides along with the title for free.
+  const starts = paneFields(host, [], "#{pane_start_command}");
+  const meta = paneFields(host, ["#{window_activity}"], "#{pane_title}");
   const now = Math.floor(Date.now() / 1000);
   for (const { name, target, cwd, placeholder } of liveManagedPaths(host)) {
     if (!managedKind(name)) continue;
-    const { id, source } = identify(paneLookup(starts, target, name));
-    const title = paneLookup(titles, target, name) || null;
-    const actAt = Number(paneLookup(acts, target, name));
+    const { id, source } = identify(fieldAt(starts, target, name, 0));
+    const title = fieldAt(meta, target, name, 1) || null;
+    const actAt = Number(fieldAt(meta, target, name, 0));
     // tmux's activity clock is the REMOTE machine's. Differencing it against a
     // local `now` is only honest while the two agree — they do here (checked:
     // identical `date +%s`), but this is a stated assumption, not a guarantee.

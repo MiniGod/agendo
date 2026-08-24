@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { TRANSPORT_EXIT, knownHost, loadHosts, tmuxArgv } from "../src/remote.ts";
+import { NO_TMUX_EXIT, TRANSPORT_EXIT, knownHost, loadHosts, tmuxArgv } from "../src/remote.ts";
 import { identify, paneLookup } from "../src/cli/remote.ts";
 
 // The transport seam decides, for every tmux call agendo makes, which machine it
@@ -13,6 +13,15 @@ import { identify, paneLookup } from "../src/cli/remote.ts";
 
 const saved = { beam: process.env.AGENDO_BEAM, cfg: process.env.BEAM_CONFIG_DIR };
 const dirs: string[] = [];
+
+// Both variables are read straight from the ambient environment, so a developer
+// who has `AGENDO_BEAM` exported — which is exactly what pointing agendo at a
+// development build of beam does — would otherwise see three of these fail and
+// nothing else. Clearing them per test makes the suite state a property of the
+// code rather than of the shell it was launched from.
+beforeEach(() => {
+  for (const k of ["AGENDO_BEAM", "BEAM_CONFIG_DIR"] as const) delete process.env[k];
+});
 
 afterEach(() => {
   for (const k of ["AGENDO_BEAM", "BEAM_CONFIG_DIR"] as const) delete process.env[k];
@@ -148,6 +157,21 @@ describe("TRANSPORT_EXIT", () => {
     // not see this pane, so I will not kill it". A dropped connection reported
     // as an ordinary tmux failure would look like an empty screen.
     expect(TRANSPORT_EXIT).toBe(255);
+  });
+});
+
+describe("the exit-status contract agendo shares with beam", () => {
+  // These two numbers are a protocol, not preferences: beam picked them and
+  // agendo reads them. 255 is "beam never got tmux's answer" (ssh's own failure
+  // code, which tmux does not produce); 127 is a shell that could not find tmux
+  // on the far machine. Folding them together would let a dropped connection
+  // look like an empty screen, and `close` treats an unread pane as "do not
+  // kill" — so the distinction is what keeps that guard armed.
+  test("transport failure and a missing tmux are different numbers, and neither is 1", () => {
+    expect(TRANSPORT_EXIT).toBe(255);
+    expect(NO_TMUX_EXIT).toBe(127);
+    expect(TRANSPORT_EXIT).not.toBe(NO_TMUX_EXIT);
+    for (const code of [TRANSPORT_EXIT, NO_TMUX_EXIT]) expect(code).not.toBe(1);
   });
 });
 

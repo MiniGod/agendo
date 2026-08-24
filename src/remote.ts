@@ -61,6 +61,19 @@ export interface RemoteHost {
 export const TRANSPORT_EXIT = 255;
 
 /**
+ * The exit status a POSIX shell uses for "command not found", which is what a
+ * machine with no tmux installed answers with.
+ *
+ * beam passes it through rather than folding it into `TRANSPORT_EXIT`, and that
+ * is the right call: rewriting 127 would assert that no tmux invocation can ever
+ * legitimately exit 127, which is not provable. It also gives agendo a better
+ * warning than "unreachable" for the one host on this machine (`mdos`) that is
+ * reachable and simply has no tmux — a problem on the far machine, not on the
+ * wire.
+ */
+export const NO_TMUX_EXIT = 127;
+
+/**
  * The beam executable, as argv. `AGENDO_BEAM` overrides it — a space-separated
  * command, so it can name an interpreter (`bun /path/to/src/beam.ts`) and not
  * only a binary.
@@ -198,6 +211,13 @@ export function probeHost(host: string): HostProbe {
   }
   if (r.status === TRANSPORT_EXIT) {
     return { ok: false, missingBeam: false, error: err || "unreachable" };
+  }
+  // Reachable, but nothing to talk to. Worth its own phrasing: the fix is on the
+  // far machine (install tmux), not here and not on the network. beam appends its
+  // own hint line to stderr, so keep only the shell's sentence.
+  if (r.status === NO_TMUX_EXIT) {
+    const shell = err.split("\n").find((l) => /command not found|not found/i.test(l))?.trim();
+    return { ok: false, missingBeam: false, error: shell || "no tmux installed there" };
   }
   return { ok: false, missingBeam: false, error: err || `exit ${r.status}` };
 }
