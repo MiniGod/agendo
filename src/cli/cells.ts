@@ -1,4 +1,4 @@
-import { paneCompactionPercent, stripAnsi, type Readiness } from "../tmux.ts";
+import { paneCompactionPercent, stripAnsi, type Readiness, type SessionKind } from "../tmux.ts";
 import { formatResetTime, paneResetAt } from "../usageLimit.ts";
 import { idleSeconds, shortAge } from "../idle.ts";
 
@@ -67,3 +67,21 @@ export function readyCell(readiness: Readiness | null, resetAt: number | null, p
 export function readyWidth(cells: string[]): number {
   return Math.max(10, ...cells.map((c) => c.length));
 }
+
+/**
+ * Trailing marker for a stalled session, in the same slot as the ⛁ (background
+ * shells) and ◆ (running workflows) markers. Deliberately a marker rather than a
+ * new column or a changed `ready` value: readiness is load-bearing for `send` /
+ * `wait` / auto-resume and must keep reading exactly as before. The `age` column
+ * already carries the idle time this qualifies.
+ */
+export const STALLED_MARK = "⚠stalled";
+
+/** Short kind labels for the `list` columns, matching the menu's {bg}/{new} badges. */
+export const KIND_LABEL: Record<SessionKind, string> = {
+  background: "bg",
+  new: "new",
+  workitem: "wi",
+  pr: "pr",
+  resumed: "—",
+};
