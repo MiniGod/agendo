@@ -448,10 +448,14 @@ Three caveats, stated rather than discovered later:
    (checked twice, `date -u +%s` identical, skew 0 s), which is a property of two
    NTP-synced boxes on one LAN and not a guarantee.
 
-Each variable-width field needs its own read: a tmux format may hold only one
-such field and it has to be last, since both a title and a launch argv can
-contain the separator. That is the rule beam already applies to its own
-`TMUX_LS_FORMAT`, for the same reason. Three extra reads, ~20 ms each warm.
+A field whose value can contain the separator has to come **last** in the format
+and take the whole remainder of the line, since both a title and a launch argv
+can contain a tab. That is a parsing rule, not a tmux limit — tmux will
+interpolate as many fields as you ask for; only the last one comes back
+unambiguously — and it is the rule beam already applies to its own
+`TMUX_LS_FORMAT`. So each *arbitrary-valued* field costs a read and every
+bounded one rides along free: `#{window_activity}` is a bare epoch second and
+travels with the title, leaving two reads rather than three.
 
 ---
 
@@ -496,11 +500,12 @@ export function tmuxArgv(host: Host, args: string[]): string[] {
 }
 ```
 
-**A null host is a direct `tmux` spawn, not `beam -H local`.** Measured: a bun
-process costs **15.7 ms**, a bare tmux spawn **3.6 ms**, and a readiness poll
-over N windows is ~2N+3 calls. Uniformity there would cost ~325 ms per poll of a
-12-window session to buy something nobody can see. The local path stays byte for
-byte what it was.
+**A null host is a direct `tmux` spawn, not `beam -H local`.** Measured against
+real beam: a beam call costs **45 ms**, a bare tmux spawn **4 ms**, and a
+readiness poll over N windows is ~2N+3 calls. Uniformity there would cost ~1.1 s
+per poll of a 12-window session to buy something nobody can see. The local path
+stays byte for byte what it was. §11.2 has the full cost table and what the
+number implies for batching.
 
 ### 3.2 Why this is now the useful half, not just the easy one
 
@@ -657,7 +662,7 @@ change rather than a semantic one.
 For the user-facing form, `vm:2bcca559d319` (host + short id) reads naturally
 and matches beam's own `remote:` prefix. Note the mild trap: in beam the
 right-hand side is a *session*, in agendo it would be a *session id*. Same
-shape, different vocabulary. Worth deciding deliberately (open question 2).
+shape, different vocabulary. Worth deciding deliberately (open question 3).
 
 ### 5.4 Adjacent finding: `exactTarget` is already wrong for pane targets
 
@@ -702,6 +707,11 @@ Two consequences in today's code:
 This belongs in its own issue, not in this feature. It is here because it is the
 same question — *what is a target?* — and because a beam design that adds a host
 axis on top of a broken within-machine axis will get blamed for it.
+
+**Independently confirmed since.** beam's own pass-through implementation hit
+the identical wall from the other side and reached the same conclusion: the
+exact-match pane target is `=<session>:`, not `=<session>`. Two separate
+reproductions on tmux 3.4, from two codebases that were not comparing notes.
 
 ---
 
@@ -878,9 +888,18 @@ Reordered: question 1 now gates everything after stage 1.
    small, and it makes the basename-collision guard work again. It also touches
    `tmux.ts` while the split is in flight. File it, or fix it inside the split?
 
-8. **The lint ratchet.** Wiring `agendo remote` in cost `src/index.tsx` 3 lines
+8. **Where does the 45 ms per beam call get paid?** (New — §11.2, measurable
+   only now that real beam exists.) Every beam invocation is a fresh bun process
+   that re-reads config and re-probes `ssh -G`, so ~30 ms of each call is startup
+   rather than network. On-demand (`agendo remote vm`, ~1 s) that is fine. On a
+   TUI refresh cadence it is not. Three ways out, and they are not exclusive:
+   collapse reads with tmux `;` chaining (beam pins it with tests), have beam
+   grow a persistent or batch mode, or keep remote rows on-demand only. This is
+   the one thing I would want decided before stage 5.
+
+9. **The lint ratchet.** Wiring `agendo remote` in cost `src/index.tsx` 3 lines
    (an import, a dispatch line, a separator) no matter how much of the command
-   lives in `src/cli/` — all 190 of its lines do. Completing the transport seam
+   lives in `src/cli/` — every line of it does. Completing the transport seam
    *earned* a lowering on `src/tmux.ts` (2301 → 2299), which was spent in the same
    change, so the net is negative. But the contract says a raise is the part that
    needs an argument, so: that is the argument. Say if it is not good enough.
@@ -889,7 +908,9 @@ Reordered: question 1 now gates everything after stage 1.
 
 ## 10. What was actually built, and what was verified
 
-Stage 1 exists. `agendo remote vm`, against a live remote, read-only:
+Stage 1 exists, and now runs against **real beam** rather than a stub of its
+contract — §11 records what changed between the spec and the implementation.
+`agendo remote vm`, against a live remote, read-only:
 
 ```
 ID            READY      AGE     DIR           TITLE
@@ -901,16 +922,19 @@ f7c286cb78df  limited    18s     agendo        ✳ Check status of all open PRs 
 cf3aa51db0d1  ready      11h     orchestrator  ✳ Investigate regolith Ubuntu 26.04 support
 ```
 
-Six windows in **0.86 s**. The `limited` row's reset time and the `dialog` row
+Six windows in **0.86 s** through the stub, **0.99 s** through real beam (§11.2
+explains the difference: beam is a bun process, and ten of them start here). The
+`limited` row's reset time and the `dialog` row
 are `paneUsageLimited` / `paneResetAt` / `paneReadiness` classifying a **remote**
 pane with no change to those functions — §3.2's claim, demonstrated. The
 unidentified row is a pane tmux reports no start command for (§2.6 caveat 1),
 shown as `—` rather than guessed at. `mdos` degrades to one warning and exit 0.
 
-Gates: e2e **648 passed, exit 0** with every tmux call in the file rerouted; lint
-green; 52 unit tests.
+Gates: e2e **649 passed, exit 0** with every tmux call in the file rerouted; lint
+green; 53 unit tests. (Re-run in full against real beam, not only against the
+stub — same result, and the one previously flaky spec passed clean.)
 
-### Three bugs found in the building, worth recording
+### Four bugs found in the building, worth recording
 
 1. **Codex's resume grammar is positional.** The identity parser was written
    against claude's `--resume <uuid>` and silently missed `codex resume <uuid>`.
@@ -926,6 +950,12 @@ green; 52 unit tests.
 3. **A reset time was shown on a `ready` row.** The cap notice lingers in
    scrollback after a session recovers. The local path already gates this
    (`cells.ts:rowResetAt`); the remote path had to learn the same rule.
+4. **The unit tests passed only because of the shell they ran in.** `AGENDO_BEAM`
+   and `BEAM_CONFIG_DIR` are read from the ambient environment, and the suite
+   restored them afterwards without clearing them first. Exporting `AGENDO_BEAM`
+   — which is exactly what pointing agendo at a development build of beam does,
+   and therefore what §11 required — turned three green tests red. Found by doing
+   it, not by reading it. They now clear per test.
 
 ### What is NOT verified
 
@@ -934,6 +964,138 @@ threaded through the same seam and **has never been run against a real remote**.
 There is no sshd on this machine and the one available remote is read-only by
 instruction, so it has argv-level tests and nothing else. It is not known to
 work. Stage 3 has to close that.
+
+## 11. Reconciliation: beam as built vs beam as specced
+
+Everything above §10 was written against a *specification* of beam's pass-through
+mode and exercised through a 30-line stub of that contract. beam's pass-through
+mode now exists (`9d08f73`, local, unpushed). The POC has been re-run against the
+real thing. (Its author reports 407 tests green including a docker e2e; I ran the
+368 non-docker ones myself and they pass, which is the part I will claim.) This section records the differences, because a
+spec that was never checked against its implementation is a plan, not a finding.
+
+**The seam needed no change.** `tmuxArgv(host, args)` emits
+`beam -H <host> <args…>` and that is byte-for-byte what real beam accepts.
+Re-verified against the live remote:
+
+```
+$ AGENDO_BEAM="bun …/beam.ts" agendo remote vm
+ID            READY      AGE     DIR           TITLE
+0fe53844cc68  ready      11h     review-fable  ✳ Use Fable and Opus sub agents for code review
+—             unknown    4d      orchestrator  ~/git/orchestrator
+8e3bec3fd38d  dialog     11h     orchestrator  ✳ Set up orchestrator skill with bunx agendo
+f7c286cb78df  limited    20m     agendo        ✳ Check status of all open PRs  ·  resets 15:50
+3b6a734a0d50  ready      11h     beam          ✳ beam-remote-squishy-wave
+cf3aa51db0d1  ready      11h     orchestrator  ✳ Investigate regolith Ubuntu 26.04 support
+```
+
+Identical to the stub's output. Byte-fidelity re-verified through real beam:
+`capture-pane -p -e` via beam and via direct ssh both give 2653 bytes,
+sha `3cd23d0f…`, 9 SGR-carrying lines — `cmp` clean.
+
+### 11.1 Where the spec was wrong
+
+**`-H` cannot appear anywhere.** The spec said beam should accept the host flag
+at any position. `tmux send-keys -H` already means *hexadecimal*, so scanning the
+whole argv would either eat that flag or force beam to know the arity of every
+tmux option it scans past — both of which contradict "forwarded verbatim". Real
+beam takes leading `-H`/`--host` only. agendo is unaffected (it builds argv
+programmatically and always leads with the flag), but the spec sentence was
+wrong and is withdrawn.
+
+**"No collisions other than the four" was wrong.** `bind` is a tmux alias for
+`bind-key`, and `a` reaches `attach-session` through tmux's unambiguous-prefix
+matching. Five shadowed spellings, not four. Resolution is as specced — reserved
+verbs stay beam's, long forms always pass through — but the census was
+incomplete.
+
+Checked against what agendo actually sends, and it is clean: every first word in
+the tree is a tmux long form — `capture-pane`, `display-message`, `has-session`,
+`kill-session`, `kill-window`, `list-panes`, `list-sessions`, `list-windows`,
+`new-session`, `new-window`, `paste-buffer`, `select-window`, `send-keys`,
+`set-buffer`, `set-option`, `set-window-option`, `show-options`. None collides
+with a reserved beam verb. That is a property worth keeping rather than
+rediscovering: `beam -H vm ls` is a hard error by design.
+
+**Missing tmux is 127, not 255.** The spec folded "no tmux on the far machine"
+into `TRANSPORT_EXIT`. Real beam passes 127 through, on the grounds that
+rewriting it would assert no tmux invocation can ever legitimately exit 127 —
+which is not provable, and with inherited stdio beam cannot read stderr to
+disambiguate. This is the better call and agendo now names the number
+(`NO_TMUX_EXIT`), which also buys a more accurate warning: the fix for `mdos` is
+on `mdos`, not on the wire.
+
+```
+$ agendo remote mdos
+warning: mdos: /bin/bash: line 1: tmux: command not found
+$ echo $?
+0
+```
+
+The degradation contract of §6 holds against real beam: zero rows, one warning,
+exit 0.
+
+**Connection multiplexing: the spec's suggestion was actively harmful here.** I
+proposed beam manage its own `ControlMaster`/`ControlPath`. On this machine that
+*hangs*: `~/.ssh/config` already runs a master to the remote, command-line
+options beat the config file, and naive injection bypassed the warm master and
+forced fresh auth through the 1Password agent — which refuses while the owner is
+away. Real beam probes with `ssh -G` first and injects nothing when the
+destination already has a `ControlPath`. Verified independently here:
+
+```
+$ ssh -G kristjan@10.0.0.229 | grep -i control
+controlmaster auto
+controlpath /home/kristjan/.ssh/cm-kristjan@10.0.0.229-22
+controlpersist 43200
+```
+
+**`capture-pane -t '=<session>'` — independently confirmed.** §5.4 found this
+from agendo's side; beam's implementation hit the identical wall from the other
+side and reports the same fix (`=<session>:`). Two independent reproductions on
+tmux 3.4. It remains a *local* agendo bug with nothing to do with beam, and it is
+still unfixed — see open question 7.
+
+### 11.2 The one new cost, and what it implies
+
+Real beam is a `bun` process, and that dominates. Measured, 5 runs each, warm
+connection:
+
+| call | median |
+|---|---|
+| local `tmux capture-pane` | **0.004 s** |
+| `ssh <host> tmux capture-pane` | **0.015 s** |
+| `beam -H <host> capture-pane` | **0.045 s** |
+
+So beam adds ~30 ms per call over raw ssh, and that ~30 ms is process startup,
+not network — beam re-reads its config and re-runs the `ssh -G` probe in every
+process, because there is no process to cache it in. `agendo remote vm` takes
+0.99 s for six windows, of which roughly half is beam starting up ten times.
+
+This does not change the design, and it *strengthens* two things already in it:
+
+1. **The local path must stay a direct spawn** (§3.1). The gap is now measured
+   against real beam rather than against a bun-startup proxy: 0.045 s vs 0.004 s,
+   an 11× difference on the call agendo makes most.
+2. **Batching stops being an optimisation and becomes the design.** A readiness
+   poll is ~2N+3 tmux calls; at 45 ms each a 12-window remote session costs
+   ~1.2 s per poll, ~0.8 s of which is beam starting up. Two ways out, and they
+   compose. tmux's own `;` chaining survives the transport — verified here,
+   read-only, and a two-command chain costs **0.05 s**, the same as one command,
+   so chaining a pair of reads is free. And one `list-panes -a -F` can carry
+   several fields at once, so the §2.6 metadata is two reads rather than three
+   (the third rode along, see §2.6). The POC does the second and not the first.
+
+   Honesty about the second: folding that read in changed the wall clock by
+   nothing measurable — 0.99 s before, 0.99 s after, on six windows. The saving
+   is one call in ten. It is in because it is *free and correct*, not because it
+   was felt. The number that would be felt is the per-window `capture-pane`, and
+   only chaining or a persistent beam reaches that.
+
+If remote polling ever runs on a TUI cadence rather than on demand, this is the
+number that decides whether it is viable — not the network.
+
+---
 
 ## Appendix: verified vs inferred
 
@@ -952,15 +1114,23 @@ nested-tmux reproduction used two throwaway servers on dedicated sockets.
   failure. The remote has `ControlMaster auto` / `ControlPersist 12h` configured.
 * Process costs: a **bun** process **15.7 ms**, a bare **tmux** spawn **3.6 ms**
   (10 runs each) — the measurement behind "a null host is a direct spawn".
-* Exit statuses: remote tmux failure passes through as **1**; unreachable host
-  and missing tmux surface as ssh's **255**. So transport failure is
-  distinguishable from a tmux answer, which `close`'s guard depends on.
+* Exit statuses: remote tmux failure passes through as **1**; an unreachable or
+  unregistered host is ssh's **255**; a reachable host with no tmux is the
+  shell's **127** (re-measured against real beam — §11.1 corrects an earlier
+  claim that folded 127 into 255). All three are distinguishable from each other
+  and from a tmux answer, which `close`'s guard depends on.
 * **Tabs survive** a non-interactive ssh intact (`agendo-git^Ilauncher`), with or
   without `LC_ALL`. This was *predicted to break* — beam's own source warns tmux
   substitutes `_` for control characters in that situation — and it did not
   reproduce. The prediction is withdrawn.
-* tmux **command chaining** survives ssh: `display-message … ';' display-message …`
-  runs both, so a two-call pane read can be collapsed into one round trip.
+* tmux **command chaining** survives ssh AND real beam: `display-message … ';'
+  display-message …` runs both, and the chained call costs **0.05 s** — the same
+  as either command alone — so collapsing a two-call read is free.
+* One `list-panes -a -F` carries `session_name`, `window_name`,
+  `window_activity`, `pane_title` and `pane_start_command` in a single
+  tab-separated line over the transport, tabs intact. The last field is the only
+  one that needs to be arbitrary-valued, which is why the metadata read is now
+  two calls and not three.
 * `#{pane_start_command}`, `#{pane_title}` and `#{window_activity}` carry the
   full session UUID, provider, config profile, resume argv, title and a
   last-paint timestamp — §2.6, quoted verbatim.
@@ -992,7 +1162,18 @@ nested-tmux reproduction used two throwaway servers on dedicated sockets.
 * `reconcileLive` drops a managed window whose name resolves to no indexed
   session.
 * **Stage 1 works**: §10's listing, produced against the live remote. Gates: e2e
-  648 passed exit 0, lint green, 52 unit tests.
+  649 passed exit 0, lint green, 53 unit tests.
+* **Against REAL beam**, not the stub (§11): identical listing; byte-identical
+  capture (2653 bytes, sha `3cd23d0f…`, `cmp` clean vs direct ssh); `mdos`
+  degrades to one warning and exit 0; unknown host exits 255; a bogus tmux target
+  exits 1; `beam -V` passes through to `tmux 3.4`.
+* Per-call cost against real beam, 5 runs each, warm: local tmux **0.004 s**,
+  raw ssh **0.015 s**, beam **0.045 s** — §11.2.
+* The remote's ssh destination already carries `ControlMaster auto` /
+  `ControlPath` / `ControlPersist 43200` (`ssh -G`), which is why beam's `ssh -G`
+  deference matters and why the spec's own-ControlPath suggestion was wrong.
+* Every tmux verb agendo sends, enumerated from the tree: all seventeen are long
+  forms, none collides with a reserved beam verb — §11.1.
 
 **Inferred — this should follow, and has not been checked.**
 
