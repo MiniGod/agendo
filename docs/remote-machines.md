@@ -849,7 +849,17 @@ the same change.
 
 Reordered: question 1 now gates everything after stage 1.
 
-1. **Does the remote row have to become indistinguishable from a local one?**
+1. ~~**Does the remote row have to become indistinguishable from a local one?**~~
+   **ANSWERED — see §12.** The owner's answer: `agendo ls` and the TUI both show
+   every machine's sessions beside the local ones, and enter must attach to a
+   remote row. `send` / `wait` / `resume` / `launch` are wanted but explicitly
+   not part of this proof of concept. One constraint added with the answer, and
+   it is the one that makes it safe: **behind a flag, local-only by default**,
+   with the flag taking either all registered machines or a named one. The
+   original question is kept below because the reasoning behind it is what §12
+   had to respect.
+
+   **Does the remote row have to become indistinguishable from a local one?**
    §3.3 lists what tmux cannot reach: branch/unpushed, the task checklist and
    activity, and the linked PR. Each needs *files* on the far machine, which
    means a second channel beside the tmux one — a non-tmux beam verb, or agendo's
@@ -1097,6 +1107,157 @@ number that decides whether it is viable — not the network.
 
 ---
 
+## 12. What the answer to question 1 turned into
+
+The owner answered §9 question 1 directly: remote sessions belong in `agendo ls`
+and in the TUI, and enter on a remote row must attach. Not `send`, `wait`,
+`resume` or `launch` — wanted, but out of scope here. And **behind a flag**:
+local-only by default, the flag taking every registered machine or a named one.
+
+That flag is what makes the rest of this defensible. Without it, every agendo
+invocation on a machine with a beam config would start spawning subprocesses to
+other computers. With it, the default path is byte-for-byte what it always was.
+
+### 12.1 The surface
+
+```
+agendo --remote            # launcher, every machine beam has registered
+agendo --remote=vm         # launcher, just vm (repeatable)
+agendo ls --remote         # the same, for the one-line listing
+```
+
+The value form needs the `=`, because both commands also take an optional
+`[dir]` positional and `--remote /some/path` could not otherwise be told from
+"all machines, scoped to that path". Guessing there would silently scope a
+listing to something other than what the command line reads as. A bare
+`--remote <known-machine>` is therefore an error with a hint, not a misread —
+and only when the next token names a machine beam actually knows, so an ordinary
+path argument is never second-guessed.
+
+`agendo ls --remote` grows one column, and only then:
+
+```
+●  local  ready          bg   f942f3b8f8cc  7m ago    refactor-and-guardrails   Agendo refactor enforcement and linting
+●  vm     ready          —    0fe53844cc68  13h ago   review-fable              ✳ Use Fable and Opus sub agents  ⚠stalled
+●  vm     dialog         —    8e3bec3fd38d  13h ago   orchestrator              ✳ Set up orchestrator skill     ⚠stalled
+●  vm     limited 15:50  new  f7c286cb78df  1m ago    agendo                    ✳ Check status of all open PRs
+●  vm     unknown        new  —             3d ago    orchestrator              ~/git/orchestrator
+```
+
+`limited 15:50`, `dialog`, `⚠stalled` and the `—` for an unidentified pane are
+all the LOCAL classifiers, unchanged, run against a remote capture. Without the
+flag there is no machine column at all: every row would say `local`, which is
+noise, and the local output has to stay exactly what it was.
+
+### 12.2 Identity: the machine is part of it
+
+`live`, `liveKinds` and `liveWindows` have always been keyed by
+`sessionName(s)` — the tmux window name. That is not unique across machines: the
+same session resumed on two of them carries the same `cl-<source>-<shortid>` on
+both. Keyed by name alone, one machine's window answers for the other's, and
+enter attaches you to the wrong machine.
+
+So `liveKey(s)` folds the host in, and is `sessionName(s)` exactly when there is
+no host — nothing local moves. `isRunning` was the ONLY place that key was
+computed, which is why this is a small change rather than a sweep.
+
+The separator is a **NUL**, not a `/`. These maps also hold raw tmux names
+(`reconcileLive` seeds them from `liveTargets()`), and agendo names its own
+remote-attach windows `<host>/<window>` — so a slash test would classify the
+LOCAL half of a remote attach as remote. tmux cannot put a NUL in a name.
+
+### 12.3 Attach: nested tmux, and no pretending otherwise
+
+There is no `switch-client` to a window on another machine — a tmux client can
+only display windows served by the tmux it is attached to. Attaching to a remote
+session therefore means a LOCAL window whose command is an ssh carrying a remote
+tmux client. That is nesting, and it shows: the inner tmux draws its own status
+bar inside the outer window, its panes resize to the outer client, and the inner
+session takes a doubled prefix (`prefix prefix d` to detach the remote end).
+None of that is hidden; the help text says it.
+
+The attach does NOT go through pass-through. Pass-through refuses a tty on
+purpose — `-t` would let the line discipline rewrite `\n` as `\r\n` and destroy
+the byte-exactness every pane read depends on — and an attach needs exactly that
+tty. So it goes through beam's own `attach` verb, which is a second seam
+(`beamAttachArgv`) rather than a special case of the first.
+
+Three things agendo needs there that a human's `beam attach web:deploy` does not,
+all of which beam now has:
+
+| need | why | beam |
+|---|---|---|
+| a **window**, not a session | agendo's sessions are windows inside a remote session | `host:session:window` |
+| **no creation** | a stale row must not spawn a session on someone's machine | `--no-create` |
+| the **exec form** unconditionally | agendo already made the window; beam sees `$TMUX` and would open a second | `--exec` |
+
+Landing on the right window costs no extra round trip. tmux resolves the `-t`
+target BEFORE opening the terminal, so `attach-session -t '=session:=window'`
+selects that window as part of attaching — verified here on a throwaway server,
+and the property beam's own suite leans on. No `select-window` is sent: one would
+move the active window for everyone else attached there even when the attach
+then fails.
+
+### 12.4 The 2-second timer, which is where this could have gone wrong
+
+agendo re-scans local tmux every 2 seconds. Putting the remote sweep on that
+timer would have been the obvious wiring and a serious mistake: a beam call is
+~45 ms and a sweep is ~2 calls per remote window (§11.2), so a handful of remote
+sessions would put the best part of a second of subprocess work on a 2-second
+timer. That is the same CPU regression the `gitrefs` import guard in
+`e2e/cli.spec.ts` exists to prevent, an order of magnitude worse.
+
+So machines are swept on a FULL load only — startup and `r` — and the 2 s rescan
+folds its fresh local scan onto the remote half already in the model rather than
+replacing it. **Remote rows keep their readiness until the next `r`; local rows
+stay live at 2 s.** That difference is real, and it is the honest trade: a stale
+remote row beats a launcher that stalls for a second at a time. If remote rows
+ever need to be live, §9 question 8 is the decision that has to come first.
+
+### 12.5 What this cost the ratchet, and what it earned
+
+Wiring `--remote` into `agendo ls` needed lines in `src/index.tsx`, which sat
+exactly on its `max-lines` cap. Rather than raise it, `runList` / `runPlainList`
+and then the `list` argv parsing moved to `src/cli/list.ts` where they belonged:
+**`src/index.tsx` went 1237 → 750**, and the cap went with it, twice, in the same
+change. `src/ui/App.tsx` needed four lines for the new prop and paid for them by
+folding two identical set-toggle closures into one helper (1036 → 1035).
+
+The extraction tripped a real guard on the way, which is the interesting part.
+`e2e/cli.spec.ts:1690` enforces that `src/gitrefs.ts` has exactly ONE importer —
+`src/index.tsx` — so that per-session ref reads can never reach the 2 s rescan.
+Moving `runList` out took `branchSync` with it and broke that rule. The suite is
+frozen, so the fix was not to widen the allow-list: `runList` now takes the ref
+reader as an argument. That satisfies the guard's letter and its intent both — a
+one-shot listing may read refs, a timer may not.
+
+### 12.6 What is verified, and the one leg that is not
+
+Verified, by running it:
+
+* `agendo ls` with no flag is unchanged, byte for byte.
+* `agendo ls --remote` lists local and remote together; `--remote=vm` narrows;
+  `--remote vm` errors with the `=` hint.
+* The TUI loads 6 remote sessions into their own `vm` group, `isRunning` is true
+  for each, `liveWindows` resolves each to its real remote target, and
+  `openSession` yields a plan that opens `vm/<window>` locally.
+* `mdos` — reachable, no tmux — contributes zero rows and one warning, exit 0.
+* **The attach itself**, through beam, against a throwaway local session: it
+  lands on the REQUESTED window rather than the active one, a missing window
+  exits 1 and moves nothing, a missing session exits 1 and creates nothing, and
+  detach exits 0. The throwaway session was killed afterwards; `kill-server` was
+  never run.
+
+**Not verified: an attach to the live remote.** The argv is unit-tested, the
+mechanism is verified locally, and beam's own suite exercises the remote leg over
+real ssh in docker — but agendo has not attached to a session on `vm`. That is
+deliberate rather than pending: both machines run `window-size latest`, so a new
+client RESIZES the panes of whatever is attached, and the vm's sessions are live
+agents mid-work. Doing it would disturb them, which the standing instruction for
+this work forbids. It needs one word from the owner, not more engineering.
+
+---
+
 ## Appendix: verified vs inferred
 
 **Verified — I ran this and got that.** All read-only against the remote. No
@@ -1175,7 +1336,31 @@ nested-tmux reproduction used two throwaway servers on dedicated sockets.
 * Every tmux verb agendo sends, enumerated from the tree: all seventeen are long
   forms, none collides with a reserved beam verb — §11.1.
 
+* **beam's window-targeted attach** (§12.3), against a throwaway local session
+  on the default server: `attach --exec --no-create local:<sess>:<win>` lands on
+  the REQUESTED window (active window moved `first` → `cl-claude-deadbeef1234`),
+  a missing window exits **1** and moves nothing, a missing session exits **1**
+  and creates nothing, and a pty attach detaches cleanly with exit **0**. The
+  throwaway session was killed by name afterwards; `kill-server` was never run
+  and the owner's seven live sessions were untouched.
+* `tmux attach-session -t '=session:=window'` selects that window as part of
+  attaching — the active window moved even though the attach itself failed for
+  want of a terminal (tmux 3.4, throwaway server). This is why no `select-window`
+  round trip is sent.
+* The TUI model with `--remote`: 6 remote sessions in their own `vm` group,
+  `isRunning` true for each, `liveWindows` resolving each to its real remote
+  `=session:=window`, and `openSession` producing a plan that opens `vm/<window>`
+  locally. `mdos` degraded to one warning.
+* beam's own suite: 368 non-docker tests on the pass-through build, run here;
+  its author reports 438 including docker e2e on the attach build.
+
 **Inferred — this should follow, and has not been checked.**
+
+* **That an attach to the LIVE remote works.** The argv is unit-tested, the
+  mechanism is verified locally, and beam exercises the remote leg over real ssh
+  in docker — but agendo has not attached to a session on `vm`. Deliberately:
+  both machines run `window-size latest`, so a new client resizes the panes of
+  whatever is attached, and the vm's sessions are live agents mid-work.
 
 * That the remote **write** path works. It is threaded through the same seam and
   has argv-level tests, and it has never been run against a real remote: there is
