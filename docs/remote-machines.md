@@ -1198,7 +1198,39 @@ and the property beam's own suite leans on. No `select-window` is sent: one woul
 move the active window for everyone else attached there even when the attach
 then fails.
 
-### 12.4 The 2-second timer, which is where this could have gone wrong
+### 12.4 Two bugs the question "does it say which machine?" found
+
+The rows were there from the start, but only the GROUPED view identified them,
+through a per-machine group header. "Running now" is flat and always expanded —
+and it is the section where enter attaches, so the one place the machine matters
+most was the one place it was not shown. Session rows now carry `@<machine>`
+between the agent name and the title, and only when the session is elsewhere; a
+tag on every local row saying "here" is noise.
+
+```
+▸ ● [claude] @vm ✳ Investigate regolith Ubuntu 26.04 support  14h ago  (ready → attach)
+▸ ● [claude] {bg} Issue #49 review: GitHub Projects + PM orchestration  20m ago  (ready → attach)  ⛁ 1 shell
+```
+
+Looking at a rendered row turned up two real bugs, both introduced by putting
+remote windows into `liveWindows` so that enter could reach them:
+
+1. **The readiness poll was capturing remote targets against local tmux.** That
+   poll reads THIS machine's panes; a remote `win.target` names a session on the
+   far one. Here it failed quietly and the row rendered with no state — but had a
+   local session shared that name, it would have captured the WRONG machine's
+   pane, reported its readiness on the remote row, and let auto-resume act on it.
+   The poll now skips remote keys explicitly, and remote readiness comes from the
+   sweep, which had already computed it (`LoadedModel.remotePanes`).
+2. **One pane lookup still used the old key.** `panes.get(sessionName(…))` — the
+   `liveKey` swap covered three call sites, found by searching for the three map
+   names, and this map has a fourth name. Same collision class as §12.2: two
+   machines, one key.
+
+Neither was reachable from a model-level check, which is what had been run. Both
+needed a rendered row.
+
+### 12.5 The 2-second timer, which is where this could have gone wrong
 
 agendo re-scans local tmux every 2 seconds. Putting the remote sweep on that
 timer would have been the obvious wiring and a serious mistake: a beam call is
@@ -1214,7 +1246,7 @@ stay live at 2 s.** That difference is real, and it is the honest trade: a stale
 remote row beats a launcher that stalls for a second at a time. If remote rows
 ever need to be live, §9 question 8 is the decision that has to come first.
 
-### 12.5 What this cost the ratchet, and what it earned
+### 12.6 What this cost the ratchet, and what it earned
 
 Wiring `--remote` into `agendo ls` needed lines in `src/index.tsx`, which sat
 exactly on its `max-lines` cap. Rather than raise it, `runList` / `runPlainList`
@@ -1231,7 +1263,7 @@ frozen, so the fix was not to widen the allow-list: `runList` now takes the ref
 reader as an argument. That satisfies the guard's letter and its intent both — a
 one-shot listing may read refs, a timer may not.
 
-### 12.6 What is verified, and the one leg that is not
+### 12.7 What is verified, and the one leg that is not
 
 Verified, by running it:
 
@@ -1241,6 +1273,9 @@ Verified, by running it:
 * The TUI loads 6 remote sessions into their own `vm` group, `isRunning` is true
   for each, `liveWindows` resolves each to its real remote target, and
   `openSession` yields a plan that opens `vm/<window>` locally.
+* A RENDERED remote row carries its machine and its readiness:
+  `▸ ● [claude] @vm ✳ Investigate regolith Ubuntu 26.04 support  14h ago
+  (ready → attach)`, with local rows in the same view carrying no machine tag.
 * `mdos` — reachable, no tmux — contributes zero rows and one warning, exit 0.
 * **The attach itself**, through beam, against a throwaway local session: it
   lands on the REQUESTED window rather than the active one, a missing window
