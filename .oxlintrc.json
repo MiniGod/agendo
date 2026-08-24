@@ -175,7 +175,7 @@
     },
 
     {
-      // ── temporary exemption: src/index.tsx (1234 lines) ──────────────────
+      // ── temporary exemption: src/index.tsx (1237 lines) ──────────────────
       // Was 2456. Ten subcommands and the shared formatters now live in
       // src/cli/; what is left is argv dispatch plus `status` and `list`.
       //
@@ -200,7 +200,7 @@
       // to 1036 / 198 in the same change.
       "files": ["src/index.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 1234, "skipBlankLines": false, "skipComments": false }],
+        "max-lines": ["error", { "max": 1237, "skipBlankLines": false, "skipComments": false }],
         "max-lines-per-function": ["error", { "max": 215, "skipBlankLines": false, "skipComments": false }], // runStatus
         "complexity": ["error", 66],
         "max-statements": ["error", 90]
@@ -243,7 +243,7 @@
     },
 
     {
-      // ── temporary exemption: src/tmux.ts (2301 lines) ────────────────────
+      // ── temporary exemption: src/tmux.ts (2299 lines) ────────────────────
       // Note it needs exactly ONE line: tmux.ts is a big file made of
       // reasonably sized functions, so only the file-length budget is blown.
       //
@@ -256,7 +256,7 @@
       // deletes this block outright rather than lowering it.
       "files": ["src/tmux.ts"],
       "rules": {
-        "max-lines": ["error", { "max": 2301, "skipBlankLines": false, "skipComments": false }]
+        "max-lines": ["error", { "max": 2299, "skipBlankLines": false, "skipComments": false }]
       }
     },
 

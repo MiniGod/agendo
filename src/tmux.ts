@@ -6,8 +6,8 @@
 //
 // The `--tmux` CLI flag bootstraps a single canonical session (LAUNCHER_SESSION)
 // whose first window runs the menu, so every agent ends up as a tab next to it.
-import { spawnSync } from "child_process";
 import type { AgentSession } from "./types.ts";
+import { runTmux, type Host } from "./remote.ts";
 import { isUsageLimited, isLimitDialog } from "./usageLimit.ts";
 
 /**
@@ -35,8 +35,8 @@ export const ROOT_OPTION = "@cl_root";
  */
 export const PLACEHOLDER_OPTION = "@cl_placeholder";
 
-export function tmuxAvailable(): boolean {
-  return spawnSync("tmux", ["-V"], { encoding: "utf-8" }).status === 0;
+export function tmuxAvailable(host: Host = null): boolean {
+  return runTmux(host, ["-V"]).status === 0;
 }
 
 export function insideTmux(): boolean {
@@ -149,14 +149,14 @@ export function liveTargetForShortId(sid: string): LiveTarget | null {
  * is simply blank, and a caller about to do something destructive has to tell
  * the two apart — see `readPaneState`.
  */
-function capturePaneRaw(target: string): string | null {
-  const r = spawnSync("tmux", ["capture-pane", "-p", "-e", "-t", target], { encoding: "utf-8" });
+function capturePaneRaw(target: string, host: Host = null): string | null {
+  const r = runTmux(host, ["capture-pane", "-p", "-e", "-t", target]);
   return r.status === 0 ? (r.stdout ?? "") : null;
 }
 
 /** Raw visible text of a target's active pane, including SGR escape codes. */
-export function capturePane(target: string): string {
-  return capturePaneRaw(target) ?? "";
+export function capturePane(target: string, host: Host = null): string {
+  return capturePaneRaw(target, host) ?? "";
 }
 
 /**
@@ -175,8 +175,8 @@ export interface PaneCursor {
  * treat null as "no cursor evidence" and fall back to the color-based read — see
  * `inputEmpty`.
  */
-function paneCursor(target: string): PaneCursor | null {
-  const r = spawnSync("tmux", ["display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y}"], { encoding: "utf-8" });
+function paneCursor(target: string, host: Host = null): PaneCursor | null {
+  const r = runTmux(host, ["display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y}"]);
   if (r.status !== 0) return null;
   const m = (r.stdout ?? "").trim().match(/^(\d+)\s+(\d+)$/);
   return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
@@ -206,8 +206,8 @@ export interface PaneSnapshot {
  * the whole screen, and the combined form's output shape is one more thing to get
  * wrong.
  */
-export function capturePaneState(target: string): PaneSnapshot {
-  return { raw: capturePane(target), cursor: paneCursor(target) };
+export function capturePaneState(target: string, host: Host = null): PaneSnapshot {
+  return { raw: capturePane(target, host), cursor: paneCursor(target, host) };
 }
 
 /**
@@ -221,9 +221,9 @@ export function capturePaneState(target: string): PaneSnapshot {
  * would silently disarm the guard and kill a session mid-turn. Callers that just
  * display a state keep using `capturePaneState`.
  */
-export function readPaneState(target: string): PaneSnapshot | null {
-  const raw = capturePaneRaw(target);
-  return raw === null ? null : { raw, cursor: paneCursor(target) };
+export function readPaneState(target: string, host: Host = null): PaneSnapshot | null {
+  const raw = capturePaneRaw(target, host);
+  return raw === null ? null : { raw, cursor: paneCursor(target, host) };
 }
 
 /** Strip ANSI SGR escape sequences, for plain-text display / matching. */
@@ -1823,15 +1823,15 @@ export function paneShells(raw: string): number {
   return max;
 }
 
-function tmuxLines(args: string[]): string[] {
-  const r = spawnSync("tmux", args, { encoding: "utf-8" });
+function tmuxLines(args: string[], host: Host = null): string[] {
+  const r = runTmux(host, args);
   if (r.status !== 0 || !r.stdout) return [];
   return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
 /** Names of all currently live tmux sessions (empty if no server running). */
-export function liveSessions(): Set<string> {
-  return new Set(tmuxLines(["list-sessions", "-F", "#{session_name}"]));
+export function liveSessions(host: Host = null): Set<string> {
+  return new Set(tmuxLines(["list-sessions", "-F", "#{session_name}"], host));
 }
 
 /**
@@ -1854,7 +1854,7 @@ export function liveSessions(): Set<string> {
  * genuine ambiguity this cannot resolve — `close` is the caller that must not
  * guess, and it enumerates `windowLocations` and refuses instead.
  */
-export function liveWindows(): Map<string, string> {
+export function liveWindows(host: Host = null): Map<string, string> {
   const out = new Map<string, string>();
   const provisional = new Set<string>(); // names whose target came from a placeholder
   for (const line of tmuxLines([
@@ -1862,7 +1862,7 @@ export function liveWindows(): Map<string, string> {
     "-a",
     "-F",
     `#{session_name}\t#{window_name}\t#{?${PLACEHOLDER_OPTION},1,0}`,
-  ])) {
+  ], host)) {
     const [session, window, placeholder] = line.split("\t");
     if (!window) continue;
     const isPlaceholder = placeholder === "1";
@@ -1882,10 +1882,10 @@ export function liveWindows(): Map<string, string> {
  * addresses itself; a window needs its host session as qualifier. A session name
  * wins over a window of the same name, as it did when this returned a set.
  */
-export function liveTargets(): Map<string, string> {
+export function liveTargets(host: Host = null): Map<string, string> {
   const out = new Map<string, string>();
-  for (const s of liveSessions()) out.set(s, exactTarget(s));
-  for (const [name, target] of liveWindows()) if (!out.has(name)) out.set(name, target);
+  for (const s of liveSessions(host)) out.set(s, exactTarget(s));
+  for (const [name, target] of liveWindows(host)) if (!out.has(name)) out.set(name, target);
   return out;
 }
 
@@ -1896,14 +1896,14 @@ export function liveTargets(): Map<string, string> {
  * item / PR (`cl-wi-…`, `cl-pr-…`) rather than a session id — back to the
  * session actually running in them, so they register as running.
  */
-export function liveManagedPaths(): ManagedTarget[] {
+export function liveManagedPaths(host: Host = null): ManagedTarget[] {
   const out: ManagedTarget[] = [];
   for (const line of tmuxLines([
     "list-panes",
     "-a",
     "-F",
     `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}`,
-  ])) {
+  ], host)) {
     const [session, window, cwd, placeholder] = line.split("\t");
     if (!cwd) continue;
     // The marker is a *window* option, so it only attributes to the window name
@@ -1954,21 +1954,21 @@ export function windowTarget(session: string, window: string): string {
   return `${exactTarget(session)}:${exactTarget(window)}`;
 }
 
-export function hasSession(name: string): boolean {
-  return spawnSync("tmux", ["has-session", "-t", exactTarget(name)]).status === 0;
+export function hasSession(name: string, host: Host = null): boolean {
+  return runTmux(host, ["has-session", "-t", exactTarget(name)]).status === 0;
 }
 
 /** The tmux session the caller is currently inside, or null (outside tmux). */
 export function currentSessionName(): string | null {
   if (!insideTmux()) return null;
-  const r = spawnSync("tmux", ["display-message", "-p", "#{session_name}"], { encoding: "utf-8" });
+  const r = runTmux(null, ["display-message", "-p", "#{session_name}"]);
   const name = r.status === 0 ? (r.stdout ?? "").trim() : "";
   return name || null;
 }
 
 /** The absolute root a launcher host session is scoped to (`@cl_root`), or null. */
 export function sessionRoot(session: string): string | null {
-  const r = spawnSync("tmux", ["show-options", "-t", exactTarget(session), "-v", ROOT_OPTION], { encoding: "utf-8" });
+  const r = runTmux(null, ["show-options", "-t", exactTarget(session), "-v", ROOT_OPTION]);
   const v = r.status === 0 ? (r.stdout ?? "").trim() : "";
   return v || null;
 }
@@ -2088,9 +2088,7 @@ export function killManagedTarget(
 
 /** The window name currently at a `session:index` location, or null. */
 function windowNameAt(location: string): string | null {
-  const r = spawnSync("tmux", ["display-message", "-p", "-t", exactTarget(location), "#{window_name}"], {
-    encoding: "utf-8",
-  });
+  const r = runTmux(null, ["display-message", "-p", "-t", exactTarget(location), "#{window_name}"]);
   const name = r.status === 0 ? (r.stdout ?? "").trim() : "";
   return name || null;
 }
@@ -2170,7 +2168,7 @@ export function windowLocation(name: string): string | null {
  */
 export function newDetached(name: string, cwd: string, argv: string[]): void {
   if (hasSession(name)) return;
-  spawnSync("tmux", ["new-session", "-d", "-s", name, "-c", cwd, "--", ...argv], { stdio: "inherit" });
+  runTmux(null, ["new-session", "-d", "-s", name, "-c", cwd, "--", ...argv], { stdio: "inherit" });
 }
 
 /**
@@ -2192,7 +2190,7 @@ function pinName(target: string): void {
  * (we don't inherit stdio), so the menu can open windows without unmounting.
  */
 export function tmuxQuiet(args: string[]): void {
-  spawnSync("tmux", args, { stdio: "ignore" });
+  runTmux(null, args, { stdio: "ignore" });
 }
 
 /**
@@ -2238,14 +2236,14 @@ export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean 
  */
 function spawnLauncherWindow(session: string, cwd: string, launcherArgv: string[]): void {
   tmuxQuiet(["kill-window", "-t", `${exactTarget(session)}:launcher`]); // no-op if none exists
-  const at0 = spawnSync(
-    "tmux",
+  const at0 = runTmux(
+    null,
     ["new-window", "-d", "-t", `${exactTarget(session)}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
     { stdio: "ignore" },
   );
   if (at0.status !== 0) {
-    spawnSync(
-      "tmux",
+    runTmux(
+      null,
       ["new-window", "-d", "-t", exactTarget(session), "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "ignore" },
     );
@@ -2283,8 +2281,8 @@ export function enterLauncherSession(
   onFreshCreate?: () => void,
 ): void {
   if (!hasSession(session)) {
-    spawnSync(
-      "tmux",
+    runTmux(
+      null,
       ["new-session", "-d", "-s", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
       { stdio: "inherit" },
     );
@@ -2297,5 +2295,5 @@ export function enterLauncherSession(
   // Land on the menu window specifically, not whatever window was last active.
   tmuxQuiet(["select-window", "-t", `${exactTarget(session)}:launcher`]);
   const verb = insideTmux() ? ["switch-client"] : ["attach-session"];
-  spawnSync("tmux", [...verb, "-t", exactTarget(session)], { stdio: "inherit" });
+  runTmux(null, [...verb, "-t", exactTarget(session)], { stdio: "inherit" });
 }

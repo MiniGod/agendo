@@ -37,6 +37,7 @@ import { runListIssues } from "./cli/listIssues.ts";
 import { runResume } from "./cli/resume.ts";
 import { runClose } from "./cli/close.ts";
 import { runMenu } from "./cli/menu.tsx";
+import { runRemoteCli } from "./cli/remote.ts";
 
 /** CLI glyphs for the three task states (plain ASCII markers stay greppable). */
 const STATUS_GLYPH: Record<string, string> = {
@@ -403,6 +404,8 @@ if (process.argv[2] === "send") {
 // human) can discover the background sessions it can `status`/`send` to. The
 // default stays live-only and model-free (fast, no backend auth needed); the
 // flags below opt into richer, association-resolving output for orchestrators.
+if (process.argv[2] === "remote") process.exit(runRemoteCli(process.argv.slice(3)));
+
 if (process.argv[2] === "list" || process.argv[2] === "ls") {
   // Subcommand routing: `list pr|prs` and `list issues|wi|work-items|…` are
   // resource lists (open PRs / issues-work-items and their associated sessions),

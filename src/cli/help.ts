@@ -48,6 +48,14 @@ Usage:
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
                                 text that starts with -- after a bare --.
+  agendo remote [machine]      EXPERIMENTAL. With no argument, the machines beam
+                                has registered. With one, that machine's live agent
+                                windows and each pane's readiness, read over ssh
+                                through \`beam -H <machine> <tmux-args>\`. Narrower
+                                than \`list\`: a window's session title, branch and
+                                idle age live in a transcript on that machine and
+                                do not cross cheaply, so they are not reported.
+      --json                    Emit machine-readable rows
   agendo list, ls [dir]        List the sessions running right now, one per line
                                 (readiness, kind, id, age, dir, title). "age" is
                                 how long since the session last did anything; a
