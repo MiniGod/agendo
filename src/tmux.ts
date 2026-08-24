@@ -236,10 +236,10 @@ export function stripAnsi(s: string): string {
  * claude TUI receives multi-line text as one paste (newlines don't submit
  * early), then a single Enter to send.
  */
-export function sendToPane(target: string, text: string): void {
-  tmuxQuiet(["set-buffer", "-b", "cl-send", "--", text]);
-  tmuxQuiet(["paste-buffer", "-p", "-d", "-b", "cl-send", "-t", target]);
-  tmuxQuiet(["send-keys", "-t", target, "Enter"]);
+export function sendToPane(target: string, text: string, host: Host = null): void {
+  tmuxQuiet(["set-buffer", "-b", "cl-send", "--", text], host);
+  tmuxQuiet(["paste-buffer", "-p", "-d", "-b", "cl-send", "-t", target], host);
+  tmuxQuiet(["send-keys", "-t", target, "Enter"], host);
 }
 
 /**
@@ -1823,7 +1823,7 @@ export function paneShells(raw: string): number {
   return max;
 }
 
-function tmuxLines(args: string[], host: Host = null): string[] {
+export function tmuxLines(args: string[], host: Host = null): string[] {
   const r = runTmux(host, args);
   if (r.status !== 0 || !r.stdout) return [];
   return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -1994,8 +1994,8 @@ export function setSessionRoot(session: string, root: string): void {
  * exactly the one. Nothing outside tmux is touched: the agent's git worktree,
  * branch and commits are left on disk.
  */
-export function killWindow(target: string): void {
-  tmuxQuiet(["kill-window", "-t", exactKillTarget(target)]);
+export function killWindow(target: string, host: Host = null): void {
+  tmuxQuiet(["kill-window", "-t", exactKillTarget(target)], host);
 }
 
 /**
@@ -2189,8 +2189,8 @@ function pinName(target: string): void {
  * Run a tmux control command silently. Safe to call while Ink owns the terminal
  * (we don't inherit stdio), so the menu can open windows without unmounting.
  */
-export function tmuxQuiet(args: string[]): void {
-  runTmux(null, args, { stdio: "ignore" });
+export function tmuxQuiet(args: string[], host: Host = null): void {
+  runTmux(host, args, { stdio: "ignore" });
 }
 
 /**

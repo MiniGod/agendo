@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { TRANSPORT_EXIT, knownHost, loadHosts, tmuxArgv } from "../src/remote.ts";
+import { identify } from "../src/cli/remote.ts";
 
 // The transport seam decides, for every tmux call agendo makes, which machine it
 // runs on. The e2e suite cannot reach this: its `fakebin/tmux` stub IS the tmux
@@ -73,6 +74,28 @@ describe("tmuxArgv", () => {
   });
 });
 
+describe("the send payload, as argv", () => {
+  // `sendToPane` is three tmux calls, the first of which carries arbitrary user
+  // prose. Only the ARGV construction is pinned here: whether that payload then
+  // survives beam's shell quoting, ssh, and the remote login shell is beam's
+  // contract to keep and beam's tests to prove. This asserts agendo hands it
+  // over intact and does nothing clever with it.
+  test("arbitrary prose reaches set-buffer as a single unmodified argument", () => {
+    const hairy = [
+      "line one",
+      "it's got 'quotes' and \"doubles\"",
+      "a $VAR, a `backtick`, a \\backslash",
+      "a tmux format #{session_name} and a ; separator",
+      "emoji: ✻ ● ⎿",
+    ].join("\n");
+    const argv = tmuxArgv("vm", ["set-buffer", "-b", "cl-send", "--", hairy]);
+    expect(argv).toEqual(["beam", "-H", "vm", "set-buffer", "-b", "cl-send", "--", hairy]);
+    // The payload is ONE element. A transport that split it on whitespace or
+    // newlines would submit a prompt line by line into a live session.
+    expect(argv.filter((a) => a === hairy)).toHaveLength(1);
+  });
+});
+
 describe("loadHosts", () => {
   test("a missing config is no hosts, not an error", () => {
     process.env.BEAM_CONFIG_DIR = join(tmpdir(), "agendo-beam-does-not-exist");
@@ -125,5 +148,52 @@ describe("TRANSPORT_EXIT", () => {
     // not see this pane, so I will not kill it". A dropped connection reported
     // as an ordinary tmux failure would look like an empty screen.
     expect(TRANSPORT_EXIT).toBe(255);
+  });
+});
+
+describe("identify — session identity from a pane's launch argv", () => {
+  // The finding this command rests on: a remote session's FULL id, its provider
+  // and its config profile are all in `#{pane_start_command}`, so agendo can
+  // name a session on another machine without reading a byte of its transcript.
+  // Specimens below are verbatim from a live remote, elided only for width.
+
+  test("a resumed session carries --resume <uuid>", () => {
+    const cmd =
+      "env CLAUDE_CONFIG_DIR=/home/kristjan/.claude claude --resume " +
+      "0fe53844-cc68-4f89-aac2-3ff54a04d1a4 --append-system-prompt \"You are running inside agendo…\"";
+    expect(identify(cmd)).toEqual({ id: "0fe53844-cc68-4f89-aac2-3ff54a04d1a4", source: "claude" });
+  });
+
+  test("a freshly launched session carries --session-id <uuid>", () => {
+    // agendo mints the id up front so it can name the window before the agent
+    // has written anything, so this form has no --resume to find.
+    const cmd = "claude --session-id f7c286cb-78df-4bf3-91ee-a47f8209b9d3 --append-system-prompt \"…\"";
+    expect(identify(cmd)).toEqual({ id: "f7c286cb-78df-4bf3-91ee-a47f8209b9d3", source: "claude" });
+  });
+
+  test("each provider's own resume grammar yields the id, not just the name", () => {
+    // Three different grammars, and getting this wrong is silent: the row still
+    // renders, just with no id to address the session by. Codex's is POSITIONAL
+    // (`codex resume <id>`), which an implementation written against claude's
+    // flag form misses entirely — it did here, until this test.
+    expect(identify("copilot --resume=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")).toEqual({
+      id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", source: "copilot",
+    });
+    expect(identify("codex resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")).toEqual({
+      id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", source: "codex",
+    });
+  });
+
+  test("a pane with no launch command is unidentified, not guessed at", () => {
+    // tmux reports an empty start command for a pane it did not start with one
+    // (a plain shell, or one whose original process was replaced). Verified on
+    // the live remote: `bash` and one `cl-new-…` window both come back empty.
+    expect(identify("")).toEqual({ id: null, source: null });
+    expect(identify(undefined)).toEqual({ id: null, source: null });
+  });
+
+  test("a uuid-shaped string that is not an id argument is not taken as one", () => {
+    // The cwd of a worktree can contain a uuid. Only the flag forms count.
+    expect(identify("bash -c 'cd /tmp/0fe53844-cc68-4f89-aac2-3ff54a04d1a4'").id).toBeNull();
   });
 });
