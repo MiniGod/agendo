@@ -112,11 +112,10 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 724 -> 712. sessions.ts set this and is now 129: the three
-        // providers, the parse cache they share and the repo-scoping predicate
-        // are separate modules under src/sessions/, and what is left here is the
-        // index built on top of them. src/wait.ts is next.
-        "max-lines": ["error", { "max": 712, "skipBlankLines": false, "skipComments": false }], // src/wait.ts
+        // DROPPED 712 -> 696. wait.ts set this and is now a 30-line facade: the
+        // vocabulary, the argv parsing and the poll loop are separate modules
+        // under src/wait/. src/clone.ts is next.
+        "max-lines": ["error", { "max": 696, "skipBlankLines": false, "skipComments": false }], // src/clone.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
