@@ -112,10 +112,10 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 840 -> 786. launch.ts set this and is now 318: the SELF_CMD
-        // resolution, the injected prompt + `--llm` guide, and the argv builders
-        // are three separate modules now. src/ado.ts is next.
-        "max-lines": ["error", { "max": 786, "skipBlankLines": false, "skipComments": false }], // src/ado.ts
+        // DROPPED 786 -> 724. ado.ts set this and is now 193: the REST layer is
+        // six modules under src/ado/ (env, urls, http, pr, identity, policy).
+        // src/sessions.ts is next.
+        "max-lines": ["error", { "max": 724, "skipBlankLines": false, "skipComments": false }], // src/sessions.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
