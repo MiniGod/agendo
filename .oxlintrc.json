@@ -112,12 +112,10 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 1036 -> 840. App.tsx set this and is now 450 lines: the
-        // session-start flow, the profile move and the whole render moved out
-        // (see its block below). The new worst file in src/ that no exemption
-        // covers is src/launch.ts, so that is what everyone is measured against
-        // now — 196 lines tighter for the other 100-odd files in the group.
-        "max-lines": ["error", { "max": 840, "skipBlankLines": false, "skipComments": false }], // src/launch.ts
+        // DROPPED 840 -> 786. launch.ts set this and is now 318: the SELF_CMD
+        // resolution, the injected prompt + `--llm` guide, and the argv builders
+        // are three separate modules now. src/ado.ts is next.
+        "max-lines": ["error", { "max": 786, "skipBlankLines": false, "skipComments": false }], // src/ado.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
