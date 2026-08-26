@@ -30,6 +30,8 @@
 import { readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, isAbsolute, join, resolve, sep } from "path";
+import type { BranchSync } from "./types.ts";
+export type { BranchSync } from "./types.ts";
 
 /**
  * Per-repo file caches, keyed by `commonDir`.
@@ -48,31 +50,6 @@ import { dirname, isAbsolute, join, resolve, sep } from "path";
 const packedCache = new Map<string, Map<string, string>>();
 const configCache = new Map<string, string | null>();
 
-/** Local-vs-tracked state of one checkout, derived from its ref files. */
-export interface BranchSync {
-  /** The branch HEAD points at (never the transcript's recorded branch). */
-  branch: string;
-  /**
-   * The ref the local tip was compared against, in display form —
-   * e.g. `origin/main`. Present even when that ref doesn't exist in this clone.
-   */
-  upstream: string;
-  /**
-   * Whether the reported `upstream` is the branch's CONFIGURED tracking ref (git
-   * config `branch.<name>.remote`/`.merge`) rather than the assumed
-   * `origin/<branch>`. False + `hasRemoteRef: false` is the weak case: the work
-   * may be unpushed, or the branch may simply track a differently-named remote.
-   */
-  upstreamConfigured: boolean;
-  /** Whether the reported `upstream` ref exists at all in this clone. */
-  hasRemoteRef: boolean;
-  /**
-   * True when the local tip matches none of the remote-tracking refs this
-   * branch could plausibly live under — i.e. this checkout holds a commit the
-   * remote (as this clone last saw it) does not.
-   */
-  unpushed: boolean;
-}
 
 /** The two ref roots of a checkout: per-worktree (HEAD) and shared (refs/…). */
 interface GitDirs {

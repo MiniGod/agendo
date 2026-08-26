@@ -29,6 +29,14 @@ A fix to a pure function belongs in `test/`. A fix to something the user can see
 belongs in `e2e/`. If a bug was invisible to both, say so in the PR rather than
 letting a green run imply coverage that does not exist.
 
+`test/gitrefsReach.test.ts` is the other thing `test/` is for: an ARCHITECTURAL
+invariant, walked rather than spot-checked. `e2e/cli.spec.ts` pins a proxy for it
+— a filename whitelist of who may import `src/gitrefs.ts` — and that proxy is one
+hop deep, so it both false-alarms on a type-only import and says nothing about
+what the whitelisted file is itself reachable from. The unit test walks the real
+import graph from the rescan roots. **When the two disagree, the unit test is the
+one describing the bug.**
+
 ## Linting — a ratchet, not a style guide
 
 `bun run lint` (oxlint, config in `.oxlintrc.json`) runs in CI as a **blocking**
@@ -39,19 +47,22 @@ Most of `src/` shares one budget; the files that blow it carry their own named
 blocks. A file creeping toward the shared cap gets its own tighter block, not a
 raised budget.
 
-The shared `max-lines` budget is **486**, and `src/index.tsx` is the only file
-in `src/` above 500 lines. Getting there took the run from 1036 down through
-`tmux.ts`, `App.tsx`, `launch.ts`, `ado.ts`, `sessions.ts`, `wait.ts`,
-`clone.ts`, `format.ts`, `restore.ts` and `model.ts`, each of which became a
-facade over a directory of its own parts. The budget is pinned at the worst
-remaining file rather than at the round 500, for the reason above: slack in a
-cap is room every other file can grow into.
+The shared `max-lines` budget is **486**, and **nothing in `src/` is above it**.
+Getting there took the run from 1036 down through `tmux.ts`, `App.tsx`,
+`launch.ts`, `ado.ts`, `sessions.ts`, `wait.ts`, `clone.ts`, `format.ts`,
+`restore.ts`, `model.ts` and finally `index.tsx`, each of which became a facade
+or an entrypoint over a directory of its own parts. The budget is pinned at the
+worst remaining file rather than at the round 500, for the reason above: slack
+in a cap is room every other file can grow into.
 
-`src/ui/App.tsx` and `src/index.tsx` carry named, temporary exemptions above
-that budget. They are what is left of the files the refactor effort is
-dismantling, and each exemption shrinks or disappears as its PR lands.
-`src/tmux.ts` was the third; it is now a facade over `src/tmux/`, its exemption
-is deleted, and every module behind it lives inside the shared budget.
+**No file carries a whole-file exemption any more.** What is left are per-FUNCTION
+blocks — `src/ui/App.tsx`, `src/cli/send.ts`, `src/cli/close.ts` — and one
+`max-params` block. Those are the next targets, and the same one-directional
+contract applies to them.
+
+Read an exemption block precisely: it replaces only the rules it NAMES, and every
+other rule falls through to the shared budget. A file with a `max-lines`
+carve-out was still measured on complexity.
 
 The contract is one-directional:
 

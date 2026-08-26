@@ -19,12 +19,14 @@
   // that shape leaves every other file free to grow up to the worst one. The
   // `src/**` block below is the real budget, set at the worst value anywhere in
   // src/ that the exemption blocks do not already cover. The files this refactor
-  // effort is dismantling carry named, temporary exemptions, and each shrinks or
-  // disappears as its PR lands — `src/tmux.ts` was the first to go, and its
-  // block is gone with it — but an exemption block only lifts
-  // the rules it names, so `src/index.tsx` (which exempts complexity and
-  // max-statements and nothing else) is still measured by the shared max-lines
-  // and max-lines-per-function, and currently sets both.
+  // effort is dismantling carried named, temporary exemptions, and each shrank or
+  // disappeared as its PR landed. `src/tmux.ts` was the first to go; `src/index.tsx`
+  // was the last, and with it every whole-file exemption in this config. What is
+  // left below are two per-FUNCTION blocks (src/ui/App.tsx, src/cli/send.ts,
+  // src/cli/close.ts) and one max-params block — no file in src/ is exempt from
+  // the shared max-lines any more. That matters because an exemption block lifts
+  // only the rules it NAMES: every other rule falls through to the shared budget,
+  // so a file with a max-lines carve-out was still measured on complexity.
   //
   // Be precise about what that buys: the budget is per GLOB GROUP, so the 103
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
@@ -97,15 +99,11 @@
       //
       // Each number is the worst value in src/ not already covered by an exemption
       // block below FOR THAT RULE, named with the file and function that sets it.
-      // The per-rule part is the whole point, and it is NOT the same as
-      // "excluding App.tsx / index.tsx": an exemption block replaces
-      // only the rules it names and lets every other rule fall through to this
-      // budget. So index.tsx still answers to the shared max-lines-per-function —
-      // and in fact sets it, at 210 — and, since its own max-lines exemption was
-      // dropped when it reached 1227, now ties App.tsx for the shared max-lines
-      // too. src/tmux.ts used to be the standing illustration here — it named
-      // only max-lines and answered to every other size rule — and is now a
-      // 125-line facade over src/tmux/, inside this budget like everything else.
+      // The per-rule part is the whole point: an exemption block replaces only the
+      // rules it names and lets every other rule fall through to this budget. The
+      // standing illustrations were src/tmux.ts (which named only max-lines and
+      // answered to every other size rule) and src/index.tsx (which named all four).
+      // Both are now facades or directories, and neither has a block any more.
       // Verified against the installed oxlint rather than assumed from eslint's
       // semantics.
       // Every extension oxlint will parse, not just ts/tsx: a new src/foo.js or
@@ -116,14 +114,15 @@
         // live-tmux read and the repo-scope filters are separate modules under
         // src/model/.
         //
-        // This is the end of the run that started at 1036. Nothing in src/ except
-        // src/index.tsx — which has its own block below — is over 500 lines any
-        // more, and the shared budget is pinned where the worst remaining file
-        // actually is (src/activity.ts at 486) rather than at the round number,
-        // because a cap with slack in it is a cap every other file can grow into.
+        // This is the end of the run that started at 1036. NOTHING in src/ is over
+        // 500 lines any more — src/index.tsx, the last one, is now 109 — and the
+        // budget is pinned where the worst remaining file actually is
+        // (src/activity.ts at 486) rather than at the round number, because a cap
+        // with slack in it is a cap every other file can grow into.
         "max-lines": ["error", { "max": 486, "skipBlankLines": false, "skipComments": false }], // src/activity.ts
-        // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
-        // and is now pinned in index.tsx's own block at its true 215.
+        // `runStatus` used to set this from inside index.tsx's own block, at 215.
+        // It is now four functions in src/cli/status.ts, the largest well under
+        // this cap, so the number is src/cli/send.ts's alone.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
         // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
         // three-way tie between src/activity.ts `claudeAction`, src/activity.ts
@@ -180,39 +179,6 @@
       "files": ["src/ui/rows.ts"],
       "rules": {
         "max-params": ["error", 10]
-      }
-    },
-
-    {
-      // ── temporary exemption: src/index.tsx (1234 lines) ──────────────────
-      // Was 2456. Ten subcommands and the shared formatters now live in
-      // src/cli/; what is left is argv dispatch plus `status` and `list`.
-      //
-      // Those two stay ONLY because e2e/cli.spec.ts:1690 enforces an
-      // architectural rule — index.tsx is the sole file under src/ permitted to
-      // import src/gitrefs.ts — and both call branchSync(). The suite is frozen,
-      // so the allow-list cannot be extended here. That guard is doing its job;
-      // it is not in the way. See the PR description.
-      //
-      // complexity/max-statements are both set by `runStatus`, which is one of
-      // the two the guard pins in place. They drop to 33/47 the moment
-      // "cli/status.ts" and "cli/list.ts" join that allow-list.
-      // max-lines and max-lines-per-function are RAISED here relative to what
-      // this branch measured (1227 / 210) — by seven and five lines, and not by
-      // this branch's own work. Both come from #44 landing on master while this
-      // was in flight: the stall verdict now reads a background-agent count off
-      // the capture it had already taken (3 sites in `status`/`list`), and
-      // `--help` documents the new `wait --json` field and the new default
-      // predicate. All of it has nowhere else to live — the verdict is computed
-      // here and the help text IS this file. Pinned to the exact merged sizes,
-      // and carved out rather than pushed into the shared budget, which DROPPED
-      // to 1036 / 198 in the same change.
-      "files": ["src/index.tsx"],
-      "rules": {
-        "max-lines": ["error", { "max": 1234, "skipBlankLines": false, "skipComments": false }],
-        "max-lines-per-function": ["error", { "max": 215, "skipBlankLines": false, "skipComments": false }], // runStatus
-        "complexity": ["error", 66],
-        "max-statements": ["error", 90]
       }
     },
 

@@ -288,3 +288,44 @@ export interface WorkItem {
    *  canonical URL builder. `""` means "no link" — see PullRequest.url. */
   url: string;
 }
+
+// Local-vs-tracked state of one checkout, derived from its ref files.
+//
+// The shape lives here rather than in src/gitrefs.ts, which produces it,
+// because the CLI modules that RENDER a BranchSync must not name gitrefs.ts at
+// all: e2e/cli.spec.ts whitelists its importers by filename, and a type-only
+// import — erased at runtime, harmless to the invariant — still reads as one.
+// Putting the shape in the shared types module keeps the one real importer
+// honest without duplicating the interface.
+/** Local-vs-tracked state of one checkout, derived from its ref files. */
+export interface BranchSync {
+  /** The branch HEAD points at (never the transcript's recorded branch). */
+  branch: string;
+  /**
+   * The ref the local tip was compared against, in display form —
+   * e.g. `origin/main`. Present even when that ref doesn't exist in this clone.
+   */
+  upstream: string;
+  /**
+   * Whether the reported `upstream` is the branch's CONFIGURED tracking ref (git
+   * config `branch.<name>.remote`/`.merge`) rather than the assumed
+   * `origin/<branch>`. False + `hasRemoteRef: false` is the weak case: the work
+   * may be unpushed, or the branch may simply track a differently-named remote.
+   */
+  upstreamConfigured: boolean;
+  /** Whether the reported `upstream` ref exists at all in this clone. */
+  hasRemoteRef: boolean;
+  /**
+   * True when the local tip matches none of the remote-tracking refs this
+   * branch could plausibly live under — i.e. this checkout holds a commit the
+   * remote (as this clone last saw it) does not.
+   */
+  unpushed: boolean;
+}
+
+/**
+ * How a BranchSync is obtained. `src/gitrefs.ts` provides the only real
+ * implementation; the CLI modules that render one take it as a parameter so
+ * they never sit on an import path the TUI's rescan timer can reach.
+ */
+export type BranchSyncReader = (cwd: string) => BranchSync | null;
