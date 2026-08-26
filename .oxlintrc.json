@@ -112,11 +112,10 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 696 -> 555. clone.ts set this and is now a 25-line facade: URL
-        // parsing, choosing where the clone lands and running git are separate
-        // modules under src/clone/, which is the split its own header already
-        // described. src/ui/format.ts is next.
-        "max-lines": ["error", { "max": 555, "skipBlankLines": false, "skipComments": false }], // src/ui/format.ts
+        // DROPPED 555 -> 533. format.ts set this and is now 181: the cell and the
+        // column-fitting machinery behind it, and the PR approval/CI reading, are
+        // separate modules under src/ui/format/. src/restore.ts is next.
+        "max-lines": ["error", { "max": 533, "skipBlankLines": false, "skipComments": false }], // src/restore.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
