@@ -112,10 +112,16 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 533 -> 515. restore.ts set this and is now 292: the snapshot
-        // file (and the legacy locations still read from) and the placeholder
-        // window are separate modules under src/restore/. src/model.ts is next.
-        "max-lines": ["error", { "max": 515, "skipBlankLines": false, "skipComments": false }], // src/model.ts
+        // DROPPED 515 -> 486. model.ts set this and is now 230: the shapes, the
+        // live-tmux read and the repo-scope filters are separate modules under
+        // src/model/.
+        //
+        // This is the end of the run that started at 1036. Nothing in src/ except
+        // src/index.tsx — which has its own block below — is over 500 lines any
+        // more, and the shared budget is pinned where the worst remaining file
+        // actually is (src/activity.ts at 486) rather than at the round number,
+        // because a cap with slack in it is a cap every other file can grow into.
+        "max-lines": ["error", { "max": 486, "skipBlankLines": false, "skipComments": false }], // src/activity.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend

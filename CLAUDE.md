@@ -39,6 +39,14 @@ Most of `src/` shares one budget; the files that blow it carry their own named
 blocks. A file creeping toward the shared cap gets its own tighter block, not a
 raised budget.
 
+The shared `max-lines` budget is **486**, and `src/index.tsx` is the only file
+in `src/` above 500 lines. Getting there took the run from 1036 down through
+`tmux.ts`, `App.tsx`, `launch.ts`, `ado.ts`, `sessions.ts`, `wait.ts`,
+`clone.ts`, `format.ts`, `restore.ts` and `model.ts`, each of which became a
+facade over a directory of its own parts. The budget is pinned at the worst
+remaining file rather than at the round 500, for the reason above: slack in a
+cap is room every other file can grow into.
+
 `src/ui/App.tsx` and `src/index.tsx` carry named, temporary exemptions above
 that budget. They are what is left of the files the refactor effort is
 dismantling, and each exemption shrinks or disappears as its PR lands.
