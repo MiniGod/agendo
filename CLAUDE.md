@@ -39,9 +39,11 @@ Most of `src/` shares one budget; the files that blow it carry their own named
 blocks. A file creeping toward the shared cap gets its own tighter block, not a
 raised budget.
 
-`src/ui/App.tsx`, `src/index.tsx` and `src/tmux.ts` carry named, temporary
-exemptions above that budget. They are the three files the refactor effort is
+`src/ui/App.tsx` and `src/index.tsx` carry named, temporary exemptions above
+that budget. They are what is left of the files the refactor effort is
 dismantling, and each exemption shrinks or disappears as its PR lands.
+`src/tmux.ts` was the third; it is now a facade over `src/tmux/`, its exemption
+is deleted, and every module behind it lives inside the shared budget.
 
 The contract is one-directional:
 
