@@ -112,10 +112,10 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 555 -> 533. format.ts set this and is now 181: the cell and the
-        // column-fitting machinery behind it, and the PR approval/CI reading, are
-        // separate modules under src/ui/format/. src/restore.ts is next.
-        "max-lines": ["error", { "max": 533, "skipBlankLines": false, "skipComments": false }], // src/restore.ts
+        // DROPPED 533 -> 515. restore.ts set this and is now 292: the snapshot
+        // file (and the legacy locations still read from) and the placeholder
+        // window are separate modules under src/restore/. src/model.ts is next.
+        "max-lines": ["error", { "max": 515, "skipBlankLines": false, "skipComments": false }], // src/model.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
