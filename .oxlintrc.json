@@ -112,14 +112,12 @@
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
       "rules": {
-        // DROPPED 1227 -> 1036 in the merge with master. index.tsx grew to 1234
-        // there (#44's stall verdict reads a background-agent count at three
-        // sites, and `--help` documents the new `wait --json` field), so rather
-        // than raise this for everyone it took its own block below — an exempt
-        // file must never be what the rest of src/ is measured against. What is
-        // left here is App.tsx's own 1036, and everything else got 191 lines
-        // tighter.
-        "max-lines": ["error", { "max": 1036, "skipBlankLines": false, "skipComments": false }], // src/ui/App.tsx
+        // DROPPED 1036 -> 840. App.tsx set this and is now 450 lines: the
+        // session-start flow, the profile move and the whole render moved out
+        // (see its block below). The new worst file in src/ that no exemption
+        // covers is src/launch.ts, so that is what everyone is measured against
+        // now — 196 lines tighter for the other 100-odd files in the group.
+        "max-lines": ["error", { "max": 840, "skipBlankLines": false, "skipComments": false }], // src/launch.ts
         // DROPPED 210 -> 198 for the same reason: `runStatus` was setting this
         // and is now pinned in index.tsx's own block at its true 215.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
@@ -144,22 +142,26 @@
       // above.
       "files": ["src/ui/App.tsx"],
       "rules": {
-        // NOTE: no max-lines here any more. App.tsx is 1036 lines and lives
-        // inside the shared src/** budget. It no longer SETS that budget either
-        // — src/index.tsx does, at 1227. What remains below is about the `App`
-        // FUNCTION, not the file.
+        // NOTE: no max-lines here. App.tsx is 450 lines and lives well inside
+        // the shared src/** budget, which it no longer sets. What remains below
+        // is about the `App` FUNCTION, not the file.
         //
-        // `App` itself, line 100: the eleven mode screens are in src/ui/screens/,
-        // the key handlers in src/ui/keys/, nine hooks in src/ui/hooks/, and the
-        // clone/convert action closures in src/ui/cloneActions.ts and
-        // src/ui/convertAgent.ts. Ten hooks now, with the background rescan in
-        // src/ui/hooks/useLocalRescan.ts.
-        "max-lines-per-function": ["error", { "max": 946, "skipBlankLines": false, "skipComments": false }],
-        // `App` itself is now the worst function in this file; the useInput
-        // handler that used to hold these records is down to complexity 14 /
-        // 14 statements, and lives in src/ui/keys/.
-        "complexity": ["error", 47],
-        "max-statements": ["error", 104]
+        // `App` itself: the mode screens are in src/ui/screens/, the key handlers
+        // in src/ui/keys/, ten hooks in src/ui/hooks/, and the action closures in
+        // src/ui/cloneActions.ts, src/ui/convertAgent.ts, src/ui/sessionFlow.ts
+        // and src/ui/profileActions.ts. The render itself is now two modules:
+        // src/ui/screens/ModeScreens.tsx (every overlay) and
+        // src/ui/screens/ListScreen.tsx (the list). What is left in `App` is the
+        // state, the hook calls and the wiring between them — which is why the
+        // remaining 396 is stubborn: it is a component's body, not a backlog.
+        // DROPPED 946 -> 396 and 104 -> 69. `App` is still the worst function
+        // here and still the only reason this block exists.
+        "max-lines-per-function": ["error", { "max": 396, "skipBlankLines": false, "skipComments": false }],
+        "max-statements": ["error", 69]
+        // NOTE: no complexity line here any more. It was 47, set by `App`; `App`
+        // is now complexity 8, and the worst function left in the file is the
+        // useInput handler at 14 — comfortably inside the shared budget of 34,
+        // so the exemption is deleted rather than lowered.
       }
     },
 
