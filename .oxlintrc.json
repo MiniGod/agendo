@@ -18,16 +18,17 @@
   // The limits are NOT pinned once globally at the worst file in the tree —
   // that shape leaves every other file free to grow up to the worst one. The
   // `src/**` block below is the real budget, set at the worst value anywhere in
-  // src/ that the exemption blocks do not already cover. The three files this
-  // refactor effort is dismantling carry named, temporary exemptions, and each
-  // shrinks or disappears as its PR lands — but an exemption block only lifts
+  // src/ that the exemption blocks do not already cover. The files this refactor
+  // effort is dismantling carry named, temporary exemptions, and each shrinks or
+  // disappears as its PR lands — `src/tmux.ts` was the first to go, and its
+  // block is gone with it — but an exemption block only lifts
   // the rules it names, so `src/index.tsx` (which exempts complexity and
   // max-statements and nothing else) is still measured by the shared max-lines
   // and max-lines-per-function, and currently sets both.
   //
-  // Be precise about what that buys: the budget is per GLOB GROUP, so the 82
+  // Be precise about what that buys: the budget is per GLOB GROUP, so the 103
   // files sharing the `src/**` cap still have headroom below it (src/launch.ts
-  // is 833 lines against a 1227 cap, and any of them may add a fresh
+  // is 840 lines against a 1036 cap, and any of them may add a fresh
   // complexity-34 function). It bounds the blast radius; it does not freeze
   // every file at its current size. If a file starts creeping toward the cap,
   // the answer is its own tighter block here, not a raised budget.
@@ -97,14 +98,16 @@
       // Each number is the worst value in src/ not already covered by an exemption
       // block below FOR THAT RULE, named with the file and function that sets it.
       // The per-rule part is the whole point, and it is NOT the same as
-      // "excluding App.tsx / index.tsx / tmux.ts": an exemption block replaces
+      // "excluding App.tsx / index.tsx": an exemption block replaces
       // only the rules it names and lets every other rule fall through to this
       // budget. So index.tsx still answers to the shared max-lines-per-function —
       // and in fact sets it, at 210 — and, since its own max-lines exemption was
       // dropped when it reached 1227, now ties App.tsx for the shared max-lines
-      // too. Meanwhile tmux.ts, which names only max-lines,
-      // answers to every other size rule here. Verified against the installed
-      // oxlint rather than assumed from eslint's semantics.
+      // too. src/tmux.ts used to be the standing illustration here — it named
+      // only max-lines and answered to every other size rule — and is now a
+      // 125-line facade over src/tmux/, inside this budget like everything else.
+      // Verified against the installed oxlint rather than assumed from eslint's
+      // semantics.
       // Every extension oxlint will parse, not just ts/tsx: a new src/foo.js or
       // src/ui/Bar.jsx would otherwise land with no size budget at all.
       "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx", "src/**/*.mjs", "src/**/*.cjs", "src/**/*.mts", "src/**/*.cts"],
@@ -243,29 +246,15 @@
     },
 
     {
-      // ── temporary exemption: src/tmux.ts (2301 lines) ────────────────────
-      // Note it needs exactly ONE line: tmux.ts is a big file made of
-      // reasonably sized functions, so only the file-length budget is blown.
-      //
-      // 2033 -> 2301 is NOT this branch's doing: it touches no line of tmux.ts.
-      // The file grew on master while this was in flight — #39 added the
-      // LiveTarget/ManagedTarget pair and windowTarget(), #44 split the live
-      // status region in two and added paneBackgroundAgents/sessionFinished —
-      // and this is that number carried across unchanged. It is the last of the
-      // three dismantling targets still growing, and the PR that splits it
-      // deletes this block outright rather than lowering it.
-      "files": ["src/tmux.ts"],
-      "rules": {
-        "max-lines": ["error", { "max": 2301, "skipBlankLines": false, "skipComments": false }]
-      }
-    },
-
-    {
       // ── ANSI parsing ─────────────────────────────────────────────────────
       // This is a terminal tool: matching ESC/CSI/control bytes in pane output
       // is the actual job. Scoped to the files that genuinely do it, so a stray
       // control byte in an unrelated regex still gets caught.
-      "files": ["src/tmux.ts", "src/ui/keys/clone.ts", "e2e/detection.spec.ts"],
+      // Narrowed from `src/tmux.ts` when it was split: of the twelve modules the
+      // file became, exactly two match control bytes, so the other ten are now
+      // covered by the rule again rather than riding on their old neighbour's
+      // exemption.
+      "files": ["src/tmux/pane.ts", "src/tmux/inputBox.ts", "src/ui/keys/clone.ts", "e2e/detection.spec.ts"],
       "rules": {
         "no-control-regex": "off"
       }
