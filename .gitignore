@@ -8,3 +8,6 @@ dist/
 /playwright-report/
 /e2e/.artifacts/
 /e2e/screenshots/
+
+# Claude Code worktrees (agendo puts one per session under .claude/)
+/.claude/worktrees/
