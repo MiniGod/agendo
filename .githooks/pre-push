@@ -7,14 +7,35 @@ z40=0000000000000000000000000000000000000000
 status=0
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$z40" ] && continue          # branch deletion — nothing to lint
-  if [ "$remote_sha" != "$z40" ]; then
-    from="$remote_sha"                            # updating an existing remote branch
-  else
-    from="$(git merge-base "$local_sha" origin/master 2>/dev/null)"  # new branch
-  fi
+  # Always lint only what this branch ADDS relative to master.
+  #
+  # This used to start from $remote_sha when updating an existing branch, which
+  # is right only while the push fast-forwards. After a rebase the old remote tip
+  # is no longer an ancestor, so `--from $remote_sha` silently widens to include
+  # every master commit the branch had not seen — and one bad message anywhere in
+  # master's history then blocks every rebased force-push in the repo, forever.
+  # (It happened: a squash merge pastes the PR body into the commit footer, so a
+  # PR body with one long line put a footer-max-line-length failure on master's
+  # tip.) The merge-base is the same answer for both cases and cannot widen.
+  from="$(git merge-base "$local_sha" origin/master 2>/dev/null)"
   if [ -n "$from" ]; then
     bunx commitlint --from "$from" --to "$local_sha" || status=1
   else
+    # No origin/master to measure against. `origin` is an SSH remote here, and
+    # pushes that name an HTTPS URL explicitly never update its tracking refs, so
+    # a worktree can genuinely have no origin/master at all.
+    #
+    # Deliberately NOT falling back to the local `master` branch: it is routinely
+    # stale (it was 30+ commits behind while this was written), which would put
+    # the merge-base BEFORE the commits master already carries and reintroduce
+    # exactly the widening this hook is meant to avoid — silently, and only on
+    # the machines where master had gone stale.
+    #
+    # So: lint the tip commit alone. That under-checks a multi-commit branch,
+    # which is why it says so out loud rather than passing quietly; CI's
+    # "Lint commit messages" job is the backstop that sees the whole range.
+    echo "pre-push: no origin/master ref — linting only the tip commit." >&2
+    echo "  Run: git fetch origin master   (to check this branch in full)" >&2
     bunx commitlint --from "${local_sha}~1" --to "$local_sha" || status=1
   fi
 done
