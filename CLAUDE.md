@@ -55,6 +55,13 @@ or an entrypoint over a directory of its own parts. The budget is pinned at the
 worst remaining file rather than at the round 500, for the reason above: slack
 in a cap is room every other file can grow into.
 
+**There is no headroom, and that is deliberate.** 486 is where `src/activity.ts`
+already sits, so a new 490-line file fails lint on the day it lands. That is not
+the ratchet misfiring — it is the whole mechanism. The answer is to split the
+file, never to raise the number. If a genuinely irreducible file ever needs more,
+it gets its own named block with the argument in the PR, and the shared budget
+stays where it is.
+
 **No file carries a whole-file exemption any more.** What is left are per-FUNCTION
 blocks — `src/ui/App.tsx`, `src/cli/send.ts`, `src/cli/close.ts` — and one
 `max-params` block. Those are the next targets, and the same one-directional
@@ -94,6 +101,34 @@ this."
 
 It is **not** fine for getting under a size threshold, and it is **never** fine
 without the reason. A bare disable is a bug report with the text deleted.
+
+### The linter runs the moment a file is written
+
+`.claude/settings.json` registers a `PostToolUse` hook on `Write|Edit`
+(`.claude/hooks/lint-written-file.sh`) that runs `oxlint` on the file Claude
+Code just wrote and, on a violation, hands the output straight back with exit 2.
+
+The hook has **no opinion of its own**. It does not know what the line limit is,
+or that there is one — it shells out to the same `oxlint` binary CI runs, reading
+the same `.oxlintrc.json`. So the two can never disagree, and adding a rule,
+lowering a threshold or granting a file its own override changes what the hook
+enforces for free.
+
+That is also why the predicate is "does this file pass the linter" rather than
+"is this file over N lines". The ratchet already encodes *block growth, allow
+shrink*: every number in the config is pinned where the file already is, so a
+file sitting at its cap still passes while an edit that grows it does not. A
+naive size check would refuse every edit to a file that is already over — the
+edits that make it smaller included, which is the whole of the work that got the
+budget down to 486.
+
+Two limits, stated rather than papered over:
+
+- The matcher covers `Write` and `Edit`. A file rewritten through `Bash` — `sed`,
+  a heredoc, a codemod — does not trigger it. **CI remains the backstop**; the
+  hook exists to shorten the loop, not to replace it.
+- It needs `jq` and an installed `node_modules`. Without either it exits quietly
+  rather than failing every edit.
 
 `bun run doctor` runs [react-doctor](https://react.doctor) — not a CI gate, a
 periodic read on React/effect health.
