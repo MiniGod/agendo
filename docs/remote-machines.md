@@ -969,11 +969,9 @@ stub — same result, and the one previously flaky spec passed clean.)
 
 ### What is NOT verified
 
-The remote **write** path — `send-keys`, `paste-buffer`, `kill-window` — is
-threaded through the same seam and **has never been run against a real remote**.
-There is no sshd on this machine and the one available remote is read-only by
-instruction, so it has argv-level tests and nothing else. It is not known to
-work. Stage 3 has to close that.
+The remote **write** path is no longer on this list: `send` is verified against a
+real machine (§13.4). What remains unrun is `kill-window` — `close` has no
+`--remote` yet — and every command below `send` in §13.6's table.
 
 ## 11. Reconciliation: beam as built vs beam as specced
 
@@ -1293,6 +1291,151 @@ this work forbids. It needs one word from the owner, not more engineering.
 
 ---
 
+## 13. Closing the gaps the feature-completeness question found
+
+Four things, asked for together. The first three were cheap and the fourth is
+the one everything else was waiting on.
+
+### 13.1 `--json` was silently local-only
+
+`--remote` reached the plain listing and nothing else, so `--json`, `--all`,
+`--pr` and `--issue` returned the local half with no warning. That is the worst
+shape a gap can take here: `--json` is what orchestrator loops read, and they
+would have concluded a machine had no sessions rather than that nobody asked.
+
+Remote rows now merge into the enriched path and re-sort, so one call returns one
+list with a `host` on every row. Everything derived from a transcript or a `.git`
+directory is `null` on a remote row — `branch`, `git`, `pr`, `workItem`,
+`workflows` — rather than guessed.
+
+A `--pr` / `--issue` **query** still cannot include them, and now says so instead
+of quietly returning half an answer: those associations come from the model's
+reverse index, built from local transcripts and branches, so a remote session can
+never match.
+
+### 13.2 Two TUI actions could have acted on the wrong session
+
+`c` (continue in another agent) hands a bare session id to the converter, which
+has no notion of a machine. Pressed on a remote row it would find a LOCAL session
+with the same id if one existed — the same session resumed on both machines is
+the ordinary way that happens — convert THAT, and open it. Acting on a different
+session from the one under the cursor is worse than refusing, so it refuses.
+
+`m` (profile move) was already safe, but only by accident: a remote session
+carries no `logPath` and is always running, so two unrelated guards happened to
+catch it. It now refuses first and by name, because "this session has no on-disk
+transcript" is true of the wrong machine and reads as corruption rather than as
+geography.
+
+### 13.3 The ambiguity contract: refuse, and name them
+
+An id live on two machines is **two sessions**. `send` refuses and lists the
+machines rather than picking, following `close`'s precedent for the same reason:
+"prefer local" would type into a session other than the one the caller named, and
+into a live agent.
+
+Answering the refusal is what named the flag's semantics, and they are
+deliberately asymmetric:
+
+| | `list` | `send` |
+|---|---|---|
+| no flag | this machine | this machine |
+| `--remote` | this machine **and** all registered | this machine and all — so it can be ambiguous |
+| `--remote=vm` | this machine **plus** vm | **vm only** |
+
+A listing wants every machine; a send wants exactly one. Folding the local
+session back in on `--remote=vm` would make the disambiguation it performs
+impossible — which it did, until the test above caught the advice being a lie.
+
+### 13.4 The write path, run against a real machine at last
+
+This was the largest unverified claim in the document. It is now verified, over
+real ssh, and the rig is worth describing because it is what makes it repeatable
+without the owner's machines:
+
+* an `alpine` container running `sshd` + `tmux` (beam's own e2e image),
+* a throwaway ed25519 keypair generated per run,
+* an `ssh` wrapper first on `PATH` that pins that key — so nothing touches the
+  real agent, `~/.ssh/config`, or the 1Password-held key,
+* a throwaway `BEAM_CONFIG_DIR` registering the container as `box` — the owner's
+  own beam config is never read or written.
+
+What that proved:
+
+* **A message reaches a pane on another machine, byte for byte.** The payload —
+  `"quotes"`, `'single'`, `$HOME`, backticks, `$( )`, a backslash, a tab, an
+  emoji, an em-dash and a `#{format}` brace — arrived identical through
+  agendo → beam → ssh → tmux → the pane's stdin.
+* `--json` reports `route: "pane"`, `queued: false`, `socket.disabledBy:
+  "remote"`. The peer socket is skipped for a remote target on purpose: it is a
+  unix socket in THIS machine's `$XDG_RUNTIME_DIR`, and a local peer answering
+  for a remote id would be a different session entirely.
+* The ambiguity refusal fires on a real collision, and `--remote=<machine>`
+  answers it.
+* Without the flag, no beam is spawned at all (checked with `AGENDO_BEAM`
+  pointing at a nonexistent binary).
+
+**And it found the bug the exit statuses were designed for.** With the machine
+stopped, `send` reported *"Session is not running"* and advised `resume` — the
+one piece of advice that is wrong here twice over: the session is probably alive
+on the far machine, and `resume` would start it on THIS one, against a transcript
+that is not here. An unreachable machine is not a dead session. It now refuses
+with `machine-unreachable`, says "do NOT resume it", and carries the machines it
+could not reach in the JSON. This is exactly the transport-vs-tmux distinction
+§11.1 is about, arriving in the one place where getting it wrong loses work.
+
+### 13.5 Two bugs a self-review caught, worth recording
+
+Both were mine, in code written in the same sitting, and both were the kind a
+green test suite would never have shown:
+
+1. **The remote matcher was looser than the local one.** It accepted any window
+   name ending in `-<sid>`; the local resolver accepts only an ID-BEARING name.
+   So `send 1234 --remote` would have matched `cl-wi-1234` — whose name embeds a
+   WORK ITEM id and whose session id is something else entirely — and typed into
+   a session the caller never named. It now uses the same `ID_BEARING_NAME`
+   regex, and a test pins the difference. Found by reading a comment I had
+   written ("the same way the local resolver does") against the code under it,
+   and noticing it was not true.
+2. **"Could not be reached" was one third right.** The sweep folds three
+   different failures into one warning list — unreachable host, no beam here, no
+   tmux there — and only the first is a network problem. The message now says
+   agendo could not *determine* whether the session is running, which is what all
+   three actually mean.
+
+### 13.6 What is still missing
+
+`send` is the one that mattered, because everything below it in this table needs
+the same write path and now has a proven one to build on.
+
+| command | state |
+|---|---|
+| `ls`, TUI list, attach, `send` | done |
+| `wait` | no host awareness at all |
+| `status` | local only |
+| `close` / `kill` | local only — and the only one that DESTROYS, so it wants the ambiguity contract before the flag |
+| `resume` | local only |
+| `unblock` | local only |
+| `launch` on a machine | not started; the worktree is git, not tmux |
+| auto-resume a capped remote session | needs the readiness poll to reach a machine, which §12.5 deliberately forbids |
+
+Two smaller ones worth recording: an attached remote window is not captured into
+a restore snapshot (`captureRestore` only sees `cl-*` names, and a remote attach
+is `<host>/cl-*`), so relaunching the launcher loses remote tabs; and `--llm`
+still says nothing about machines, so an orchestrator agent cannot use any of
+this.
+
+### 13.7 What the ratchet did
+
+Every threshold this touched went DOWN. `src/index.tsx` 750 → 719 (`send`'s argv
+parsing joined `list`'s in `src/cli/`), `src/ui/App.tsx` 1034 → 937 (the
+profile-move block became `useProfileMove` — a hook, because `rules-of-hooks`
+correctly refused to let a `useRef` live in a plain factory), `src/tmux.ts` held
+at 2299 by dropping a `LiveTarget.host` field that turned out to have no reader.
+`runSend` grew past its complexity cap twice and was split rather than exempted.
+
+---
+
 ## Appendix: verified vs inferred
 
 **Verified — I ran this and got that.** All read-only against the remote. No
@@ -1397,11 +1540,12 @@ nested-tmux reproduction used two throwaway servers on dedicated sockets.
   both machines run `window-size latest`, so a new client resizes the panes of
   whatever is attached, and the vm's sessions are live agents mid-work.
 
-* That the remote **write** path works. It is threaded through the same seam and
-  has argv-level tests, and it has never been run against a real remote: there is
-  no sshd on this machine and the one available remote is read-only by
-  instruction. **This is the largest unverified claim in the document** and §8
-  stage 3 exists to close it.
+* ~~That the remote **write** path works.~~ **VERIFIED — §13.4.** It was the
+  largest unverified claim in this document. `send` now delivers a message to a
+  pane on another machine over real ssh, byte for byte, against a containerised
+  sshd+tmux with a throwaway key and a throwaway beam config. Running it also
+  found a real bug: an unreachable machine used to report "not running" and
+  advise `resume`.
 * That the beam-attached-window path (§1.3) behaves against the remote as it did
   in the local nested reproduction. The mechanism is identical; running it would
   have attached a second client to a live session.
