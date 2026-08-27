@@ -25,7 +25,7 @@ import { loadModel, refreshLiveTmux, type LoadedModel } from "../model.ts";
 import { printJson } from "../output.ts";
 import type { AgentSession, AgentSource, WorkflowStatus } from "../types.ts";
 import { workflowStatus } from "../workflows.ts";
-import { remoteSession, sweepRemotes } from "../remoteSessions.ts";
+import { remoteSession, sweepRemotes, type RemoteWindow } from "../remoteSessions.ts";
 import { resolveContext } from "../context.ts";
 import { makeSessionScope } from "../scope.ts";
 import { knownHost } from "../remote.ts";
@@ -86,6 +86,8 @@ export interface GitRefs {
 interface ListRow {
   id: string;
   shortId: string;
+  /** The machine this session runs on, as beam names it; null for this one. */
+  host: string | null;
   source: AgentSource;
   running: boolean;
   /** Input readiness from the live pane, or null when idle (no pane to read). */
@@ -156,6 +158,59 @@ interface ListRow {
   workItemUrl: string | null;
   /** Workflow-tool runs the session launched, with their effective status. */
   workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
+}
+
+/**
+ * One enriched row for a window on another machine.
+ *
+ * Every field the local path derives from a transcript or a `.git` directory is
+ * null here, and deliberately so — those files are on the far machine and tmux
+ * cannot reach them (see docs/remote-machines.md §3.3). `branch`, `git`, `pr`,
+ * `workItem` and `workflows` are therefore absent rather than guessed, which is
+ * the same contract the type already had for a local session whose transcript
+ * could not be read.
+ *
+ * What IS present comes from the sweep, which classified the pane with the same
+ * pure functions the local path uses: readiness, shells, background agents and
+ * the usage-limit reset.
+ */
+function remoteListRow(w: RemoteWindow, s: AgentSession, thresholdMs: number): ListRow {
+  const idle = w.idleSeconds ?? idleSeconds(s.lastUsed);
+  return {
+    // A pane tmux reports no launch argv for has no resumable id; `remoteSession`
+    // falls back to the window name so the row still has an identity, and the
+    // short id is left empty rather than dressing a window name up as one.
+    id: w.id ?? s.id,
+    shortId: w.id ? shortId(w.id) : "",
+    host: w.host,
+    source: s.source,
+    running: true, // a swept window is a live one; the sweep lists nothing else
+    readiness: w.readiness,
+    // Claude's own resume dialog is a readiness of its own here (`dialog`), and
+    // the remote sweep reports it as such rather than as a flag beside `ready`.
+    resumeDialog: false,
+    limitResetAt: w.limitResetAt,
+    compactionPercent: null,
+    shells: w.shells,
+    kind: managedKind(w.name),
+    branch: null,
+    cwd: s.cwd,
+    dir: basename(s.cwd) || s.cwd,
+    title: s.title.replace(/\s+/g, " ").trim(),
+    lastUsed: s.lastUsed.toISOString(),
+    idleSeconds: idle,
+    stalled: isStalled(
+      { running: true, readiness: w.readiness, resumeDialog: false, backgroundAgents: w.backgroundAgents, idleSeconds: idle },
+      thresholdMs,
+    ),
+    stalledAfterSeconds: thresholdMs / 1000,
+    git: null,
+    pr: null,
+    workItem: null,
+    prUrl: null,
+    workItemUrl: null,
+    workflows: [],
+  };
 }
 
 /**
@@ -263,6 +318,7 @@ export async function runList(opts: ListOptions): Promise<void> {
     return {
       id: s.id,
       shortId: shortId(s.id),
+      host: null,
       source: s.source,
       running,
       readiness,
@@ -303,11 +359,22 @@ export async function runList(opts: ListOptions): Promise<void> {
     };
   });
 
+  // Remote machines. Appended to the local rows and re-sorted, so a consumer
+  // reading `--json` sees one list with a `host` on each row rather than having
+  // to call twice and merge.
+  //
+  // A `--pr` / `--issue` QUERY cannot include them and says so rather than
+  // quietly returning the local half: those associations come from the model's
+  // reverse index, which is built from local transcripts and branches. A remote
+  // session has neither here (§3.3), so it can never match — and a silent empty
+  // half reads as "that machine has nothing on this PR".
+  const allRows = withRemoteRows(rows, opts, isQuery, inScope, thresholdMs);
+
   if (opts.json) {
-    await printJson(rows);
+    await printJson(allRows);
     return;
   }
-  if (rows.length === 0) {
+  if (allRows.length === 0) {
     // Name the scope when there is one: an empty listing under a `--repo` typo
     // otherwise reads as "nothing is running" rather than "nothing matched".
     const where = scopeNote(opts.scope);
@@ -318,19 +385,70 @@ export async function runList(opts: ListOptions): Promise<void> {
     );
     return;
   }
-  const itemLabel = model?.provider === "github" ? "issue" : "wi";
+  renderEnrichedTable(allRows, opts, model?.provider === "github" ? "issue" : "wi");
+}
+
+/**
+ * Fold the machines' rows into the local ones and re-sort, so a `--json`
+ * consumer reads ONE list with a `host` on each row rather than calling twice
+ * and merging.
+ *
+ * A `--pr` / `--issue` query cannot include them and says so rather than quietly
+ * returning the local half. Those associations come from the model's reverse
+ * index, built from local transcripts and branches; a remote session has neither
+ * here (docs/remote-machines.md §3.3), so it can never match — and a silent
+ * empty half reads as "that machine has nothing on this PR".
+ */
+function withRemoteRows(
+  rows: ListRow[],
+  opts: ListOptions,
+  isQuery: boolean,
+  inScope: (s: AgentSession) => boolean,
+  thresholdMs: number,
+): ListRow[] {
+  if (!opts.remote) return rows;
+  if (isQuery) {
+    console.error(
+      "warning: --remote is ignored by --pr / --issue — a PR or work-item link is derived from a " +
+        "session's branch, which lives in files on that machine and is not readable over tmux.",
+    );
+    return rows;
+  }
+  const out = [...rows];
+  const sweep = sweepRemotes(opts.remote);
+  for (const w of sweep.warnings) console.error(`warning: ${w}`);
+  for (const w of sweep.windows) {
+    // Same rule as the local half: a dormant restored tab is an idle bash, not a
+    // running agent.
+    if (w.placeholder) continue;
+    const s = remoteSession(w);
+    if (!inScope(s)) continue;
+    out.push(remoteListRow(w, s, thresholdMs));
+  }
+  return out.sort((a, b) => Date.parse(b.lastUsed) - Date.parse(a.lastUsed));
+}
+
+/** The enriched human table. `itemLabel` is the backend's word for a work item. */
+function renderEnrichedTable(rows: ListRow[], opts: ListOptions, itemLabel: string): void {
   const ready = rows.map((r) =>
     readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt), r.compactionPercent),
   );
   const rw = readyWidth(ready);
+  // Same rule as the plain table: the column exists only when machines were
+  // asked for. Without `--remote` every row is local and a column saying so on
+  // all of them is noise.
+  const mw = opts.remote ? Math.max("machine".length, ...rows.map((r) => (r.host ?? "local").length)) : 0;
+  /** The machine cell, or no cell at all when machines were not asked for. */
+  const machine = (text: string) => (opts.remote ? [text.padEnd(mw)] : []);
   console.log(
-    ["", "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+    ["", ...machine("machine"), "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
   for (const [i, r] of rows.entries()) {
     const wfRunning = r.workflows.filter((w) => w.status === "running").length;
     console.log(
       [
         r.running ? "●" : "○",
+        ...machine(r.host ?? "local"),
         ready[i].padEnd(rw),
         (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
         r.shortId.padEnd(12),
