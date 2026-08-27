@@ -878,13 +878,13 @@ const RESUME_DIALOG_LOOKS = 16;
  * Answering is all this does. It does NOT verify the input box came back — the
  * caller must re-capture and check that before pasting anything (see runSend).
  */
-export function answerResumeDialog(target: string, option: ResumeDialogOption): boolean {
+export function answerResumeDialog(target: string, option: ResumeDialogOption, host: Host = null): boolean {
   let seen: number | null = null;
   let times = 0;
   let movedFrom: number | null = null;
   for (let i = 0; i < RESUME_DIALOG_LOOKS; i++) {
     if (i > 0) sleepSync(RESUME_DIALOG_STEP_MS);
-    const raw = capturePane(target);
+    const raw = capturePane(target, host);
     // Gone (someone answered it, or it was never really there): nothing to confirm.
     if (!paneResumeDialogActive(raw)) return false;
     const at = resumeDialogSelection(raw);
@@ -904,10 +904,10 @@ export function answerResumeDialog(target: string, option: ResumeDialogOption): 
     seen = at.number;
     if (times < 2) continue; // not a settled frame yet — look again
     if (at.label === option.label) {
-      tmuxQuiet(resumeDialogStep(target, at.number, at.number)); // Enter
+      tmuxQuiet(resumeDialogStep(target, at.number, at.number), host); // Enter
       return true;
     }
-    tmuxQuiet(resumeDialogStep(target, at.number, want.number));
+    tmuxQuiet(resumeDialogStep(target, at.number, want.number), host);
     movedFrom = at.number; // ignore frames still showing this until the move lands
     seen = null; // whatever the next frame shows must settle again before we act
     times = 0;

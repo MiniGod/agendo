@@ -2,8 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { remoteSession, type RemoteWindow } from "../src/remoteSessions.ts";
+import { locateEverywhere, remoteSession, type RemoteWindow } from "../src/remoteSessions.ts";
 import { isRemoteKey, liveKey, REMOTE_KEY_SEP } from "../src/model.ts";
+import { ID_BEARING_NAME } from "../src/tmux.ts";
 import { parseMenuArgs } from "../src/cli/args.ts";
 
 // None of this is reachable from e2e: the suite has no second machine, and its
@@ -156,5 +157,55 @@ describe("parseMenuArgs — --remote", () => {
       session: "host",
       remote: ["vm"],
     });
+  });
+});
+
+describe("locateEverywhere — a named machine is exclusive, a bare --remote is not", () => {
+  // The asymmetry is deliberate and was a bug before it was a rule: `ls
+  // --remote=vm` adds that machine to the local listing, but `send --remote=vm`
+  // must mean THAT machine, because it is how a caller answers "which of the two
+  // did you mean". Folding the local session back in made that unanswerable.
+  test("includeLocal=false leaves this machine out entirely", () => {
+    // No beam machines and no local half: there is nothing left to find, which is
+    // exactly the point — the flag decided that, not the absence of a session.
+    expect(locateEverywhere("deadbeef1234", null, false)).toEqual({ found: [], warnings: [] });
+  });
+
+  test("includeLocal=true with no machines is the local-only lookup send always did", () => {
+    const { found, warnings } = locateEverywhere("nosuchsession", null, true);
+    expect(warnings).toEqual([]);
+    expect(found).toEqual([]); // no such local session either, but it did look
+  });
+});
+
+describe("the remote matcher is EXACTLY the local one, not a looser cousin", () => {
+  // `locateEverywhere` resolves a short id against remote window names. It must
+  // use the same rule `liveTargetForShortId` uses locally — the short id embedded
+  // in an ID-BEARING name — because anything looser matches more remotely than
+  // locally, which is the wrong direction for a resolver whose entire job is
+  // telling two machines apart.
+  //
+  // The specific miss this pins: a trailing `-<sid>` test (which is what the
+  // first draft used) matches `cl-wi-1234`, whose name embeds a WORK ITEM id.
+  // `send 1234 --remote` would have typed into a session whose own id is
+  // something else entirely.
+  const match = (name: string) => name.match(ID_BEARING_NAME)?.[1] ?? null;
+
+  test("id-bearing names resolve to their short id", () => {
+    expect(match("cl-claude-aaaabbbbcccc")).toBe("aaaabbbbcccc");
+    expect(match("cl-bg-ddddeeeeffff")).toBe("ddddeeeeffff");
+    expect(match("cl-new-f7c286cb78df")).toBe("f7c286cb78df");
+  });
+
+  test("a work-item or PR name is NOT an id-bearing name", () => {
+    // These embed an item id, not a session id. Matching them here would send
+    // to a session the caller never named.
+    expect(match("cl-wi-1234")).toBeNull();
+    expect(match("cl-pr-50")).toBeNull();
+  });
+
+  test("a bare trailing id does not make a name id-bearing", () => {
+    expect(match("launcher")).toBeNull();
+    expect(match("some-window-aaaabbbbcccc")).toBeNull();
   });
 });

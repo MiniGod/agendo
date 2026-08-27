@@ -205,6 +205,18 @@ Usage:
       --timeout <dur>           Deadline for the input box to appear after that
                                 dialog is answered — a ceiling, not a wait: it
                                 proceeds as soon as the box is there (default 120s)
+      --remote                  EXPERIMENTAL. Also look for the session on the
+                                machines beam has registered. If the id is live on
+                                more than one, send REFUSES and names them rather
+                                than picking — the same id on two machines is two
+                                sessions. A remote session is always typed into its
+                                pane: the messaging socket is a unix socket and
+                                does not cross a machine boundary.
+      --remote=<machine>        That machine, and NOT this one — the way you
+                                answer the refusal above. (Note the difference
+                                from \`list --remote=<machine>\`, which ADDS that
+                                machine to the local listing rather than replacing
+                                it: a listing wants both, a send wants one.)
   agendo close <id>            End a running session: kills ONLY the tmux window
        (aliases: kill, stop)    (or session) it runs in. Its git worktree, branch
                                 and commits are guaranteed untouched on disk —

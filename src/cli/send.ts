@@ -2,10 +2,14 @@ import { PEER_SOCKET_ENV, peerSocketEnabled, resumeDialogChoice } from "../confi
 import { SELF_CMD, notRunningHint } from "../launch.ts";
 import { printJson } from "../output.ts";
 import { findPeer, sendPeerMessage } from "../peer.ts";
+import { locateEverywhere } from "../remoteSessions.ts";
+import { knownHost } from "../remote.ts";
+import { parseRemoteFlag } from "./args.ts";
+import { parseDuration } from "../wait.ts";
 import {
-  answerResumeDialog, capturePane, capturePaneState, liveTargetForShortId, paneAcceptsPaste, paneReadiness,
+  answerResumeDialog, capturePane, capturePaneState, paneAcceptsPaste, paneReadiness,
   paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, sendToPane, shortId, stripAnsi,
-  RESUME_DIALOG_POLL_MS, type PaneSnapshot, type Readiness,
+  RESUME_DIALOG_POLL_MS, RESUME_DIALOG_WAIT_MS, type LiveTarget, type PaneSnapshot, type Readiness,
 } from "../tmux.ts";
 import { flushWarnings } from "./warnings.ts";
 
@@ -20,18 +24,118 @@ import { flushWarnings } from "./warnings.ts";
  * that half-drawn screen can be discarded by the next full repaint — so the box
  * has to still be there a moment later to count.
  */
-async function waitForInputBox(target: string, timeoutMs: number): Promise<PaneSnapshot | null> {
+async function waitForInputBox(target: string, timeoutMs: number, host: string | null): Promise<PaneSnapshot | null> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const deadline = Date.now() + timeoutMs;
   let settled = false;
   while (true) {
-    const snap = capturePaneState(target);
+    const snap = capturePaneState(target, host);
     const ok = paneAcceptsPaste(snap.raw, snap.cursor);
     if (ok && settled) return snap;
     settled = ok;
     if (Date.now() >= deadline) return null;
     await sleep(Math.min(RESUME_DIALOG_POLL_MS, Math.max(0, deadline - Date.now())));
   }
+}
+
+/**
+ * Say why `send` found nothing to send to, and how to fix it.
+ *
+ * Two different failures wear the same shape here and need OPPOSITE advice, so
+ * they must not share a message.
+ *
+ * With the socket ON, no window and no peer means the session is genuinely not
+ * running — and #38's hint exists precisely because the bare refusal read as a
+ * death notice, so `resume` has to be named.
+ *
+ * With the socket OFF we never looked, and a session that is alive but merely
+ * unreachable must NOT be told to `resume`: that would put a second claude on
+ * one transcript, which `resume` itself refuses. So look now, diagnostically.
+ * That is consistent with the switch's scope rather than a hole in it — it stops
+ * us SPEAKING an undocumented protocol, not reading a registry file, which is
+ * the same reason `status` keeps its peer lines.
+ */
+async function diagnoseNotRunning(
+  token: string,
+  sid: string,
+  socket: { enabled: boolean; source: string },
+  unreachableMachines: string[],
+): Promise<{ reason: string; extra?: Record<string, unknown>; code: number }> {
+  // A machine we could not REACH is not a session that is not running, and the
+  // two need opposite advice. "Not running" sends the caller to `resume`, which
+  // here would be wrong twice over: the session is probably alive on the far
+  // machine, and resuming would do it on THIS one, against a transcript that is
+  // not here. This is the transport-vs-tmux distinction the exit statuses were
+  // designed around (docs/remote-machines.md §11.1), arriving where it counts.
+  if (unreachableMachines.length > 0) {
+    // "Could not determine", not "could not be reached": the sweep folds three
+    // different failures into one warning list (unreachable host, no beam here,
+    // no tmux there), and only the first is a network problem. What they share
+    // is the only thing this message needs to say — agendo does not know.
+    console.error(
+      `Not sending: ${token} was not found here, and agendo could not determine whether it is running on ` +
+        `${unreachableMachines.length === 1 ? "the machine it could not read" : `the ${unreachableMachines.length} machines it could not read`}. ` +
+        `Do NOT resume it — that would start a second session, here, against a transcript that may not be here. Retry once the machine answers.`,
+    );
+    return { reason: "machine-unreachable", extra: { unreachable: unreachableMachines }, code: 1 };
+  }
+  const unreachable = socket.enabled ? null : await findPeer((id) => shortId(id) === sid);
+  if (unreachable) {
+    const by = socket.source === "env" ? PEER_SOCKET_ENV : `"peerSocket": false in config.json`;
+    console.error(`Session ${token} IS running (pid ${unreachable.pid}), but unreachable: it has no tmux window, and the messaging socket is disabled (${by}).`);
+    console.error(
+      `  Re-enable it for one command with \`${PEER_SOCKET_ENV}=1 ${SELF_CMD} send ${token} "…"\`, or attach to it\n` +
+        `  yourself. Do NOT resume it — it is already running, and a second session on one transcript is\n` +
+        `  exactly what \`${SELF_CMD} resume\` refuses.`,
+    );
+    return { reason: "socket-disabled", extra: { pid: unreachable.pid, sessionId: unreachable.sessionId }, code: 1 };
+  }
+  // Genuinely gone — by either route, whatever the switch says. Describing this
+  // one as "switched off" would send the caller to unset a variable that would
+  // change nothing, instead of to the command that actually brings it back.
+  console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
+  console.error(notRunningHint(token, "then send again"));
+  return { reason: "not-running", code: 1 };
+}
+
+/**
+ * Resolve `sid` to exactly one live window, across machines when asked.
+ *
+ * Without `--remote` this is the local lookup `send` always did, and no beam is
+ * spawned.
+ *
+ * MORE THAN ONE MATCH IS A REFUSAL, not a preference. The same session resumed
+ * on two machines carries the same `cl-<source>-<shortid>` window name on both,
+ * so "prefer local" would type into a session other than the one the caller
+ * named — silently, and into a live agent. `close` sets the precedent for the
+ * same reason: enumerate and refuse. `--remote=<machine>` narrows it.
+ *
+ * No match is NOT decided here: `send` can still reach a session over its peer
+ * socket with no window at all, and the diagnosis for "genuinely gone" belongs
+ * with that.
+ */
+function locateOne(
+  token: string,
+  sid: string,
+  remote: string[] | null,
+): { target: LiveTarget | null; host: string | null; unreachable: string[] } {
+  // A NAMED machine is exclusive here, unlike in a listing: `--remote=vm` is the
+  // answer to "which one did you mean", so folding this machine back in would
+  // make the disambiguation it performs impossible. A bare `--remote` stays
+  // additive, and is the spelling that can be ambiguous.
+  const includeLocal = remote === null || remote.length === 0;
+  const { found, warnings } = locateEverywhere(sid, remote, includeLocal);
+  for (const w of warnings) console.error(`warning: ${w}`);
+  if (found.length > 1) {
+    const where = found.map((f) => f.host ?? "local").join(", ");
+    console.error(
+      `Not sending: ${token} matches a live session on ${found.length} machines (${where}) — agendo can't tell ` +
+        `which one you mean. Narrow it with \`--remote=<machine>\`, or drop --remote to mean this machine.`,
+    );
+    process.exit(2);
+  }
+  const one = found[0];
+  return { target: one?.target ?? null, host: one?.host ?? null, unreachable: warnings };
 }
 
 /**
@@ -87,7 +191,7 @@ async function waitForInputBox(target: string, timeoutMs: number): Promise<PaneS
  * one would either wait for a delivery that already happened or treat a refusal as
  * transient. Nothing about the session tells it apart afterwards, so `send` says.
  */
-export async function runSend(token: string | undefined, prompt: string, force: boolean, dialogWaitMs: number, json: boolean): Promise<void> {
+export async function runSend(token: string | undefined, prompt: string, force: boolean, dialogWaitMs: number, json: boolean, remote: string[] | null = null): Promise<void> {
   if (!token || !prompt) {
     console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force] [--json] [--timeout <dur>]`);
     process.exit(1);
@@ -98,12 +202,16 @@ export async function runSend(token: string | undefined, prompt: string, force: 
   // and `reason`, a human tailing stderr still sees what went wrong.
   const say = (line: string) => { if (!json) console.log(line); };
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
-  const target = liveTargetForShortId(sid);
+  const { target, host, unreachable } = locateOne(token, sid, remote);
   // The kill switch. Deliberately gating DISCOVERY and not just the write: with
   // it off, `send` must behave exactly as it did before the socket existed, and
   // a resolved-but-unused peer would still change the outcome — a windowless
   // session would be "reachable" right up to the point of refusing to deliver.
-  const socket = peerSocketEnabled();
+  // The peer socket is a unix socket in THIS machine's $XDG_RUNTIME_DIR. It does
+  // not cross a machine boundary, and a local peer answering for a remote id
+  // would be a different session entirely — so a resolved remote target skips
+  // discovery altogether rather than risking that match.
+  const socket = host === null ? peerSocketEnabled() : { enabled: false, note: null, source: "remote" as const };
   if (socket.note) console.error(`▸ ${socket.note}.`);
   const peer = socket.enabled ? await findPeer((id) => shortId(id) === sid) : null;
   const routeInfo = { enabled: socket.enabled, disabledBy: socket.enabled ? null : socket.source };
@@ -132,39 +240,8 @@ export async function runSend(token: string | undefined, prompt: string, force: 
   // target first would make `send` the one thing you cannot do to a session
   // that `status` reports as running.
   if (!target && !peer) {
-    // Two different failures wear the same shape here, and they need OPPOSITE
-    // advice, so they must not share a message.
-    //
-    // With the socket on, no window and no peer means the session is genuinely
-    // not running — and #38's hint exists precisely because the bare refusal
-    // read as a death notice, so `resume` has to be named.
-    //
-    // With the socket OFF we never looked, and a session that is alive but
-    // merely unreachable must NOT be told to `resume`: that would put a second
-    // claude on one transcript, which `resume` itself refuses. So look now,
-    // diagnostically. That is consistent with the switch's scope rather than a
-    // hole in it — it stops us SPEAKING an undocumented protocol, not reading a
-    // registry file, which is the same reason `status` keeps its peer lines.
-    const unreachable = socket.enabled ? null : await findPeer((id) => shortId(id) === sid);
-    if (unreachable) {
-      const by = socket.source === "env" ? PEER_SOCKET_ENV : `"peerSocket": false in config.json`;
-      console.error(`Session ${token} IS running (pid ${unreachable.pid}), but unreachable: it has no tmux window, and the messaging socket is disabled (${by}).`);
-      console.error(
-        `  Re-enable it for one command with \`${PEER_SOCKET_ENV}=1 ${SELF_CMD} send ${token} "…"\`, or attach to it\n` +
-          `  yourself. Do NOT resume it — it is already running, and a second session on one transcript is\n` +
-          `  exactly what \`${SELF_CMD} resume\` refuses.`,
-      );
-      return finish(
-        { ok: false, route: null, reason: "socket-disabled", extra: { pid: unreachable.pid, sessionId: unreachable.sessionId } },
-        1,
-      );
-    }
-    // Genuinely gone — by either route, whatever the switch says. Describing this
-    // one as "switched off" would send the caller to unset a variable that would
-    // change nothing, instead of to the command that actually brings it back.
-    console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
-    console.error(notRunningHint(token, "then send again"));
-    return finish({ ok: false, route: null, reason: "not-running" }, 1);
+    const gone = await diagnoseNotRunning(token, sid, socket, unreachable);
+    return finish({ ok: false, route: null, reason: gone.reason, extra: gone.extra }, gone.code);
   }
   /** Whether step 1 actually had a dialog to answer — reported, since it means a turn started. */
   let dialogAnswered = false;
@@ -173,7 +250,7 @@ export async function runSend(token: string | undefined, prompt: string, force: 
   // Pane state only exists when there IS a pane. Where it exists it is what the
   // dialog step below reads — that step is not advisory, and only a pane can
   // satisfy it.
-  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target.target) : { raw: "", cursor: null };
+  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target.target, host) : { raw: "", cursor: null };
   let readiness: Readiness | null = target ? paneReadiness(raw, cursor) : null;
   // ── Step 1: answer claude's resume dialog. Keystrokes only, and BEFORE any
   // delivery — a queued frame can't answer it, and a session parked here hasn't
@@ -195,14 +272,14 @@ export async function runSend(token: string | undefined, prompt: string, force: 
     // Nothing was confirmed and the menu is still up — the cursor wouldn't move,
     // or we couldn't read it. Stop here rather than wait out the whole timeout;
     // either way not one character of the message has been sent.
-    if (!answerResumeDialog(target.target, option) && paneResumeDialogActive(capturePane(target.target))) {
+    if (!answerResumeDialog(target.target, option, host) && paneResumeDialogActive(capturePane(target.target, host))) {
       console.error(
         `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
           `selection keys). Nothing was pasted — answer it yourself, then retry.`,
       );
       return finish({ ok: false, route: null, reason: "resume-dialog-unanswered", extra: { resumeDialog: true } }, 2);
     }
-    const settled = await waitForInputBox(target.target, dialogWaitMs);
+    const settled = await waitForInputBox(target.target, dialogWaitMs, host);
     if (!settled) {
       console.error(
         `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
@@ -276,12 +353,72 @@ export async function runSend(token: string | undefined, prompt: string, force: 
     );
     return finish({ ok: false, route: null, reason: "resume-menu-suspect", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
   }
-  sendToPane(target!.target, prompt); // non-null: reaching here means the peer path didn't return
+  sendToPane(target!.target, prompt, host); // non-null: reaching here means the peer path didn't return
   // Name the route, and — where it isn't obvious — why this one. A caller that
   // expected the socket needs to know it got keystroke semantics instead: this
   // message is in the pane NOW, and it was only allowed there because the pane
   // was idle (or --force said to anyway).
-  const why = socketFellBack ? " (socket fallback)" : !socket.enabled ? ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})` : "";
+  // Name the reason the socket wasn't used, and name it correctly: a remote
+  // target skipped it because a unix socket does not cross a machine boundary,
+  // which is not the same fact as "you turned it off" and would send a reader to
+  // change a setting that would not have helped.
+  const noSocket = socket.source === "remote"
+    ? ` (over ${host})`
+    : ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})`;
+  const why = socketFellBack ? " (socket fallback)" : !socket.enabled ? noSocket : "";
   say(`▸ pasted into pane ${target!.name}${why}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
   return finish({ ok: true, route: "pane", extra: { state: readiness, resumeDialog: dialogAnswered, socketFellBack } }, 0);
+}
+
+/**
+ * `agendo send` argv → one delivered (or refused) message.
+ *
+ * Parsed beside the command for the same reason `list`'s is: `--remote` is the
+ * flag that pushed index.tsx back over its `max-lines` cap, and a command's
+ * flags belong with the command.
+ */
+export async function runSendCli(argv: string[]): Promise<void> {
+
+let id: string | undefined;
+let force = false;
+// How long to wait for the input box to come back after answering claude's
+// resume dialog (only used on that path).
+let dialogWaitMs = RESUME_DIALOG_WAIT_MS;
+let json = false;
+let remote: string[] | null = null;
+const parts: string[] = [];
+const rest = argv;
+for (let i = 0; i < rest.length; i++) {
+  const a = rest[i];
+  if (a === "--force" || a === "-f") force = true;
+  // Recognized anywhere in argv, as --force already is: both are valueless, so
+  // neither can swallow a word of the prompt, and `--` still passes either
+  // spelling through literally.
+  else if (a === "--json") json = true;
+  // Valueless in both spellings (`--remote`, `--remote=<machine>`), so like
+  // --force it cannot swallow a word of the prompt and is recognized anywhere.
+  // The "did you mean --remote=x" hint is deliberately NOT armed here: the
+  // token after a bare --remote is ordinarily the id or the prompt, and only
+  // `list`/the launcher have a positional it could be confused with.
+  else if (a === "--remote" || a.startsWith("--remote=")) {
+    remote = parseRemoteFlag("send", a, undefined, remote, knownHost);
+  }
+  // Only before the prompt begins: unlike --force, this flag consumes the NEXT
+  // token, so recognizing it mid-prompt would eat a word of the message. Shares
+  // `wait`'s duration grammar (and its parser, which lives in wait.ts) so the
+  // two commands can't drift into accepting different spellings of "2s".
+  else if (a === "--timeout" && parts.length === 0) {
+    const ms = parseDuration(rest[++i]);
+    if (ms === null) {
+      console.error(`send: --timeout needs a duration like 500ms, 2s, 5m, 1h (got "${rest[i] ?? ""}")`);
+      process.exit(1);
+    }
+    dialogWaitMs = ms;
+  }
+  else if (a === "--") { parts.push(...rest.slice(i + 1)); break; }
+  else if (id === undefined) id = a;
+  else parts.push(a);
+}
+await runSend(id, parts.join(" ").trim(), force, dialogWaitMs, json, remote);
+process.exit(0);
 }

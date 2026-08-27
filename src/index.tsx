@@ -4,7 +4,7 @@ import {
   tmuxAvailable, enterLauncherSession, shortId, sessionName, liveTargets, liveTargetForShortId,
   capturePaneState, paneReadiness, paneBackgroundAgents, paneShells, stripAnsi,
   sessionRoot, currentSessionName,
-  paneResumeDialogActive, RESUME_DIALOG_WAIT_MS,
+  paneResumeDialogActive,
 } from "./tmux.ts";
 import { formatResetTime, paneResetAt } from "./usageLimit.ts";
 import { FORWARDABLE_LAUNCH_FLAGS, launchTask, llmGuide, SELF_CMD, withSelfCmdEnv } from "./launch.ts";
@@ -18,7 +18,7 @@ import { makeSessionScope, scopeFilter, scopeNote, type SessionScope } from "./s
 import { refreshLiveTmux } from "./model.ts";
 import { resumeDialogChoice } from "./config.ts";
 import { linkLine, linkVocab } from "./output.ts";
-import { parseDuration, runWaitCli } from "./wait.ts";
+import { runWaitCli } from "./wait.ts";
 import { AGENTS } from "./types.ts";
 import type { AgentSource, WorkflowStatus } from "./types.ts";
 import { loadWorkflowDetails, workflowStatus } from "./workflows.ts";
@@ -28,7 +28,7 @@ import { parseMenuArgs, parseSessionArgs, requireDuration, requireValue } from "
 import { readyCell, rowCompactionPercent, timeAgo } from "./cli/cells.ts";
 import { resolveSessionLink } from "./cli/links.ts";
 import { runOpen } from "./cli/open.ts";
-import { runSend } from "./cli/send.ts";
+import { runSendCli } from "./cli/send.ts";
 import { runUnblock } from "./cli/unblock.ts";
 import { runResume } from "./cli/resume.ts";
 import { runClose } from "./cli/close.ts";
@@ -329,38 +329,7 @@ if (process.argv[2] === "launch") {
 // it — but only if the TUI looks idle/ready, so we never clobber an open
 // question, a mid-turn generation, or text already queued in the box.
 if (process.argv[2] === "send") {
-  let id: string | undefined;
-  let force = false;
-  // How long to wait for the input box to come back after answering claude's
-  // resume dialog (only used on that path).
-  let dialogWaitMs = RESUME_DIALOG_WAIT_MS;
-  let json = false;
-  const parts: string[] = [];
-  const rest = process.argv.slice(3);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--force" || a === "-f") force = true;
-    // Recognized anywhere in argv, as --force already is: both are valueless, so
-    // neither can swallow a word of the prompt, and `--` still passes either
-    // spelling through literally.
-    else if (a === "--json") json = true;
-    // Only before the prompt begins: unlike --force, this flag consumes the NEXT
-    // token, so recognizing it mid-prompt would eat a word of the message. Shares
-    // `wait`'s duration grammar (and its parser, which lives in wait.ts) so the
-    // two commands can't drift into accepting different spellings of "2s".
-    else if (a === "--timeout" && parts.length === 0) {
-      const ms = parseDuration(rest[++i]);
-      if (ms === null) {
-        console.error(`send: --timeout needs a duration like 500ms, 2s, 5m, 1h (got "${rest[i] ?? ""}")`);
-        process.exit(1);
-      }
-      dialogWaitMs = ms;
-    }
-    else if (a === "--") { parts.push(...rest.slice(i + 1)); break; }
-    else if (id === undefined) id = a;
-    else parts.push(a);
-  }
-  await runSend(id, parts.join(" ").trim(), force, dialogWaitMs, json);
+  await runSendCli(process.argv.slice(3));
   process.exit(0);
 }
 

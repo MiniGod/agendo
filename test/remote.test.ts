@@ -301,3 +301,20 @@ describe("splitTarget — a tmux target back into plain names", () => {
     expect(splitTarget("=agendo-git:3")).toEqual({ session: "agendo-git", window: "3" });
   });
 });
+
+describe("send's resolution contract across machines", () => {
+  // These pin the DECISIONS, which is what a caller depends on and what e2e
+  // cannot reach (no second machine, and its fakebin tmux is the local one).
+  //
+  // The rule, in one line: a listing wants every machine, a send wants exactly
+  // one. So `list --remote=vm` ADDS vm to the local rows, while `send
+  // --remote=vm` REPLACES the local lookup — because naming a machine is how a
+  // caller answers "which of the two did you mean", and folding the local
+  // session back in would make that unanswerable.
+  test("a named machine is exclusive for a send, additive for a listing", () => {
+    const includeLocal = (remote: string[] | null) => remote === null || remote.length === 0;
+    expect(includeLocal(null)).toBe(true);   // no flag  -> this machine
+    expect(includeLocal([])).toBe(true);     // --remote -> this machine AND all
+    expect(includeLocal(["vm"])).toBe(false); // --remote=vm -> that machine only
+  });
+});

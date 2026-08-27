@@ -25,8 +25,8 @@
 // faked — `AgentSession` already marks every one of them optional, which is why
 // a remote session fits the type agendo has always used.
 import {
-  capturePaneState, liveManagedPaths, managedKind, paneBackgroundAgents,
-  paneReadiness, paneShells, stripAnsi, tmuxLines, type Readiness,
+  ID_BEARING_NAME, capturePaneState, liveManagedPaths, liveTargetForShortId, managedKind,
+  paneBackgroundAgents, paneReadiness, paneShells, stripAnsi, tmuxLines, type LiveTarget, type Readiness,
 } from "./tmux.ts";
 import { paneResetAt } from "./usageLimit.ts";
 import { loadHosts, probeHost } from "./remote.ts";
@@ -244,4 +244,55 @@ export function sweepRemotes(hosts: string[]): RemoteSweep {
     windows.push(...readHost(name));
   }
   return { windows, warnings };
+}
+
+/** Where a session id was found: a machine (or this one) and the window on it. */
+export interface Located {
+  /** null = this machine. */
+  host: string | null;
+  target: LiveTarget;
+  /** The short id that matched, for the ambiguity message. */
+  shortId: string;
+}
+
+/**
+ * Find every window matching `sid`, on `remote` and — when `includeLocal` —
+ * here too.
+ *
+ * The local half is optional because a listing and a single-session command want
+ * different things from a NAMED machine. `ls --remote=vm` is additive: show me
+ * this machine and that one. `send --remote=vm` is exclusive: that machine is
+ * the answer to "which one did you mean", and folding the local session back in
+ * would make the very disambiguation the caller just performed impossible.
+ *
+ * Returns ALL matches rather than the first, because more than one is the case
+ * that matters: the same session resumed on two machines carries the same
+ * `cl-<source>-<shortid>` window name on both, and a caller that silently took
+ * the local one would type into a session other than the one the user named.
+ * Deciding that is the caller's job (`send` refuses and lists them); finding it
+ * is this function's.
+ */
+export function locateEverywhere(
+  sid: string,
+  remote: string[] | null,
+  includeLocal: boolean,
+): { found: Located[]; warnings: string[] } {
+  const found: Located[] = [];
+  const local = includeLocal ? liveTargetForShortId(sid) : null;
+  if (local) found.push({ host: null, target: local, shortId: sid });
+  if (!remote) return { found, warnings: [] };
+  const sweep = sweepRemotes(remote);
+  for (const w of sweep.windows) {
+    if (w.placeholder) continue;
+    // EXACTLY the rule `liveTargetForShortId` uses, and the same regex: the short
+    // id embedded in an ID-BEARING window name. Anything looser matches more
+    // remotely than locally, which is the wrong direction for a resolver whose
+    // whole job is telling two machines apart — a trailing-`-<sid>` test, for
+    // one, would let `send 1234` hit a `cl-wi-1234` window, whose name embeds a
+    // WORK ITEM id and whose session id is something else entirely.
+    const m = w.name.match(ID_BEARING_NAME);
+    if (!m || m[1] !== sid) continue;
+    found.push({ host: w.host, target: { name: w.name, target: w.target }, shortId: sid });
+  }
+  return { found, warnings: sweep.warnings };
 }

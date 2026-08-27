@@ -175,7 +175,7 @@
     },
 
     {
-      // ── temporary exemption: src/index.tsx (750 lines) ───────────────────
+      // ── temporary exemption: src/index.tsx (719 lines) ───────────────────
       // Was 2456, then 1237. Eleven subcommands and the shared formatters now
       // live in src/cli/; what is left is argv dispatch plus `status`.
       //
@@ -203,7 +203,7 @@
       // to 1036 / 198 in the same change.
       "files": ["src/index.tsx"],
       "rules": {
-        "max-lines": ["error", { "max": 750, "skipBlankLines": false, "skipComments": false }],
+        "max-lines": ["error", { "max": 719, "skipBlankLines": false, "skipComments": false }],
         "max-lines-per-function": ["error", { "max": 215, "skipBlankLines": false, "skipComments": false }], // runStatus
         "complexity": ["error", 66],
         "max-statements": ["error", 90]
