@@ -27,6 +27,17 @@ export function makeContinueInOtherAgent({
   // the default ~/.claude config dir (where the converter writes), so no
   // configDir override is needed for resume.
   const continueInOtherAgent = async (s: AgentSession) => {
+    // A session on another machine cannot be converted from here, and — this is
+    // the part worth guarding rather than letting fail — the converter takes a
+    // bare session ID with no notion of a machine. Handed a remote row's id it
+    // would find a LOCAL session with the same id if one exists (the same
+    // session resumed on both machines is the ordinary way that happens),
+    // convert THAT, and open it. Acting on a different session from the one
+    // under the cursor is worse than refusing.
+    if (s.host) {
+      setNotice(`${s.title} is on ${s.host} — its transcript is on that machine, so there is nothing here to convert.`);
+      return;
+    }
     const dest = convertTarget(s.source);
     if (!dest) {
       setNotice(`No cross-agent convert for ${s.source} sessions (the converter only speaks Claude↔Copilot).`);
