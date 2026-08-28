@@ -2,7 +2,7 @@
 // and the session-scoped options the launcher stores on them. Queries only —
 // everything that CHANGES the server lives in `windows.ts`.
 import { spawnSync } from "child_process";
-import { tmuxLines, tmuxQuiet } from "./exec.ts";
+import { tmuxLines } from "./exec.ts";
 import { ID_BEARING_NAME, PLACEHOLDER_OPTION, ROOT_OPTION, insideTmux, type LiveTarget, type ManagedTarget } from "./names.ts";
 
 /**
@@ -147,6 +147,35 @@ export function windowTarget(session: string, window: string): string {
   return `${exactTarget(session)}:${exactTarget(window)}`;
 }
 
+/**
+ * Exact-pinned target for the SESSION OPTION commands — `=<name>:`, with a
+ * trailing colon.
+ *
+ * `show-options`/`set-option` take a target-PANE, not a target-session, and a
+ * bare `=name` is not valid target-pane syntax: tmux rejects it outright with
+ * `no such session: =name` and exit 1. `has-session` takes a target-session and
+ * accepts the same string happily, which is why this went unnoticed — the guard
+ * in src/index.tsx could confirm a host session existed and then never manage to
+ * read or write its `@cl_root`.
+ *
+ * The colon is what makes it parse: `=name:` is a pane target naming the current
+ * pane of exactly-session `name`, so resolution stays pinned to the literal
+ * name. That matters as much here as anywhere else — host names are prefixes of
+ * each other (`agendo` ⊂ `agendo-work`), and dropping the pin would let
+ * `sessionRoot("agendo")` answer with `agendo-work`'s root when only the longer
+ * one is live, reporting a collision between a session and itself.
+ *
+ * Verified against tmux 3.4:
+ *
+ *     set-option  -t 'work'    @cl_root /a   → exit 0
+ *     set-option  -t '=work'   @cl_root /a   → exit 1, "no such session: =work"
+ *     set-option  -t '=work:'  @cl_root /a   → exit 0
+ *     show-options -t '=work:' -v @cl_root   → "/a", and never a sibling's value
+ */
+export function sessionOptionTarget(session: string): string {
+  return `${exactTarget(session)}:`;
+}
+
 export function hasSession(name: string): boolean {
   return spawnSync("tmux", ["has-session", "-t", exactTarget(name)]).status === 0;
 }
@@ -159,15 +188,38 @@ export function currentSessionName(): string | null {
   return name || null;
 }
 
-/** The absolute root a launcher host session is scoped to (`@cl_root`), or null. */
+/**
+ * The absolute root a launcher host session is scoped to (`@cl_root`), or null.
+ *
+ * Null covers three different things on purpose, because the caller treats them
+ * alike: no such session, a session that never recorded a root (a bare `agendo`
+ * doesn't), and an unset option — tmux answers that last one with exit 1 and
+ * `invalid option: @cl_root` rather than an empty string.
+ */
 export function sessionRoot(session: string): string | null {
-  const r = spawnSync("tmux", ["show-options", "-t", exactTarget(session), "-v", ROOT_OPTION], { encoding: "utf-8" });
+  const r = spawnSync("tmux", ["show-options", "-t", sessionOptionTarget(session), "-v", ROOT_OPTION], {
+    encoding: "utf-8",
+  });
   const v = r.status === 0 ? (r.stdout ?? "").trim() : "";
   return v || null;
 }
 
-/** Record the absolute root a launcher host session is scoped to (`@cl_root`). */
-export function setSessionRoot(session: string, root: string): void {
-  tmuxQuiet(["set-option", "-t", exactTarget(session), ROOT_OPTION, root]);
+/**
+ * Record the absolute root a launcher host session is scoped to (`@cl_root`).
+ * Returns whether tmux accepted it.
+ *
+ * Deliberately NOT routed through `tmuxQuiet`. This call exists only for its
+ * side effect, and its side effect is the entire basis of the collision guard:
+ * if the write is dropped, `sessionRoot` returns null forever after and the
+ * guard silently never fires again for that session. `tmuxQuiet` discards the
+ * exit status, which is exactly how the `=name` bug above survived unnoticed —
+ * every write failed and nothing anywhere said so. A caller that depends on the
+ * write landing should be able to find out that it didn't.
+ */
+export function setSessionRoot(session: string, root: string): boolean {
+  const r = spawnSync("tmux", ["set-option", "-t", sessionOptionTarget(session), ROOT_OPTION, root], {
+    stdio: "ignore",
+  });
+  return r.status === 0;
 }
 

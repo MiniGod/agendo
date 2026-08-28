@@ -97,6 +97,23 @@ function resolveTarget(target, names) {
   return hits.length === 1 ? hits[0] : undefined;
 }
 
+/**
+ * The session a `show-options`/`set-option` `-t` value addresses, or undefined
+ * if tmux would reject it.
+ *
+ * These take a target-PANE. `=name` alone is not one — no colon, so tmux never
+ * reaches the session lookup and errors on the literal string. `=name:` and a
+ * bare `name` both resolve; the `=` keeps it to an exact match, a bare name may
+ * fall through to a unique prefix, exactly as `resolveTarget` models elsewhere.
+ */
+function sessionOptionTarget(state, target) {
+  const t = target ?? "";
+  const colon = t.indexOf(":");
+  if (t.startsWith("=") && colon === -1) return undefined;
+  const spec = colon === -1 ? t : t.slice(0, colon);
+  return resolveTarget(spec, state.sessions);
+}
+
 /** Every window name in the state, however the fixture spelled it. */
 function windowNames(state) {
   return [
@@ -287,6 +304,56 @@ switch (cmd) {
       state.panes.push({ session: "launcher-session", window: name, cwd: cwd ?? "" });
       writeState(state);
     }
+    process.exit(0);
+  }
+  // Session options (`@cl_root`), modelled rather than stubbed, because the
+  // WHOLE bug these two once had lived in the exit status a stub would have
+  // thrown away.
+  //
+  // `show-options`/`set-option` take a target-PANE, not a target-session. A bare
+  // `=name` is not valid target-pane syntax and real tmux rejects it outright;
+  // `=name:` — the trailing colon naming that session's current pane — is
+  // accepted and stays exact-matched. `has-session` takes a target-SESSION and
+  // accepts `=name` happily, which is how agendo could confirm a session existed
+  // and then silently fail to read or write its option for months.
+  //
+  // Verified against tmux 3.4 before being written down here:
+  //   set-option   -t 'work'   @cl_root /a   → 0
+  //   set-option   -t '=work'  @cl_root /a   → 1, "no such session: =work"
+  //   set-option   -t '=work:' @cl_root /a   → 0
+  //   show-options -t work -v @cl_absent     → 1, "invalid option: @cl_absent"
+  case "set-option":
+  case "show-options": {
+    // Window options (-w) are a different namespace and are read back through
+    // `#{?@cl_placeholder,1,0}` in the list formats, never through show-options.
+    // Their `=session:=window` target already carries a colon, so it parses.
+    // Left as the silent success it has always been.
+    if (argv.includes("-w")) process.exit(0);
+    const target = flag("-t") ?? "";
+    const session = sessionOptionTarget(state, target);
+    if (session === undefined) {
+      process.stderr.write(`no such session: ${target}\n`);
+      process.exit(1);
+    }
+    if (cmd === "set-option") {
+      const rest = argv.slice(argv.indexOf("-t") + 2).filter((a) => !a.startsWith("-"));
+      const [opt, value] = rest;
+      if (opt) {
+        state.options = { ...(state.options ?? {}) };
+        state.options[session] = { ...(state.options[session] ?? {}), [opt]: value ?? "" };
+        writeState(state);
+      }
+      process.exit(0);
+    }
+    const opt = flag("-v");
+    const value = (state.options ?? {})[session]?.[opt];
+    if (value === undefined) {
+      // tmux's answer for an unset USER option, and the reason sessionRoot's
+      // "no root recorded" and "no such option" collapse to the same null.
+      process.stderr.write(`invalid option: ${opt}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`${value}\n`);
     process.exit(0);
   }
   // Navigation / config commands: nothing to do, just succeed.

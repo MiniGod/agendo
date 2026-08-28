@@ -309,7 +309,20 @@ export function enterLauncherSession(
       { stdio: "inherit" },
     );
     pinName(`${exactTarget(session)}:launcher`);
-    if (root) setSessionRoot(session, root);
+    // A dropped write here disarms the collision guard for the whole life of
+    // this session — `sessionRoot` would answer null forever after and a second,
+    // differently-rooted launcher would silently merge into these tabs. That is
+    // precisely the failure this used to have, and it was invisible, so say so
+    // rather than discard the status. Not fatal: the session is up and usable,
+    // and refusing to launch over it would be a worse trade than losing one
+    // guard.
+    if (root && !setSessionRoot(session, root)) {
+      console.error(
+        `warning: could not record this launcher's root on tmux session "${session}".\n` +
+          `  Another launcher for a different path with the same basename will share its tabs\n` +
+          `  instead of being refused. Pass -s <name> to keep them apart.`,
+      );
+    }
     onFreshCreate?.();
   } else if (!launcherWindowLive(session)) {
     spawnLauncherWindow(session, cwd, launcherArgv);

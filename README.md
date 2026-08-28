@@ -80,9 +80,12 @@ runs it outside tmux, where each agent is a detached session you attach to.)
 whose cwd is under it, and narrows the work-item / PR / issue views to the git
 repos found inside it. Its agent tabs live in their own host session,
 `agendo-<basename>` — so a launcher per project runs in parallel without any of
-them stepping on each other. Two paths that share a basename derive the *same*
-host session, though, and quietly share its tabs: `~/a/work` and `~/b/work` are
-both `agendo-work`. Give one of them `-s <name>` and they stay apart.
+them stepping on each other. Two paths that share a basename would derive the
+*same* host session — `~/a/work` and `~/b/work` are both `agendo-work` — so the
+launcher records the absolute root it was scoped to and refuses to attach a
+differently-rooted launcher to it, rather than quietly merging the two into one
+set of tabs. It names the root already in use and tells you to pass
+`-s <name>`, which keeps them apart.
 
 Neither half is a one-way door. The scope line above the list carries both
 switches: `a` toggles between the scoped view and every session on the machine,
@@ -401,7 +404,7 @@ are here for the reasoning and the captured evidence, not as a feature list:
 
 | Document | Status |
 | --- | --- |
-| [`docs/contexts.md`](docs/contexts.md) — path-scoped launchers | **Shipped**, bar one section. Its "Host session name collisions" describes a `@cl_root` guard that refuses two differently-rooted launchers; that guard is written but cannot fire, so the paths [merge instead](#one-launcher-per-project-or-one-for-everything). |
+| [`docs/contexts.md`](docs/contexts.md) — path-scoped launchers | Shipped |
 | [`docs/cloning.md`](docs/cloning.md) — cloning a repo you don't have locally | Shipped |
 | [`docs/codex-usage-limits.md`](docs/codex-usage-limits.md) — detecting a capped Codex session | **Design.** The pane captures are committed as e2e fixtures; the detection is not written. |
 | [`docs/error-retry.md`](docs/error-retry.md) — recovering a session that stopped on an error | **Design.** Nothing in it is implemented; a turn that dies on an API error still reads `ready`. |

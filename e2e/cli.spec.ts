@@ -4826,3 +4826,91 @@ test("agendo unblock reaches a session hosted in another launcher session", asyn
   expect(r.stderr).toContain('looks "busy"');
   expect(r.stderr).not.toContain("not running");
 });
+
+// ── the basename-collision guard, and the option target that disarmed it ──────
+// `agendo <path>` derives its host session from the path's BASENAME, so
+// `~/a/work` and `~/b/work` both want `agendo-work`. On fresh creation the
+// launcher records the absolute root as the session option `@cl_root`; a later
+// attach compares it and refuses on mismatch, telling the user to pass `-s`.
+//
+// That guard existed but could never fire. `show-options`/`set-option` take a
+// target-PANE, and the bare `=name` the launcher passed is not valid target-pane
+// syntax — tmux answers "no such session: =name" and exit 1 for BOTH the read
+// and the write. `has-session` takes a target-SESSION and accepts the same
+// string, so the launcher could confirm a session existed and then silently fail
+// to record anything on it. Every write was dropped, `sessionRoot` returned null
+// forever, and two differently-rooted launchers merged into one set of tabs.
+//
+// The fake models that rejection rather than stubbing it (see e2e/fakebin/tmux),
+// which is what makes these tests meaningful: run them against the old `=name`
+// form and the first one fails, because nothing was ever stored.
+const collidingRoots = async (mock: { home: string }) => {
+  const a = join(mock.home, "a", "work");
+  const b = join(mock.home, "b", "work");
+  await mkdir(a, { recursive: true });
+  await mkdir(b, { recursive: true });
+  return { a, b };
+};
+
+test("a second launcher on a different path with the same basename is refused", async ({ mock }) => {
+  const { a, b } = await collidingRoots(mock);
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+
+  // First launcher: creates `agendo-work` and records its root.
+  const first = agendoIn(mock.home, mock.env, a);
+  expect(first.status).toBe(0);
+
+  // The write actually landed — the whole point. Read it back the way the
+  // launcher does, through the fake's own option store.
+  const state = await mock.getTmuxState();
+  expect(state.sessions).toContain("agendo-work");
+  expect(state.options?.["agendo-work"]?.["@cl_root"]).toBe(a);
+
+  // Second launcher, same basename, different root: refused, and told how.
+  const second = agendoIn(mock.home, mock.env, b);
+  expect(second.status).toBe(1);
+  expect(second.stderr).toContain('already scoped to');
+  expect(second.stderr).toContain(a);
+  expect(second.stderr).toContain("-s <name>");
+});
+
+test("the same path attaches to its own launcher rather than being refused", async ({ mock }) => {
+  const { a } = await collidingRoots(mock);
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+
+  expect(agendoIn(mock.home, mock.env, a).status).toBe(0);
+  // Matching roots are not a collision — this is the case the guard must NOT
+  // catch, and a guard that refuses here is worse than no guard at all.
+  const again = agendoIn(mock.home, mock.env, a);
+  expect(again.status).toBe(0);
+  expect(again.stderr).not.toContain("already scoped");
+});
+
+test("-s <name> keeps two same-basename launchers apart", async ({ mock }) => {
+  const { a, b } = await collidingRoots(mock);
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+
+  expect(agendoIn(mock.home, mock.env, a).status).toBe(0);
+  // The documented escape hatch from the refusal message above.
+  const second = agendoIn(mock.home, mock.env, b, "-s", "agendo-work-b");
+  expect(second.status).toBe(0);
+  expect(second.stderr).not.toContain("already scoped");
+
+  const state = await mock.getTmuxState();
+  expect(state.sessions).toEqual(expect.arrayContaining(["agendo-work", "agendo-work-b"]));
+  expect(state.options?.["agendo-work"]?.["@cl_root"]).toBe(a);
+  expect(state.options?.["agendo-work-b"]?.["@cl_root"]).toBe(b);
+});
+
+test("a bare `agendo` records no root, and never collides with a scoped one", async ({ mock }) => {
+  const { a } = await collidingRoots(mock);
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+
+  // Bare `agendo` has a null root: it neither sets nor checks `@cl_root`, so it
+  // must not be refused by, nor able to refuse, a scoped launcher.
+  expect(agendoIn(mock.home, mock.env).status).toBe(0);
+  const state = await mock.getTmuxState();
+  expect(state.options?.["agendo"]?.["@cl_root"]).toBeUndefined();
+
+  expect(agendoIn(mock.home, mock.env, a).status).toBe(0);
+});
