@@ -187,9 +187,11 @@ Usage:
                                 nothing there is deleted, and \`agendo resume
                                 <id>\` brings the session back. Only ever kills a
                                 managed cl-… target, and refuses a session with
-                                work in flight (mid-turn, compacting, text queued,
-                                or an open question), or a window it can't
-                                attribute to that session alone — or can't read.
+                                work in flight — mid-turn, compacting, text
+                                queued, an open question, or a SUBAGENT still
+                                running while the main agent sits idle at its
+                                prompt — or a window it can't attribute to that
+                                session alone, or can't read.
       --force, -f               Close despite work in flight / an ambiguous window
   agendo unblock <id>          Nudge a session at its usage limit to continue:
                                 sends <esc>continue<enter>. Refuses unless the

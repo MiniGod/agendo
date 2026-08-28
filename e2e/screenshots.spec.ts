@@ -63,9 +63,9 @@ test("PRs view", async ({ launch, mock }) => {
   await capture(wt, mock.home, "03-prs");
 });
 
-// The GitHub-backend PRs page, used as the README hero. Seeds three PRs so all
-// three sections render: one linked to an issue, one awaiting the viewer's review
-// (authored by someone else), and one orphan the viewer authored. Distinct CI /
+// The GitHub-backend PRs page. Seeds three PRs so all three sections render: one
+// linked to an issue, one awaiting the viewer's review (authored by someone
+// else), and one orphan the viewer authored. Distinct CI /
 // review states make the badges representative. The linked PR's branch is the one
 // the running `login` fixture session resolves to (`feature/login`), so expanding
 // it reveals that live session and its recent activity nested under the PR — the
@@ -125,6 +125,12 @@ test("PRs view (GitHub backend)", async ({ launch, mock }) => {
   await capture(wt, mock.home, "03-prs-github");
 });
 
+// The view the README hero shows — but NOT the image itself. `docs/screenshot.png`
+// is not produced by this suite: it needs five live sessions across all three
+// agents and one row expanded, which no scenario here sets up. It is rendered by a
+// throwaway script that reuses `e2e/harness` from outside the repo, so this file
+// stays a snapshot suite rather than a picture generator. Nothing here regenerates
+// the hero, and nothing here should be edited on the assumption that it does.
 test("sessions view (grouped by repo)", async ({ launch, mock }) => {
   const wt = await launch();
   await wt.waitForText("Current sprint", 20000);
