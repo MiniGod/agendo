@@ -107,7 +107,10 @@ const UNSAFE_CLOSE_STATES = new Set<Readiness>(["busy", "compacting", "queued", 
  *     So an id-less window with rival sessions in its dir needs `--force`.
  *  4. WORK IN FLIGHT. A pane mid-turn (or compacting, or holding queued text /
  *     an open question) is refused unless `force` — killing an agent mid-write
- *     is how work gets lost. See UNSAFE_CLOSE_STATES. A pane that could not be
+ *     is how work gets lost. See UNSAFE_CLOSE_STATES. Since #44 that is only
+ *     half the test: a session whose SUBAGENT is still running reads "ready",
+ *     so the count is refused on separately (see `unsafeCloseReason`).
+ *     A pane that could not be
  *     READ is refused too: readiness classifies a blank screen as "unknown",
  *     which this guard lets through, so a failed read would pass for an idle
  *     session (see `readPaneState`).
