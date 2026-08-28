@@ -417,3 +417,24 @@ on-disk sessions, tmux, and git are all faked, so nothing real is touched.
 bun run test:e2e:setup   # one-time: download Chromium
 bun run test:e2e
 ```
+
+A second, much smaller suite lives in [`test/`](test/), for the things a
+rendered screen cannot show you. Three so far, and `e2e/` is blind to each of
+them for its own reason:
+
+- **Column widths.** Every fixture value that reaches a table cell in `e2e/` is
+  ASCII, and ASCII is exactly the input class for which a correct and an
+  incorrect cell measure agree — so a green e2e run says nothing about the
+  measure at all.
+- **Torn-append recovery.** Which record comes back from a half-written
+  transcript line, and which lines must *not* be declared recovered. Driving
+  that through the UI would mean a fixture corrupt in one exact way, read at one
+  exact moment, to prove a record the screen then draws no differently.
+- **What imports what.** Nothing the TUI's rescan timer can reach may pull in
+  `src/gitrefs.ts`. That has no rendered output to assert on in the first place.
+
+```bash
+bun run test
+```
+
+Both suites are blocking CI jobs, alongside `typecheck` and `lint`.

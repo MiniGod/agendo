@@ -37,6 +37,28 @@ jobs:
       - name: Lint (oxlint)
         run: bun run lint
 
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    # The suite runs in ~100ms; anything past 10 minutes is a hung install or
+    # runner, not a slow test run.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # These cover what the e2e suite structurally CANNOT reach, which is the
+      # reason they are their own gate rather than a faster corner of that one.
+      # Every fixture value reaching a table cell in e2e is ASCII, and ASCII is
+      # exactly the input class for which a correct and an incorrect column
+      # measure agree — so a green e2e run proves nothing about the width logic.
+      # Same for torn-transcript recovery (the screen draws a recovered record
+      # no differently from any other) and for the rule that the TUI's rescan
+      # timer must never pull in src/gitrefs.ts, which has no rendered output to
+      # assert on at all.
+      - name: Unit tests
+        run: bun run test
+
   e2e:
     name: E2E (browser)
     runs-on: ubuntu-latest
