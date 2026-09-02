@@ -1,10 +1,10 @@
 import type { Key } from "ink";
-import { itemKey, prKey } from "../../model.ts";
 import { openSession } from "../../launch.ts";
 import { sessionName } from "../../tmux.ts";
-import { SELECTABLE, sessionExpandKey, type Row } from "../rows.ts";
+import type { Row } from "../rows.ts";
 import { V } from "../vocabState.ts";
 import type { KeyContext, View } from "./context.ts";
+import { ancestorIndex, expandKeyOf, firstChildIndex, isExpandable, isOpen } from "./rowTree.ts";
 
 type ViewCtx = Pick<
   KeyContext,
@@ -219,70 +219,88 @@ function handleListRowActionKeys(input: string, key: Key, ctx: RowActionCtx): bo
   return false;
 }
 
-function handleListNavKeys(input: string, key: Key, ctx: NavCtx): boolean {
-  if (key.upArrow || input === "k") { ctx.move(-1); return true; }
-  if (key.downArrow || input === "j") { ctx.move(1); return true; }
+type FlipCtx = Pick<NavCtx, "toggleExpand" | "toggleSection" | "ensureActivity">;
 
-  // ── expand/collapse with →/← (or l/h) ──
-  const isExpandable = (row: Row) =>
-    row.kind === "item" || row.kind === "pr" || row.kind === "toggle" || row.kind === "session";
-  const isOpen = (row: Row) =>
-    row.kind === "item" || row.kind === "pr" || row.kind === "session"
-      ? row.expanded
-      : row.kind === "toggle"
-        ? row.open
-        : false;
-  const flipOpen = (row: Row) => {
-    if (row.kind === "item") ctx.toggleExpand(`wi:${itemKey(row.item)}`);
-    else if (row.kind === "pr") ctx.toggleExpand(`pr:${prKey(row.pr)}`);
-    else if (row.kind === "toggle") ctx.toggleSection(row.id);
-    else if (row.kind === "session") {
-      ctx.ensureActivity(row.session); // kick off the lazy parse on first expand
-      ctx.toggleExpand(sessionExpandKey(row.key));
-    }
-  };
-  // Nesting depth: sections/groups (toggle) = 0, work items / PRs = 1, the
-  // sessions & fresh rows under them = 2. Used to climb one level on ←.
-  const depthOf = (row: Row) =>
-    row.kind === "session" || row.kind === "fresh" ? 2 : row.kind === "item" || row.kind === "pr" ? 1 : 0;
+/** Open a closed expandable row or close an open one; a no-op for every other kind. */
+function flipOpen(row: Row, ctx: FlipCtx): void {
+  if (row.kind === "toggle") return ctx.toggleSection(row.id);
+  if (row.kind === "session") ctx.ensureActivity(row.session); // kick off the lazy parse on first expand
+  const k = expandKeyOf(row);
+  if (k) ctx.toggleExpand(k);
+}
 
-  if (key.rightArrow || input === "l") {
-    const row = ctx.rows[ctx.cursor];
-    if (!row || !isExpandable(row)) return true;
-    if (!isOpen(row)) { flipOpen(row); return true; } // expand
-    // already open → select the first child (the row right below it)
-    const child = ctx.rows[ctx.cursor + 1];
-    if (child && SELECTABLE.has(child.kind)) ctx.setCursor(ctx.cursor + 1);
+// → (or l): expand a closed row; on an open one, select its first child.
+function expandOrDescend(ctx: NavCtx): boolean {
+  const row = ctx.rows[ctx.cursor];
+  if (!row || !isExpandable(row)) return true;
+  if (!isOpen(row)) {
+    flipOpen(row, ctx);
     return true;
   }
-  if (key.leftArrow || input === "h") {
-    const row = ctx.rows[ctx.cursor];
-    if (!row) return true;
-    // An open expandable collapses first; only once it's collapsed (or it's a
-    // leaf) does ← climb to the nearest selectable ancestor one level up
-    // (child → work item/PR → its section/group).
-    if (isExpandable(row) && isOpen(row)) { flipOpen(row); return true; }
-    const d = depthOf(row);
-    for (let i = ctx.cursor - 1; i >= 0; i--) {
-      if (depthOf(ctx.rows[i]) < d && SELECTABLE.has(ctx.rows[i].kind)) { ctx.setCursor(i); return true; }
-    }
-    return true;
-  }
+  const child = firstChildIndex(ctx.rows, ctx.cursor);
+  if (child >= 0) ctx.setCursor(child);
+  return true;
+}
 
-  if (key.return) {
-    const row = ctx.rows[ctx.cursor];
-    if (!row) return true;
-    if (row.kind === "item") ctx.toggleExpand(`wi:${itemKey(row.item)}`);
-    else if (row.kind === "pr") ctx.toggleExpand(`pr:${prKey(row.pr)}`);
-    else if (row.kind === "toggle") ctx.toggleSection(row.id);
-    else if (row.kind === "session") {
-      ctx.open(openSession(row.session, ctx.model?.liveWindows.get(sessionName(row.session))));
-    } else if (row.kind === "fresh") {
-      ctx.enterFresh(row.target);
-    } else if (row.kind === "newsess") {
-      ctx.enterNewSession();
-    }
+// ← (or h): an open expandable collapses first; only once it's collapsed (or
+// it's a leaf) does ← climb to the nearest selectable ancestor one level up
+// (child → work item/PR → its section/group).
+function collapseOrClimb(ctx: NavCtx): boolean {
+  const row = ctx.rows[ctx.cursor];
+  if (!row) return true;
+  if (isExpandable(row) && isOpen(row)) {
+    flipOpen(row, ctx);
     return true;
   }
-  return false;
+  const up = ancestorIndex(ctx.rows, ctx.cursor);
+  if (up >= 0) ctx.setCursor(up);
+  return true;
+}
+
+// enter: resume a session, start a fresh or new one, or toggle anything else.
+function activateRow(ctx: NavCtx): boolean {
+  const row = ctx.rows[ctx.cursor];
+  if (!row) return true;
+  if (row.kind === "session") ctx.open(openSession(row.session, ctx.model?.liveWindows.get(sessionName(row.session))));
+  else if (row.kind === "fresh") ctx.enterFresh(row.target);
+  else if (row.kind === "newsess") ctx.enterNewSession();
+  else flipOpen(row, ctx);
+  return true;
+}
+
+type Nav = "up" | "down" | "right" | "left" | "enter";
+const VI_KEYS = new Map<string, Nav>([
+  ["k", "up"],
+  ["j", "down"],
+  ["l", "right"],
+  ["h", "left"],
+]);
+
+/** The navigation a key means — arrows and enter, or their vi letters — or null. */
+export function navKeyOf(input: string, key: Key): Nav | null {
+  if (key.upArrow) return "up";
+  if (key.downArrow) return "down";
+  if (key.rightArrow) return "right";
+  if (key.leftArrow) return "left";
+  if (key.return) return "enter";
+  return VI_KEYS.get(input) ?? null;
+}
+
+export function handleListNavKeys(input: string, key: Key, ctx: NavCtx): boolean {
+  switch (navKeyOf(input, key)) {
+    case "up":
+      ctx.move(-1);
+      return true;
+    case "down":
+      ctx.move(1);
+      return true;
+    case "right":
+      return expandOrDescend(ctx);
+    case "left":
+      return collapseOrClimb(ctx);
+    case "enter":
+      return activateRow(ctx);
+    default:
+      return false;
+  }
 }
