@@ -59,10 +59,17 @@ test("the clone row is reachable by ↑ from the top and ↓ off the bottom", as
   await wt.waitForText("Current sprint", 20000);
   await openRepoPicker(wt);
 
-  // ↑ from the first row wraps onto the clone row (it renders last)…
+  // ↑ from the first row wraps onto the last action row — "New local repo"
+  // renders after the clone row — and one more ↑ is the clone row…
   await wt.press(KEY.up);
-  expect(await wt.waitForText("Clone from URL")).toMatch(/❯[^\n]*Clone from URL/);
-  // …and ↓ from there lands back on the first repo, not past the end.
+  expect(await wt.waitForText("Clone from URL")).toMatch(/❯[^\n]*New local repo/);
+  await wt.press(KEY.up);
+  await wt.waitForStable();
+  expect(await wt.screen()).toMatch(/❯[^\n]*Clone from URL/);
+  // …and ↓ walks back down through it onto the first repo, not past the end.
+  await wt.press(KEY.down);
+  await wt.waitForStable();
+  expect(await wt.screen()).toMatch(/❯[^\n]*New local repo/);
   await wt.press(KEY.down);
   await wt.waitForStable();
   const back = await wt.screen();
@@ -72,7 +79,9 @@ test("the clone row is reachable by ↑ from the top and ↓ off the bottom", as
   // Enter on the clone row opens the prompt — the row is addressed by a
   // sentinel, so a repo list that grows underneath it can't steal the keystroke.
   await wt.press(KEY.up);
-  await wt.waitForText("Clone from URL");
+  await wt.press(KEY.up);
+  await wt.waitForStable();
+  expect(await wt.screen()).toMatch(/❯[^\n]*Clone from URL/);
   await wt.press(KEY.enter);
   expect(await wt.waitForText("Clone a repo into")).toContain("Paste a GitHub or Azure DevOps repo URL");
 });

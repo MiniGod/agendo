@@ -348,8 +348,9 @@ a single keystroke — folds it into the launch notice.
 
 - **No credential prompting or token storage.** If the user's git can't clone
   it, agendo says so.
-- **No `git init`** for an empty folder — the picker's non-repo row is
-  `new-user-bootstrap`'s territory.
+- **No `git init`** for an empty folder — that is the picker's other action
+  row, **＋ New local repo…**, which has its own flow and its own notes:
+  [`new-local-repo.md`](new-local-repo.md).
 - **No clone from the work-item / PR views.** A PR row already knows its repo;
   cloning the repo a PR lives in is a reasonable follow-up but a separate flow.
 - **No ADO remote parser unification.** PR #13 adds an ADO branch to

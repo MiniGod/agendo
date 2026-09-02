@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   parseRepoUrl,
   cloneDirName,
@@ -10,20 +10,43 @@ import type { Mode } from "../keys/context.ts";
 
 /**
  * The clone step's own state: what the last clone did, the in-flight `git
- * clone`, and where the URL on the prompt would land.
+ * clone`, where the URL on the prompt would land — and the elapsed-seconds
+ * ticker the cloning screen shows.
  *
  * Extracted verbatim from App. The hook OWNS all of it — `cloneNote` and its
  * synchronous mirror ref, the `cloneRun` handle, and the `cloneDest`
  * resolution — so both effects keep their dependency arrays unchanged and
- * neither reaches for a setter it did not create. The elapsed-seconds ticker
- * for the cloning screen stays in App: it drives `mode`, which the whole
- * component shares.
+ * neither reaches for a setter it did not create. The ticker drives `mode`,
+ * which the whole component shares, so it takes `setMode` in; it sits FIRST
+ * here because it was the effect immediately before this hook's call site in
+ * App, which keeps App's effect order exactly as it was.
  *
- * Called from the position the unmount-cancel effect occupied, so the two
- * effects here keep their place in App's effect order (after the ticker,
- * before the cursor clamp).
+ * Called from the position the unmount-cancel effect occupied, so the effects
+ * here keep their place in App's effect order (before the cursor clamp).
  */
-export function useCloneFlow({ mode, filterRoot }: { mode: Mode; filterRoot: string | null }) {
+export function useCloneFlow({
+  mode,
+  filterRoot,
+  setMode,
+}: {
+  mode: Mode;
+  filterRoot: string | null;
+  setMode: Dispatch<SetStateAction<Mode>>;
+}) {
+  // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
+  // chatty once it's transferring, but silent while it resolves DNS, completes
+  // the TLS handshake and waits for the server to enumerate objects — on a large
+  // repo that's long enough to read as a frozen UI. A second-hand that always
+  // moves is the cheapest possible proof that it hasn't.
+  const cloning = mode.kind === "cloning";
+  useEffect(() => {
+    if (!cloning) return;
+    const t = setInterval(() => {
+      setMode((p) => (p.kind === "cloning" ? { ...p, elapsed: p.elapsed + 1 } : p));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [cloning, setMode]);
+
   // What the clone step did, carried into the screens that follow it. `notice`
   // is a list-view banner, and a clone hands off directly to the next dialog —
   // without this, "reused the checkout you already had" would be invisible until

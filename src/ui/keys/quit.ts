@@ -14,13 +14,17 @@ type Ctx = Pick<KeyContext, "mode" | "exit">;
  * `cloning` is in this set for a different reason: a `git clone` is mid-write,
  * so `q` should not walk away from it — esc cancels, which cleans up.
  *
+ * `initName` and `initPath` are text inputs too (a repo name, a parent path —
+ * `~/quarantine/quic` has three). `initDir` is a list and is NOT here: `q`
+ * quits from it exactly as from the repo picker.
+ *
  * Note this only holds `q`. Ink handles ctrl-c itself (`exitOnCtrlC` defaults
  * on) and never forwards it here, so ctrl-c still quits from every mode — the
  * `key.ctrl` half below is unreachable, kept only to mirror the `branch`
  * prompt's long-standing shape. What makes that safe is the unmount cleanup,
  * which kills the clone and removes the partial directory on the way out.
  */
-export const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning"]);
+export const HOLDS_QUIT_KEYS = new Set<Mode["kind"]>(["branch", "clone", "cloning", "initName", "initPath"]);
 
 /**
  * The global quit guards. Not a mode branch of its own, but its POSITION in the

@@ -25,6 +25,15 @@ export type Mode =
   // is the URL prompt; `cloning` is the live `git clone`, cancellable with esc.
   | { kind: "clone"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string[] }
   | { kind: "cloning"; target: FreshTarget; agent: AgentSource; url: RepoUrl; dest: string; progress: string; elapsed: number }
+  // New-local-repo flow (docs/new-local-repo.md), the clone row's sibling and
+  // never gated on the scope: the user names the parent folder themselves.
+  // `initName` asks for the folder name; `initDir` lists the parent folders of
+  // every known checkout (`candidates`, most common first) plus a free-text row
+  // that opens `initPath`. `existing` is set once enter has landed on a folder
+  // that is already a repo — a second enter then adopts it as-is.
+  | { kind: "initName"; target: FreshTarget; agent: AgentSource; value: string; cursor: number; error?: string }
+  | { kind: "initDir"; target: FreshTarget; agent: AgentSource; name: string; candidates: string[]; cursor: number; error?: string; existing?: string }
+  | { kind: "initPath"; target: FreshTarget; agent: AgentSource; name: string; candidates: string[]; value: string; cursor: number; error?: string; existing?: string }
   | { kind: "wtchoice"; target: FreshTarget; agent: AgentSource; repo: RepoInfo; cursor: number }
   // `seed` is the value the field was PREFILLED with (orchestrator flow only).
   // Kept so submit can tell an untouched default from a name the user chose, and
@@ -37,6 +46,9 @@ export type Mode =
   // is not a choice.
   | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
   | { kind: "open"; targets: OpenTargets; title: string };
+
+/** The two screens on which a parent folder can be chosen for a new repo. */
+export type InitParentMode = Extract<Mode, { kind: "initDir" | "initPath" }>;
 
 /**
  * Everything the keyboard handlers in this directory read or drive, built once
@@ -112,6 +124,10 @@ export type KeyContext = {
   cancelClone: () => void;
   setCloneNote: Dispatch<SetStateAction<string | null>>;
   cloneNoteRef: MutableRefObject<string | null>;
+
+  // ── new-local-repo flow ──
+  beginInitDir: (target: FreshTarget, agent: AgentSource, rawName: string) => void;
+  beginInit: (mode: InitParentMode, rawParent: string) => void;
 
   // ── settings / pickers ──
   settingsItems: Array<"provider" | "identity" | "autoResume">;

@@ -10,10 +10,36 @@ const argv = process.argv.slice(2);
 const LOG = process.env.FAKE_CALL_LOG;
 if (LOG) { try { fs.appendFileSync(LOG, "git " + JSON.stringify(argv) + "\n"); } catch {} }
 
-// Capture then strip a leading `-C <root>`.
+// Capture then strip a leading `-C <root>`, and any `-c key=value` after it.
 let args = argv.slice();
 let root = process.cwd();
 if (args[0] === "-C") { root = args[1]; args = args.slice(2); }
+while (args[0] === "-c") args = args.slice(2);
+
+if (args[0] === "init") {
+  // `git -C <dest> init --quiet` (initRepo.ts). FAKE_GIT_INIT selects the outcome:
+  //   • unset / "ok" → creates <dest>/.git with an unborn HEAD
+  //   • "fail"       → exits 128 having written a partial .git, which is what a
+  //                    real init leaves behind when it dies mid-way; the cleanup
+  //                    of it is initRepo.ts's job, and specs assert it happened
+  try { fs.mkdirSync(path.join(root, ".git"), { recursive: true }); } catch {}
+  if (process.env.FAKE_GIT_INIT === "fail") {
+    process.stderr.write(`fatal: cannot copy '/usr/share/git-core/templates/info' to '${root}/.git/info': Permission denied\n`);
+    process.exit(128);
+  }
+  try { fs.writeFileSync(path.join(root, ".git", "HEAD"), "ref: refs/heads/main\n"); } catch {}
+  process.exit(0);
+}
+
+if (args[0] === "commit") {
+  // The empty initial commit initRepo.ts makes after init. FAKE_GIT_COMMIT=fail
+  // is the "no user.name configured" case — the repo exists, the commit doesn't.
+  if (process.env.FAKE_GIT_COMMIT === "fail") {
+    process.stderr.write("Author identity unknown\n\n*** Please tell me who you are.\n\nfatal: unable to auto-detect email address (got 'ada@box.(none)')\n");
+    process.exit(128);
+  }
+  process.exit(0);
+}
 
 if (args[0] === "symbolic-ref") {
   // refs/remotes/origin/HEAD --short -> the default branch ref.

@@ -8,6 +8,7 @@ import { discoverGitReposUnder, type RepoInfo } from "../repos.ts";
 import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../provider.ts";
 import { type Activity } from "./format.ts";
 import { makeCloneActions } from "./cloneActions.ts";
+import { makeInitActions } from "./initActions.ts";
 import { makeSessionFlow } from "./sessionFlow.ts";
 import { makeProfileActions } from "./profileActions.ts";
 import { makeContinueInOtherAgent } from "./convertAgent.ts";
@@ -31,6 +32,7 @@ import { handleAgentKeys } from "./keys/agent.ts";
 import { handleBranchKeys } from "./keys/branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
 import { handleIdentityKeys } from "./keys/identity.ts";
+import { handleInitKeys } from "./keys/init.ts";
 import { handleListKeys } from "./keys/list.ts";
 import { handleOpenKeys } from "./keys/open.ts";
 import { handleProfileKeys } from "./keys/profile.ts";
@@ -194,23 +196,12 @@ export default function App({
     cloned,
   });
 
-  // Elapsed-seconds ticker for the clone screen. `git clone --progress` is
-  // chatty once it's transferring, but silent while it resolves DNS, completes
-  // the TLS handshake and waits for the server to enumerate objects — on a large
-  // repo that's long enough to read as a frozen UI. A second-hand that always
-  // moves is the cheapest possible proof that it hasn't.
-  const cloning = mode.kind === "cloning";
-  useEffect(() => {
-    if (!cloning) return;
-    const t = setInterval(() => {
-      setMode((p) => (p.kind === "cloning" ? { ...p, elapsed: p.elapsed + 1 } : p));
-    }, 1000);
-    return () => clearInterval(t);
-  }, [cloning]);
-
+  // The clone step's state, plus the cloning screen's elapsed-seconds ticker —
+  // both in ./hooks/useCloneFlow.ts, called from the line the ticker occupied.
   const { cloneNote, setCloneNote, cloneNoteRef, cloneRun, cloneUrl, resolved } = useCloneFlow({
     mode,
     filterRoot,
+    setMode,
   });
 
   const { rows, selectableIdx, roster } = useRowModel({
@@ -346,6 +337,10 @@ export default function App({
   const { canClone, beginClone, cancelClone } = makeCloneActions({
     scoped, filterRoot, cloneRun, cloneNoteRef, setMode, setNotice, setCloned, setCloneNote, chooseRepo,
   });
+  // …or create one that exists nowhere yet — ./initActions.ts, same shape.
+  const { beginInitDir, beginInit } = makeInitActions({
+    model, cloned, scoped, filterRoot, setMode, setNotice, setCloned, setCloneNote, cloneNoteRef, chooseRepo,
+  });
 
   const continueInOtherAgent = makeContinueInOtherAgent({ open, setMode, setNotice, setBusy });
 
@@ -370,7 +365,7 @@ export default function App({
     setNotice, setActivity, requested, setRescanKey, reload,
     enterFresh, enterNewSession, enterOrchestrator, proceedFresh, reposForTarget,
     chooseRepo, startFresh, open, openInBrowser,
-    canClone, beginClone, cancelClone, setCloneNote, cloneNoteRef,
+    canClone, beginClone, cancelClone, setCloneNote, cloneNoteRef, beginInitDir, beginInit,
     settingsItems, enterSettings, enterProvider, enterIdentity, applyProvider,
     setAutoResume, persist, roster, setIdentity,
     continueInOtherAgent, enterProfilePicker, moveToProfile,
@@ -388,6 +383,7 @@ export default function App({
 
     if (handleCloneKeys(input, key, ctx)) return;
     if (handleCloningKeys(input, key, ctx)) return;
+    if (handleInitKeys(input, key, ctx)) return;
 
     if (handleWtchoiceKeys(input, key, ctx)) return;
 

@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import { homeShort, padCell, repoBreakdown } from "../format.ts";
-import { CLONE_ROW } from "../keys/repo.ts";
+import { CLONE_ROW, INIT_ROW } from "../keys/repo.ts";
 import type { FreshTarget } from "../targets.ts";
 import type { RepoInfo } from "../../repos.ts";
 
@@ -42,7 +42,7 @@ export function RepoScreen({
         {orch ? `Orchestrator session — pick a repo` : isFree ? `New session — pick a repo` : `Fresh session — ${target.title.slice(0, 54)}`}
       </Text>
       <Text dimColor>
-        {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""}`}
+        {`Pick a repo${isFree ? "" : " to create the worktree in"}  ·  ↑/↓ move · enter select · esc back${canClone ? " · c clone" : ""} · i new repo`}
       </Text>
       {orch ? (
         <Text color="magenta">{"It will delegate every unit of work to background sessions — it writes no code itself."}</Text>
@@ -50,8 +50,8 @@ export function RepoScreen({
       {noCheckout ? (
         <Text color="yellow">
           {canClone
-            ? "No git checkout here — press c to clone one, or run `agendo <dir>` pointing at a repo."
-            : "No git checkout here — run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
+            ? "No git checkout here — press c to clone one, i to create one, or run `agendo <dir>` pointing at a repo."
+            : "No git checkout here — press i to create one, or run `agendo <dir>` pointing at a repo (or quit with q, cd into one, rerun)."}
         </Text>
       ) : null}
       <Box marginTop={1} flexDirection="column">
@@ -83,6 +83,14 @@ export function RepoScreen({
             <Text dimColor={cursor !== CLONE_ROW}>{`  clone into ${homeShort(filterRoot!)}`}</Text>
           </Text>
         ) : null}
+        <Text
+          color={cursor === INIT_ROW ? "black" : undefined}
+          backgroundColor={cursor === INIT_ROW ? "cyan" : undefined}
+        >
+          {cursor === INIT_ROW ? "❯ " : "  "}
+          <Text bold>{padCell("＋ New local repo…", 22)}</Text>
+          <Text dimColor={cursor !== INIT_ROW}>{"  git init a fresh repo where you say"}</Text>
+        </Text>
       </Box>
     </Box>
   );

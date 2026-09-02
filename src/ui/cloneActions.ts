@@ -10,7 +10,7 @@ import {
   repoUrlLabel,
   type CloneRun,
 } from "../clone.ts";
-import { normalizeCwd } from "../context.ts";
+import { makeAdoptRepo } from "./adoptRepo.ts";
 import { cloneError, homeShort } from "./format.ts";
 import type { RepoInfo } from "../repos.ts";
 import type { AgentSource } from "../types.ts";
@@ -64,27 +64,9 @@ export function makeCloneActions({
   // one. `enclosingCheckout` walks up, but stops below $HOME — see there for why.
   const canClone = scoped && !!filterRoot && !enclosingCheckout(filterRoot, homedir());
 
-  /** A freshly cloned (or matched) checkout, as a zero-session picker entry. */
-  const clonedRepo = (root: string): RepoInfo => ({
-    root,
-    name: basename(root) || root,
-    total: 0,
-    claude: 0,
-    copilot: 0,
-    codex: 0,
-  });
-
-  /** Remember the checkout and continue into the ordinary session flow. */
-  const adoptClonedRepo = (target: FreshTarget, agent: AgentSource, root: string, note: string) => {
-    const repo = clonedRepo(root);
-    setCloned((prev) =>
-      prev.some((r) => normalizeCwd(r.root) === normalizeCwd(root)) ? prev : [...prev, repo],
-    );
-    setNotice(note);
-    setCloneNote(note);
-    cloneNoteRef.current = note;
-    chooseRepo(target, repo, agent);
-  };
+  /** Remember the checkout and continue into the ordinary session flow —
+   *  shared with the new-local-repo flow, see ./adoptRepo.ts. */
+  const adoptClonedRepo = makeAdoptRepo({ setNotice, setCloned, setCloneNote, cloneNoteRef, chooseRepo });
 
   /**
    * Enter on the URL prompt. Resolves where the repo should live before touching

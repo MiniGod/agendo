@@ -12,6 +12,8 @@ type Ctx = Pick<
  * slide the cursor off it onto a real repo.
  */
 export const CLONE_ROW = -1;
+/** Same, for the "＋ New local repo…" row that renders after it. */
+export const INIT_ROW = -2;
 
 // ── repo picker ──
 // Owns every key while it is up — unhandled ones are swallowed.
@@ -22,20 +24,21 @@ export function handleRepoKeys(input: string, key: Key, ctx: Ctx): boolean {
   const len = repos.length || 1;
   const openClone = () =>
     ctx.setMode({ kind: "clone", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
-  // The clone row is rendered last but addressed by a SENTINEL, never by
+  const openInit = () =>
+    ctx.setMode({ kind: "initName", target: mode.target, agent: mode.agent, value: "", cursor: 0 });
+  // The action rows are rendered last but addressed by SENTINELS, never by
   // `repos.length`: the background rescan replaces `model.repos` while the
   // picker is open (a sibling session starting in a new repo grows the list),
-  // and a positional index would slide off the clone row onto whatever repo
+  // and a positional index would slide off an action row onto whatever repo
   // took its place — enter would then launch a session instead of cloning.
-  const onClone = mode.cursor === CLONE_ROW;
-  // ↑/↓ treat the clone row as one past the end, wrapping through it.
+  // ↑/↓ walk this order and wrap through it: the repos, then the clone row
+  // (only when cloning is on offer), then the new-repo row (always).
+  const order = [...Array.from({ length: len }, (_, i) => i), ...(ctx.canClone ? [CLONE_ROW] : []), INIT_ROW];
   const move = (d: 1 | -1) =>
     ctx.setMode((p) => {
       if (p.kind !== "repo") return p;
-      if (!ctx.canClone) return { ...p, cursor: (p.cursor + d + len) % len };
-      if (p.cursor === CLONE_ROW) return { ...p, cursor: d === 1 ? 0 : len - 1 };
-      const next = p.cursor + d;
-      return { ...p, cursor: next < 0 || next >= len ? CLONE_ROW : next };
+      const at = Math.max(0, order.indexOf(p.cursor));
+      return { ...p, cursor: order[(at + d + order.length) % order.length] };
     });
   // The orchestrator flow entered here directly (no agent step to go back to),
   // which makes THIS the last exit out of the fresh flow for it — so it also
@@ -56,7 +59,9 @@ export function handleRepoKeys(input: string, key: Key, ctx: Ctx): boolean {
   if (key.upArrow || input === "k") { move(-1); return true; }
   if (key.downArrow || input === "j") { move(1); return true; }
   if (input === "c" && ctx.canClone) { openClone(); return true; }
-  if (key.return && onClone && ctx.canClone) { openClone(); return true; }
+  if (input === "i") { openInit(); return true; }
+  if (key.return && mode.cursor === CLONE_ROW && ctx.canClone) { openClone(); return true; }
+  if (key.return && mode.cursor === INIT_ROW) { openInit(); return true; }
   if (key.return && repos[mode.cursor]) {
     // Picking a repo off the list is not the result of a clone. Without
     // this, backing out of the post-clone flow and choosing a different repo
