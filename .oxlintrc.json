@@ -171,7 +171,10 @@
         // ticker moved into useCloneFlow (it was the effect right before that
         // hook's call, so effect order is unchanged), which paid for wiring the
         // new-local-repo actions in and left a little over.
-        "max-lines-per-function": ["error", { "max": 390, "skipBlankLines": false, "skipComments": false }],
+        // LOWERED 390 -> 365: the provider switch moved to
+        // src/ui/providerActions.ts (same factory shape as the clone and
+        // profile actions), leaving one wiring call where the closure sat.
+        "max-lines-per-function": ["error", { "max": 365, "skipBlankLines": false, "skipComments": false }],
         "max-statements": ["error", 68]
         // NOTE: no complexity line here any more. It was 47, set by `App`; `App`
         // is now complexity 8, and the worst function left in the file is the
