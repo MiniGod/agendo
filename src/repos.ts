@@ -9,6 +9,7 @@ import { homedir } from "os";
 import { join, dirname, basename } from "path";
 import { isUnderRoot, normalizeCwd } from "./context.ts";
 import { parseGithubRemote } from "./github.ts";
+import { orchestratorRoles } from "./orchestrator.ts";
 import type { AgentSession } from "./types.ts";
 
 export interface RepoInfo {
@@ -54,10 +55,119 @@ export function repoRootForCwd(cwd: string): string {
   return root;
 }
 
-/** Group all sessions by repo root and rank by total session count. */
+/** Collapse duplicate/trailing slashes so the segment split can't produce holes. */
+function normalizeSlashes(p: string): string {
+  return p.replace(/\/+/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Deepest directory that contains every path in `paths`, or null if they share
+ * nothing but the filesystem root (or the list is empty). Pure path arithmetic —
+ * no filesystem access, so it works on repo roots that may since have moved.
+ */
+export function commonParent(paths: string[]): string | null {
+  const split = paths.map((p) => normalizeSlashes(p).split("/").filter(Boolean));
+  if (split.length === 0) return null;
+  const first = split[0];
+  let n = first.length;
+  for (const parts of split.slice(1)) {
+    let i = 0;
+    while (i < n && i < parts.length && parts[i] === first[i]) i++;
+    n = i;
+  }
+  return n > 0 ? `/${first.slice(0, n).join("/")}` : null;
+}
+
+/**
+ * Where to run a GLOBAL orchestrator — the one session that belongs to no single
+ * repository. It coordinates repo orchestrators through the launcher's CLI and
+ * never opens a checkout, so its cwd is only ever a vantage point; the goal is
+ * simply that it not LOOK like it lives in one repo, which would invite it to
+ * start running git there — the one thing its prompt forbids.
+ *
+ * So: the scope root when the launcher has one (that is literally the user's
+ * declared "everything I'm working on"), else the deepest directory containing
+ * every known repo. Anything degenerate — no repos, or roots so unrelated their
+ * only common ancestor is `/` — falls back to `fallback` (the caller's cwd).
+ *
+ * EVERY route ends in `outsideCheckout`, the fallback included. All three can
+ * land in one: a single known repo makes the common parent the repo itself,
+ * `agendo ~/git/myrepo` declares a scope root that is a repo root, and the
+ * fallback is wherever the user happened to type the command — which, with no
+ * sessions indexed yet, is most often a repo they were just working in. Sitting
+ * inside a checkout is exactly what makes a global orchestrator look local.
+ */
+export function globalOrchestratorCwd(
+  repoRoots: string[],
+  fallback: string,
+  scopeRoot?: string | null,
+): string {
+  const base = scopeRoot ? normalizeSlashes(scopeRoot) : commonParent(repoRoots);
+  // A DECLARED scope root is judged by the disk alone, never by membership in
+  // `repoRoots`. The TUI's scoped repo list is seeded with the scope root itself
+  // (`ensureRepoAtTop` in useRepoScope.ts) so the user's declared directory can't
+  // fall off the picker — which means membership would report every scoped
+  // launcher's root as a checkout and step out of a directory that merely HOLDS
+  // repos. `agendo ~/git` would coordinate from `~`.
+  const known = scopeRoot ? [] : repoRoots;
+  const chosen = base && base !== "/" ? outsideCheckout(base, known) : null;
+  if (chosen) return chosen;
+  // `null` means both "nothing to compute from" and "stepping out would answer
+  // `/`" — neither is a place to run anything, so the caller's cwd is the last
+  // resort, and it earns no exemption from the step-out.
+  const here = normalizeSlashes(fallback);
+  return outsideCheckout(here, known) ?? here;
+}
+
+/**
+ * The nearest ancestor of `dir` — `dir` itself included — that is not a git
+ * checkout; null when the walk runs out of directories before finding one.
+ *
+ * It KEEPS GOING rather than stepping once, because checkouts nest: a
+ * chezmoi/yadm user has `$HOME` itself under version control (the case
+ * `bootstrapRepoRoot` below already guards against), so one step out of
+ * `~/myrepo` lands in another repo — and "not inside a checkout" is the entire
+ * property this function owes its caller. Each pass strictly shortens the path,
+ * so `/` terminates it.
+ *
+ * Answering `/` would be worse than answering the checkout, so exhaustion is
+ * reported as null: a signal to try somewhere else, with only the last caller in
+ * the chain settling for the checkout itself.
+ */
+function outsideCheckout(dir: string, repoRoots: string[]): string | null {
+  let at = dir;
+  for (;;) {
+    // A known root, or an unlisted checkout — a launcher whose repo has no
+    // sessions yet contributes no root to compare against, so ask the disk too.
+    // Membership is worth keeping alongside it because the disk answer can be a
+    // false NEGATIVE (a checkout on a mount that is momentarily away); the caller
+    // decides when the root list is trustworthy enough to consult.
+    const isCheckout = repoRoots.some((r) => normalizeSlashes(r) === at) || existsSync(join(at, ".git"));
+    if (!isCheckout) return at;
+    const up = dirname(at);
+    if (up === "/" || up === at) return null;
+    at = up;
+  }
+}
+
+/**
+ * Group all sessions by repo root and rank by total session count.
+ *
+ * GLOBAL orchestrators are skipped, and that filter belongs HERE rather than at
+ * each call site. Their cwd is a vantage point picked precisely because it is not
+ * a checkout (`globalOrchestratorCwd`), and `repoRootForCwd` answers with the
+ * bare directory when it finds no `.git` above — so one would enter this list as
+ * a repo that isn't one. Everything downstream then compounds it: the TUI repo
+ * picker offers a directory `git worktree add` cannot work in, and the next
+ * `globalOrchestratorCwd` sees its own predecessor's vantage point among the
+ * "repo roots", treats it as a checkout to step out of, and lands one directory
+ * higher — every relaunch walking further from the repos it coordinates.
+ */
 export function discoverRepos(sessions: AgentSession[]): RepoInfo[] {
   const byRoot = new Map<string, RepoInfo>();
+  const roles = orchestratorRoles();
   for (const s of sessions) {
+    if (roles.get(s.id) === "global") continue;
     const root = repoRootForCwd(s.cwd);
     let info = byRoot.get(root);
     if (!info) {

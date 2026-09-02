@@ -11,8 +11,13 @@
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
 import { currentSessionName } from "../tmux.ts";
-import { FORWARDABLE_LAUNCH_FLAGS, launchTask, SELF_CMD, type LaunchResult } from "../launch.ts";
+import {
+  FORWARDABLE_LAUNCH_FLAGS, launchGlobalOrchestrator, launchTask, SELF_CMD,
+  type GlobalLayout, type LaunchResult,
+} from "../launch.ts";
 import { recordLaunchedSession } from "../restore.ts";
+import { SessionIndex } from "../sessions.ts";
+import { discoverRepos, globalOrchestratorCwd } from "../repos.ts";
 
 import { AGENTS } from "../types.ts";
 import type { AgentSource } from "../types.ts";
@@ -58,6 +63,54 @@ function parseWorktreeFlag(a: string, eq: number, next: string | undefined): str
   return undefined;
 }
 
+/** The `--agent <name>` shorthands, as a table: three cases in the parse chain
+ *  buy nothing over one lookup. */
+const AGENT_SHORTHAND: Record<string, AgentSource> = {
+  "--claude": "claude",
+  "--copilot": "copilot",
+  "--codex": "codex",
+};
+
+/**
+ * The global-orchestrator flags, lifted out of the main parse chain: its own
+ * spelling (`--global-orchestrator` / `-G`), `--global` as a modifier on
+ * `--orchestrator`, and the two layout choices. Returns null when `a` is none of
+ * them, so the caller falls through to the next branch.
+ *
+ * Both spellings exist because a reader who knows `-O` will reach for a modifier
+ * and a reader who knows neither will look for a long flag; neither should have
+ * to guess which one this build implemented.
+ */
+function parseOrchestratorFlag(a: string, flag: string, inline: boolean): boolean {
+  if (flag !== "--orchestrator" && a !== "-O" && !a.startsWith("-O=")) return false;
+  // A boolean flag: `--orchestrator=false` reads as "off" to a human but would
+  // enable it here, so an inline value is refused, never guessed. `-O=…` is
+  // checked separately because `inline` only recognises the `--` form, and
+  // single-dash args fall through to the prompt rather than to the unknown-flag
+  // guard — so without this it would silently become prompt text.
+  if (inline || a.startsWith("-O=")) {
+    console.error(`launch failed: --orchestrator takes no value (got "${a}")`);
+    process.exit(1);
+  }
+  return true;
+}
+
+function parseGlobalFlag(a: string, flag: string, inline: boolean): { global?: true; layout?: "pane" | "window" } | null {
+  if (flag === "--global-orchestrator" || a === "-G" || a.startsWith("-G=")) {
+    // A boolean flag given a value reads as "off" to a human but would enable it
+    // here, so refuse rather than guess — as `--orchestrator` does.
+    if (inline || a.startsWith("-G=")) {
+      console.error(`launch failed: --global-orchestrator takes no value (got "${a}")`);
+      process.exit(1);
+    }
+    return { global: true };
+  }
+  if (a === "--global") return { global: true };
+  if (a === "--window") return { layout: "window" };
+  if (a === "--pane") return { layout: "pane" };
+  return null;
+}
+
 /** Everything `launch` reads out of argv, once. */
 interface LaunchArgs {
   name?: string;
@@ -67,6 +120,10 @@ interface LaunchArgs {
   worktreePath?: string;
   attach: boolean;
   orchestrator: boolean;
+  /** Launch the GLOBAL orchestrator — the level above the per-repo ones. */
+  global: boolean;
+  /** Preferred layout for the global orchestrator; undefined = its default. */
+  layout?: "pane" | "window";
   unattended: boolean;
   agent: AgentSource;
   /** Flat `[flag, value, …]` tokens forwarded verbatim to the new agent. */
@@ -83,6 +140,8 @@ function parseLaunchArgs(): LaunchArgs {
   let worktreePath: string | undefined;
   let attach = false;
   let orchestrator = false;
+  let global = false;
+  let layout: "pane" | "window" | undefined;
   let unattended = false;
   let agent: AgentSource = "claude";
   // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
@@ -97,6 +156,7 @@ function parseLaunchArgs(): LaunchArgs {
     const eq = a.indexOf("=");
     const inline = a.startsWith("--") && eq > 2;
     const flag = inline ? a.slice(0, eq) : a;
+    const globalFlag = parseGlobalFlag(a, flag, inline);
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
     else if (flag === "--worktree") {
@@ -108,22 +168,13 @@ function parseLaunchArgs(): LaunchArgs {
     // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
     // would be rejected outright and `-O` would fall through into the prompt —
     // launching an ordinary session that looks like it was asked to orchestrate.
-    else if (flag === "--orchestrator" || a === "-O" || a.startsWith("-O=")) {
-      // A boolean flag: `--orchestrator=false` reads as "off" to a human but
-      // would enable it here, so an inline value is refused, never guessed.
-      // `-O=…` is checked separately because `inline` only recognises the `--`
-      // form, and single-dash args fall through to the prompt rather than to the
-      // unknown-flag guard — so without this it would silently become prompt text.
-      if (inline || a.startsWith("-O=")) {
-        console.error(`launch failed: --orchestrator takes no value (got "${a}")`);
-        process.exit(1);
-      }
-      orchestrator = true;
-    }
+    else if (parseOrchestratorFlag(a, flag, inline)) orchestrator = true;
     else if (a === "--unattended") unattended = true;
-    else if (a === "--copilot") agent = "copilot";
-    else if (a === "--claude") agent = "claude";
-    else if (a === "--codex") agent = "codex";
+    else if (AGENT_SHORTHAND[a]) agent = AGENT_SHORTHAND[a];
+    else if (globalFlag) {
+      if (globalFlag.global) global = true;
+      if (globalFlag.layout) layout = globalFlag.layout;
+    }
     else if (flag === "--agent") {
       const v = inline ? a.slice(eq + 1) : rest[++i];
       if (!AGENTS.includes(v as AgentSource)) {
@@ -153,7 +204,7 @@ function parseLaunchArgs(): LaunchArgs {
     } else positionals.push(a);
   }
   checkForwardedFlags(forwardArgv, agent);
-  return { name, worktree, worktreePath, attach, orchestrator, unattended, agent, forwardArgv, positionals };
+  return { name, worktree, worktreePath, attach, orchestrator, global, layout, unattended, agent, forwardArgv, positionals };
 }
 
 /**
@@ -177,15 +228,44 @@ function adoptionNotice(a: NonNullable<LaunchResult["adopted"]>): string {
   return drifted || a.dirty ? `warning: ${line} — left as found, nothing reset, stashed or checked out` : `▸ ${line}`;
 }
 
-export async function runLaunch(): Promise<void> {
-  const { name, worktree, worktreePath, attach, orchestrator, unattended, agent, forwardArgv, positionals } = parseLaunchArgs();
+/** How each resolved layout reads in the launch report. */
+const LAYOUT_NOTE: Record<GlobalLayout, string> = {
+  pane: "split pane beside the agendo TUI",
+  window: "its own tmux window",
+  session: "its own tmux session",
+};
+
+/**
+ * Launch the global orchestrator, choosing where it should sit.
+ *
+ * It belongs to no repo, so there is nothing to derive a cwd from the way
+ * `launchTask` derives one from the checkout it was invoked in. We pick a
+ * vantage point instead: the deepest directory containing every repo agendo
+ * knows about, stepping up out of a lone repo so the session does not look like
+ * it lives in one (see `globalOrchestratorCwd`). Falls back to the caller's cwd
+ * when there are no known repos at all.
+ */
+async function launchGlobal(prompt: string, layout: "pane" | "window" | undefined, unattended: boolean) {
+  const index = await SessionIndex.build();
+  const roots = discoverRepos(index.all).map((r) => r.root);
+  const cwd = globalOrchestratorCwd(roots, process.cwd());
+  return launchGlobalOrchestrator(cwd, { prompt, layout, unattended });
+}
+
+/**
+ * Refuse the flag combinations that contradict each other, before anything is
+ * launched. They are all the same shape — one flag says where or how to run and
+ * another says something incompatible — and accept-and-ignore is the failure
+ * mode to avoid: a caller who wrote the second flag believes it changed
+ * something. Exits rather than returning, so `runLaunch` reads as the happy path.
+ */
+function validateLaunchArgs(a: LaunchArgs): void {
   // `--worktree=<path>` says exactly where to run, so the flags that would pick
   // a different directory are contradictions, not overrides to be resolved by
   // position: `--name` would name a worktree that isn't used, `--no-worktree`
-  // would run in cwd, and a bare `--worktree` would create one. Refuse all three
-  // rather than pick a winner the caller can't see.
-  if (worktreePath !== undefined && (name !== undefined || worktree !== undefined)) {
-    const other = name !== undefined ? "--name" : worktree ? "a bare --worktree" : "--no-worktree";
+  // would run in cwd, and a bare `--worktree` would create one.
+  if (a.worktreePath !== undefined && (a.name !== undefined || a.worktree !== undefined)) {
+    const other = a.name !== undefined ? "--name" : a.worktree ? "a bare --worktree" : "--no-worktree";
     console.error(`launch failed: --worktree=<path> can't be combined with ${other} (it already says where to run)`);
     process.exit(1);
   }
@@ -194,17 +274,40 @@ export async function runLaunch(): Promise<void> {
   // coordinate-don't-implement instructions. Refuse loudly rather than degrade.
   // `agent` defaults to claude, so "copilot" here can only mean a flag asked for
   // it — no need to track explicitness separately.
-  if (orchestrator && agent === "copilot") {
-    console.error(`launch failed: --orchestrator is Claude-only (Copilot has no --append-system-prompt equivalent)`);
+  if ((a.orchestrator || a.global) && a.agent !== "claude") {
+    const flag = a.global ? "--global-orchestrator" : "--orchestrator";
+    console.error(`launch failed: ${flag} is Claude-only (no --append-system-prompt equivalent in --agent ${a.agent})`);
+    process.exit(1);
+  }
+  // A global orchestrator belongs to no repository — it coordinates the per-repo
+  // orchestrators, never a checkout — so the repo-shaped flags have no meaning
+  // for it.
+  if (a.global && (a.worktree !== undefined || a.worktreePath !== undefined)) {
+    console.error(`launch failed: --global-orchestrator is tied to no repo, so --worktree/--no-worktree don't apply`);
+    process.exit(1);
+  }
+  if (a.global && a.name !== undefined) {
+    console.error(`launch failed: --global-orchestrator creates no worktree or branch, so --name doesn't apply`);
+    process.exit(1);
+  }
+  if (a.layout !== undefined && !a.global) {
+    console.error(`launch failed: --window/--pane only apply to --global-orchestrator`);
     process.exit(1);
   }
   // `--unattended` only ever loosens an ORCHESTRATOR's approvals — a plain
-  // background session is already unattended. Accepting it elsewhere would read
-  // as "this made a difference" when it changed nothing at all.
-  if (unattended && !orchestrator) {
+  // background session is already unattended. `-G` IS an orchestrator flag, so it
+  // qualifies on its own; requiring `--orchestrator` beside it would refuse a
+  // combination that means exactly what it says.
+  if (a.unattended && !a.orchestrator && !a.global) {
     console.error(`launch failed: --unattended only applies with --orchestrator (background sessions already run unattended)`);
     process.exit(1);
   }
+}
+
+export async function runLaunch(): Promise<void> {
+  const args = parseLaunchArgs();
+  validateLaunchArgs(args);
+  const { name, worktree, worktreePath, attach, orchestrator, global, layout, unattended, agent, forwardArgv, positionals } = args;
   // An orchestrator squash-merges into the main branch, and git allows the main
   // branch in only ONE working tree — the primary checkout. A worktree would give
   // it an empty branch it never commits to while forcing every merge to reach out
@@ -212,16 +315,22 @@ export async function runLaunch(): Promise<void> {
   // otherwise. Ordinary background sessions keep their isolation.
   const useWorktree = worktree ?? !orchestrator;
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, adopted, error } = launchTask(process.cwd(), {
-    prompt,
-    name,
-    worktree: useWorktree,
-    worktreePath,
-    agent,
-    orchestrator,
-    unattended,
-    forwardArgv,
-  });
+  // Resolved once so the layout report below can read it off the same value the
+  // launch produced — `"layout" in result` would widen the union and lose it.
+  const globalRes = global ? await launchGlobal(prompt, layout, unattended) : null;
+  const launched: LaunchResult =
+    globalRes ??
+    launchTask(process.cwd(), {
+      prompt,
+      name,
+      worktree: useWorktree,
+      worktreePath,
+      agent,
+      orchestrator,
+      unattended,
+      forwardArgv,
+    });
+  const { plan, id, cwd, adopted, error } = launched;
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -244,7 +353,7 @@ export async function runLaunch(): Promise<void> {
       {
         id,
         cwd,
-        title: prompt || (orchestrator ? "orchestrator session" : "background session"),
+        title: prompt || (global ? "global orchestrator session" : orchestrator ? "orchestrator session" : "background session"),
         source: agent,
         // Claude is profile-scoped via CLAUDE_CONFIG_DIR; Copilot keeps all state
         // under ~/.copilot, so it carries no config dir.
@@ -263,10 +372,11 @@ export async function runLaunch(): Promise<void> {
     // Print machine-readable next steps for the agent/human that launched it.
     // `status` is keyed by session id; codex assigns its own only once the
     // session starts, so send the caller to `list` to pick it up from there.
-    const kind = orchestrator ? "orchestrator" : "background";
+    const kind = global ? "global orchestrator" : orchestrator ? "orchestrator" : "background";
     console.log(`▸ launched ${kind} session ${id ?? `— ${agent} assigns its own id`}`);
     console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
     console.log(id ? `  status:  ${SELF_CMD} status ${id}` : `  id:      ${SELF_CMD} list   (then: ${SELF_CMD} status <id>)`);
+    if (globalRes) console.log(`  layout:  ${LAYOUT_NOTE[globalRes.layout]}${globalRes.layoutNote ? ` — ${globalRes.layoutNote}` : ""}`);
     console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);
   }
   process.exit(0);

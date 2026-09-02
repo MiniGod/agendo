@@ -303,6 +303,36 @@ reason `--orchestrator` is documented here and in `--help`, but deliberately lef
 `agendo --llm`: that guide is injected into every launched session, and a worktree-sandboxed
 agent shouldn't be able to read its way into starting an orchestrator in your main checkout.
 
+### One level up: the global orchestrator
+
+Press `G` in the Sessions view — or run `agendo launch --global-orchestrator "<goal>"`
+(`-G`, also spellable `--orchestrator --global`) — to start the session that coordinates
+the *orchestrators*. It belongs to no repository: it writes no code, runs no git, and
+does not merge — that stays each repo orchestrator's job. It surveys your repos, starts
+a repo orchestrator where one is missing, briefs them, aggregates their status and
+brings cross-repo decisions back to you.
+
+The hierarchy is three levels deep, and each level talks only to the one directly below
+it — reaching past a level is how two agents end up editing the same branch:
+
+```
+global orchestrator  →  per-repo orchestrators  →  per-worktree sessions
+```
+
+The survey it runs is `agendo list repos [dir] [--json]`, one row per repo with its
+session counts and its orchestrator (`●` running, `○` closed but resumable, or `none`).
+Without a directory the rows come from the sessions that exist; name one and it walks
+the tree for checkouts too, so a repo nobody has touched yet shows up as unmanaged
+rather than as nothing at all. The `--json` form carries `hasOrchestrator` (any, even a
+closed one) and `hasRunningOrchestrator` separately, because "start one" and "resume the
+one that's there" are different answers.
+
+By default it opens as a tmux **pane beside the agendo TUI**, so the fleet view and its
+coordinator are on screen together; `--window` gives it its own tab instead, and a pane
+too narrow to split usefully falls back to a window and says so. Like `--orchestrator`
+it keeps its approval prompts unless you pass `--unattended`, and for the same reason it
+is documented here and in `--help` but left out of `agendo --llm`.
+
 ### Fresh sessions in isolated worktrees
 
 Pick "start a fresh session", choose the agent and repo, and agendo creates a `git

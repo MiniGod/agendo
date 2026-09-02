@@ -131,7 +131,11 @@
         // (The first two moved out of src/sessions.ts with the activity split;
         // neither changed.)
         "complexity": ["error", 34], // src/activity.ts claudeAction / loadCodexActivity, src/ui/components.tsx SessionRow
-        "max-statements": ["error", 61], // src/ui/keys/list.ts handleListViewKeys
+        // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
+        // three session-starting keys (`n`, `O` and the new `G`) moved out into
+        // `handleSessionStartKeys`; adding the global orchestrator's key inline
+        // would have pushed it the other way.
+        "max-statements": ["error", 56], // src/ui/keys/list.ts handleListViewKeys
         "max-params": ["error", 6], // src/usageLimit.ts
         "max-depth": ["error", 6], // src/activity.ts:219
         "max-nested-callbacks": ["error", 4] // src/sessions.ts:212
@@ -213,11 +217,13 @@
     {
       "files": ["src/cli/close.ts"],
       "rules": {
-        // LOWERED 49 -> 47. #44's close guard (refuse a session whose subagent is
-        // still writing) landed on master while this was in flight and would have
+        // LOWERED 49 -> 47 -> 45. #44's close guard (refuse a session whose subagent
+        // is still writing) landed on master while this was in flight and would have
         // pushed `runClose` to 53 inline; lifting it into `refuseIfWorkInFlight`
-        // paid for itself and then some. Statements are inside the shared budget.
-        "complexity": ["error", 47] // runClose
+        // paid for itself and then some. Closing a PANE-hosted session needs a
+        // second way to address the target, which cost another 5 inline and bought
+        // 2 more back out of `closeAddress`. Statements are inside the shared budget.
+        "complexity": ["error", 45] // runClose
       }
     },
 

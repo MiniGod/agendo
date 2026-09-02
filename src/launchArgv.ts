@@ -1,22 +1,23 @@
 // Building the argv for an agent process: the autonomy flags each CLI wants, the
 // resume form for an existing session, and the fresh form for a new one.
 import type { AgentSession, AgentSource } from "./types.ts";
-import { isOrchestratorSession, orchestratorSystemPrompt } from "./orchestrator.ts";
+import { orchestratorRoleOf, type OrchestratorRole } from "./orchestrator.ts";
+import { systemPromptForRole } from "./orchestratorGlobal.ts";
 import { SELF_CMD, withSelfCmdEnv } from "./selfCmd.ts";
 import { launcherSystemPrompt } from "./launchPrompt.ts";
 
 /**
  * Append our system-prompt additions to a claude argv — the launcher prompt
- * always, plus the orchestrator instructions when this session runs in
- * orchestrator mode.
+ * always, plus the instructions for `role` when this session is an orchestrator
+ * (the repo-level ones, or the global ones a level above them).
  *
  * Both go into a SINGLE `--append-system-prompt` value. claude's flag takes one
  * value, so passing it twice would keep only the last occurrence and silently
  * drop the other prompt.
  */
-export function withLauncherPrompt(argv: string[], orchestrator = false): string[] {
+export function withLauncherPrompt(argv: string[], role?: OrchestratorRole): string[] {
   const parts = [launcherSystemPrompt()];
-  if (orchestrator) parts.push(orchestratorSystemPrompt(SELF_CMD));
+  if (role) parts.push(systemPromptForRole(role, SELF_CMD));
   return [...argv, "--append-system-prompt", parts.join("\n\n")];
 }
 
@@ -105,8 +106,10 @@ export function resumeArgv(s: AgentSession): string[] {
     case "claude": {
       // claude records neither `--append-system-prompt` nor `--agent` in its own
       // session state, so an orchestrator resumed cold would come back as a plain
-      // session. Re-inject from our own marker file (see src/orchestrator.ts).
-      const cmd = withLauncherPrompt(["claude", "--resume", s.id], isOrchestratorSession(s.id));
+      // session. Re-inject from our own marker file (see src/orchestrator.ts) — at
+      // the LEVEL it was launched at, so a global one doesn't come back as a repo
+      // orchestrator that starts merging in whatever checkout it landed in.
+      const cmd = withLauncherPrompt(["claude", "--resume", s.id], orchestratorRoleOf(s.id) ?? undefined);
       // Point claude at the config dir the session lives in, so the right
       // subscription/profile (e.g. ~/.claude vs ~/.claude-work) finds it.
       return withSelfCmdEnv(cmd, s.configDir ? { CLAUDE_CONFIG_DIR: s.configDir } : {});
@@ -150,8 +153,9 @@ export interface FreshArgvOptions {
    * shell in between, so values with spaces need no quoting or escaping.
    */
   forwardArgv?: string[];
-  /** Run in orchestrator mode — inject the coordinate-don't-implement prompt. */
-  orchestrator?: boolean;
+  /** Run in orchestrator mode at this level — injects the matching
+   *  coordinate-don't-implement prompt. Absent ⇒ an ordinary session. */
+  orchestrator?: OrchestratorRole;
 }
 
 /**

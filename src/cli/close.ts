@@ -4,9 +4,10 @@ import { refreshLiveTmux } from "../model.ts";
 import { forgetRestoreTab, idBearingName } from "../restore.ts";
 import { SessionIndex } from "../sessions.ts";
 import {
-  exactTarget, isPlaceholderWindow, killManagedTarget, liveManagedPaths, liveTargetForShortId, managedKind,
-  paneBackgroundAgents, paneReadiness, readPaneState, sessionName, shortId, stripAnsi, windowLocations,
-  type PaneSnapshot, type Readiness,
+  exactTarget, isPaneTarget, isPlaceholderWindow, killManagedTarget, killPane, liveManagedPaths,
+  liveTargetForShortId, managedKind, paneBackgroundAgents, paneReadiness, readPaneState,
+  sessionName, shortId, stripAnsi, windowLocations,
+  type LiveTarget, type PaneSnapshot, type Readiness,
 } from "../tmux.ts";
 
 /**
@@ -70,6 +71,46 @@ function refuseIfWorkInFlight(pane: PaneSnapshot | null, readiness: Readiness | 
  * dead zone.
  */
 const UNSAFE_CLOSE_STATES = new Set<Readiness>(["busy", "compacting", "queued", "dialog"]);
+
+/**
+ * How to address the target for BOTH the pane read and the kill, so neither
+ * falls back to tmux's current-session lookup.
+ *
+ * Two shapes, and telling them apart is the whole job. A session hosted in a
+ * PANE of somebody else's window (the global orchestrator, beside the menu) owns
+ * no window and no session, so `windowLocations` reports nothing for it and
+ * `killManagedTarget` can place it nowhere — this command would refuse to close
+ * the one thing it can plainly see running, and `--force` would fail too. Its
+ * pane id is the handle, and it is unambiguous by construction, so the
+ * duplicate-window guard below has nothing to guard. `kill-pane` is also the
+ * only correct kill: the window belongs to the menu, not to this session.
+ *
+ * Otherwise the name resolves to window locations. tmux allows duplicate window
+ * names and this launcher produces them — a global and a path-scoped launcher
+ * can each hold a tab for the same session — so more than one means we cannot
+ * tell which window the caller meant. Reading the wrong one is harmless; killing
+ * it is not. No location at all means the target is a tmux session of its own
+ * (an agent launched outside tmux).
+ */
+function closeAddress(name: string, live: LiveTarget | null | undefined): {
+  readTarget: string;
+  locations: string[];
+  location: string | null;
+  kill: () => { how: "window" | "session" | "moved" | "none" | "pane"; gone: boolean };
+} {
+  if (live && isPaneTarget(live.target)) {
+    const pane = live.target;
+    return { readTarget: pane, locations: [], location: null, kill: () => ({ how: "pane", gone: killPane(pane, name) }) };
+  }
+  const locations = windowLocations(name);
+  const location = locations[0] ?? null;
+  return {
+    readTarget: exactTarget(location ?? name),
+    locations,
+    location,
+    kill: () => killManagedTarget(name, location),
+  };
+}
 
 /**
  * End a running session: kill the tmux target it lives in — a window in a host
@@ -138,20 +179,27 @@ export async function runClose(token: string | undefined, force: boolean, verb =
   const index = await SessionIndex.build();
   const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
   const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
-  // For a known session: its canonical name, and whatever window it's live in.
-  // For one too new to be indexed: the live id-bearing window named after this
-  // very short id — which is only ever that session's own window, so it's as
-  // safe a target as the canonical name.
-  const canon = s ? sessionName(s) : (liveTargetForShortId(sid)?.name ?? null);
+  // For a known session: whatever window it's live in, under its canonical name.
+  // For one too new to be indexed: the live id-bearing target named after this
+  // very short id — which is only ever that session's own, so it's as safe a
+  // target as the canonical name.
+  //
+  // The resolved target is KEPT, not rebuilt from the name. A pane-hosted session
+  // has no window of that name, so re-deriving `{name, target: name}` would send
+  // `closeAddress` down the window branch and leave the one thing we can plainly
+  // see running uncloseable — refused on the read, and "can no longer place it in
+  // any session" even under --force. `send` and `unblock` reach it by this same
+  // handle; close has no reason to be the odd one out.
+  const live = s ? liveWindows.get(sessionName(s)) : liveTargetForShortId(sid);
+  const canon = s ? sessionName(s) : (live?.name ?? null);
   if (!canon) {
     console.error(`No session found for "${token}" — refusing to close anything.`);
     process.exit(1);
   }
-  const liveWindow = s ? liveWindows.get(canon)?.name : canon;
   // A placeholder squats the canonical name with no agent behind it; close it by
   // that name (it's a real tmux window) when no live window vouches for the session.
-  const placeholder = !liveWindow && livePlaceholders.has(canon);
-  const target = liveWindow ?? (placeholder ? canon : undefined);
+  const placeholder = !live && livePlaceholders.has(canon);
+  const target = live?.name ?? (placeholder ? canon : undefined);
   const label = s ? shortId(s.id) : sid;
   if (!target) {
     // Already closed / never started. The desired end state holds, so this is a
@@ -180,15 +228,8 @@ export async function runClose(token: string | undefined, force: boolean, verb =
       process.exit(2);
     }
   }
-  // Where the window actually lives, used for BOTH the pane read and the kill so
-  // neither falls back to tmux's current-session lookup. No location means the
-  // target is a tmux session of its own (an agent launched outside tmux).
-  //
-  // tmux allows duplicate window names and this launcher produces them — a global
-  // and a path-scoped launcher can each hold a tab for the same session — so more
-  // than one location means we cannot tell which window the caller meant. Reading
-  // the wrong one is harmless; killing it is not.
-  const locations = windowLocations(target);
+  const addr = closeAddress(target, live);
+  const { readTarget, locations, location } = addr;
   if (locations.length > 1 && !force) {
     console.error(
       `Not closing: ${locations.length} live windows are named ${target} (${locations.join(", ")}) — ` +
@@ -196,8 +237,6 @@ export async function runClose(token: string | undefined, force: boolean, verb =
     );
     process.exit(2);
   }
-  const location = locations[0] ?? null;
-  const readTarget = exactTarget(location ?? target);
   // One pane read serves both the verdict and, if we refuse, the screen tail that
   // explains it — the same shape `send` uses when it declines.
   const pane = placeholder ? null : readPaneState(readTarget);
@@ -220,7 +259,7 @@ export async function runClose(token: string | undefined, force: boolean, verb =
   // it in neither a window nor a session — so nothing was killed, whatever the
   // (vacuously true) `gone` check says. Report the failure rather than the
   // reassuring lie; the caller can look and re-run.
-  const { how, gone } = killManagedTarget(target, location);
+  const { how, gone } = addr.kill();
   if (!gone || how === "none") {
     console.error(
       how === "moved"

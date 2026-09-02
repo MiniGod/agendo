@@ -22,6 +22,47 @@ export function launcherSystemPrompt(): string {
 }
 
 /**
+ * The coordination hierarchy, as `--llm` describes it. Its own function because
+ * `llmGuide` is a single array literal against a `max-lines-per-function` budget,
+ * and because this section is the one part of the guide that is about a ROLE
+ * rather than a command.
+ *
+ * It says how the levels relate and which way instructions may flow. It does NOT
+ * say how to create a coordinator — see the note in `llmGuide`.
+ */
+function hierarchyGuide(): string[] {
+  return [
+    `Repo survey:  ${SELF_CMD} list repos [--json]`,
+    "  One row per repo: how many sessions it has, and its orchestrator (or `none`).",
+    "  The direct answer to \"which repos is nobody coordinating?\". Read-only.",
+    "",
+    "── The three-level hierarchy ────────────────────────────────────────────────",
+    "",
+    "    global orchestrator  →  per-repo orchestrators  →  per-worktree sessions",
+    "",
+    "Most sessions are the right-hand level and none of this applies. But if you ARE a",
+    "coordinator, each level talks only to the level directly BELOW it, and always via",
+    `\`${SELF_CMD} send <id> "…"\`:`,
+    "",
+    "  · The global orchestrator sends to repo orchestrators. Never to their sessions.",
+    "  · A repo orchestrator sends to the worktree sessions it launched, and integrates",
+    "    their branches. It does not manage other repos.",
+    "  · A worktree session does the work in its own worktree and reports back.",
+    "",
+    "Reaching past a level is the mistake to avoid: two coordinators instructing one",
+    "agent duplicate, revert, or lose its work. If something needs doing a level down",
+    "from where you can reach, tell the level below you and let it act. READING is",
+    "unrestricted — `list` and `status` are read-only, so inspect any depth you like.",
+    "",
+    "Who is where: `list --json` carries `repoRoot`/`repoName` per session, plus",
+    '`orchestrator` (boolean) and `role` (`"global"` · `"repo"` · `null`). Both repo',
+    'fields are `null` on a `role: "global"` row — that session belongs to no',
+    "repository, so do not read one off it.",
+    "",
+  ];
+}
+
+/**
  * On-demand, agent-facing guide for the background-session workflow. Kept out of
  * the injected system prompt (which only points here) so every session isn't
  * bloated with detail it may never use. Printed by `agendo --llm`.
@@ -66,8 +107,18 @@ export function llmGuide(): string {
     // in `--help` and the README), never from instructions an agent reads to itself.
     // An orchestrator doesn't need it either: it is already in orchestrator mode,
     // and the sessions it launches are meant to implement, not to orchestrate.
+    //
+    // `launch --global-orchestrator` is omitted for the same reason, and harder:
+    // a global orchestrator's whole job is starting orchestrators in OTHER repos.
+    // `hierarchyGuide` above describes the levels and the one-level-down rule,
+    // because a coordinator has to know them — and stops short of saying how to
+    // CREATE a coordinator. One is told that by its own injected prompt, which
+    // exists only because a human asked for it.
     `List yours:   ${SELF_CMD} list`,
     "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
+    "  The kind column marks COORDINATORS: `orch` is a repo orchestrator, `global` the",
+    "  global one; everything else is an ordinary worktree session. A per-repo summary",
+    "  under the table names each repo's orchestrator, or says it has none.",
     "  --all additionally lists idle ones: not running, but still on disk and revivable",
     "  with `resume` (below). A session missing from a plain `list` is not a lost session.",
     "  One at its usage limit reads \"limited <time>\" — when it comes back. Same instant",
@@ -78,6 +129,7 @@ export function llmGuide(): string {
     "  owner/repo slug; a worktree counts as the repo it belongs to). Both also work on",
     `  ${SELF_CMD} status, ${SELF_CMD} open and ${SELF_CMD} wait, and with --json.`,
     "",
+    ...hierarchyGuide(),
     `Check on it:  ${SELF_CMD} status <id>`,
     "  Prints its state, task checklist, Workflow-tool runs (with agent progress),",
     "  recent activity, and whether its input is ready for a prompt. A session parked on",
@@ -199,12 +251,3 @@ export function llmGuide(): string {
   ].join("\n");
 }
 
-/**
- * Append our system-prompt additions to a claude argv — the launcher prompt
- * always, plus the orchestrator instructions when this session runs in
- * orchestrator mode.
- *
- * Both go into a SINGLE `--append-system-prompt` value. claude's flag takes one
- * value, so passing it twice would keep only the last occurrence and silently
- * drop the other prompt.
- */
