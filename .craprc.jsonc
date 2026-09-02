@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -65,11 +65,15 @@
   // suite, and the component only paints it, the worst of it at 6. Then
   // src/cli/dispatch.ts `listCommand` (cc 33, 92%) set 33.66; each listing
   // now parses its own argv in src/cli/listArgs.ts with a unit suite, and
-  // dispatch.ts routes, the worst of it at 7. The holder is src/usageLimit.ts
+  // dispatch.ts routes, the worst of it at 7. Then src/usageLimit.ts
   // `parseResetTime` (cc 19, 66%: its spec cases run in-process under
-  // Playwright, which the instrumented bun never sees), with src/selfCmd.ts
-  // `derivedSelfCmd` (cc 9, 33%) at 33.00 behind it.
-  "max": 33.10,
+  // Playwright, which the instrumented bun never sees) set 33.10; it is now a
+  // chain over one helper per part of the notice, each arm unit tested on the
+  // bun side, the worst of it at 6. The holder is src/selfCmd.ts
+  // `derivedSelfCmd` (cc 9, 33%: decided once at module load from the real
+  // environment, so one arm runs), with src/ui/keys/settings.ts
+  // `handleSettingsKeys` (cc 12, 48%) at 32.25 behind it.
+  "max": 33.00,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
