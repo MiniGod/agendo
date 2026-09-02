@@ -3,6 +3,7 @@ import { SELF_CMD } from "../launch.ts";
 import { refreshLiveTmux } from "../model.ts";
 import { forgetRestoreTab, idBearingName } from "../restore.ts";
 import { SessionIndex } from "../sessions.ts";
+import type { AgentSession } from "../types.ts";
 import {
   exactTarget, isPaneTarget, isPlaceholderWindow, killManagedTarget, killPane, liveManagedPaths,
   liveTargetForShortId, managedKind, paneBackgroundAgents, paneReadiness, readPaneState,
@@ -24,7 +25,7 @@ import {
  * facts for `wait` and the stall verdict: those treat "queued" and "dialog" as
  * done, and this command must refuse both. Same inputs, different question.
  */
-function unsafeCloseReason(readiness: Readiness, agents: number): string | null {
+export function unsafeCloseReason(readiness: Readiness, agents: number): string | null {
   if (UNSAFE_CLOSE_STATES.has(readiness)) return `session looks "${readiness}"`;
   if (agents > 0) return `session is idle but ${agents} background agent${agents === 1 ? " is" : "s are"} still running`;
   return null;
@@ -171,131 +172,223 @@ function closeAddress(name: string, live: LiveTarget | null | undefined): {
  * closeable too, and skips the readiness read: there's no agent in it to lose.
  */
 export async function runClose(token: string | undefined, force: boolean, verb = "close"): Promise<void> {
-  if (!token) {
-    console.error(`usage: ${SELF_CMD} ${verb} <id> [--force]`);
-    process.exit(1);
-  }
+  if (!token) usageExit(verb);
+  const found = await findSession(token);
+  const { liveWindows, livePlaceholders } = refreshLiveTmux(found.index.all);
+  const { live, canon } = liveHandle(found.s, found.sid, liveWindows);
+  if (!canon) refuseNoSession(token);
+  const { placeholder, target } = closeTargetOf(live, canon, livePlaceholders);
+  if (!target) return reportNotRunning(found);
+  refuseUnmanaged(target);
+  refuseSharedDir(target, found, force);
+  const addr = closeAddress(target, live);
+  refuseManyWindows(addr.locations, target, found.label, force);
+  // One pane read serves both the verdict and, if we refuse, the screen tail that
+  // explains it — the same shape `send` uses when it declines.
+  const pane = placeholder ? null : readPaneState(addr.readTarget);
+  refuseUnread(pane, placeholder, force, target, addr.readTarget);
+  const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
+  refuseIfWorkInFlight(pane, readiness, force);
+  killOrReport(addr, target);
+  tidyHost(addr.location, canon, placeholder);
+  reportClosed(target, found, placeholder, readiness);
+}
+
+type CloseAddress = ReturnType<typeof closeAddress>;
+
+/** What the close token resolved to, and the label the messages call it by. */
+interface FoundSession {
+  s: AgentSession | undefined;
+  /** The short id the token names, whether or not a session answers to it. */
+  sid: string;
+  label: string;
+  index: SessionIndex;
+}
+
+export function usageExit(verb: string): never {
+  console.error(`usage: ${SELF_CMD} ${verb} <id> [--force]`);
+  process.exit(1);
+}
+
+export function refuseNoSession(token: string): never {
+  console.error(`No session found for "${token}" — refusing to close anything.`);
+  process.exit(1);
+}
+
+/** Guard 1, first half: the id resolves exactly as it does for `status`/`send`/`resume`. */
+async function findSession(token: string): Promise<FoundSession> {
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const index = await SessionIndex.build();
   const s = index.all.find((x) => x.id === token || shortId(x.id) === sid);
-  const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
-  // For a known session: whatever window it's live in, under its canonical name.
-  // For one too new to be indexed: the live id-bearing target named after this
-  // very short id — which is only ever that session's own, so it's as safe a
-  // target as the canonical name.
-  //
-  // The resolved target is KEPT, not rebuilt from the name. A pane-hosted session
-  // has no window of that name, so re-deriving `{name, target: name}` would send
-  // `closeAddress` down the window branch and leave the one thing we can plainly
-  // see running uncloseable — refused on the read, and "can no longer place it in
-  // any session" even under --force. `send` and `unblock` reach it by this same
-  // handle; close has no reason to be the odd one out.
+  return { s, sid, label: s ? shortId(s.id) : sid, index };
+}
+
+/**
+ * Guard 1, second half. For a known session: whatever window it's live in,
+ * under its canonical name. For one too new to be indexed: the live id-bearing
+ * target named after this very short id — which is only ever that session's
+ * own, so it's as safe a target as the canonical name.
+ *
+ * The resolved target is KEPT, not rebuilt from the name. A pane-hosted session
+ * has no window of that name, so re-deriving `{name, target: name}` would send
+ * `closeAddress` down the window branch and leave the one thing we can plainly
+ * see running uncloseable — refused on the read, and "can no longer place it in
+ * any session" even under --force. `send` and `unblock` reach it by this same
+ * handle; close has no reason to be the odd one out.
+ */
+export function liveHandle(
+  s: AgentSession | undefined,
+  sid: string,
+  liveWindows: ReadonlyMap<string, LiveTarget>,
+): { live: LiveTarget | null | undefined; canon: string | null } {
   const live = s ? liveWindows.get(sessionName(s)) : liveTargetForShortId(sid);
   const canon = s ? sessionName(s) : (live?.name ?? null);
-  if (!canon) {
-    console.error(`No session found for "${token}" — refusing to close anything.`);
-    process.exit(1);
-  }
-  // A placeholder squats the canonical name with no agent behind it; close it by
-  // that name (it's a real tmux window) when no live window vouches for the session.
+  return { live, canon };
+}
+
+/**
+ * The tmux name to close, if anything is there to close. A placeholder squats
+ * the canonical name with no agent behind it; close it by that name (it's a
+ * real tmux window) when no live window vouches for the session.
+ */
+export function closeTargetOf(
+  live: LiveTarget | null | undefined,
+  canon: string,
+  livePlaceholders: ReadonlySet<string>,
+): { placeholder: boolean; target: string | undefined } {
   const placeholder = !live && livePlaceholders.has(canon);
   const target = live?.name ?? (placeholder ? canon : undefined);
-  const label = s ? shortId(s.id) : sid;
-  if (!target) {
-    // Already closed / never started. The desired end state holds, so this is a
-    // success — `close` is idempotent for the scripts and agents driving it.
-    console.log(`○ session ${label} is not running — nothing to close.`);
-    // Idempotent success, but the caller may have expected a live session here; an
-    // indexed one can still be brought back (an unindexed id has nothing to resume).
-    if (s) console.log(`  resume:  ${SELF_CMD} resume ${label}   (its worktree, branch and commits are intact)`);
-    return;
-  }
-  if (!managedKind(target)) {
-    console.error(`Refusing to close "${target}": not a managed agendo window.`);
-    process.exit(1);
-  }
-  // Guard 3: an id-less window is attributed by working directory, so it only
-  // names one session unambiguously when it's the only session in that dir.
-  if (!idBearingName(target) && !force) {
-    const cwd = liveManagedPaths().find((p) => p.name === target)?.cwd;
-    const rivals = cwd ? index.all.filter((x) => normalizeCwd(x.cwd) === normalizeCwd(cwd)) : [];
-    if (rivals.length > 1) {
-      console.error(
-        `Not closing: window ${target} carries no session id, and ${rivals.length} sessions share ` +
-          `its directory (${cwd}) — the one running in it may not be ${label}. Candidates: ` +
-          `${rivals.map((x) => shortId(x.id)).join(", ")}. Pass --force to close that window anyway.`,
-      );
-      process.exit(2);
-    }
-  }
-  const addr = closeAddress(target, live);
-  const { readTarget, locations, location } = addr;
-  if (locations.length > 1 && !force) {
-    console.error(
-      `Not closing: ${locations.length} live windows are named ${target} (${locations.join(", ")}) — ` +
-        `agendo can't tell which one is ${label}. Close the one you mean from its launcher, or pass --force.`,
-    );
-    process.exit(2);
-  }
-  // One pane read serves both the verdict and, if we refuse, the screen tail that
-  // explains it — the same shape `send` uses when it declines.
-  const pane = placeholder ? null : readPaneState(readTarget);
-  // A read that FAILED is not evidence of an idle session. `paneReadiness` turns
-  // an empty screen into "unknown", which guard 4 lets through — so a tmux read
-  // that never landed (busy server, pane gone between the listing and here) would
-  // silently disarm the only check standing between `close` and a mid-turn agent.
-  // `wait` distrusts a single missed read for the same reason (EXIT_CONFIRM_TICKS);
-  // this command is the destructive one, so it refuses outright.
-  if (!placeholder && !pane && !force) {
-    console.error(
-      `Not closing: tmux could not read ${target}'s pane (${readTarget}), so agendo can't tell whether ` +
-        `work is in flight. Re-run to try again, or pass --force to close it unread.`,
-    );
-    process.exit(2);
-  }
-  const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
-  refuseIfWorkInFlight(pane, readiness, force);
-  // `how === "none"` means tmux listed the target a moment ago but can now place
-  // it in neither a window nor a session — so nothing was killed, whatever the
-  // (vacuously true) `gone` check says. Report the failure rather than the
-  // reassuring lie; the caller can look and re-run.
-  const { how, gone } = addr.kill();
-  if (!gone || how === "none") {
-    console.error(
-      how === "moved"
-        ? `Not closing ${target}: the window at ${location} is no longer it (tmux renumbered while we looked). Nothing was killed — re-run to pick it up at its new index.`
-        : `Could not close ${target}: tmux ${how === "none" ? "can no longer place it in any session" : "still reports it live"}. Nothing else was changed.`,
-    );
-    process.exit(1);
-  }
-  // The host session the window we just killed lived in. A standalone agent
-  // session (launched outside tmux) was never a tab in one.
-  const host = location?.split(":")[0];
-  // A dormant placeholder can carry the canonical name alongside the real window
-  // we just killed — reconcileLive drops it from `livePlaceholders` in exactly
-  // that case (a real window vouched for the name), so ask tmux directly rather
-  // than trust the reconciled set. Without this the closed session is still
-  // sitting in the tab strip as an unopened tab.
-  //
-  // Scoped to that one host session, and flag-checked inside it: the same
-  // canonical name can be tabbed in a SECOND launcher (which is why
-  // `isPlaceholderWindow` reads the flag per host), and that launcher's strip is
-  // none of this command's business — we don't edit its restore snapshot either,
-  // so killing its tab would only make it reappear there on its next start.
-  if (!placeholder && host && isPlaceholderWindow(host, canon)) {
-    const leftover = windowLocations(canon).find((l) => l.startsWith(`${host}:`));
-    if (leftover) killManagedTarget(canon, leftover);
-  }
-  // Drop the tab from the restore snapshot of the host session that held the
-  // window we just killed — and only that one, so a parallel path-scoped
-  // launcher's tabs are untouched.
-  if (host) forgetRestoreTab(canon, host);
-  console.log(
-    `▸ closed ${target}${placeholder ? " (unopened restore tab)" : readiness && readiness !== "ready" ? ` (was "${readiness}")` : ""}`,
+  return { placeholder, target };
+}
+
+/**
+ * Already closed / never started. The desired end state holds, so this is a
+ * success — `close` is idempotent for the scripts and agents driving it. The
+ * caller may have expected a live session here, though; an indexed one can
+ * still be brought back (an unindexed id has nothing to resume).
+ */
+export function reportNotRunning(found: Pick<FoundSession, "s" | "label">): void {
+  console.log(`○ session ${found.label} is not running — nothing to close.`);
+  if (found.s) console.log(`  resume:  ${SELF_CMD} resume ${found.label}   (its worktree, branch and commits are intact)`);
+}
+
+/** Guard 2. */
+export function refuseUnmanaged(target: string): void {
+  if (managedKind(target)) return;
+  console.error(`Refusing to close "${target}": not a managed agendo window.`);
+  process.exit(1);
+}
+
+/**
+ * Guard 3: an id-less window is attributed by working directory, so it only
+ * names one session unambiguously when it's the only session in that dir.
+ */
+function refuseSharedDir(target: string, found: Pick<FoundSession, "index" | "label">, force: boolean): void {
+  if (idBearingName(target) || force) return;
+  const cwd = liveManagedPaths().find((p) => p.name === target)?.cwd;
+  const rivals = cwd ? found.index.all.filter((x) => normalizeCwd(x.cwd) === normalizeCwd(cwd)) : [];
+  if (rivals.length <= 1) return;
+  console.error(
+    `Not closing: window ${target} carries no session id, and ${rivals.length} sessions share ` +
+      `its directory (${cwd}) — the one running in it may not be ${found.label}. Candidates: ` +
+      `${rivals.map((x) => shortId(x.id)).join(", ")}. Pass --force to close that window anyway.`,
   );
-  console.log(`  kept:    worktree, branch and commits are untouched${s ? ` in ${s.cwd}` : ""}`);
-  // Only an indexed session can be resumed by id — one whose transcript hasn't
-  // landed yet has nothing for `resume` to find (that's why it took the
-  // window-name path to get here in the first place).
-  if (s) console.log(`  resume:  ${SELF_CMD} resume ${label}`);
+  process.exit(2);
+}
+
+/** More than one live window carries the name: refused rather than guessed (see `closeAddress`). */
+export function refuseManyWindows(locations: readonly string[], target: string, label: string, force: boolean): void {
+  if (locations.length <= 1 || force) return;
+  console.error(
+    `Not closing: ${locations.length} live windows are named ${target} (${locations.join(", ")}) — ` +
+      `agendo can't tell which one is ${label}. Close the one you mean from its launcher, or pass --force.`,
+  );
+  process.exit(2);
+}
+
+/**
+ * A read that FAILED is not evidence of an idle session. `paneReadiness` turns
+ * an empty screen into "unknown", which guard 4 lets through — so a tmux read
+ * that never landed (busy server, pane gone between the listing and here) would
+ * silently disarm the only check standing between `close` and a mid-turn agent.
+ * `wait` distrusts a single missed read for the same reason (EXIT_CONFIRM_TICKS);
+ * this command is the destructive one, so it refuses outright.
+ */
+export function refuseUnread(pane: PaneSnapshot | null, placeholder: boolean, force: boolean, target: string, readTarget: string): void {
+  if (placeholder || pane || force) return;
+  console.error(
+    `Not closing: tmux could not read ${target}'s pane (${readTarget}), so agendo can't tell whether ` +
+      `work is in flight. Re-run to try again, or pass --force to close it unread.`,
+  );
+  process.exit(2);
+}
+
+/**
+ * Why the kill did not happen, or null when it did. `how === "none"` means tmux
+ * listed the target a moment ago but can now place it in neither a window nor a
+ * session — so nothing was killed, whatever the (vacuously true) `gone` check
+ * says. Report the failure rather than the reassuring lie; the caller can look
+ * and re-run.
+ */
+export function killFailure(how: ReturnType<CloseAddress["kill"]>["how"], gone: boolean, target: string, location: string | null): string | null {
+  if (gone && how !== "none") return null;
+  if (how === "moved") {
+    return `Not closing ${target}: the window at ${location} is no longer it (tmux renumbered while we looked). Nothing was killed — re-run to pick it up at its new index.`;
+  }
+  return `Could not close ${target}: tmux ${how === "none" ? "can no longer place it in any session" : "still reports it live"}. Nothing else was changed.`;
+}
+
+function killOrReport(addr: CloseAddress, target: string): void {
+  const { how, gone } = addr.kill();
+  const failure = killFailure(how, gone, target, addr.location);
+  if (!failure) return;
+  console.error(failure);
+  process.exit(1);
+}
+
+/**
+ * Tidy the host session the window we just killed lived in — a standalone
+ * agent session (launched outside tmux) was never a tab in one, and gets
+ * nothing here.
+ *
+ * A dormant placeholder can carry the canonical name alongside the real window
+ * we just killed — reconcileLive drops it from `livePlaceholders` in exactly
+ * that case (a real window vouched for the name), so ask tmux directly rather
+ * than trust the reconciled set. Without this the closed session is still
+ * sitting in the tab strip as an unopened tab.
+ *
+ * Scoped to that one host session, and flag-checked inside it: the same
+ * canonical name can be tabbed in a SECOND launcher (which is why
+ * `isPlaceholderWindow` reads the flag per host), and that launcher's strip is
+ * none of this command's business — we don't edit its restore snapshot either,
+ * so killing its tab would only make it reappear there on its next start. The
+ * tab is dropped from the restore snapshot of that one host for the same reason.
+ */
+function tidyHost(location: string | null, canon: string, placeholder: boolean): void {
+  const host = location?.split(":")[0];
+  if (!host) return;
+  if (!placeholder && isPlaceholderWindow(host, canon)) killLeftoverPlaceholder(host, canon);
+  forgetRestoreTab(canon, host);
+}
+
+function killLeftoverPlaceholder(host: string, canon: string): void {
+  const leftover = windowLocations(canon).find((l) => l.startsWith(`${host}:`));
+  if (leftover) killManagedTarget(canon, leftover);
+}
+
+/** What the closed line says the target was, when it was not simply idle. */
+export function closedSuffix(placeholder: boolean, readiness: Readiness | null): string {
+  if (placeholder) return " (unopened restore tab)";
+  return readiness && readiness !== "ready" ? ` (was "${readiness}")` : "";
+}
+
+/**
+ * Only an indexed session can be resumed by id — one whose transcript hasn't
+ * landed yet has nothing for `resume` to find (that's why it took the
+ * window-name path to get here in the first place).
+ */
+export function reportClosed(target: string, found: Pick<FoundSession, "s" | "label">, placeholder: boolean, readiness: Readiness | null): void {
+  console.log(`▸ closed ${target}${closedSuffix(placeholder, readiness)}`);
+  console.log(`  kept:    worktree, branch and commits are untouched${found.s ? ` in ${found.s.cwd}` : ""}`);
+  if (found.s) console.log(`  resume:  ${SELF_CMD} resume ${found.label}`);
 }

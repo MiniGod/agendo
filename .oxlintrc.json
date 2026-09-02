@@ -22,8 +22,8 @@
   // effort is dismantling carried named, temporary exemptions, and each shrank or
   // disappeared as its PR landed. `src/tmux.ts` was the first to go; `src/index.tsx`
   // was the last, and with it every whole-file exemption in this config. What is
-  // left below are two per-FUNCTION blocks (src/ui/App.tsx, src/cli/send.ts,
-  // src/cli/close.ts) and one max-params block — no file in src/ is exempt from
+  // left below are two per-FUNCTION blocks (src/ui/App.tsx, src/cli/send.ts)
+  // and one max-params block — no file in src/ is exempt from
   // the shared max-lines any more. That matters because an exemption block lifts
   // only the rules it NAMES: every other rule falls through to the shared budget,
   // so a file with a max-lines carve-out was still measured on complexity.
@@ -201,39 +201,26 @@
     },
 
     {
-      // ── inherited exemptions: src/cli/send.ts, src/cli/close.ts ──────────
-      // NOT new debt, and NOT a raised threshold: `runSend` and `runClose` had
-      // exactly these shapes while they sat in index.tsx, where its blanket
-      // complexity-66 exemption covered them silently. Moving them out is what
-      // made them visible, and pinning them here is strictly TIGHTER than the
-      // status quo — a cap of 66 spread across 2456 lines becomes 49 on 224
-      // lines and 40 on 287, with index.tsx's own 66 now confined to a third of
-      // its former reach.
+      // ── inherited exemption: src/cli/send.ts ─────────────────────────────
+      // NOT new debt, and NOT a raised threshold: `runSend` had exactly this
+      // shape while it sat in index.tsx, where its blanket complexity-66
+      // exemption covered it silently. Moving it out is what made it visible,
+      // and pinning it here is strictly TIGHTER than the status quo — a cap of
+      // 66 spread across 2456 lines became 40 on 287, with index.tsx's own 66
+      // now confined to a third of its former reach.
       //
-      // Decomposing them is real work on live control flow (`runSend` alone
-      // drives the socket path, the tmux fallback and the readiness wait), not
-      // the motion this PR is doing. They are the next two ratchet targets.
-      // One block each, not one shared block: pinning both files together
-      // would set complexity at close.ts's 49 and hand send.ts nine points of
-      // free growth it has not earned. Same reason the `src/**` budget is not
-      // pinned at the worst file in the tree.
+      // Decomposing it is real work on live control flow (`runSend` drives the
+      // socket path, the tmux fallback and the readiness wait), not motion. It
+      // is the next ratchet target. src/cli/close.ts had a block of its own
+      // here (49 -> 47 -> 45, `runClose`) rather than sharing this one, so
+      // that send.ts never got close.ts's nine points of free growth; `runClose`
+      // is now a dispatch over named guards, the worst of them at 7, and the
+      // block is gone. Same reason the `src/**` budget is not pinned at the
+      // worst file in the tree.
       "files": ["src/cli/send.ts"],
       "rules": {
         "complexity": ["error", 40], // runSend
         "max-statements": ["error", 74] // runSend
-      }
-    },
-
-    {
-      "files": ["src/cli/close.ts"],
-      "rules": {
-        // LOWERED 49 -> 47 -> 45. #44's close guard (refuse a session whose subagent
-        // is still writing) landed on master while this was in flight and would have
-        // pushed `runClose` to 53 inline; lifting it into `refuseIfWorkInFlight`
-        // paid for itself and then some. Closing a PANE-hosted session needs a
-        // second way to address the target, which cost another 5 inline and bought
-        // 2 more back out of `closeAddress`. Statements are inside the shared budget.
-        "complexity": ["error", 45] // runClose
       }
     },
 
