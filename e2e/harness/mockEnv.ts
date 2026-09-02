@@ -49,6 +49,14 @@ export interface MockEnv {
    *  deliberately isn't JSON (an HTML sign-in page), or that needs `times` /
    *  `delayMs` to let an automatic retry succeed or stay observable. */
   setAdoRaw(match: RegExp, response: RawFault): void;
+  /** Overwrite the fake-`git` worktree registry: `{ worktrees: [{ root, path,
+   *  branch, dirty }] }`, which `worktree list --porcelain` and `status
+   *  --porcelain` answer from. Directories are NOT created — a spec that wants
+   *  the path to exist mkdirs it, and one that registers nothing but mkdirs is
+   *  exactly the "a directory, not a worktree" case. */
+  setGitState(state: unknown): Promise<void>;
+  /** Read the registry back — the fake `worktree add` appends to it. */
+  getGitState(): Promise<any>;
   /** Argv arrays of every fake-tmux invocation, in order. */
   tmuxLog(): Promise<string[][]>;
   /** Raw lines of the shared call log (az/gh/git/claude/xdg-open invocations). */
@@ -66,9 +74,11 @@ export async function createMockEnv(): Promise<MockEnv> {
   const tmuxLogPath = join(tmpDir, "tmux-log.txt");
   const callLogPath = join(tmpDir, "call-log.txt");
   const ghStatePath = join(tmpDir, "gh-state.json");
+  const gitStatePath = join(tmpDir, "git-state.json");
   await writeFile(tmuxStatePath, JSON.stringify(initialTmuxState, null, 2));
   await writeFile(tmuxLogPath, "");
   await writeFile(callLogPath, "");
+  await writeFile(gitStatePath, JSON.stringify({ worktrees: [] }, null, 2));
   // Default: GitHub CLI present but not logged in. ADO-mode tests only hit this
   // on the Settings page (its per-provider auth probe), where it must be a
   // deterministic "not authenticated" rather than whatever the real `gh` reports.
@@ -91,6 +101,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     FAKE_TMUX_LOG: tmuxLogPath,
     FAKE_CALL_LOG: callLogPath,
     FAKE_GH_STATE: ghStatePath,
+    FAKE_GIT_STATE: gitStatePath,
     // Force interactive color so Ink emits ANSI even though stdout is a PTY pipe.
     FORCE_COLOR: "3",
   };
@@ -114,6 +125,8 @@ export async function createMockEnv(): Promise<MockEnv> {
       await rm(`${ghStatePath}.seq`, { recursive: true, force: true });
       await writeFile(ghStatePath, JSON.stringify(state, null, 2));
     },
+    setGitState: (state) => writeFile(gitStatePath, JSON.stringify(state, null, 2)),
+    getGitState: async () => JSON.parse(await readFile(gitStatePath, "utf-8")),
     setProvider: (name) => writeFile(join(home, ".agendo", "state.json"), JSON.stringify({ provider: name }, null, 2)),
     setAdoPr: (id, patch) => ado.setPr(id, patch),
     setAdoResponse: (match, response) => ado.setResponse(match, response),

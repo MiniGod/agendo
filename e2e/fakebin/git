@@ -91,12 +91,75 @@ if (args[0] === "clone") {
   process.exit(0);
 }
 
-if (args[0] === "worktree" && args[1] === "add") {
-  // The worktree path is the argument that looks like an absolute path.
-  const path = args.slice(2).find((a) => a.startsWith("/"));
-  if (path) {
-    try { fs.mkdirSync(path, { recursive: true }); } catch {}
+// ── worktree registry ─────────────────────────────────────────────────────────
+// `worktree list --porcelain` and `status --porcelain` are what `launch` reads
+// before ADOPTING an existing worktree (src/worktreeAdopt.ts), and neither can
+// be derived from the directories the fake `worktree add` creates: a test needs
+// a worktree that is dirty, on an unexpected branch, or living outside
+// `.claude/worktrees/`, and — the case the real bug was about — a directory
+// that exists where a worktree would be WITHOUT being one. So the registry is
+// explicit: FAKE_GIT_STATE holds `{ worktrees: [{ root, path, branch, dirty }] }`
+// (`dirty` is the `status --porcelain` lines), seeded by specs and appended to
+// by the fake `worktree add` so a create-then-adopt sequence needs no seeding.
+const STATE = process.env.FAKE_GIT_STATE;
+function readState() {
+  try { return { worktrees: [], ...JSON.parse(fs.readFileSync(STATE, "utf-8")) }; } catch { return { worktrees: [] }; }
+}
+function real(p) { try { return fs.realpathSync(p); } catch { return p; } }
+/** The main checkout `dir` belongs to: a registered root or worktree that is
+ *  `dir` or an ancestor of it, else the nearest ancestor holding a `.git`. */
+function mainRootOf(dir) {
+  const d = real(dir);
+  const within = (p) => d === real(p) || d.startsWith(real(p) + "/");
+  for (const w of readState().worktrees) {
+    if (within(w.root) || within(w.path)) return real(w.root);
   }
+  let cur = d;
+  while (cur && cur !== "/") {
+    if (fs.existsSync(path.join(cur, ".git"))) return cur;
+    cur = path.dirname(cur);
+  }
+  return undefined;
+}
+
+if (args[0] === "worktree" && args[1] === "add") {
+  // The worktree path is the argument that looks like an absolute path; the
+  // branch is `-b`'s value, else the positional after the path (the
+  // existing-branch form). Registered so a later `worktree list` finds it.
+  const rest = args.slice(2);
+  const wt = rest.find((a) => a.startsWith("/"));
+  const b = rest.indexOf("-b");
+  const branch = b >= 0 ? rest[b + 1] : rest[rest.indexOf(wt) + 1];
+  if (wt) {
+    try { fs.mkdirSync(wt, { recursive: true }); } catch {}
+    if (STATE) {
+      const s = readState();
+      s.worktrees.push({ root: real(root), path: real(wt), branch: branch ?? "worktree-unnamed", dirty: [] });
+      try { fs.writeFileSync(STATE, JSON.stringify(s, null, 2)); } catch {}
+    }
+  }
+  process.exit(0);
+}
+
+if (args[0] === "worktree" && args[1] === "list") {
+  const main = mainRootOf(root);
+  if (!main) {
+    process.stderr.write("fatal: not a git repository (or any of the parent directories): .git\n");
+    process.exit(128);
+  }
+  const record = (p, branch) => `worktree ${p}\nHEAD 0000000000000000000000000000000000000000\nbranch refs/heads/${branch}\n\n`;
+  let out = record(main, "main");
+  for (const w of readState().worktrees) {
+    if (real(w.root) === main) out += record(real(w.path), w.branch);
+  }
+  process.stdout.write(out);
+  process.exit(0);
+}
+
+if (args[0] === "status") {
+  const here = real(root);
+  const w = readState().worktrees.find((x) => real(x.path) === here);
+  process.stdout.write((w?.dirty ?? []).map((l) => `${l}\n`).join(""));
   process.exit(0);
 }
 

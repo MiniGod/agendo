@@ -9,8 +9,9 @@
 // swallowed into the prompt, so a typo'd flag can't quietly change the task.
 
 import { spawnSync } from "child_process";
+import { existsSync } from "fs";
 import { currentSessionName } from "../tmux.ts";
-import { FORWARDABLE_LAUNCH_FLAGS, launchTask, SELF_CMD } from "../launch.ts";
+import { FORWARDABLE_LAUNCH_FLAGS, launchTask, SELF_CMD, type LaunchResult } from "../launch.ts";
 import { recordLaunchedSession } from "../restore.ts";
 
 import { AGENTS } from "../types.ts";
@@ -28,11 +29,42 @@ function checkForwardedFlags(forwardArgv: string[], agent: AgentSource): void {
   }
 }
 
+/**
+ * `--worktree` has two meanings, told apart by the `=`: bare, it forces a fresh
+ * worktree (returns undefined); `--worktree=<path>` adopts an existing one
+ * (returns the path). `eq` is the index of the `=` in the token, or -1 for the
+ * bare form. The two-token `--worktree <path>` form is deliberately NOT
+ * accepted — bare `--worktree` has always been followed directly by the prompt,
+ * so the next token can't be read as a value. What it must not do either is
+ * quietly swallow a path into the prompt and create a NEW worktree, the
+ * opposite of what was asked: a next token that looks like a path is refused.
+ */
+function parseWorktreeFlag(a: string, eq: number, next: string | undefined): string | undefined {
+  if (eq >= 0) {
+    const p = a.slice(eq + 1);
+    if (!p) {
+      console.error(`launch failed: --worktree= needs a path`);
+      process.exit(1);
+    }
+    return p;
+  }
+  if (next !== undefined && !next.startsWith("-") && (next.includes("/") || existsSync(next))) {
+    console.error(
+      `launch failed: "${next}" after a bare --worktree looks like a path; ` +
+      `use --worktree=${next} to adopt an existing worktree, or put the prompt after a bare --`,
+    );
+    process.exit(1);
+  }
+  return undefined;
+}
+
 /** Everything `launch` reads out of argv, once. */
 interface LaunchArgs {
   name?: string;
   /** undefined = not specified, so the default can depend on --orchestrator. */
   worktree?: boolean;
+  /** `--worktree=<path>`: an existing worktree to adopt instead of creating one. */
+  worktreePath?: string;
   attach: boolean;
   orchestrator: boolean;
   unattended: boolean;
@@ -48,6 +80,7 @@ function parseLaunchArgs(): LaunchArgs {
   let name: string | undefined;
   // undefined = "not specified", so the default can depend on --orchestrator below.
   let worktree: boolean | undefined;
+  let worktreePath: string | undefined;
   let attach = false;
   let orchestrator = false;
   let unattended = false;
@@ -66,7 +99,11 @@ function parseLaunchArgs(): LaunchArgs {
     const flag = inline ? a.slice(0, eq) : a;
     if (a === "--attach" || a === "-a") attach = true;
     else if (a === "--no-worktree") worktree = false;
-    else if (a === "--worktree") worktree = true;
+    else if (flag === "--worktree") {
+      const p = parseWorktreeFlag(a, inline ? eq : -1, rest[i + 1]);
+      if (p === undefined) worktree = true;
+      else worktreePath = p;
+    }
     else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
     // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
     // would be rejected outright and `-O` would fall through into the prompt —
@@ -116,11 +153,42 @@ function parseLaunchArgs(): LaunchArgs {
     } else positionals.push(a);
   }
   checkForwardedFlags(forwardArgv, agent);
-  return { name, worktree, attach, orchestrator, unattended, agent, forwardArgv, positionals };
+  return { name, worktree, worktreePath, attach, orchestrator, unattended, agent, forwardArgv, positionals };
+}
+
+/**
+ * The stderr line for a launch that landed in a worktree that already existed.
+ * Always printed — reusing a directory is worth a sentence even when it is
+ * exactly what was asked for — and upgraded to a `warning:` when there is
+ * something in it the caller may not have expected: uncommitted entries, or a
+ * branch other than the one the slug names (a `--name` adopt only; an explicit
+ * `--worktree=<path>` has no expected branch). Either way the tree is used as
+ * found: nothing in it is reset, stashed or checked out — those uncommitted
+ * files are the work the launch exists to get back to (#37).
+ */
+function adoptionNotice(a: NonNullable<LaunchResult["adopted"]>): string {
+  const branch = a.branch === null ? "a detached HEAD" : `branch ${a.branch}`;
+  const drifted = a.expectedBranch !== undefined && a.branch !== a.expectedBranch;
+  const dirty = a.dirty === 1 ? "1 uncommitted change" : `${a.dirty} uncommitted changes`;
+  const parts = [`adopting existing worktree ${a.path} on ${branch}`];
+  if (drifted) parts.push(`(expected ${a.expectedBranch})`);
+  parts.push(a.dirty ? `with ${dirty}` : "(clean)");
+  const line = parts.join(" ");
+  return drifted || a.dirty ? `warning: ${line} — left as found, nothing reset, stashed or checked out` : `▸ ${line}`;
 }
 
 export async function runLaunch(): Promise<void> {
-  const { name, worktree, attach, orchestrator, unattended, agent, forwardArgv, positionals } = parseLaunchArgs();
+  const { name, worktree, worktreePath, attach, orchestrator, unattended, agent, forwardArgv, positionals } = parseLaunchArgs();
+  // `--worktree=<path>` says exactly where to run, so the flags that would pick
+  // a different directory are contradictions, not overrides to be resolved by
+  // position: `--name` would name a worktree that isn't used, `--no-worktree`
+  // would run in cwd, and a bare `--worktree` would create one. Refuse all three
+  // rather than pick a winner the caller can't see.
+  if (worktreePath !== undefined && (name !== undefined || worktree !== undefined)) {
+    const other = name !== undefined ? "--name" : worktree ? "a bare --worktree" : "--no-worktree";
+    console.error(`launch failed: --worktree=<path> can't be combined with ${other} (it already says where to run)`);
+    process.exit(1);
+  }
   // Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
   // equivalent for, so a Copilot orchestrator would run with none of the
   // coordinate-don't-implement instructions. Refuse loudly rather than degrade.
@@ -144,10 +212,11 @@ export async function runLaunch(): Promise<void> {
   // otherwise. Ordinary background sessions keep their isolation.
   const useWorktree = worktree ?? !orchestrator;
   const prompt = positionals.join(" ").trim();
-  const { plan, id, cwd, error } = launchTask(process.cwd(), {
+  const { plan, id, cwd, adopted, error } = launchTask(process.cwd(), {
     prompt,
     name,
     worktree: useWorktree,
+    worktreePath,
     agent,
     orchestrator,
     unattended,
@@ -157,6 +226,9 @@ export async function runLaunch(): Promise<void> {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
   }
+  // On stderr, so a caller parsing the stdout summary still sees the same shape
+  // it always did; the directory itself is repeated in the `window:` line below.
+  if (adopted) console.error(adoptionNotice(adopted));
   // Persist this background session into the restore snapshot right away. The CLI
   // runs as its own process and never goes through loadModel, so `captureRestore`
   // wouldn't see it until the menu's next full reload — and a brand-new session
