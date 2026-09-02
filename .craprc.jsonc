@@ -24,10 +24,12 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // Set by src/ui/convert.ts `(anonymous L33)`: cc 12 at 0% coverage. Naming
-  // it and covering it is the first drive-down step; the next holders are
-  // handleListNavKeys (127.82) and handleSearchInputKeys (125.72).
-  "max": 156,
+  // LOWERED 156 -> 127.82. The convert flow's execFile callback (cc 12 at 0%)
+  // set 156; it is now `parseConvertOutput` and friends, pure and unit-tested,
+  // the worst of them at 6. The holder is src/ui/keys/list.ts
+  // `handleListNavKeys` (cc 29, 51% covered), with `handleSearchInputKeys`
+  // right behind it at 125.72.
+  "max": 127.82,
 
   "overrides": [
     // src/activity.ts is the whole top of the table: the codex and copilot
