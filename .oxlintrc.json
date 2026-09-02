@@ -116,28 +116,31 @@
         //
         // This is the end of the run that started at 1036. NOTHING in src/ is over
         // 500 lines any more — src/index.tsx, the last one, is now 109 — and the
-        // budget is pinned where the worst remaining file actually is
-        // (src/activity.ts at 486) rather than at the round number, because a cap
-        // with slack in it is a cap every other file can grow into.
-        "max-lines": ["error", { "max": 486, "skipBlankLines": false, "skipComments": false }], // src/activity.ts
+        // budget is pinned where the worst remaining file actually is rather than
+        // at the round number, because a cap with slack in it is a cap every
+        // other file can grow into.
+        //
+        // DROPPED 486 -> 461. src/activity.ts set 486 and is now a 31-line
+        // dispatch over src/activity/ (one reader per agent, the largest 217).
+        "max-lines": ["error", { "max": 461, "skipBlankLines": false, "skipComments": false }], // src/github.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
         // It is now four functions in src/cli/status.ts, the largest well under
         // this cap, so the number is src/cli/send.ts's alone.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
         // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
-        // three-way tie between src/activity.ts `claudeAction`, src/activity.ts
-        // `loadCodexActivity` and src/ui/components.tsx `SessionRow`. Three
-        // separate refactors have to land before this one can move at all.
-        // (The first two moved out of src/sessions.ts with the activity split;
-        // neither changed.)
-        "complexity": ["error", 34], // src/activity.ts claudeAction / loadCodexActivity, src/ui/components.tsx SessionRow
+        // tie between src/activity/claude.ts `claudeAction` and
+        // src/ui/components.tsx `SessionRow`. Both refactors have to land before
+        // this one can move at all. (`loadCodexActivity` was the third holder;
+        // it is now a walk over small per-record handlers in src/activity/codex.ts,
+        // the worst of them 7.)
+        "complexity": ["error", 34], // src/activity/claude.ts claudeAction, src/ui/components.tsx SessionRow
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
         // would have pushed it the other way.
         "max-statements": ["error", 56], // src/ui/keys/list.ts handleListViewKeys
         "max-params": ["error", 6], // src/usageLimit.ts
-        "max-depth": ["error", 6], // src/activity.ts:219
+        "max-depth": ["error", 6], // src/activity/claude.ts loadClaudeActivity
         "max-nested-callbacks": ["error", 4] // src/sessions.ts:212
       }
     },
