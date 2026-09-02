@@ -330,6 +330,14 @@ directory (`agendo <path>`, above) that isn't itself inside a checkout, since
 that directory is where the clone has to land. Design notes:
 [`docs/cloning.md`](docs/cloning.md).
 
+Beside it sits **＋ New local repo…** (`i`), for a project that exists nowhere
+yet: name the folder, pick where it goes from the parent folders of the repos
+agendo already knows about (or type any absolute path — `~/…` works), and
+agendo runs `mkdir` + `git init` and carries on into the same session flow. A
+folder that is already a repo is offered as-is; one with other things in it is
+refused. Offered from every entry point, scoped or not, since you name the
+folder yourself. Design notes: [`docs/new-local-repo.md`](docs/new-local-repo.md).
+
 ### Three agents, one list
 
 Claude Code, Copilot CLI and Codex CLI sessions are all discovered from disk and
@@ -416,6 +424,7 @@ are here for the reasoning and the captured evidence, not as a feature list:
 | --- | --- |
 | [`docs/contexts.md`](docs/contexts.md) — path-scoped launchers | Shipped |
 | [`docs/cloning.md`](docs/cloning.md) — cloning a repo you don't have locally | Shipped |
+| [`docs/new-local-repo.md`](docs/new-local-repo.md) — creating a repo that exists nowhere yet | Shipped |
 | [`docs/codex-usage-limits.md`](docs/codex-usage-limits.md) — detecting a capped Codex session | **Design.** The pane captures are committed as e2e fixtures; the detection is not written. |
 | [`docs/error-retry.md`](docs/error-retry.md) — recovering a session that stopped on an error | **Design.** Nothing in it is implemented; a turn that dies on an API error still reads `ready`. |
 

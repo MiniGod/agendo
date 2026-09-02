@@ -11,6 +11,7 @@ import { BranchScreen } from "./BranchScreen.tsx";
 import { CloneScreen } from "./CloneScreen.tsx";
 import { CloningScreen } from "./CloningScreen.tsx";
 import { IdentityScreen } from "./IdentityScreen.tsx";
+import { InitDirScreen, InitNameScreen, InitPathScreen } from "./InitScreens.tsx";
 import { OpenScreen } from "./OpenScreen.tsx";
 import { ProfileScreen } from "./ProfileScreen.tsx";
 import { ProviderScreen } from "./ProviderScreen.tsx";
@@ -136,6 +137,34 @@ export function renderMode({
 
   if (mode.kind === "cloning") {
     return <CloningScreen url={mode.url} dest={mode.dest} progress={mode.progress} elapsed={mode.elapsed} />;
+  }
+
+  if (mode.kind === "initName") {
+    return <InitNameScreen value={mode.value} cursor={mode.cursor} error={mode.error} />;
+  }
+
+  if (mode.kind === "initDir") {
+    return (
+      <InitDirScreen
+        name={mode.name}
+        candidates={mode.candidates}
+        cursor={mode.cursor}
+        error={mode.error}
+        existing={mode.existing}
+      />
+    );
+  }
+
+  if (mode.kind === "initPath") {
+    return (
+      <InitPathScreen
+        name={mode.name}
+        value={mode.value}
+        cursor={mode.cursor}
+        error={mode.error}
+        existing={mode.existing}
+      />
+    );
   }
 
   if (mode.kind === "identity") {
