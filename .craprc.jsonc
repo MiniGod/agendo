@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -72,11 +72,13 @@
   // bun side, the worst of it at 6. Then src/selfCmd.ts `derivedSelfCmd`
   // (cc 9, 33%: decided once at module load from the real environment, so one
   // arm ran) set 33.00; `deriveSelfCmd` now takes its inputs, every arm unit
-  // tested, the worst of it at 5. The holder is src/ui/keys/settings.ts
-  // `handleSettingsKeys` (cc 12, 48%), with src/cli/list.ts `runList`
-  // (cc 32, 96%) at 32.05 and src/cli/status.ts `runStatus` (cc 32, fully
-  // covered) at 32.00 behind it.
-  "max": 32.25,
+  // tested, the worst of it at 5. Then src/ui/keys/settings.ts
+  // `handleSettingsKeys` (cc 12, 48%) set 32.25; it is now a switch over what
+  // a key means, the parts unit tested on a context of mocks, the worst of it
+  // at 6. The holder is src/cli/list.ts `runList` (cc 32, 96%), with
+  // src/cli/status.ts `runStatus` (cc 32, fully covered) at 32.00 and
+  // src/sessions/codex.ts `parseCodexHead` (cc 27, 81%) at 31.63 behind it.
+  "max": 32.05,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
