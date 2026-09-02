@@ -62,10 +62,9 @@ file, never to raise the number. If a genuinely irreducible file ever needs more
 it gets its own named block with the argument in the PR, and the shared budget
 stays where it is.
 
-**No file carries a whole-file exemption any more.** What is left are per-FUNCTION
-blocks — `src/ui/App.tsx` and `src/cli/send.ts` — and one
-`max-params` block. Those are the next targets, and the same one-directional
-contract applies to them.
+**No file carries a whole-file exemption any more.** What is left is one
+per-FUNCTION block — `src/ui/App.tsx` — and one `max-params` block. Those are
+the next targets, and the same one-directional contract applies to them.
 
 Read an exemption block precisely: it replaces only the rules it NAMES, and every
 other rule falls through to the shared budget. A file with a `max-lines`
