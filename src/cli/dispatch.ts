@@ -7,11 +7,12 @@
 import { RESUME_DIALOG_WAIT_MS, tmuxAvailable } from "../tmux.ts";
 import { llmGuide } from "../launch.ts";
 import { resolveContext } from "../context.ts";
-import { makeSessionScope, scopeFlagValue } from "../scope.ts";
+import { makeSessionScope } from "../scope.ts";
 import { parseDuration, runWaitCli } from "../wait.ts";
 import type { BranchSyncReader } from "../types.ts";
 import { HELP } from "./help.ts";
-import { parseSessionArgs } from "./args.ts";
+import { parseSessionArgs, requireDuration, requireValue } from "./args.ts";
+import { listRoute, parseRepoListArgs, parseResourceListArgs, parseSessionListArgs } from "./listArgs.ts";
 import { runStatus } from "./status.ts";
 import { runList } from "./list.ts";
 import { runLaunch } from "./launchCmd.ts";
@@ -23,40 +24,6 @@ import { runUnblock } from "./unblock.ts";
 import { runListPrs } from "./listPrs.ts";
 import { runListIssues } from "./listIssues.ts";
 import { runListRepos } from "./listRepos.ts";
-
-/**
- * Parse a required duration flag, exiting with a clear error on bad/missing
- * input. Lives here because it validates argv for THIS module's flags
- * (`--stalled-after` on `status` and `list`); `wait` parses its own argv inside
- * wait.ts. The duration grammar itself is not duplicated — `parseDuration` is
- * imported from wait.ts, so `2s`/`5m`/`1h` mean the same thing everywhere.
- */
-function requireDuration(cmd: string, flag: string, s: string | undefined): number {
-  const ms = parseDuration(s);
-  if (ms === null) {
-    console.error(`${cmd}: ${flag} needs a duration like 500ms, 2s, 5m, 1h (got "${s ?? ""}")`);
-    process.exit(1);
-  }
-  return ms;
-}
-
-/**
- * The exiting form of `scopeFlagValue`, for the subcommands parsed here (`wait`
- * uses the returning form directly — it turns its whole argv tail into an exit
- * code rather than exiting mid-parse). One guard, so a missing `--repo` can't be
- * an error on one subcommand and a silent "no filter" on another.
- */
-function requireValue(cmd: string, flag: string, v: string | undefined): string {
-  const value = scopeFlagValue(cmd, flag, v);
-  if (value === null) process.exit(1);
-  return value;
-}
-
-/** `list`'s path scope was named twice — as `[dir]`, as `--path`, or as both. */
-function duplicatePathScope(): never {
-  console.error(`list: the path scope was given twice — [dir] and --path <dir> name the same slot`);
-  process.exit(1);
-}
 
 // `status <id>`: print a session's state + the same recent-activity summary the
 // menu shows, so an agent that launched a background session can poll it.
@@ -188,115 +155,46 @@ async function sendCommand(): Promise<void> {
 // ones have an orchestrator and which are unmanaged. It takes the session list's
 // own scope selectors rather than the resource lists' `[dir]` context, because it
 // is a view of the same sessions grouped differently, not a backend query.
-async function listReposCommand(sub: string): Promise<void> {
-  let json = false;
-  let dirArg: string | undefined;
-  let repoArg: string | undefined;
-  const rest = process.argv.slice(4);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--json") json = true;
-    else if (a === "--path") {
-      if (dirArg !== undefined) duplicatePathScope();
-      dirArg = requireValue("list repos", a, rest[++i]);
-    } else if (a === "--repo") repoArg = requireValue("list repos", a, rest[++i]);
-    else if (!a.startsWith("-")) {
-      if (dirArg !== undefined) duplicatePathScope();
-      dirArg = a;
-    } else {
-      console.error(`list ${sub}: unknown argument "${a}"`);
-      process.exit(1);
-    }
-  }
-  await runListRepos({ json, scope: makeSessionScope({ path: dirArg, repo: repoArg }, process.cwd()) });
+async function listReposCommand(sub: string, argv: string[]): Promise<void> {
+  const a = parseRepoListArgs(sub, argv);
+  await runListRepos({ json: a.json, scope: makeSessionScope({ path: a.dirArg, repo: a.repoArg }, process.cwd()) });
+}
+
+// `list pr|prs` and `list issues|wi|work-items|…`: the resource lists (open PRs /
+// issues-work-items and their associated sessions), distinct from the default
+// session list.
+async function listResourcesCommand(kind: "prs" | "issues", sub: string, argv: string[]): Promise<void> {
+  const a = parseResourceListArgs(sub, argv);
+  const root = a.dirArg ? resolveContext(a.dirArg, process.cwd()).filterRoot : null;
+  const opts = { json: a.json, filterRoot: root, repoFilter: a.repoFilter ?? !!root };
+  if (kind === "prs") await runListPrs(opts);
+  else await runListIssues(opts);
+}
+
+// The default session list, scoped like `status` is and queried by PR / work item.
+async function listSessionsCommand(readBranchSync: BranchSyncReader, argv: string[]): Promise<void> {
+  const a = parseSessionListArgs(argv);
+  await runList({
+    readBranchSync,
+    json: a.json, all: a.all, pr: a.pr, item: a.item,
+    scope: makeSessionScope({ path: a.dirArg, repo: a.repoArg }, process.cwd()),
+    stalledAfterMs: a.stalledAfterMs,
+  });
 }
 
 // `list` (alias `ls`): print the managed sessions that are running right now —
 // one per line, with input readiness and how each was started — so an agent (or
 // human) can discover the background sessions it can `status`/`send` to. The
 // default stays live-only and model-free (fast, no backend auth needed); the
-// flags below opt into richer, association-resolving output for orchestrators.
+// flags opt into richer, association-resolving output for orchestrators. The
+// keyword after `list` picks one of the three listings (see `listRoute`); each
+// parses its own argv tail in listArgs.ts.
 async function listCommand(readBranchSync: BranchSyncReader): Promise<void> {
-  // Subcommand routing: `list pr|prs` and `list issues|wi|work-items|…` are
-  // resource lists (open PRs / issues-work-items and their associated sessions),
-  // distinct from the default session list. Only the exact keywords route here;
-  // any other non-dash positional falls through to the session list's `[dir]`
-  // path filter, and the dashed `--pr`/`--issue` stay session-list query flags.
-  const sub = process.argv[3];
-  const PR_SUBS = new Set(["pr", "prs"]);
-  const ISSUE_SUBS = new Set(["issue", "issues", "wi", "work-item", "work-items", "workitem", "workitems"]);
-  const REPO_SUBS = new Set(["repo", "repos"]);
-  if (sub !== undefined && REPO_SUBS.has(sub)) {
-    await listReposCommand(sub);
-    process.exit(0);
-  }
-  if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub))) {
-    let json = false;
-    // Optional `[dir]` positional: the same path context the TUI takes, narrowing
-    // the listing to the repos found inside it. `--repo-filter`/`--no-repo-filter`
-    // override the default (on whenever a dir is given), mirroring the menu's `f`.
-    let dirArg: string | undefined;
-    let repoFilter: boolean | undefined;
-    for (const a of process.argv.slice(4)) {
-      if (a === "--json") json = true;
-      else if (a === "--repo-filter") repoFilter = true;
-      else if (a === "--no-repo-filter") repoFilter = false;
-      else if (!a.startsWith("-") && dirArg === undefined) dirArg = a;
-      else {
-        console.error(`list ${sub}: unknown argument "${a}"`);
-        process.exit(1);
-      }
-    }
-    const root = dirArg ? resolveContext(dirArg, process.cwd()).filterRoot : null;
-    const opts = { json, filterRoot: root, repoFilter: repoFilter ?? !!root };
-    if (PR_SUBS.has(sub)) await runListPrs(opts);
-    else await runListIssues(opts);
-    process.exit(0);
-  }
-  let json = false;
-  let all = false;
-  let pr: number | undefined;
-  let item: number | undefined;
-  let stalledAfterMs: number | undefined;
-  // Optional `[dir]` positional (or its `--path` flag form) scopes the listing to
-  // sessions whose cwd is under it, mirroring the TUI's path filter; resolved
-  // against the current directory. `--repo` scopes by repo instead/as well.
-  let dirArg: string | undefined;
-  let repoArg: string | undefined;
-  const rest = process.argv.slice(3);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--json") json = true;
-    else if (a === "--all" || a === "--include-idle") all = true;
-    else if (a === "--stalled-after") stalledAfterMs = requireDuration("list", "--stalled-after", rest[++i]);
-    else if (a === "--pr") pr = Number(rest[++i]);
-    else if (a === "--issue" || a === "--work-item" || a === "--workitem") item = Number(rest[++i]);
-    // `--path` and the `[dir]` positional are the SAME slot, so a second one is a
-    // mistake — silently letting the later win would scope the listing to
-    // something other than what the command line reads as. Both spellings share
-    // one guard so the error doesn't depend on which came first.
-    else if (a === "--path") {
-      if (dirArg !== undefined) duplicatePathScope();
-      dirArg = requireValue("list", a, rest[++i]);
-    } else if (a === "--repo") repoArg = requireValue("list", a, rest[++i]);
-    else if (!a.startsWith("-")) {
-      if (dirArg !== undefined) duplicatePathScope();
-      dirArg = a;
-    } else {
-      console.error(`list: unknown argument "${a}"`);
-      process.exit(1);
-    }
-  }
-  if ((pr !== undefined && !Number.isFinite(pr)) || (item !== undefined && !Number.isFinite(item))) {
-    console.error(`list: --pr/--issue/--work-item need a numeric id`);
-    process.exit(1);
-  }
-  await runList({
-    readBranchSync,
-    json, all, pr, item,
-    scope: makeSessionScope({ path: dirArg, repo: repoArg }, process.cwd()),
-    stalledAfterMs,
-  });
+  const route = listRoute(process.argv[3]);
+  const tail = process.argv.slice(4);
+  if (route.kind === "sessions") await listSessionsCommand(readBranchSync, process.argv.slice(3));
+  else if (route.kind === "repos") await listReposCommand(route.sub, tail);
+  else await listResourcesCommand(route.kind, route.sub, tail);
   process.exit(0);
 }
 
