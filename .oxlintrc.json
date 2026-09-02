@@ -129,9 +129,11 @@
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
         // It is now four functions in src/cli/status.ts, the largest well under
         // this cap. LOWERED 198 -> 197: src/cli/send.ts `runSend` set 198 and is
-        // now a ten-line dispatch, the longest step under it 40 lines. The holder
-        // is src/cli/list.ts `runList`, with src/model.ts `loadModel` at 195.
-        "max-lines-per-function": ["error", { "max": 197, "skipBlankLines": false, "skipComments": false }], // src/cli/list.ts runList
+        // now a ten-line dispatch, the longest step under it 40 lines. LOWERED
+        // 197 -> 195: src/cli/list.ts `runList` set 197 and is now load, select,
+        // sort, map, print, each step named, `runList` itself 38 lines. The
+        // holder is src/model.ts `loadModel`.
+        "max-lines-per-function": ["error", { "max": 195, "skipBlankLines": false, "skipComments": false }], // src/model.ts loadModel
         // Was also src/wait.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/activity.ts; both are now
         // walks over small per-record handlers under src/activity/, the worst of
@@ -144,9 +146,10 @@
         // `runList` at 32 behind it.
         // LOWERED 33 -> 32. `listCommand` set 33; each listing now parses its
         // own argv in src/cli/listArgs.ts and dispatch.ts only routes, the worst
-        // of it 7. The holders are src/cli/status.ts `runStatus` and
-        // src/cli/list.ts `runList`, tied at 32.
-        "complexity": ["error", 32], // src/cli/status.ts runStatus, src/cli/list.ts runList
+        // of it 7. The holders were src/cli/status.ts `runStatus` and
+        // src/cli/list.ts `runList`, tied at 32; `runList` is now 10, so
+        // `runStatus` holds it alone.
+        "complexity": ["error", 32], // src/cli/status.ts runStatus
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
