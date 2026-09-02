@@ -216,7 +216,7 @@ the top of it. Locally the e2e suite wants `--workers 2`, same as always.
   its own is covered iff it was entered.
 - **A function no test ever reaches scores at cov 0**, whether or not its file
   was loaded. That is the honest number, not a gap in the tool: on the first
-  measured run every file in `src/` was imported by some test, and 138 of the
+  measured run every file in `src/` was imported by some test, and 133 of the
   1164 functions were still never entered — almost all of `src/activity.ts`'s
   codex and copilot readers among them.
 - **Coverage is not perfectly deterministic.** Retried e2e attempts add
