@@ -95,6 +95,15 @@ function install(outDir: string): void {
   };
   process.on("exit", dump);
 
+  // `bun test` ends without firing "exit" (or "beforeExit") at all; the one
+  // hook it does run from a preload is a global `afterAll`, once per test file.
+  // Each call overwrites the same dump with the cumulative counters, so the
+  // last file's write is the whole suite. Under `bun run` the import succeeds
+  // but `afterAll` throws — swallowed, "exit" is the hook there.
+  import("bun:test")
+    .then(({ afterAll }) => afterAll(dump))
+    .catch(() => {});
+
   // A process killed by a signal never reaches "exit". The harness ends the TUI
   // with SIGHUP (node-pty's kill) and the CLI with SIGTERM (child.kill), so
   // those runs would otherwise vanish. Dump, then hand the signal back: if we
