@@ -198,6 +198,19 @@ export const BARE_TIME_LOOKBACK_MS = 6 * 3600_000;
  * the notice's zone is normally the user's own, safe for same-machine resume.
  */
 export function parseResetTime(plain: string, now: Date, lookbackMs = 0): number | null {
+  const tail = resetTail(plain);
+  if (tail === null) return null;
+  const { tz, rest } = resetZone(tail);
+  const clock = resetClock(rest);
+  if (!clock) return null;
+  const floor = now.getTime() - lookbackMs;
+  return resetOnDate(rest, tz, now, floor, clock)
+    ?? resetOnWeekday(rest, tz, now, floor, clock)
+    ?? resetBareTime(tz, now, lookbackMs, clock);
+}
+
+/** The rest of the line after the "reset(s) [at|by]" anchor, or null without one. */
+function resetTail(plain: string): string | null {
   // Confine the search to the notice itself when the phrase is present.
   const phrase = plain.match(USAGE_LIMIT_RE);
   const region = phrase ? plain.slice(phrase.index) : plain;
@@ -208,86 +221,97 @@ export function parseResetTime(plain: string, now: Date, lookbackMs = 0): number
   // option above a later line). A wrapped notice that splits between "resets"
   // and its time simply yields null — reporting no time beats reporting a wrong one.
   const anchor = region.match(/\breset[s]?(?:[^\S\n]+(?:by|at))?[^\S\n]+([^\n]*)/i);
-  if (!anchor) return null;
-  let tail = anchor[1];
+  return anchor ? anchor[1] : null;
+}
 
-  // Optional IANA timezone in parens, e.g. "(America/Santiago)". Extract, then
-  // strip it from the tail so its letters can't feed the weekday/month scans.
-  let tz: string | null = null;
+/**
+ * The optional IANA timezone in parens, e.g. "(America/Santiago)", and the tail
+ * with it stripped so its letters can't feed the weekday/month scans.
+ */
+function resetZone(tail: string): { tz: string | null; rest: string } {
   const tzMatch = tail.match(/\(([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+)\)/);
-  if (tzMatch) {
-    try {
-      new Intl.DateTimeFormat("en-US", { timeZone: tzMatch[1] }); // throws for garbage
-      tz = tzMatch[1];
-    } catch {
-      tz = null;
-    }
-    tail = tail.replace(tzMatch[0], " ");
-  }
+  if (!tzMatch) return { tz: null, rest: tail };
+  return { tz: knownZone(tzMatch[1]), rest: tail.replace(tzMatch[0], " ") };
+}
 
-  // Time-of-day: "3pm", "3:30pm", "4:00 AM" (hour bounded 1-12 so a stray
-  // "…30pm" from "4.30pm" can't match), or a 24h "15:30".
-  let h: number, mi: number;
+/** `tz` when the runtime knows it; garbage falls back to local time. */
+function knownZone(tz: string): string | null {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz }); // throws for garbage
+    return tz;
+  } catch {
+    return null;
+  }
+}
+
+/** A wall-clock time of day. */
+interface Clock {
+  h: number;
+  mi: number;
+}
+
+/**
+ * Time-of-day: "3pm", "3:30pm", "4:00 AM" (hour bounded 1-12 so a stray "…30pm"
+ * from "4.30pm" can't match), or a 24h "15:30".
+ */
+function resetClock(tail: string): Clock | null {
   const ampm = tail.match(/\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*([ap])\.?m\.?/i);
   if (ampm) {
-    h = +ampm[1] % 12;
-    if (/p/i.test(ampm[3])) h += 12;
-    mi = ampm[2] ? +ampm[2] : 0;
-  } else {
-    const h24 = tail.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
-    if (!h24) return null;
-    h = +h24[1];
-    mi = +h24[2];
+    const h = (+ampm[1] % 12) + (/p/i.test(ampm[3]) ? 12 : 0);
+    return { h, mi: ampm[2] ? +ampm[2] : 0 };
   }
+  const h24 = tail.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  return h24 ? { h: +h24[1], mi: +h24[2] } : null;
+}
 
-  const nowMs = now.getTime();
-  const floor = nowMs - lookbackMs;
+/**
+ * The instant `days` after Y-M-D at `clock` in `tz`, stepped through local noon
+ * so a DST edge can't skip or repeat a day.
+ */
+function daysAfter(tz: string | null, y: number, mo: number, d: number, days: number, clock: Clock): number {
+  const base = new Date(instantFor(null, y, mo, d, 12, 0));
+  base.setDate(base.getDate() + days);
+  return instantFor(tz, base.getFullYear(), base.getMonth() + 1, base.getDate(), clock.h, clock.mi);
+}
 
-  // Optional explicit month + day ("Apr 24" / "April 24").
+/** An explicit month + day ("Apr 24" / "April 24") → that calendar date, or null without one. */
+function resetOnDate(tail: string, tz: string | null, now: Date, floor: number, clock: Clock): number | null {
   const md = tail.match(/\b([A-Za-z]{3,})\.?\s+(\d{1,2})\b/);
-  const monthIdx = md ? MONTHS[md[1].slice(0, 3).toLowerCase()] : undefined;
+  if (!md) return null;
+  const monthIdx = MONTHS[md[1].slice(0, 3).toLowerCase()];
+  if (monthIdx === undefined) return null;
+  const day = +md[2];
+  const { y } = todayIn(tz, now);
+  const inst = instantFor(tz, y, monthIdx + 1, day, clock.h, clock.mi);
+  // Only roll to next year when the date is *long* past (a Dec→Jan window);
+  // a recently-passed date stays put so the caller can resume now.
+  return inst < floor ? instantFor(tz, y + 1, monthIdx + 1, day, clock.h, clock.mi) : inst;
+}
 
-  if (monthIdx !== undefined) {
-    const day = +md![2];
-    const { y } = todayIn(tz, now);
-    let inst = instantFor(tz, y, monthIdx + 1, day, h, mi);
-    // Only roll to next year when the date is *long* past (a Dec→Jan window);
-    // a recently-passed date stays put so the caller can resume now.
-    if (inst < floor) inst = instantFor(tz, y + 1, monthIdx + 1, day, h, mi);
-    return inst;
-  }
-
-  // Optional weekday ("Friday") without an explicit date.
+/** A weekday ("Friday") without an explicit date → that weekday this week, else next week; null without one. */
+function resetOnWeekday(tail: string, tz: string | null, now: Date, floor: number, clock: Clock): number | null {
   const wd = tail.match(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/i);
-  const targetDow = wd ? WEEKDAYS[wd[1].slice(0, 3).toLowerCase()] : undefined;
-
+  if (!wd) return null;
+  const targetDow = WEEKDAYS[wd[1].slice(0, 3).toLowerCase()];
   const { y, mo, d } = todayIn(tz, now);
-  let inst = instantFor(tz, y, mo, d, h, mi);
+  const dow = new Date(instantFor(null, y, mo, d, 12, 0)).getDay();
+  let offset = (targetDow - dow + 7) % 7;
+  if (offset === 0 && instantFor(tz, y, mo, d, clock.h, clock.mi) < floor) offset = 7;
+  return daysAfter(tz, y, mo, d, offset, clock);
+}
 
-  if (targetDow !== undefined) {
-    const dow = new Date(instantFor(null, y, mo, d, 12, 0)).getDay();
-    let offset = (targetDow - dow + 7) % 7;
-    if (offset === 0 && inst < floor) offset = 7;
-    if (offset > 0) {
-      const base = new Date(instantFor(null, y, mo, d, 12, 0));
-      base.setDate(base.getDate() + offset);
-      inst = instantFor(tz, base.getFullYear(), base.getMonth() + 1, base.getDate(), h, mi);
-    }
-    return inst;
-  }
-
-  // Bare time-of-day: today unless it's further past than the lookback, then
-  // tomorrow. The lookback is capped at BARE_TIME_LOOKBACK_MS here — the 8-day
-  // weekly lookback must NOT apply to a bare clock time (see the constant), or a
-  // reset many hours ago (e.g. "1am" at 23:00) reads as "act now" and burns the
-  // one auto-resume shot into a still-limited session.
-  const bareFloor = nowMs - Math.min(lookbackMs, BARE_TIME_LOOKBACK_MS);
-  if (inst < bareFloor) {
-    const base = new Date(instantFor(null, y, mo, d, 12, 0));
-    base.setDate(base.getDate() + 1);
-    inst = instantFor(tz, base.getFullYear(), base.getMonth() + 1, base.getDate(), h, mi);
-  }
-  return inst;
+/**
+ * A bare time-of-day: today unless it's further past than the lookback, then
+ * tomorrow. The lookback is capped at BARE_TIME_LOOKBACK_MS here — the 8-day
+ * weekly lookback must NOT apply to a bare clock time (see the constant), or a
+ * reset many hours ago (e.g. "1am" at 23:00) reads as "act now" and burns the
+ * one auto-resume shot into a still-limited session.
+ */
+function resetBareTime(tz: string | null, now: Date, lookbackMs: number, clock: Clock): number {
+  const { y, mo, d } = todayIn(tz, now);
+  const inst = instantFor(tz, y, mo, d, clock.h, clock.mi);
+  const bareFloor = now.getTime() - Math.min(lookbackMs, BARE_TIME_LOOKBACK_MS);
+  return inst < bareFloor ? daysAfter(tz, y, mo, d, 1, clock) : inst;
 }
 
 /**
