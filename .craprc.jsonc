@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -50,10 +50,13 @@
   // now src/ui/providerActions.ts, a pure decision plus two closures with a
   // unit suite, the worst of it at 5. Then src/github.ts `rollupCI` (cc 20,
   // 59%) set 46.65; it is now src/github/ci.ts, one verdict per check and a
-  // precedence, with a unit suite, the worst of it at 5. The holder is
-  // src/cli/close.ts `runClose` (cc 45, 93%), with src/ado/policy.ts
-  // `fetchBuildResult` (cc 6, never entered) at 42 behind it.
-  "max": 45.78,
+  // precedence, with a unit suite, the worst of it at 5. Then src/cli/close.ts
+  // `runClose` (cc 45, 93%) set 45.78; it is now a dispatch over one function
+  // per guard and per report, the arms e2e never trips unit tested, the worst
+  // of it at 7. The holder is src/ado/policy.ts `fetchBuildResult` (cc 6,
+  // never entered), with src/cli/send.ts `runSend` (cc 40, 91%) at 41.35
+  // behind it.
+  "max": 42,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
