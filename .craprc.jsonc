@@ -32,15 +32,12 @@
   "max": 127.82,
 
   "overrides": [
-    // src/activity.ts is the whole top of the table: the codex and copilot
-    // activity readers and their action classifiers run against no fixture at
-    // all, so every one of them scores its full cc². Four separate pins rather
-    // than one for the file — pinning the file at 1190 would hand the other
-    // three several hundred points of free growth.
-    { "file": "src/activity.ts", "function": "loadCodexActivity", "max": 1190 },
-    { "file": "src/activity.ts", "function": "copilotAction", "max": 702 },
-    { "file": "src/activity.ts", "function": "codexAction", "max": 702 },
-    { "file": "src/activity.ts", "function": "loadCopilotActivity", "max": 506 },
+    // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
+    // copilotAction 702, codexAction 702, loadCopilotActivity 506). The codex
+    // and copilot readers are now src/activity/codex.ts and copilot.ts, walks
+    // over small per-record handlers with a unit suite over every tool they
+    // render; the worst function in either file is 7.
+    //
     // The input-box scan, cc 29 with a quarter of it exercised. In the
     // orchestrator port's area (src/tmux/), so measured here and left alone.
     { "file": "src/tmux/inputBox.ts", "function": "inputRealText", "max": 365.45 }
