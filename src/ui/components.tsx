@@ -4,26 +4,20 @@ import {
   agentCell,
   approvalCell,
   ciCell,
-  compactionSuffix,
   fit,
   fmtDelta,
-  limitSuffix,
   padCell,
   prBadge,
-  runningStatus,
   stateColor,
   timeAgo,
   verbStyle,
-  KIND_BADGE,
   TASK_STYLE,
   type Cell,
-  type PaneState,
 } from "./format.ts";
 import { V } from "./vocabState.ts";
 import type { PrSort } from "./rows.ts";
-import type { OpenTargets } from "./targets.ts";
-import type { SessionKind } from "../tmux.ts";
-import type { ActionLine, AgentSession, PRWithSessions, TaskItem, WorkItem } from "../types.ts";
+import { sessionRowParts, type SessionRowInput } from "./sessionRow.ts";
+import type { ActionLine, PRWithSessions, TaskItem, WorkItem } from "../types.ts";
 
 // ── column layout ─────────────────────────────────────────────────────────────
 // Rows are rendered as a single Text with each cell padded/truncated to a fixed
@@ -125,50 +119,34 @@ export function PrRow({
   return <Box><ColRow cells={cells} widths={PR_WIDTHS} selected={selected} /></Box>;
 }
 
-// The PR / work item a session links back to, as a compact one-line badge
-// (e.g. `!76896 → WI 234309`, or just one side when only one is known).
-export function linkBadge(open: OpenTargets | undefined): string | null {
-  if (!open) return null;
-  const parts: string[] = [];
-  if (open.pr) parts.push(`!${open.pr.id}`);
-  if (open.workItem) parts.push(`WI ${open.workItem.id}`);
-  return parts.length ? parts.join(" → ") : null;
-}
-
-export function SessionRow({
-  session,
-  running,
-  kind,
-  pane,
-  expanded,
-  selected,
-  timeField = "lastUsed",
-  open,
-  showLink,
-  placeholder,
-}: { session: AgentSession; running: boolean; kind?: SessionKind; pane?: PaneState; expanded: boolean; selected: boolean; timeField?: "lastUsed" | "created"; open?: OpenTargets; showLink?: boolean; placeholder?: boolean }) {
-  const caret = expanded ? "▾ " : "▸ ";
-  const displayTime = timeField === "created" ? (session.createdAt ?? session.lastUsed) : session.lastUsed;
-  const badge = kind ? KIND_BADGE[kind] : undefined;
-  const status = running ? runningStatus(pane?.readiness) : null;
-  const shells = running ? pane?.shells ?? 0 : 0;
-  const link = showLink ? linkBadge(open) : null;
+/** A session in the list. What it says is decided in sessionRow.ts; this paints it, highlighted when selected. */
+export function SessionRow(props: SessionRowInput & { selected: boolean }) {
+  const p = sessionRowParts(props);
+  const { selected } = props;
+  function paint(color: string): string {
+    return selected ? "black" : color;
+  }
   return (
     <Box marginLeft={4}>
-      <Text wrap="truncate" color={selected ? "black" : undefined} backgroundColor={selected ? "cyan" : undefined}>
-        <Text color={selected ? "black" : "gray"}>{caret}</Text>
-        <Text color={selected ? "black" : status ? status.color : "gray"}>{running ? "● " : placeholder ? "⏸ " : "○ "}</Text>
-        <Text dimColor={!selected}>{`[${session.source}] `}</Text>
-        {badge ? <Text color={selected ? "black" : "cyan"}>{`{${badge}} `}</Text> : null}
-        <Text>{session.title.replace(/\s+/g, " ").slice(0, 50)}</Text>
-        {link ? <Text color={selected ? "black" : "magenta"}>{`  ${link}`}</Text> : null}
-        <Text dimColor={!selected}>{`  ${timeAgo(displayTime)}`}</Text>
-        {status ? <Text color={selected ? "black" : status.color}>{`  (${status.label}${pane?.readiness === "limited" ? limitSuffix(pane.resetAt) : pane?.readiness === "compacting" ? compactionSuffix(pane.compactionPercent) : ""})`}</Text> : null}
-        {shells > 0 ? <Text color={selected ? "black" : "blue"}>{`  ⛁ ${shells} shell${shells > 1 ? "s" : ""}`}</Text> : null}
-        {placeholder ? <Text color={selected ? "black" : "gray"} dimColor={!selected}>{"  restored · press to resume"}</Text> : null}
+      <Text wrap="truncate" {...rowStyle(selected)}>
+        <Text color={paint("gray")}>{p.caret}</Text>
+        <Text color={paint(p.glyphColor)}>{p.glyph}</Text>
+        <Text dimColor={!selected}>{p.source}</Text>
+        {p.badge ? <Text color={paint("cyan")}>{p.badge}</Text> : null}
+        <Text>{p.title}</Text>
+        {p.link ? <Text color={paint("magenta")}>{`  ${p.link}`}</Text> : null}
+        <Text dimColor={!selected}>{p.time}</Text>
+        {p.status ? <Text color={paint(p.status.color)}>{p.status.text}</Text> : null}
+        {p.shells ? <Text color={paint("blue")}>{p.shells}</Text> : null}
+        {p.restored ? <Text color={paint("gray")} dimColor={!selected}>{"  restored · press to resume"}</Text> : null}
       </Text>
     </Box>
   );
+}
+
+/** The selection highlight: black on cyan, or the terminal's own colors. */
+function rowStyle(selected: boolean): { color?: string; backgroundColor?: string } {
+  return selected ? { color: "black", backgroundColor: "cyan" } : {};
 }
 
 // A single activity line under an expanded session: relative time + the gap

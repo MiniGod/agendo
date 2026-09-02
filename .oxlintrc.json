@@ -137,7 +137,12 @@
         // walks over small per-record handlers under src/activity/, the worst of
         // them 7. That leaves 34 a tie between src/ui/components.tsx `SessionRow`
         // and src/cli/launchCmd.ts `parseLaunchArgs`.
-        "complexity": ["error", 34], // src/ui/components.tsx SessionRow, src/cli/launchCmd.ts parseLaunchArgs
+        // LOWERED 34 -> 33. src/ui/components.tsx `SessionRow` set 34; what the
+        // row says is now decided in src/ui/sessionRow.ts, the component paints
+        // it, and the worst of the two is 6. The holder is src/cli/dispatch.ts
+        // `listCommand`, with src/cli/status.ts `runStatus` and src/cli/list.ts
+        // `runList` at 32 behind it.
+        "complexity": ["error", 33], // src/cli/dispatch.ts listCommand
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
