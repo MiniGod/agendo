@@ -142,7 +142,11 @@
         // it, and the worst of the two is 6. The holder is src/cli/dispatch.ts
         // `listCommand`, with src/cli/status.ts `runStatus` and src/cli/list.ts
         // `runList` at 32 behind it.
-        "complexity": ["error", 33], // src/cli/dispatch.ts listCommand
+        // LOWERED 33 -> 32. `listCommand` set 33; each listing now parses its
+        // own argv in src/cli/listArgs.ts and dispatch.ts only routes, the worst
+        // of it 7. The holders are src/cli/status.ts `runStatus` and
+        // src/cli/list.ts `runList`, tied at 32.
+        "complexity": ["error", 32], // src/cli/status.ts runStatus, src/cli/list.ts runList
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
