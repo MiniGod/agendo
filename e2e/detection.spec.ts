@@ -26,7 +26,7 @@ import {
 } from "../src/repos.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
 import { isStalled } from "../src/idle.ts";
-import { type ManagedTarget, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/tmux.ts";
+import { type ManagedTarget, isPaneTarget, isPaneHosted, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/tmux.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
 import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
 import { freshName, prFreshName } from "../src/launch.ts";
@@ -3341,5 +3341,69 @@ test.describe("#39: window targets carry their host session", () => {
     expect(r.liveWindows.get(canon)?.target).toBe(real);
     // A real window vouched for the name, so it is not a dormant tab.
     expect(r.livePlaceholders.has(canon)).toBe(false);
+  });
+});
+
+// ── pane-hosted sessions ──────────────────────────────────────────────────────
+// The global orchestrator lives in a PANE of the launcher's own window, so it
+// owns no window and no session of its own. Everything that finds a session by
+// name would therefore miss it entirely — which is why its managed name is
+// stamped on the pane (`@cl_pane_target`) and the pane id is what addresses it.
+// A pane id needs no `=` pin: `%12` cannot be a prefix of another target the way
+// `cl-pr-5` is of `cl-pr-50`.
+
+test.describe("pane-hosted targets", () => {
+  test("isPaneTarget accepts pane ids and nothing else", () => {
+    expect(isPaneTarget("%0")).toBe(true);
+    expect(isPaneTarget("%12")).toBe(true);
+    // The forms it must not swallow: a window name, and both target spellings.
+    expect(isPaneTarget("cl-bg-abc")).toBe(false);
+    expect(isPaneTarget("=agendo:=cl-bg-abc")).toBe(false);
+    expect(isPaneTarget("%")).toBe(false);
+    expect(isPaneTarget("%1a")).toBe(false);
+  });
+
+  test("isPaneHosted reads the target, not the name", () => {
+    // The NAME is identical either way — a pane-hosted session is an ordinary
+    // `cl-bg-…` session that happens to have been parked in somebody's window.
+    // Only the target says where it actually lives.
+    const pane: ManagedTarget = { name: "cl-bg-abc", target: "%3", cwd: "/x", placeholder: false };
+    const window: ManagedTarget = { name: "cl-bg-abc", target: "=agendo:=cl-bg-abc", cwd: "/x", placeholder: false };
+    expect(isPaneHosted(pane)).toBe(true);
+    expect(isPaneHosted(window)).toBe(false);
+  });
+
+  test("reconcileLive counts a pane-hosted session as running and addresses it by pane id", () => {
+    // `base` is empty on purpose: this session's name is on NO window and NO
+    // session, so the raw tmux listing cannot see it. If reconciliation only
+    // narrowed `base` it would be reported as dead while running perfectly well.
+    const s = sess("panehost0001", "/x", 1_000);
+    const r = reconcileLive(new Set(), [{ name: "cl-bg-panehost0001", target: "%7", cwd: "/x", placeholder: false }], [s]);
+    const canon = sessionName(s);
+    expect(r.live.has(canon)).toBe(true);
+    // The pane id is handed to tmux verbatim — capture-pane, send-keys and
+    // select-pane all take one, so nothing downstream needs a special case.
+    expect(r.liveWindows.get(canon)?.target).toBe("%7");
+    expect(r.liveWindows.get(canon)?.name).toBe("cl-bg-panehost0001");
+    expect(r.liveKinds.get(canon)).toBe("background");
+  });
+
+  test("a pane-hosted session is never mistaken for a restore placeholder", () => {
+    // Restore recreates WINDOWS, never panes, so a pane carrying a managed name
+    // is always a real running agent. Reading a placeholder's flag off the pane
+    // that hosts it would silently report the orchestrator as a dormant tab.
+    const s = sess("panehost0002", "/x", 1_000);
+    const canon = sessionName(s);
+    const r = reconcileLive(
+      new Set([canon]),
+      [
+        { name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: true },
+        { name: "cl-bg-panehost0002", target: "%9", cwd: "/x", placeholder: false },
+      ],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.livePlaceholders.has(canon)).toBe(false);
+    expect(r.liveWindows.get(canon)?.target).toBe("%9");
   });
 });

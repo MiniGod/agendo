@@ -22,6 +22,7 @@ import { runClose } from "./close.ts";
 import { runUnblock } from "./unblock.ts";
 import { runListPrs } from "./listPrs.ts";
 import { runListIssues } from "./listIssues.ts";
+import { runListRepos } from "./listRepos.ts";
 
 /**
  * Parse a required duration flag, exiting with a clear error on bad/missing
@@ -183,6 +184,33 @@ async function sendCommand(): Promise<void> {
   process.exit(0);
 }
 
+// `list repos`: a THIRD kind of listing — one row per repository, saying which
+// ones have an orchestrator and which are unmanaged. It takes the session list's
+// own scope selectors rather than the resource lists' `[dir]` context, because it
+// is a view of the same sessions grouped differently, not a backend query.
+async function listReposCommand(sub: string): Promise<void> {
+  let json = false;
+  let dirArg: string | undefined;
+  let repoArg: string | undefined;
+  const rest = process.argv.slice(4);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--json") json = true;
+    else if (a === "--path") {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = requireValue("list repos", a, rest[++i]);
+    } else if (a === "--repo") repoArg = requireValue("list repos", a, rest[++i]);
+    else if (!a.startsWith("-")) {
+      if (dirArg !== undefined) duplicatePathScope();
+      dirArg = a;
+    } else {
+      console.error(`list ${sub}: unknown argument "${a}"`);
+      process.exit(1);
+    }
+  }
+  await runListRepos({ json, scope: makeSessionScope({ path: dirArg, repo: repoArg }, process.cwd()) });
+}
+
 // `list` (alias `ls`): print the managed sessions that are running right now —
 // one per line, with input readiness and how each was started — so an agent (or
 // human) can discover the background sessions it can `status`/`send` to. The
@@ -197,6 +225,11 @@ async function listCommand(readBranchSync: BranchSyncReader): Promise<void> {
   const sub = process.argv[3];
   const PR_SUBS = new Set(["pr", "prs"]);
   const ISSUE_SUBS = new Set(["issue", "issues", "wi", "work-item", "work-items", "workitem", "workitems"]);
+  const REPO_SUBS = new Set(["repo", "repos"]);
+  if (sub !== undefined && REPO_SUBS.has(sub)) {
+    await listReposCommand(sub);
+    process.exit(0);
+  }
   if (sub !== undefined && (PR_SUBS.has(sub) || ISSUE_SUBS.has(sub))) {
     let json = false;
     // Optional `[dir]` positional: the same path context the TUI takes, narrowing
