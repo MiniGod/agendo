@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -34,9 +34,14 @@
   // with src/profiles.ts `moveSessionToProfile` (cc 25, 59%) behind it; the
   // first is two named helpers under a stand-in git, the second is the three
   // phases of src/profiles/move.ts, both with a unit suite, the worst at 7.
-  // The holder is src/ui/keys/lineEdit.ts `editLine` (cc 18, 47%), with
-  // src/ui/keys/clone.ts `handleCloneKeys` at 63.13 behind it.
-  "max": 64.57,
+  // Then src/ui/keys/lineEdit.ts `editLine` (cc 18, 47%) set 64.57 with
+  // src/ui/keys/clone.ts `handleCloneKeys` (cc 21, 54%) behind it; both now
+  // dispatch over the search prompt's edits (searchEdit.ts) through
+  // lineEdit.ts, with a unit suite, the worst of them at 6. The holder is
+  // src/tmux/codex.ts `codexReadiness` (cc 7, never entered), in the
+  // orchestrator port's area, with src/ui/keys/list.ts
+  // `handleListRowActionKeys` (cc 21, 57%) at 55.71 behind it.
+  "max": 56,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
