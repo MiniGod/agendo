@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -59,10 +59,14 @@
   // fetch itself entered through a fake request, the worst of it at 14. The
   // Then src/cli/send.ts `runSend` (cc 40, 91%) set 41.35; it is now a
   // ten-line dispatch over one function per step, the arms e2e never trips
-  // unit tested, the worst of it at 6. The holder is src/ui/components.tsx
-  // `SessionRow` (cc 34, fully covered), with src/cli/dispatch.ts
-  // `listCommand` (cc 33, 92%) at 33.66 behind it.
-  "max": 34,
+  // unit tested, the worst of it at 6. Then src/ui/components.tsx
+  // `SessionRow` (cc 34, fully covered) set 34; what the row says is now
+  // decided in src/ui/sessionRow.ts, one small function per part with a unit
+  // suite, and the component only paints it, the worst of it at 6. The holder
+  // is src/cli/dispatch.ts `listCommand` (cc 33, 92%), with src/usageLimit.ts
+  // `parseResetTime` (cc 19, 66%) at 33.10 and src/selfCmd.ts
+  // `derivedSelfCmd` (cc 9, 33%) at 33.00 behind it.
+  "max": 33.66,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
