@@ -56,8 +56,8 @@ export const SELF_CMD_ENV = "AGENDO_SELF_CMD";
  * ours. npm's command form is rejected by its whitespace/quotes, and any spec
  * that doesn't name this package is rejected outright.
  */
-function runnerSpec(): string | null {
-  const script = (process.env.npm_lifecycle_script ?? "").trim();
+export function runnerSpec(lifecycleScript: string | undefined): string | null {
+  const script = (lifecycleScript ?? "").trim();
   if (!script || /[\s"']/.test(script)) return null;
   return script.includes(BIN) ? script : null;
 }
@@ -74,9 +74,31 @@ function runnerSpec(): string | null {
  * started from a shell inside a bunx-launched session sees both and would otherwise
  * claim to be a build it is not.
  */
-function runnerCacheArgv(): string | null {
-  const argv1 = process.argv[1] ?? "";
-  return /(^|\/)(bunx-[^/]*|_npx)\//.test(argv1) ? argv1 : null;
+export function runnerCacheArgv(argv1: string | undefined): string | null {
+  return argv1 !== undefined && /(^|\/)(bunx-[^/]*|_npx)\//.test(argv1) ? argv1 : null;
+}
+
+/**
+ * The runner `npm_config_user_agent` names, to prefix a spec with. Bun first, as
+ * its user-agent also contains a bare `npm/?`, so npm matches only when followed
+ * by a digit.
+ */
+export function runnerName(userAgent: string | undefined): "bunx" | "npx" | null {
+  const ua = userAgent ?? "";
+  if (/\bbun\//i.test(ua)) return "bunx";
+  return /\bnpm\/\d/i.test(ua) ? "npx" : null;
+}
+
+/** What the process knows about how it was started, as `deriveSelfCmd` reads it. */
+export interface SelfCmdInputs {
+  argv0: string;
+  argv1: string | undefined;
+  /** `npm_config_user_agent`. */
+  userAgent: string | undefined;
+  /** `npm_lifecycle_script`. */
+  lifecycleScript: string | undefined;
+  /** Is `cmd` resolvable as an executable on PATH? */
+  onPath: (cmd: string) => boolean;
 }
 
 /**
@@ -97,18 +119,18 @@ function runnerCacheArgv(): string | null {
  *     invocation — no absolute path baked in. Otherwise fall back to the literal
  *     argv (covers `bun run src/index.tsx` dev and odd layouts).
  */
-function derivedSelfCmd(): string {
-  const cached = runnerCacheArgv();
-  if (cached) {
-    const ua = process.env.npm_config_user_agent ?? "";
-    const runner = /\bbun\//i.test(ua) ? "bunx" : /\bnpm\/\d/i.test(ua) ? "npx" : null;
-    const spec = runnerSpec();
-    if (runner && spec) return `${runner} ${spec}`;
-    return `${process.argv[0]} ${cached}`;
-  }
-  if (onPath(BIN)) return BIN;
-  const argv1 = process.argv[1];
-  return argv1 ? `${process.argv[0]} ${argv1}` : BIN;
+export function deriveSelfCmd(i: SelfCmdInputs): string {
+  const cached = runnerCacheArgv(i.argv1);
+  if (cached) return runnerCommand(i, cached);
+  if (i.onPath(BIN)) return BIN;
+  return i.argv1 ? `${i.argv0} ${i.argv1}` : BIN;
+}
+
+/** Case 1 above: the runner and its spec when both are known, else the cached copy itself. */
+function runnerCommand(i: SelfCmdInputs, cached: string): string {
+  const runner = runnerName(i.userAgent);
+  const spec = runnerSpec(i.lifecycleScript);
+  return runner && spec ? `${runner} ${spec}` : `${i.argv0} ${cached}`;
 }
 
 /**
@@ -116,7 +138,13 @@ function derivedSelfCmd(): string {
  * launcher was invoked as, propagated down (`SELF_CMD_ENV`), or derived from this
  * process when we are the start of the chain.
  */
-export const SELF_CMD = process.env[SELF_CMD_ENV]?.trim() || derivedSelfCmd();
+export const SELF_CMD = process.env[SELF_CMD_ENV]?.trim() || deriveSelfCmd({
+  argv0: process.argv[0],
+  argv1: process.argv[1],
+  userAgent: process.env.npm_config_user_agent,
+  lifecycleScript: process.env.npm_lifecycle_script,
+  onPath,
+});
 
 /**
  * The next step after any "session is not running" refusal — every command that
