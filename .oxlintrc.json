@@ -127,20 +127,21 @@
         // It is now four functions in src/cli/status.ts, the largest well under
         // this cap, so the number is src/cli/send.ts's alone.
         "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
-        // Was also src/wait.ts at 34; `runWait` is now complexity 3, and 34 is a
-        // tie between src/activity/claude.ts `claudeAction` and
-        // src/ui/components.tsx `SessionRow`. Both refactors have to land before
-        // this one can move at all. (`loadCodexActivity` was the third holder;
-        // it is now a walk over small per-record handlers in src/activity/codex.ts,
-        // the worst of them 7.)
-        "complexity": ["error", 34], // src/activity/claude.ts claudeAction, src/ui/components.tsx SessionRow
+        // Was also src/wait.ts at 34; `runWait` is now complexity 3. So were
+        // `claudeAction` and `loadCodexActivity` in src/activity.ts; both are now
+        // walks over small per-record handlers under src/activity/, the worst of
+        // them 7. That leaves 34 a tie between src/ui/components.tsx `SessionRow`
+        // and src/cli/launchCmd.ts `parseLaunchArgs`.
+        "complexity": ["error", 34], // src/ui/components.tsx SessionRow, src/cli/launchCmd.ts parseLaunchArgs
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
         // would have pushed it the other way.
         "max-statements": ["error", 56], // src/ui/keys/list.ts handleListViewKeys
         "max-params": ["error", 6], // src/usageLimit.ts
-        "max-depth": ["error", 6], // src/activity/claude.ts loadClaudeActivity
+        // DROPPED 6 -> 5. `loadClaudeActivity` set 6 and is now a walk over
+        // per-record handlers two levels deep at most; 5 is a four-way tie.
+        "max-depth": ["error", 5], // src/workflows.ts, src/tmux/inputBox.ts, src/ui/hooks/useReadinessPoll.ts, src/ui/hooks/useModelLoader.ts
         "max-nested-callbacks": ["error", 4] // src/sessions.ts:212
       }
     },
