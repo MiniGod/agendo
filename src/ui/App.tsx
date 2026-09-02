@@ -11,6 +11,7 @@ import { makeCloneActions } from "./cloneActions.ts";
 import { makeInitActions } from "./initActions.ts";
 import { makeSessionFlow } from "./sessionFlow.ts";
 import { makeProfileActions } from "./profileActions.ts";
+import { makeProviderActions } from "./providerActions.ts";
 import { makeContinueInOtherAgent } from "./convertAgent.ts";
 import {
   sessionId,
@@ -288,29 +289,10 @@ export default function App({
     setMode({ kind: "identity", cursor: idx, fromSettings });
   };
 
-  // Switch backend — only to an installed one. Clears the (provider-specific)
-  // identity override so the new backend's own "me" is used, resets scroll/search,
-  // and persists the choice. Picking an uninstalled backend just surfaces its
-  // auth hint (back on `fallback`); picking the current one is a no-op. A real
-  // switch always lands on the list so you see the new backend's data reload.
-  const applyProvider = (name: ProviderName, fallback: Mode) => {
-    const info = PROVIDER_INFO.find((p) => p.name === name);
-    if (!available.has(name)) {
-      setMode(fallback);
-      setNotice(`${info?.label ?? name} unavailable — ${info?.authHint ?? "CLI not installed"}`);
-      return;
-    }
-    if (name === provider) {
-      setMode(fallback);
-      return;
-    }
-    setProvider(name);
-    setIdentity(null); // ADO identity ids are meaningless on GitHub and vice-versa
-    persist({ provider: name, identity: null });
-    setCursor(0);
-    clearSearch();
-    setMode({ kind: "list" });
-  };
+  // Switch backend, from the picker — the closures live in ./providerActions.ts.
+  const { applyProvider } = makeProviderActions({
+    provider, available, setProvider, setIdentity, persist, setCursor, clearSearch, setMode, setNotice,
+  });
 
   // ── starting a session ──────────────────────────────────────────────────────
   // Agent pick → repo pick → worktree/checkout routing → launch, all in
