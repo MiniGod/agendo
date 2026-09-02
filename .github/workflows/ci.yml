@@ -91,3 +91,36 @@ jobs:
             e2e/screenshots
           if-no-files-found: ignore
           retention-days: 7
+
+  crap:
+    name: CRAP score
+    runs-on: ubuntu-latest
+    # Runs BOTH suites again, this time with src/ instrumented for coverage, then
+    # scores every function in src/ (see scripts/crap/ and .craprc.jsonc). The
+    # e2e run is the bulk of it, so budget roughly twice the e2e job; past 30
+    # minutes it is stuck, not slow.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # Same split as the e2e job: Playwright and node-pty run under Node, the
+      # app under test runs under bun.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - name: Install Playwright Chromium + OS deps
+        run: bunx playwright install --with-deps chromium
+      # Fails when any function in src/ scores above its pin in .craprc.jsonc.
+      # The pins are the same one-directional ratchet as .oxlintrc.json: lowered
+      # in the PR that makes a lower value hold, never raised.
+      - name: CRAP score
+        run: bun run crap
+      - name: Upload CRAP report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: crap-report
+          path: coverage/crap/report.json
+          if-no-files-found: ignore
+          retention-days: 7
