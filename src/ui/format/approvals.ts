@@ -118,19 +118,24 @@ export function approvalCell(pr: PullRequest): Cell {
   return { text: `✓ ${progress}`, color };
 }
 
+const CI_CELL: Record<Exclude<PullRequest["ci"], "expired">, Cell> = {
+  pass: { text: "✓ pass", color: "green" },
+  fail: { text: "✗ fail", color: "red" },
+  running: { text: "● running", color: "yellow" },
+  queued: { text: "⧗ queued", color: "yellow" },
+  conflict: { text: "⚠ conflict", color: "red" },
+  none: { text: "— no CI", color: "gray" },
+};
+
+// Build result aged out (shown as "queued" by ADO). Leading glyph carries
+// the last known result; "expired" flags that it's stale and needs a re-run.
+function expiredCell(pr: PullRequest): Cell {
+  if (pr.ciExpiredResult === "pass") return { text: "✓ expired", color: "yellow" };
+  if (pr.ciExpiredResult === "fail") return { text: "✗ expired", color: "red" };
+  return { text: "⌛ expired", color: "gray" };
+}
+
 export function ciCell(pr: PullRequest): Cell {
-  switch (pr.ci) {
-    case "pass": return { text: "✓ pass", color: "green" };
-    case "fail": return { text: "✗ fail", color: "red" };
-    case "running": return { text: "● running", color: "yellow" };
-    case "queued": return { text: "⧗ queued", color: "yellow" };
-    // Build result aged out (shown as "queued" by ADO). Leading glyph carries
-    // the last known result; "expired" flags that it's stale and needs a re-run.
-    case "expired":
-      if (pr.ciExpiredResult === "pass") return { text: "✓ expired", color: "yellow" };
-      if (pr.ciExpiredResult === "fail") return { text: "✗ expired", color: "red" };
-      return { text: "⌛ expired", color: "gray" };
-    case "conflict": return { text: "⚠ conflict", color: "red" };
-    default: return { text: "— no CI", color: "gray" };
-  }
+  if (pr.ci === "expired") return expiredCell(pr);
+  return CI_CELL[pr.ci] ?? CI_CELL.none;
 }
