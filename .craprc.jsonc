@@ -1,0 +1,46 @@
+// ─────────────────────────────────────────────────────────────────────────
+// CRAP pins — A RATCHET, NOT A CLIFF. Same contract as .oxlintrc.json:
+//
+//     every number here HOLDS TODAY (measured by `bun run crap`, both suites);
+//     a PR that makes a number achievable lowers it in that same PR;
+//     a lowered number never goes back up.
+//
+// CRAP(m) = cc² · (1 − cov)³ + cc, per function in src/. The target is 7.
+// The CI job "CRAP score" fails when any function is above the pin that
+// applies to it. Raising `max`, raising an override, or ADDING an override is
+// the one change here that needs an argument in the PR description; the
+// tool's own NOTE lines say when a number can come down.
+//
+// `max` is the shared budget — the worst function NOT named below — rather than
+// the worst function in the tree, for the reason the lint config gives: a cap
+// with slack in it is a cap every other function can grow into. The overrides
+// are the outliers that would otherwise set it, one pin each, and the list is
+// meant to shrink: an override whose function fits inside `max` is reported as
+// stale, and one whose function no longer exists fails the run.
+//
+// Overrides name a function the way oxlint does. A function oxlint reports
+// anonymously shows up as "(anonymous L<line>)", which moves whenever the file
+// above it does — so the fix for an anonymous outlier is to name it, not to
+// pin it. See CLAUDE.md, "CRAP score".
+// ─────────────────────────────────────────────────────────────────────────
+{
+  // Set by src/ui/convert.ts `(anonymous L33)`: cc 12 at 0% coverage. Naming
+  // it and covering it is the first drive-down step; the next holders are
+  // handleListNavKeys (127.82) and handleSearchInputKeys (125.72).
+  "max": 156,
+
+  "overrides": [
+    // src/activity.ts is the whole top of the table: the codex and copilot
+    // activity readers and their action classifiers run against no fixture at
+    // all, so every one of them scores its full cc². Four separate pins rather
+    // than one for the file — pinning the file at 1190 would hand the other
+    // three several hundred points of free growth.
+    { "file": "src/activity.ts", "function": "loadCodexActivity", "max": 1190 },
+    { "file": "src/activity.ts", "function": "copilotAction", "max": 702 },
+    { "file": "src/activity.ts", "function": "codexAction", "max": 702 },
+    { "file": "src/activity.ts", "function": "loadCopilotActivity", "max": 506 },
+    // The input-box scan, cc 29 with a quarter of it exercised. In the
+    // orchestrator port's area (src/tmux/), so measured here and left alone.
+    { "file": "src/tmux/inputBox.ts", "function": "inputRealText", "max": 365.45 }
+  ]
+}

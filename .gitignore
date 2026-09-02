@@ -3,6 +3,9 @@ dist/
 *.log
 .DS_Store
 
+# CRAP coverage counters + report (bun run crap)
+/coverage/
+
 # Playwright e2e
 /test-results/
 /playwright-report/
