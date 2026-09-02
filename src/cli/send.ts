@@ -1,11 +1,11 @@
 import { PEER_SOCKET_ENV, peerSocketEnabled, resumeDialogChoice } from "../config.ts";
 import { SELF_CMD, notRunningHint } from "../launch.ts";
 import { printJson } from "../output.ts";
-import { findPeer, sendPeerMessage } from "../peer.ts";
+import { findPeer, type PeerSession, sendPeerMessage } from "../peer.ts";
 import {
   answerResumeDialog, capturePane, capturePaneState, liveTargetForShortId, paneAcceptsPaste, paneReadiness,
   paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, sendToPane, shortId, stripAnsi,
-  RESUME_DIALOG_POLL_MS, type PaneSnapshot, type Readiness,
+  RESUME_DIALOG_POLL_MS, type LiveTarget, type PaneSnapshot, type Readiness,
 } from "../tmux.ts";
 import { flushWarnings } from "./warnings.ts";
 
@@ -88,15 +88,58 @@ async function waitForInputBox(target: string, timeoutMs: number): Promise<PaneS
  * transient. Nothing about the session tells it apart afterwards, so `send` says.
  */
 export async function runSend(token: string | undefined, prompt: string, force: boolean, dialogWaitMs: number, json: boolean): Promise<void> {
-  if (!token || !prompt) {
-    console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force] [--json] [--timeout <dur>]`);
-    process.exit(1);
-  }
-  // Human progress lines go to stdout, which under --json is the payload's alone —
-  // so they're suppressed there and carried in the payload's own fields instead.
-  // Errors already go to stderr and are left there: a machine reader gets `ok`
-  // and `reason`, a human tailing stderr still sees what went wrong.
-  const say = (line: string) => { if (!json) console.log(line); };
+  if (!token || !prompt) usageExit();
+  const ctx = await resolveSend(token, json);
+  await ensureReachable(ctx);
+  const pane = await answerDialogIfOpen(ctx, readPane(ctx.target), dialogWaitMs);
+  await refuseLimited(ctx, pane, force);
+  const socketFellBack = ctx.peer ? await deliverViaSocket(ctx, ctx.peer, prompt, pane) : false;
+  await refusePaneNotReady(ctx, pane, force);
+  await refuseMenuSuspect(ctx, pane);
+  return pasteIntoPane(ctx, prompt, pane, socketFellBack);
+}
+
+/** How one run of `send` ended, for the `--json` payload. */
+export interface SendOutcome {
+  ok: boolean;
+  /** "socket" means queued into a session that may be mid-turn, "pane" typed into one that had to be idle. */
+  route: "socket" | "pane" | null;
+  reason?: string;
+  extra?: Record<string, unknown>;
+}
+
+/** What the token resolved to, and the two voices every step below speaks in. */
+export interface SendContext {
+  token: string;
+  sid: string;
+  target: LiveTarget | null;
+  socket: ReturnType<typeof peerSocketEnabled>;
+  peer: PeerSession | null;
+  json: boolean;
+  /**
+   * A human progress line. Goes to stdout, which under --json is the payload's
+   * alone — so suppressed there and carried in the payload's own fields instead.
+   * Errors already go to stderr and are left there: a machine reader gets `ok`
+   * and `reason`, a human tailing stderr still sees what went wrong.
+   */
+  say: (line: string) => void;
+  /** Emit the machine payload (if asked) and exit. Every exit goes through this. */
+  finish: (o: SendOutcome, code: number) => Promise<never>;
+}
+
+/** The pane as read (empty when there is none), its verdict, and what step 1 did to it. */
+export interface PaneRead extends PaneSnapshot {
+  readiness: Readiness | null;
+  /** Whether step 1 actually had a dialog to answer — reported, since it means a turn started. */
+  dialogAnswered: boolean;
+}
+
+export function usageExit(): never {
+  console.error(`usage: ${SELF_CMD} send <id> "<prompt>" [--force] [--json] [--timeout <dur>]`);
+  process.exit(1);
+}
+
+async function resolveSend(token: string, json: boolean): Promise<SendContext> {
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
   const target = liveTargetForShortId(sid);
   // The kill switch. Deliberately gating DISCOVERY and not just the write: with
@@ -106,182 +149,254 @@ export async function runSend(token: string | undefined, prompt: string, force: 
   const socket = peerSocketEnabled();
   if (socket.note) console.error(`▸ ${socket.note}.`);
   const peer = socket.enabled ? await findPeer((id) => shortId(id) === sid) : null;
-  const routeInfo = { enabled: socket.enabled, disabledBy: socket.enabled ? null : socket.source };
-  /** Emit the machine payload (if asked) and exit. Every exit below goes through this. */
-  const finish = async (o: { ok: boolean; route: "socket" | "pane" | null; reason?: string; extra?: Record<string, unknown> }, code: number): Promise<never> => {
-    if (json) {
-      await printJson({
-        ok: o.ok,
-        // The whole point of the field: "socket" means queued into a session that
-        // may be mid-turn, "pane" means typed into one that had to be idle.
-        route: o.route,
-        queued: o.route === "socket",
-        id: sid,
-        sessionId: peer?.sessionId ?? null,
-        target: target ? target.name : null,
-        pid: peer?.pid ?? null,
-        socket: routeInfo,
-        ...(o.reason ? { reason: o.reason } : {}),
-        ...o.extra,
-      });
-    }
+  return sendContext({ token, sid, target, socket, peer, json });
+}
+
+/** Attach the two voices to a resolved session. */
+export function sendContext(base: Omit<SendContext, "say" | "finish">): SendContext {
+  function say(line: string): void {
+    if (!base.json) console.log(line);
+  }
+  async function finish(o: SendOutcome, code: number): Promise<never> {
+    if (base.json) await printJson(sendPayload(base, o));
     process.exit(code);
+  }
+  return { ...base, say, finish };
+}
+
+/** The `--json` payload: the outcome, the route, and where the session was found. */
+export function sendPayload(base: Pick<SendContext, "sid" | "peer" | "target" | "socket">, o: SendOutcome): Record<string, unknown> {
+  const { sid, target, socket } = base;
+  const peer = base.peer ?? { sessionId: null, pid: null };
+  return {
+    ok: o.ok,
+    // The whole point of the field: "socket" means queued into a session that
+    // may be mid-turn, "pane" means typed into one that had to be idle.
+    route: o.route,
+    queued: o.route === "socket",
+    id: sid,
+    sessionId: peer.sessionId,
+    target: target ? target.name : null,
+    pid: peer.pid,
+    socket: { enabled: socket.enabled, disabledBy: socket.enabled ? null : socket.source },
+    ...(o.reason ? { reason: o.reason } : {}),
+    ...o.extra,
   };
-  // A session reachable over its socket needs no window: it may be running
-  // outside agendo entirely (a plain terminal, an editor). Requiring a tmux
-  // target first would make `send` the one thing you cannot do to a session
-  // that `status` reports as running.
-  if (!target && !peer) {
-    // Two different failures wear the same shape here, and they need OPPOSITE
-    // advice, so they must not share a message.
-    //
-    // With the socket on, no window and no peer means the session is genuinely
-    // not running — and #38's hint exists precisely because the bare refusal
-    // read as a death notice, so `resume` has to be named.
-    //
-    // With the socket OFF we never looked, and a session that is alive but
-    // merely unreachable must NOT be told to `resume`: that would put a second
-    // claude on one transcript, which `resume` itself refuses. So look now,
-    // diagnostically. That is consistent with the switch's scope rather than a
-    // hole in it — it stops us SPEAKING an undocumented protocol, not reading a
-    // registry file, which is the same reason `status` keeps its peer lines.
-    const unreachable = socket.enabled ? null : await findPeer((id) => shortId(id) === sid);
-    if (unreachable) {
-      const by = socket.source === "env" ? PEER_SOCKET_ENV : `"peerSocket": false in config.json`;
-      console.error(`Session ${token} IS running (pid ${unreachable.pid}), but unreachable: it has no tmux window, and the messaging socket is disabled (${by}).`);
-      console.error(
-        `  Re-enable it for one command with \`${PEER_SOCKET_ENV}=1 ${SELF_CMD} send ${token} "…"\`, or attach to it\n` +
-          `  yourself. Do NOT resume it — it is already running, and a second session on one transcript is\n` +
-          `  exactly what \`${SELF_CMD} resume\` refuses.`,
-      );
-      return finish(
-        { ok: false, route: null, reason: "socket-disabled", extra: { pid: unreachable.pid, sessionId: unreachable.sessionId } },
-        1,
-      );
-    }
-    // Genuinely gone — by either route, whatever the switch says. Describing this
-    // one as "switched off" would send the caller to unset a variable that would
-    // change nothing, instead of to the command that actually brings it back.
-    console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
-    console.error(notRunningHint(token, "then send again"));
-    return finish({ ok: false, route: null, reason: "not-running" }, 1);
+}
+
+/**
+ * A session reachable over its socket needs no window: it may be running
+ * outside agendo entirely (a plain terminal, an editor). Requiring a tmux
+ * target first would make `send` the one thing you cannot do to a session
+ * that `status` reports as running.
+ *
+ * Two different failures wear the same shape here, and they need OPPOSITE
+ * advice, so they must not share a message.
+ *
+ * With the socket on, no window and no peer means the session is genuinely
+ * not running — and #38's hint exists precisely because the bare refusal
+ * read as a death notice, so `resume` has to be named.
+ *
+ * With the socket OFF we never looked, and a session that is alive but
+ * merely unreachable must NOT be told to `resume`: that would put a second
+ * claude on one transcript, which `resume` itself refuses. So look now,
+ * diagnostically. That is consistent with the switch's scope rather than a
+ * hole in it — it stops us SPEAKING an undocumented protocol, not reading a
+ * registry file, which is the same reason `status` keeps its peer lines.
+ */
+export async function ensureReachable(ctx: SendContext): Promise<void> {
+  const { target, peer, socket, token, sid } = ctx;
+  if (target || peer) return;
+  const unreachable = socket.enabled ? null : await findPeer((id) => shortId(id) === sid);
+  if (unreachable) return refuseUnreachable(ctx, unreachable);
+  // Genuinely gone — by either route, whatever the switch says. Describing this
+  // one as "switched off" would send the caller to unset a variable that would
+  // change nothing, instead of to the command that actually brings it back.
+  console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
+  console.error(notRunningHint(token, "then send again"));
+  return ctx.finish({ ok: false, route: null, reason: "not-running" }, 1);
+}
+
+export function refuseUnreachable(ctx: SendContext, peer: PeerSession): Promise<never> {
+  const by = ctx.socket.source === "env" ? PEER_SOCKET_ENV : `"peerSocket": false in config.json`;
+  console.error(`Session ${ctx.token} IS running (pid ${peer.pid}), but unreachable: it has no tmux window, and the messaging socket is disabled (${by}).`);
+  console.error(
+    `  Re-enable it for one command with \`${PEER_SOCKET_ENV}=1 ${SELF_CMD} send ${ctx.token} "…"\`, or attach to it\n` +
+      `  yourself. Do NOT resume it — it is already running, and a second session on one transcript is\n` +
+      `  exactly what \`${SELF_CMD} resume\` refuses.`,
+  );
+  return ctx.finish({ ok: false, route: null, reason: "socket-disabled", extra: { pid: peer.pid, sessionId: peer.sessionId } }, 1);
+}
+
+/**
+ * Pane state only exists when there IS a pane. Where it exists it is what the
+ * dialog step reads — that step is not advisory, and only a pane can satisfy it.
+ */
+function readPane(target: LiveTarget | null): PaneRead {
+  if (!target) return { raw: "", cursor: null, readiness: null, dialogAnswered: false };
+  const snap = capturePaneState(target.target);
+  return { ...snap, readiness: paneReadiness(snap.raw, snap.cursor), dialogAnswered: false };
+}
+
+/**
+ * Step 1: answer claude's resume dialog. Keystrokes only, and BEFORE any
+ * delivery — a queued frame can't answer it, and a session parked here hasn't
+ * started, so delivering past it would strand the message. Returns the pane as
+ * it settled afterwards, or the read untouched when there was no dialog.
+ */
+async function answerDialogIfOpen(ctx: SendContext, pane: PaneRead, dialogWaitMs: number): Promise<PaneRead> {
+  const { target } = ctx;
+  if (!target || !paneResumeDialogActive(pane.raw)) return pane;
+  const choice = resumeDialogChoice();
+  // Reading the config can report-and-ignore a malformed config.json, and this
+  // is the one command that ACTS on that file's value. Silently falling back to
+  // the default while pressing a key into a live session is exactly the case
+  // that warning exists for, so drain it here as `list` does for its own loads.
+  flushWarnings("send");
+  const option = resumeDialogOption(pane.raw, choice);
+  if (!option) {
+    return refuseDialog(ctx, "resume-dialog-unanswerable", `Not sending: claude's resume dialog is open but no "${choice}" option was found — answer it yourself, then retry.`);
   }
-  /** Whether step 1 actually had a dialog to answer — reported, since it means a turn started. */
-  let dialogAnswered = false;
-  /** Whether a peer was found and its socket then failed, so the pane route is a fallback. */
-  let socketFellBack = false;
-  // Pane state only exists when there IS a pane. Where it exists it is what the
-  // dialog step below reads — that step is not advisory, and only a pane can
-  // satisfy it.
-  let { raw, cursor }: PaneSnapshot = target ? capturePaneState(target.target) : { raw: "", cursor: null };
-  let readiness: Readiness | null = target ? paneReadiness(raw, cursor) : null;
-  // ── Step 1: answer claude's resume dialog. Keystrokes only, and BEFORE any
-  // delivery — a queued frame can't answer it, and a session parked here hasn't
-  // started, so delivering past it would strand the message.
-  if (target && paneResumeDialogActive(raw)) {
-    const choice = resumeDialogChoice();
-    // Reading the config can report-and-ignore a malformed config.json, and this
-    // is the one command that ACTS on that file's value. Silently falling back to
-    // the default while pressing a key into a live session is exactly the case
-    // that warning exists for, so drain it here as `list` does for its own loads.
-    flushWarnings("send");
-    const option = resumeDialogOption(raw, choice);
-    if (!option) {
-      console.error(`Not sending: claude's resume dialog is open but no "${choice}" option was found — answer it yourself, then retry.`);
-      return finish({ ok: false, route: null, reason: "resume-dialog-unanswerable", extra: { resumeDialog: true } }, 2);
-    }
-    say(`▸ answering claude's resume dialog (${choice}): ${option.number}. ${option.label}`);
-    dialogAnswered = true;
-    // Nothing was confirmed and the menu is still up — the cursor wouldn't move,
-    // or we couldn't read it. Stop here rather than wait out the whole timeout;
-    // either way not one character of the message has been sent.
-    if (!answerResumeDialog(target.target, option) && paneResumeDialogActive(capturePane(target.target))) {
-      console.error(
-        `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
-          `selection keys). Nothing was pasted — answer it yourself, then retry.`,
-      );
-      return finish({ ok: false, route: null, reason: "resume-dialog-unanswered", extra: { resumeDialog: true } }, 2);
-    }
-    const settled = await waitForInputBox(target.target, dialogWaitMs);
-    if (!settled) {
-      console.error(
-        `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
-          `nothing was delivered by EITHER route (a message typed into that menu would pick an option, and queueing ` +
-          `one past an unanswered dialog would strand it — the socket does not shorten this wait). This is ordinary ` +
-          `right after a resume, where the session may compact before its input exists: WAIT AND RETRY (or raise ` +
-          `--timeout). --force cannot help — it never pastes into that menu. Re-check with \`${SELF_CMD} status ${token}\`.`,
-      );
-      return finish({ ok: false, route: null, reason: "no-input-box", extra: { resumeDialog: true } }, 2);
-    }
-    ({ raw, cursor } = settled);
-    readiness = paneReadiness(raw, cursor);
-  }
-  // ── Step 2: deliver. Checked only now: the previous run's usage-limit notice is
-  // replayed above the resume dialog, so reading this before step 1 could refuse on
-  // a cap that belonged to the run that already ended.
-  if (readiness === "limited" && !force) {
-    console.error(`Not sending: session is at its usage limit. Wait for the reset, \`${SELF_CMD} unblock ${token}\`, or pass --force.`);
-    return finish({ ok: false, route: null, reason: "limited", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
-  }
-  if (peer) {
-    const where = target ? target.name : `pid ${peer.pid}`;
-    // Each path names the state in its own vocabulary — the pane classifier's
-    // ("ready", "compacting") when there is a pane, the receiver's own
-    // ("idle", "busy", "waiting") when there is not. Both spell idle-ness
-    // differently, so both spellings count as "no need to warn".
-    const state = readiness ?? peer.status ?? "running";
-    const idle = state === "ready" || state === "idle";
-    try {
-      await sendPeerMessage(peer, prompt);
-      say(`▸ queued via socket to ${where}${idle ? "" : ` (session is "${state}"; it will be delivered when it next reads input)`}`);
-      // A menu the detector wouldn't fully match was left standing (step 1 only
-      // acts on an exact match). Queueing past it is safe where a paste is not —
-      // a frame cannot pick an option — but nothing reads the queue until someone
-      // answers it, so don't let "queued" read as "the session acted on it".
-      const suspect = paneResumeMenuSuspect(raw);
-      if (suspect) {
-        console.error(
-          `  note: the pane looks like a resume menu agendo won't answer, so the message waits until you do.`,
-        );
-      }
-      return finish({ ok: true, route: "socket", extra: { state, resumeDialog: dialogAnswered, unreadUntilAnswered: suspect } }, 0);
-    } catch (e) {
-      // The socket was advertised but unusable — the session died between
-      // discovery and send, or something else holds the path.
-      if (!target) {
-        console.error(`Failed to reach the session socket (${(e as Error).message}), and it has no tmux window to type into.`);
-        return finish({ ok: false, route: null, reason: "socket-unusable" }, 1);
-      }
-      console.error(`▸ session socket unusable (${(e as Error).message}); falling back to the tmux pane.`);
-      socketFellBack = true;
-    }
-  }
-  if (readiness !== "ready" && !force) {
-    console.error(`Not sending: session looks "${readiness}", not ready. Re-check with \`${SELF_CMD} status ${token}\`, or pass --force.`);
-    console.error(`\n  current screen (tail):`);
-    for (const l of stripAnsi(raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
-    return finish({ ok: false, route: null, reason: "pane-not-ready", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
-  }
-  // The one thing --force may not do. If the pane is showing something that
-  // looks like the resume menu but the detector didn't fully match it (a wrapped
-  // label, reworded footer, changed option set), the branch above never ran —
-  // and a forced paste would type the message INTO that menu, where its digits
-  // pick options and the trailing Enter confirms one. (The socket path returned
-  // long before this: queueing a frame can't pick an option, so this gate is
-  // about pasting specifically, not about reaching a parked session at all.)
-  if (paneResumeMenuSuspect(raw)) {
-    console.error(
-      `Not sending: the pane looks like claude's resume menu but doesn't match it exactly, so agendo won't answer it ` +
-        `and --force won't paste into it (the message would pick an option). Answer it yourself, then retry.`,
+  ctx.say(`▸ answering claude's resume dialog (${choice}): ${option.number}. ${option.label}`);
+  if (!selectOption(target.target, option)) {
+    return refuseDialog(
+      ctx,
+      "resume-dialog-unanswered",
+      `Not sending: couldn't select "${option.label}" on claude's resume dialog (the pane isn't responding to the ` +
+        `selection keys). Nothing was pasted — answer it yourself, then retry.`,
     );
-    return finish({ ok: false, route: null, reason: "resume-menu-suspect", extra: { state: readiness, resumeDialog: dialogAnswered } }, 2);
   }
-  sendToPane(target!.target, prompt); // non-null: reaching here means the peer path didn't return
-  // Name the route, and — where it isn't obvious — why this one. A caller that
-  // expected the socket needs to know it got keystroke semantics instead: this
-  // message is in the pane NOW, and it was only allowed there because the pane
-  // was idle (or --force said to anyway).
-  const why = socketFellBack ? " (socket fallback)" : !socket.enabled ? ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})` : "";
-  say(`▸ pasted into pane ${target!.name}${why}${readiness !== "ready" ? ` (forced; was "${readiness}")` : ""}`);
-  return finish({ ok: true, route: "pane", extra: { state: readiness, resumeDialog: dialogAnswered, socketFellBack } }, 0);
+  const settled = await waitForInputBox(target.target, dialogWaitMs);
+  if (!settled) return refuseDialog(ctx, "no-input-box", noInputBoxMessage(ctx.token, dialogWaitMs));
+  return { ...settled, readiness: paneReadiness(settled.raw, settled.cursor), dialogAnswered: true };
+}
+
+/**
+ * Press the option's keys; false when nothing was confirmed and the menu is
+ * still up — the cursor wouldn't move, or we couldn't read it. The caller stops
+ * there rather than wait out the whole timeout; either way not one character of
+ * the message has been sent.
+ */
+function selectOption(target: string, option: NonNullable<ReturnType<typeof resumeDialogOption>>): boolean {
+  return answerResumeDialog(target, option) || !paneResumeDialogActive(capturePane(target));
+}
+
+export function noInputBoxMessage(token: string, dialogWaitMs: number): string {
+  return (
+    `Not sending: answered claude's resume dialog but no input box appeared within ${Math.round(dialogWaitMs / 1000)}s — ` +
+    `nothing was delivered by EITHER route (a message typed into that menu would pick an option, and queueing ` +
+    `one past an unanswered dialog would strand it — the socket does not shorten this wait). This is ordinary ` +
+    `right after a resume, where the session may compact before its input exists: WAIT AND RETRY (or raise ` +
+    `--timeout). --force cannot help — it never pastes into that menu. Re-check with \`${SELF_CMD} status ${token}\`.`
+  );
+}
+
+/** A step-1 refusal: nothing was delivered, and the payload says a dialog was in the way. */
+export function refuseDialog(ctx: SendContext, reason: string, message: string): Promise<never> {
+  console.error(message);
+  return ctx.finish({ ok: false, route: null, reason, extra: { resumeDialog: true } }, 2);
+}
+
+/**
+ * Step 2 begins here. Checked only now: the previous run's usage-limit notice is
+ * replayed above the resume dialog, so reading this before step 1 could refuse on
+ * a cap that belonged to the run that already ended.
+ */
+export async function refuseLimited(ctx: SendContext, pane: PaneRead, force: boolean): Promise<void> {
+  if (pane.readiness !== "limited" || force) return;
+  console.error(`Not sending: session is at its usage limit. Wait for the reset, \`${SELF_CMD} unblock ${ctx.token}\`, or pass --force.`);
+  return ctx.finish({ ok: false, route: null, reason: "limited", extra: { state: pane.readiness, resumeDialog: pane.dialogAnswered } }, 2);
+}
+
+/**
+ * The session's state in whichever vocabulary applies — the pane classifier's
+ * ("ready", "compacting") when there is a pane, the receiver's own ("idle",
+ * "busy", "waiting") when there is not.
+ */
+export function socketState(pane: Pick<PaneRead, "readiness">, peer: Pick<PeerSession, "status">): string {
+  return pane.readiness ?? peer.status ?? "running";
+}
+
+/** The progress line for a frame that went out. Both spellings of idle count as "no need to warn". */
+export function queuedLine(target: LiveTarget | null, peer: Pick<PeerSession, "pid">, state: string): string {
+  const where = target ? target.name : `pid ${peer.pid}`;
+  const idle = state === "ready" || state === "idle";
+  return `▸ queued via socket to ${where}${idle ? "" : ` (session is "${state}"; it will be delivered when it next reads input)`}`;
+}
+
+/**
+ * Deliver over the socket. Exits on success; returns true when the socket was
+ * advertised but unusable and there is a pane to fall back to — the session
+ * died between discovery and send, or something else holds the path.
+ */
+async function deliverViaSocket(ctx: SendContext, peer: PeerSession, prompt: string, pane: PaneRead): Promise<boolean> {
+  try {
+    await sendPeerMessage(peer, prompt);
+  } catch (e) {
+    return socketFailed(ctx, e as Error);
+  }
+  const state = socketState(pane, peer);
+  ctx.say(queuedLine(ctx.target, peer, state));
+  // A menu the detector wouldn't fully match was left standing (step 1 only
+  // acts on an exact match). Queueing past it is safe where a paste is not —
+  // a frame cannot pick an option — but nothing reads the queue until someone
+  // answers it, so don't let "queued" read as "the session acted on it".
+  const suspect = paneResumeMenuSuspect(pane.raw);
+  if (suspect) console.error(`  note: the pane looks like a resume menu agendo won't answer, so the message waits until you do.`);
+  return ctx.finish({ ok: true, route: "socket", extra: { state, resumeDialog: pane.dialogAnswered, unreadUntilAnswered: suspect } }, 0);
+}
+
+export async function socketFailed(ctx: SendContext, e: Error): Promise<boolean> {
+  if (!ctx.target) {
+    console.error(`Failed to reach the session socket (${e.message}), and it has no tmux window to type into.`);
+    return ctx.finish({ ok: false, route: null, reason: "socket-unusable" }, 1);
+  }
+  console.error(`▸ session socket unusable (${e.message}); falling back to the tmux pane.`);
+  return true;
+}
+
+/** The pane gate: a paste lands in whatever is on screen, so the TUI must be idle first (`--force` overrides). */
+export async function refusePaneNotReady(ctx: SendContext, pane: PaneRead, force: boolean): Promise<void> {
+  if (pane.readiness === "ready" || force) return;
+  console.error(`Not sending: session looks "${pane.readiness}", not ready. Re-check with \`${SELF_CMD} status ${ctx.token}\`, or pass --force.`);
+  console.error(`\n  current screen (tail):`);
+  for (const l of stripAnsi(pane.raw).split("\n").filter((x) => x.trim()).slice(-12)) console.error(`    ${l}`);
+  return ctx.finish({ ok: false, route: null, reason: "pane-not-ready", extra: { state: pane.readiness, resumeDialog: pane.dialogAnswered } }, 2);
+}
+
+/**
+ * The one thing --force may not do. If the pane is showing something that
+ * looks like the resume menu but the detector didn't fully match it (a wrapped
+ * label, reworded footer, changed option set), step 1 never ran — and a forced
+ * paste would type the message INTO that menu, where its digits pick options
+ * and the trailing Enter confirms one. (The socket path returned long before
+ * this: queueing a frame can't pick an option, so this gate is about pasting
+ * specifically, not about reaching a parked session at all.)
+ */
+export async function refuseMenuSuspect(ctx: SendContext, pane: PaneRead): Promise<void> {
+  if (!paneResumeMenuSuspect(pane.raw)) return;
+  console.error(
+    `Not sending: the pane looks like claude's resume menu but doesn't match it exactly, so agendo won't answer it ` +
+      `and --force won't paste into it (the message would pick an option). Answer it yourself, then retry.`,
+  );
+  return ctx.finish({ ok: false, route: null, reason: "resume-menu-suspect", extra: { state: pane.readiness, resumeDialog: pane.dialogAnswered } }, 2);
+}
+
+/**
+ * Why the pane route, where it isn't obvious. A caller that expected the socket
+ * needs to know it got keystroke semantics instead: the message is in the pane
+ * NOW, and it was only allowed there because the pane was idle (or --force said
+ * to anyway).
+ */
+export function pasteWhy(socketFellBack: boolean, socket: Pick<SendContext["socket"], "enabled" | "source">): string {
+  if (socketFellBack) return " (socket fallback)";
+  if (socket.enabled) return "";
+  return ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})`;
+}
+
+function pasteIntoPane(ctx: SendContext, prompt: string, pane: PaneRead, socketFellBack: boolean): Promise<never> {
+  const target = ctx.target!; // non-null: reaching here means the peer path didn't return
+  sendToPane(target.target, prompt);
+  ctx.say(`▸ pasted into pane ${target.name}${pasteWhy(socketFellBack, ctx.socket)}${pane.readiness !== "ready" ? ` (forced; was "${pane.readiness}")` : ""}`);
+  return ctx.finish({ ok: true, route: "pane", extra: { state: pane.readiness, resumeDialog: pane.dialogAnswered, socketFellBack } }, 0);
 }

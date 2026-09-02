@@ -22,8 +22,8 @@
   // effort is dismantling carried named, temporary exemptions, and each shrank or
   // disappeared as its PR landed. `src/tmux.ts` was the first to go; `src/index.tsx`
   // was the last, and with it every whole-file exemption in this config. What is
-  // left below are two per-FUNCTION blocks (src/ui/App.tsx, src/cli/send.ts)
-  // and one max-params block — no file in src/ is exempt from
+  // left below are one per-FUNCTION block (src/ui/App.tsx) and one max-params
+  // block — no file in src/ is exempt from
   // the shared max-lines any more. That matters because an exemption block lifts
   // only the rules it NAMES: every other rule falls through to the shared budget,
   // so a file with a max-lines carve-out was still measured on complexity.
@@ -128,8 +128,10 @@
         "max-lines": ["error", { "max": 453, "skipBlankLines": false, "skipComments": false }], // src/tmux/windows.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
         // It is now four functions in src/cli/status.ts, the largest well under
-        // this cap, so the number is src/cli/send.ts's alone.
-        "max-lines-per-function": ["error", { "max": 198, "skipBlankLines": false, "skipComments": false }], // src/cli/send.ts runSend
+        // this cap. LOWERED 198 -> 197: src/cli/send.ts `runSend` set 198 and is
+        // now a ten-line dispatch, the longest step under it 40 lines. The holder
+        // is src/cli/list.ts `runList`, with src/model.ts `loadModel` at 195.
+        "max-lines-per-function": ["error", { "max": 197, "skipBlankLines": false, "skipComments": false }], // src/cli/list.ts runList
         // Was also src/wait.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/activity.ts; both are now
         // walks over small per-record handlers under src/activity/, the worst of
@@ -197,30 +199,6 @@
       "files": ["src/ui/rows.ts"],
       "rules": {
         "max-params": ["error", 10]
-      }
-    },
-
-    {
-      // ── inherited exemption: src/cli/send.ts ─────────────────────────────
-      // NOT new debt, and NOT a raised threshold: `runSend` had exactly this
-      // shape while it sat in index.tsx, where its blanket complexity-66
-      // exemption covered it silently. Moving it out is what made it visible,
-      // and pinning it here is strictly TIGHTER than the status quo — a cap of
-      // 66 spread across 2456 lines became 40 on 287, with index.tsx's own 66
-      // now confined to a third of its former reach.
-      //
-      // Decomposing it is real work on live control flow (`runSend` drives the
-      // socket path, the tmux fallback and the readiness wait), not motion. It
-      // is the next ratchet target. src/cli/close.ts had a block of its own
-      // here (49 -> 47 -> 45, `runClose`) rather than sharing this one, so
-      // that send.ts never got close.ts's nine points of free growth; `runClose`
-      // is now a dispatch over named guards, the worst of them at 7, and the
-      // block is gone. Same reason the `src/**` budget is not pinned at the
-      // worst file in the tree.
-      "files": ["src/cli/send.ts"],
-      "rules": {
-        "complexity": ["error", 40], // runSend
-        "max-statements": ["error", 74] // runSend
       }
     },
 
