@@ -317,16 +317,10 @@ export default function App({
   // ./sessionFlow.ts. Built here, at the line the block occupied, because the
   // clone and convert handlers below close over `open` and `chooseRepo`.
   const {
-    enterFresh,
-    enterNewSession,
-    enterOrchestrator,
-    proceedFresh,
-    open,
-    startFresh,
-    openInBrowser,
-    chooseRepo,
+    enterFresh, enterNewSession, enterOrchestrator, enterGlobalOrchestrator,
+    proceedFresh, open, startFresh, openInBrowser, chooseRepo,
   } = makeSessionFlow({
-    model, scopedRepos, cloneNoteRef, onOpen, exit, reload,
+    model, scopedRepos, filterRoot, hostSession, cloneNoteRef, onOpen, exit, reload,
     setMode, setNotice, setBusy, setCloneNote,
   });
 
@@ -363,7 +357,7 @@ export default function App({
     searchFocus, setSearchFocus, search, editSearch, clearSearch,
     setGlobalView, setRepoFilterOn, setGrouped, setPrsGrouped, setPrSort, setSessionSort,
     setNotice, setActivity, requested, setRescanKey, reload,
-    enterFresh, enterNewSession, enterOrchestrator, proceedFresh, reposForTarget,
+    enterFresh, enterNewSession, enterOrchestrator, enterGlobalOrchestrator, proceedFresh, reposForTarget,
     chooseRepo, startFresh, open, openInBrowser,
     canClone, beginClone, cancelClone, setCloneNote, cloneNoteRef, beginInitDir, beginInit,
     settingsItems, enterSettings, enterProvider, enterIdentity, applyProvider,

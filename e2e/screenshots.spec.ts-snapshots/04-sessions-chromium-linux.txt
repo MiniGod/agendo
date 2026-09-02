@@ -1,5 +1,5 @@
 agendo ⟨bold⟩[Azure DevOps]  ⟨cyan⟩ 1 Work items ⟨dim⟩  2 PRs ⟨dim⟩  3 Sessions ⟨black,bg:cyan,bold⟩
-↑/↓ move · → expand · ⇥ view · g ungroup · s sort: updated · / search · n new · O orchestrator · enter resume · c →othe…⟨dim⟩
+↑/↓ move · → expand · ⇥ view · g ungroup · s sort: updated · / search · n new · O orch · G global · enter resume · c →o…⟨dim⟩
  ⟨dim⟩
 ＋ new session⟨black,bg:cyan,bold⟩
 ▌ Running now⟨blue,bold⟩  (1) — enter to attach⟨bold,dim⟩

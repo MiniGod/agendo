@@ -1,6 +1,6 @@
-import { launchFresh, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
+import { launchFresh, launchGlobalOrchestrator, launchNewSession, runInline, type OpenPlan } from "../launch.ts";
 import { createWorktree, checkoutWorktree, freeWorktreeBranch } from "../worktree.ts";
-import { isGitCheckout, type RepoInfo } from "../repos.ts";
+import { globalOrchestratorCwd, isGitCheckout, type RepoInfo } from "../repos.ts";
 import { openUrl } from "../browser.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "./targets.ts";
 import type { LoadedModel } from "../model.ts";
@@ -66,7 +66,9 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
     const launch = (cwd: string) =>
       open(
         target.kind === "free"
-          ? launchNewSession(cwd, agent, target.orchestrator)
+          // Only REPO-level orchestrators come through this flow: the global one
+          // picks no repo and no worktree, so it launches straight from its key.
+          ? launchNewSession(cwd, agent, target.orchestrator ? "repo" : undefined)
           : launchFresh(cwd, target.tmuxName, agent),
       );
     if (worktree) {
@@ -177,6 +179,8 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
 export function makeSessionFlow({
   model,
   scopedRepos,
+  filterRoot,
+  hostSession,
   cloneNoteRef,
   onOpen,
   exit,
@@ -188,6 +192,10 @@ export function makeSessionFlow({
 }: {
   model: LoadedModel | null;
   scopedRepos: RepoInfo[];
+  /** The launcher's path scope, if it has one — the global orchestrator's cwd. */
+  filterRoot: string | null;
+  /** The tmux session hosting the menu, whose window the pane layout splits. */
+  hostSession?: string;
   cloneNoteRef: { current: string | null };
   onOpen: (plan: OpenPlan) => void;
   exit: () => void;
@@ -258,6 +266,31 @@ export function makeSessionFlow({
     setMode({ kind: "repo", target: orchestratorTarget(), agent: "claude", cursor: 0 });
   };
 
+  /**
+   * Start the GLOBAL orchestrator: the one coordinator that belongs to no repo
+   * and talks only to the per-repo orchestrators (see src/orchestratorGlobal.ts).
+   *
+   * Unlike every other entry point here it opens no picker at all — there is no
+   * repo, worktree, branch or agent left to choose, so a wizard would be four
+   * screens of nothing. It launches on the keystroke and reports where it landed,
+   * because the default layout (a pane beside this menu) falls back to a window
+   * on a narrow terminal and the user has to be told which one they got.
+   */
+  const enterGlobalOrchestrator = () => {
+    setNotice(null);
+    setCloneNote(null);
+    cloneNoteRef.current = null;
+    const cwd = globalOrchestratorCwd(scopedRepos.map((r) => r.root), process.cwd(), filterRoot);
+    const res = launchGlobalOrchestrator(cwd, { hostSession });
+    if (!res.plan) {
+      setNotice(`Global orchestrator failed to start: ${res.error ?? "unknown error"}`);
+      return;
+    }
+    const where = { pane: "beside this menu", window: "in its own window", session: "in its own tmux session" }[res.layout];
+    open(res.plan);
+    setNotice(`▸ global orchestrator started ${where}${res.layoutNote ? ` — ${res.layoutNote}` : ""}`);
+  };
+
   // Open a prepared plan. Outside tmux we unmount and let index.tsx attach;
   // inside tmux we switch to the agent's window but keep the menu mounted in its
   // own window, then refresh so running badges are current when you switch back.
@@ -285,6 +318,7 @@ export function makeSessionFlow({
     enterFresh,
     enterNewSession,
     enterOrchestrator,
+    enterGlobalOrchestrator,
     open,
   };
 }

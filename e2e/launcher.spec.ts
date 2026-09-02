@@ -818,8 +818,11 @@ test("O in the Sessions view launches an orchestrator through the normal worktre
   await wt.waitForStable();
   wt.write("3"); // Sessions view
   let screen = await wt.waitForText("Running now");
-  // The action is discoverable, alongside the existing `n new`.
-  expect(screen).toContain("O orchestrator");
+  // Both coordinator actions are discoverable, alongside the existing `n new`.
+  // They are abbreviated to the same words the `agendo list` kind column prints
+  // (`orch` / `global`), which is what buys the second one room on the hint line.
+  expect(screen).toContain("O orch");
+  expect(screen).toContain("G global");
 
   wt.write("O");
   // Straight to the repo picker — no agent step, since the mode is Claude-only.
@@ -860,6 +863,41 @@ test("O in the Sessions view launches an orchestrator through the normal worktre
     );
   });
   // No worktree was created for it.
+  expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
+});
+
+// ── the GLOBAL orchestrator from the TUI (`G` in the Sessions view) ───────────
+// One level above `O`. Unlike every other launch action it opens no picker at
+// all — there is no repo, worktree, branch or agent left to choose — so the
+// keypress IS the whole flow, and what has to be pinned is that it starts the
+// right thing in a directory that belongs to no repo.
+test("G in the Sessions view launches the global orchestrator with no picker at all", async ({ launch, mock }) => {
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3"); // Sessions view
+  await wt.waitForText("Running now");
+
+  wt.write("G");
+  // It runs in the directory that HOLDS the known repos, not in any of them: a
+  // global orchestrator sitting in a repo root is one that will start running git
+  // there, which is the single thing its prompt forbids.
+  const expectedCwd = join(mock.home, "repos");
+  await waitUntil(async () => {
+    const spawned = (await mock.tmuxLog()).find(
+      (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("claude"),
+    );
+    if (!spawned) return false;
+    const appended = spawned[spawned.indexOf("--append-system-prompt") + 1] ?? "";
+    return (
+      appended.includes("GLOBAL ORCHESTRATOR MODE") &&
+      // Not the repo-level instructions, which would have it merging branches.
+      !appended.includes("# You are running in ORCHESTRATOR MODE") &&
+      appended.includes("You are running inside agendo")
+    );
+  });
+  // No worktree and no branch: it belongs to no repository.
   expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
 });
 

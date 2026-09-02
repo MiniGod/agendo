@@ -18,6 +18,7 @@ type ViewCtx = Pick<
   | "setPrsGrouped"
   | "enterNewSession"
   | "enterOrchestrator"
+  | "enterGlobalOrchestrator"
   | "setSearchFocus"
   | "setPrSort"
   | "setSessionSort"
@@ -99,13 +100,7 @@ function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boolean {
     return true;
   }
 
-  // new arbitrary session (sessions view only)
-  if (input === "n" && ctx.view === "sessions") { ctx.enterNewSession(); return true; }
-
-  // new ORCHESTRATOR session (sessions view only) — a session that delegates
-  // every unit of work to further background sessions instead of implementing.
-  // Capital O, so the lowercase `o` open-in-browser binding is untouched.
-  if (input === "O" && ctx.view === "sessions") { ctx.enterOrchestrator(); return true; }
+  if (handleSessionStartKeys(input, ctx)) return true;
 
   // focus the fuzzy-search input (all list views)
   if (input === "/") { ctx.setSearchFocus("input"); return true; }
@@ -138,6 +133,38 @@ function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boolean {
     ctx.reload();
     return true;
   }
+  return false;
+}
+
+/**
+ * The three "start something new" keys of the sessions view.
+ *
+ * Split out of `handleListViewKeys` rather than left inline because they are one
+ * group — a plain session and the two coordinator levels above it — and because
+ * the caller is already at its statement budget; a third binding there would buy
+ * a lint threshold bump for no structural gain.
+ *
+ * Both coordinator keys are CAPITALS, so the lowercase `o` (open in browser) and
+ * `g` (group by repo) bindings next door keep working.
+ */
+function handleSessionStartKeys(
+  input: string,
+  ctx: Pick<KeyContext, "view" | "enterNewSession" | "enterOrchestrator" | "enterGlobalOrchestrator">,
+): boolean {
+  if (ctx.view !== "sessions") return false;
+
+  // new arbitrary session
+  if (input === "n") { ctx.enterNewSession(); return true; }
+
+  // new REPO orchestrator — a session that delegates every unit of work in one
+  // repo to further background sessions instead of implementing.
+  if (input === "O") { ctx.enterOrchestrator(); return true; }
+
+  // the GLOBAL orchestrator — one level up again: it coordinates the per-repo
+  // orchestrators and never touches a repo itself. Launches on the keystroke
+  // (no repo or worktree left to pick) beside this menu.
+  if (input === "G") { ctx.enterGlobalOrchestrator(); return true; }
+
   return false;
 }
 

@@ -245,10 +245,13 @@ export function ListScreen({
               ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
               : view === "sessions"
                 // `⇥ view` (not "switch view") matches the PRs hint and buys back
-                // 7 columns for the `O orchestrator` and `m →profile` entries —
-                // this line already truncated at ~120 cols before either of them,
-                // so tail hints are at a premium.
-                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orchestrator · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
+                // 7 columns for the coordinator and `m →profile` entries — this
+                // line already truncated at ~120 cols before any of them, so tail
+                // hints are at a premium. `O orch · G global` spends 3 of those 7
+                // to name BOTH coordinator levels where one used to be spelled out
+                // as `O orchestrator`, in the same words the `kind` column of
+                // `agendo list` prints for those sessions.
+                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orch · G global · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
                 : view === "prs"
                   ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
                   : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}

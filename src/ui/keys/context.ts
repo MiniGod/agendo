@@ -104,6 +104,7 @@ export type KeyContext = {
   enterFresh: (target: FreshTarget) => void;
   enterNewSession: () => void;
   enterOrchestrator: () => void;
+  enterGlobalOrchestrator: () => void;
   proceedFresh: (target: FreshTarget, agent: AgentSource) => void;
   reposForTarget: (target: FreshTarget) => RepoInfo[];
   chooseRepo: (target: FreshTarget, repo: RepoInfo, agent: AgentSource) => void;
