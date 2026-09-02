@@ -11,10 +11,10 @@
 // embedded in the PR branch (see linkedIssues).
 import { spawn, spawnSync } from "child_process";
 import { messageOf, snippetOf, tag } from "./errors.ts";
+import { rollupCI } from "./github/ci.ts";
 import type { RepoInfo } from "./repos.ts";
 import type { EntityUrls, FetchContext } from "./provider.ts";
 import type {
-  CIStatus,
   Identity,
   PullRequest,
   ReviewPR,
@@ -207,36 +207,6 @@ function linkedIssues(raw: any, issueNums: Set<number>): Set<number> {
 // Aggregate a PR's check rollup into a single gate status. CheckRuns carry
 // status+conclusion; legacy StatusContexts carry a single `state`. A merge
 // conflict (mergeStateStatus "DIRTY") outranks any individual check.
-function rollupCI(rollup: any[] | undefined, mergeStateStatus: string | undefined): CIStatus {
-  if (mergeStateStatus === "DIRTY") return "conflict";
-  if (!rollup || rollup.length === 0) return "none";
-  let fail = false, running = false, queued = false, pass = false;
-  for (const c of rollup) {
-    if (c.__typename === "StatusContext") {
-      const s = c.state;
-      if (s === "FAILURE" || s === "ERROR") fail = true;
-      else if (s === "PENDING") running = true;
-      else if (s === "SUCCESS") pass = true;
-      continue;
-    }
-    // CheckRun
-    if (c.status !== "COMPLETED") {
-      if (c.status === "QUEUED" || c.status === "WAITING" || c.status === "PENDING") queued = true;
-      else running = true; // IN_PROGRESS, REQUESTED, …
-      continue;
-    }
-    const concl = c.conclusion;
-    if (["FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED"].includes(concl)) fail = true;
-    else if (concl === "SUCCESS") pass = true;
-    // NEUTRAL / SKIPPED → ignored (don't count toward pass or fail).
-  }
-  if (fail) return "fail";
-  if (running) return "running";
-  if (queued) return "queued";
-  if (pass) return "pass";
-  return "none";
-}
-
 // Net review votes: the latest non-comment review per author. GitHub doesn't
 // expose the branch-protection required count cheaply, so we approximate the
 // gate from reviewDecision (any decision ⇒ at least one approval is required).

@@ -47,16 +47,16 @@ Most of `src/` shares one budget; the files that blow it carry their own named
 blocks. A file creeping toward the shared cap gets its own tighter block, not a
 raised budget.
 
-The shared `max-lines` budget is **461**, and **nothing in `src/` is above it**.
+The shared `max-lines` budget is **453**, and **nothing in `src/` is above it**.
 Getting there took the run from 1036 down through `tmux.ts`, `App.tsx`,
 `launch.ts`, `ado.ts`, `sessions.ts`, `wait.ts`, `clone.ts`, `format.ts`,
-`restore.ts`, `model.ts`, `index.tsx` and then `activity.ts`, each of which became a
-facade or an entrypoint over a directory of its own parts. The budget is pinned at the
+`restore.ts`, `model.ts`, `index.tsx`, `activity.ts` and then `github.ts`, each of which
+became a facade or an entrypoint over a directory of its own parts. The budget is pinned at the
 worst remaining file rather than at the round 500, for the reason above: slack
 in a cap is room every other file can grow into.
 
-**There is no headroom, and that is deliberate.** 461 is where `src/github.ts`
-already sits, so a new 470-line file fails lint on the day it lands. That is not
+**There is no headroom, and that is deliberate.** 453 is where `src/tmux/windows.ts`
+already sits, so a new 460-line file fails lint on the day it lands. That is not
 the ratchet misfiring — it is the whole mechanism. The answer is to split the
 file, never to raise the number. If a genuinely irreducible file ever needs more,
 it gets its own named block with the argument in the PR, and the shared budget
@@ -120,7 +120,7 @@ shrink*: every number in the config is pinned where the file already is, so a
 file sitting at its cap still passes while an edit that grows it does not. A
 naive size check would refuse every edit to a file that is already over — the
 edits that make it smaller included, which is the whole of the work that got the
-budget down to 461.
+budget down to 453.
 
 Two limits, stated rather than papered over:
 

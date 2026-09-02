@@ -122,7 +122,10 @@
         //
         // DROPPED 486 -> 461. src/activity.ts set 486 and is now a 31-line
         // dispatch over src/activity/ (one reader per agent, the largest 217).
-        "max-lines": ["error", { "max": 461, "skipBlankLines": false, "skipComments": false }], // src/github.ts
+        //
+        // LOWERED 461 -> 453. src/github.ts set 461; its CI rollup is now
+        // src/github/ci.ts and the file is 431. The holder is src/tmux/windows.ts.
+        "max-lines": ["error", { "max": 453, "skipBlankLines": false, "skipComments": false }], // src/tmux/windows.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
         // It is now four functions in src/cli/status.ts, the largest well under
         // this cap, so the number is src/cli/send.ts's alone.
