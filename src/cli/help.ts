@@ -16,7 +16,17 @@ Usage:
                               new agent, in a tmux window attachable later from
                               the menu. Prints the new session id.
       --attach, -a              Switch/attach to it immediately (default: detached)
-      --name, -n <slug>         Name the worktree/branch (else derived from prompt)
+      --name, -n <slug>         Name the worktree/branch (else derived from prompt).
+                                If .claude/worktrees/<slug> already exists it is
+                                ADOPTED — provided git lists it as a worktree of
+                                this repo (a bare directory there is refused).
+      --worktree=<path>         Run in that EXISTING worktree instead of creating
+                                one — any worktree root git registers, wherever
+                                it lives. Adopted as found: an unexpected branch or
+                                uncommitted changes are reported on stderr, never
+                                reset, stashed or checked out. Can't combine with
+                                --name / --no-worktree. Note the "=": a bare
+                                --worktree followed by a path is refused.
       --no-worktree             Run in the current checkout instead of a new worktree
       --worktree                Force a new worktree (only useful with --orchestrator,
                                 which otherwise runs in the main checkout)

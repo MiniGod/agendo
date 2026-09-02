@@ -309,6 +309,16 @@ Pick "start a fresh session", choose the agent and repo, and agendo creates a `g
 worktree` off the repo's default branch and launches the agent there — so new work
 never disturbs your current checkout.
 
+A fresh session can also be pointed at a worktree that **already exists** — the way
+to put a new agent onto work whose original session is gone, or to start over on a
+branch without continuing the old conversation. `agendo launch --worktree=<path> "…"`
+runs in that worktree (any root `git worktree list` registers, wherever it lives), and
+`--name <slug>` adopts `.claude/worktrees/<slug>` when it is already there. Either way
+the checkout is used **as found**: an unexpected branch or uncommitted changes are
+reported on stderr and never reset, stashed or checked out — they are usually the
+very work you are trying to get back to. A directory that merely sits at that path
+without being a registered worktree is refused rather than launched into.
+
 The repo picker offers the repos your past sessions were in, so a repo you have
 never cloned used to have no way in. It now also carries a **＋ Clone from URL…**
 row (`c` in that picker — not the session list's `c`, which is

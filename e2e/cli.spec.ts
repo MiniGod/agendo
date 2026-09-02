@@ -4,7 +4,7 @@
 // fixture $HOME). The fake tmux serves a stored pane capture for the running
 // session, so readiness classification is real — including the compacting state.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -4355,6 +4355,192 @@ test("agendo launch --name overrides the orchestrator's default slug", async ({ 
   const args = gitArgv(await mock.callLog()).flat();
   expect(args).toContain("worktree-rollout");
   expect(args).not.toContain("worktree-orchestrator");
+});
+
+// ── `launch` into an EXISTING worktree (#37) ─────────────────────────────────
+// `--worktree=<path>` names one outright; `--name <slug>` adopts
+// `.claude/worktrees/<slug>` when it is already there. Both require git to list
+// the directory as a worktree, and both use it AS FOUND — the uncommitted work in
+// it is the whole reason for pointing a session there. The fake git's registry
+// (FAKE_GIT_STATE, harness/mockEnv.ts) answers `worktree list` / `status`, so a
+// dirty tree, a drifted branch, a worktree outside the container and — the bug
+// this replaces — a bare directory at the worktree's path can each be staged.
+//
+// Paths are realpath'd because agendo reports the ADOPTED path resolved (it is
+// what tmux will report as the pane's cwd, and what `list` attributes by), and
+// the temp home may sit behind a symlink on some CI hosts.
+
+/** The `-c <cwd>` of the last new-session/new-window the fake tmux recorded. */
+function spawnedCwd(tmux: string[][]): string | undefined {
+  const call = [...tmux].reverse().find((argv) => argv[0] === "new-session" || argv[0] === "new-window");
+  const at = call?.indexOf("-c") ?? -1;
+  return at >= 0 ? call![at + 1] : undefined;
+}
+
+/** Every git argv that would CHANGE a checkout — none may ever appear on an adopt. */
+function mutatingGit(callLog: string[]): string[][] {
+  const verbs = new Set(["reset", "stash", "checkout", "switch", "clean", "restore"]);
+  return gitArgv(callLog).filter((a) => a.some((t) => verbs.has(t)) || (a.includes("worktree") && a.includes("add")));
+}
+
+test("agendo launch --name lands in an existing worktree of that name, and says so", async ({ mock }) => {
+  const repo = realpathSync(mockRepo(mock.home));
+  const dir = join(repo, ".claude", "worktrees", "audio-focus");
+  const first = agendoIn(repo, mock.env, "launch", "--name", "audio-focus", "Start the audio work");
+  expect(first.status).toBe(0);
+  expect(first.stderr).not.toContain("adopting"); // created, not adopted
+  expect(spawnedCwd(await mock.tmuxLog())).toBe(dir);
+
+  // Same name again. The directory is there and git registers it (the fake
+  // `worktree add` recorded it), so the new session runs THERE — a second
+  // `worktree add` would have been the old "reuse if present" happening by
+  // accident; now it is stated, on stderr, with the branch.
+  const second = agendoIn(repo, mock.env, "launch", "--name", "audio-focus", "Pick the audio work back up");
+  expect(second.status).toBe(0);
+  expect(second.stdout).toContain("launched background session");
+  expect(second.stdout).toContain(`(in ${dir})`);
+  expect(second.stderr).toContain(`▸ adopting existing worktree ${dir} on branch worktree-audio-focus (clean)`);
+  expect(second.stderr).not.toContain("warning"); // expected branch, nothing uncommitted
+  expect(spawnedCwd(await mock.tmuxLog())).toBe(dir);
+  expect(mutatingGit(await mock.callLog())).toHaveLength(1); // the first launch's `worktree add`, and nothing since
+});
+
+test("adopting a dirty worktree on another branch warns with both, and touches nothing in it", async ({ mock }) => {
+  // The live case from #37: the worktree's session is gone, its branch was
+  // renamed along the way, and the work exists only as uncommitted files there.
+  // Refusing would strand exactly that work; resetting would destroy it. So it
+  // is adopted, and the warning names what was found.
+  const repo = realpathSync(mockRepo(mock.home));
+  const dir = join(repo, ".claude", "worktrees", "audio-focus");
+  await mkdir(dir, { recursive: true });
+  await mock.setGitState({
+    worktrees: [{ root: repo, path: dir, branch: "feature/audio", dirty: [" M src/mixer.ts", "?? notes.md", "A  src/new.ts"] }],
+  });
+  const r = agendoIn(repo, mock.env, "launch", "--name", "audio-focus", "Finish the mixer");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`(in ${dir})`);
+  expect(r.stderr).toContain(
+    `warning: adopting existing worktree ${dir} on branch feature/audio (expected worktree-audio-focus) with 3 uncommitted changes`,
+  );
+  expect(r.stderr).toContain("nothing reset, stashed or checked out");
+  expect(spawnedCwd(await mock.tmuxLog())).toBe(dir);
+  expect(mutatingGit(await mock.callLog())).toEqual([]);
+  // What it DID run against the worktree is the read-only pair.
+  const ran = gitArgv(await mock.callLog()).filter((a) => a[1] === dir).map((a) => a.slice(2).join(" "));
+  expect(ran).toEqual(["worktree list --porcelain", "status --porcelain"]);
+});
+
+test("agendo launch --name refuses a directory that sits where the worktree would be but is not one", async ({ mock }) => {
+  // Before #37 this launched straight into the bare directory — no branch, no
+  // checkout, an agent told to work in a folder git knows nothing about.
+  const repo = realpathSync(mockRepo(mock.home));
+  const dir = join(repo, ".claude", "worktrees", "audio-focus");
+  await mkdir(dir, { recursive: true }); // present on disk, absent from `git worktree list`
+  const r = agendoIn(repo, mock.env, "launch", "--name", "audio-focus", "Finish the mixer");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain(`launch failed: ${dir} exists but is not a registered worktree of ${repo}`);
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+
+  // A worktree of a DIFFERENT repo parked under this one's container is refused
+  // too — adopting it would put this repo's session on another repo's branch.
+  const other = join(realpathSync(mock.home), "repos", "appweb");
+  await mock.setGitState({ worktrees: [{ root: other, path: dir, branch: "worktree-audio-focus", dirty: [] }] });
+  const foreign = agendoIn(repo, mock.env, "launch", "--name", "audio-focus", "Finish the mixer");
+  expect(foreign.status).toBe(1);
+  expect(foreign.stderr).toContain(`${dir} is a worktree of ${other}, not of ${repo}`);
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+  expect(mutatingGit(await mock.callLog())).toEqual([]);
+});
+
+test("agendo launch --worktree=<path> runs in that worktree wherever it lives, from any cwd", async ({ mock }) => {
+  // Not under `.claude/worktrees/`, and launched from a directory that is not a
+  // checkout at all: the path is the whole answer, cwd plays no part.
+  const repo = realpathSync(mockRepo(mock.home));
+  const dir = join(realpathSync(mock.home), "elsewhere", "audio-wt");
+  await mkdir(dir, { recursive: true });
+  await mock.setGitState({ worktrees: [{ root: repo, path: dir, branch: "feature/audio", dirty: [" M src/mixer.ts"] }] });
+  const r = agendoIn(mock.home, mock.env, "launch", `--worktree=${dir}`, "Finish the mixer");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched background session");
+  expect(r.stdout).toContain(`(in ${dir})`);
+  // An explicit path carries no expected branch: the branch is named, not
+  // judged. The uncommitted count still warns (singular, since there is one).
+  expect(r.stderr).toContain(`warning: adopting existing worktree ${dir} on branch feature/audio with 1 uncommitted change —`);
+  expect(r.stderr).not.toContain("expected");
+  expect(spawnedCwd(await mock.tmuxLog())).toBe(dir);
+  expect(mutatingGit(await mock.callLog())).toEqual([]);
+
+  // Clean and explicit: still announced, just not as a warning.
+  await mock.setGitState({ worktrees: [{ root: repo, path: dir, branch: "feature/audio", dirty: [] }] });
+  const clean = agendoIn(mock.home, mock.env, "launch", `--worktree=${dir}`, "Review the mixer");
+  expect(clean.status).toBe(0);
+  expect(clean.stderr).toContain(`▸ adopting existing worktree ${dir} on branch feature/audio (clean)`);
+  expect(clean.stderr).not.toContain("warning");
+});
+
+test("agendo launch --worktree=<path> refuses what is not a worktree, and contradicting flags", async ({ mock }) => {
+  const repo = realpathSync(mockRepo(mock.home));
+  const plain = join(realpathSync(mock.home), "elsewhere", "plain");
+  await mkdir(plain, { recursive: true });
+
+  const notGit = agendoIn(repo, mock.env, "launch", `--worktree=${plain}`, "Do it");
+  expect(notGit.status).toBe(1);
+  expect(notGit.stderr).toContain(`launch failed: ${plain} is not inside a git repository`);
+
+  const missing = agendoIn(repo, mock.env, "launch", "--worktree=/no/such/dir", "Do it");
+  expect(missing.status).toBe(1);
+  expect(missing.stderr).toContain("launch failed: no such directory: /no/such/dir");
+
+  const empty = agendoIn(repo, mock.env, "launch", "--worktree=", "Do it");
+  expect(empty.status).toBe(1);
+  expect(empty.stderr).toContain("--worktree= needs a path");
+
+  // The path already says where to run, so a flag that would say otherwise is
+  // a contradiction to refuse, not a tie to break by position.
+  const withName = agendoIn(repo, mock.env, "launch", `--worktree=${repo}`, "--name", "x", "Do it");
+  expect(withName.status).toBe(1);
+  expect(withName.stderr).toContain("--worktree=<path> can't be combined with --name");
+  const noWorktree = agendoIn(repo, mock.env, "launch", "--no-worktree", `--worktree=${repo}`, "Do it");
+  expect(noWorktree.status).toBe(1);
+  expect(noWorktree.stderr).toContain("--worktree=<path> can't be combined with --no-worktree");
+  const bare = agendoIn(repo, mock.env, "launch", "--worktree", `--worktree=${repo}`, "Do it");
+  expect(bare.status).toBe(1);
+  expect(bare.stderr).toContain("--worktree=<path> can't be combined with a bare --worktree");
+
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+  expect(mutatingGit(await mock.callLog())).toEqual([]);
+});
+
+test("a bare --worktree followed by something path-like is refused, never swallowed into the prompt", async ({ mock }) => {
+  // The two-token `--worktree <path>` form is not supported (bare `--worktree`
+  // sits directly before the prompt, see the orchestrator tests above). The one
+  // thing it must not do is read the path as prompt text and create a NEW
+  // worktree — the exact opposite of what was asked.
+  const repo = realpathSync(mockRepo(mock.home));
+  const r = agendoIn(repo, mock.env, "launch", "--worktree", "../audio-focus", "Finish it");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain('"../audio-focus" after a bare --worktree looks like a path');
+  expect(r.stderr).toContain("--worktree=../audio-focus");
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toBeUndefined();
+  expect(mutatingGit(await mock.callLog())).toEqual([]);
+
+  // Prompt text after a bare `--` is never mistaken for a path.
+  const ok = agendoIn(repo, mock.env, "launch", "--worktree", "--", "../audio-focus is where the bug is");
+  expect(ok.status).toBe(0);
+  expect(spawnedAgentArgv(await mock.tmuxLog())).toContain("../audio-focus is where the bug is");
+});
+
+test("--help and --llm both document adopting an existing worktree", async ({ mock }) => {
+  const help = agendo(mock.env, "--help");
+  expect(help.status).toBe(0);
+  expect(help.stdout).toContain("--worktree=<path>");
+  expect(help.stdout).toContain("ADOPTED");
+  // Agents get the flag too: recovering a worktree whose session is gone is
+  // exactly the situation an orchestrator hits (#37).
+  const llm = agendo(mock.env, "--llm");
+  expect(llm.status).toBe(0);
+  expect(llm.stdout).toContain("--worktree=<path>");
+  expect(llm.stdout).toContain("never reset or stashed");
 });
 
 test("a plain agendo launch carries NO orchestrator instructions", async ({ mock }) => {

@@ -84,7 +84,7 @@ fixtures `mock` + `launch`):
 | Azure DevOps REST | `dev.azure.com`, `app.vssps.visualstudio.com` | A local mock HTTP server (`adoServer.ts`); the app points at it via the `ADO_BASE_URL` / `ADO_VSSPS_URL` env seams added to `src/ado.ts`. |
 | `az` token | `az account get-access-token` | Fake `az` shim returns a static token. |
 | `tmux` | the user's tmux server | Fake `tmux` shim — answers `list-*`/`has-session` from a JSON state file and logs every call; **starts nothing**. Live "running" state is just fixture data. |
-| `git worktree add` | real repos | Fake `git` shim — `mkdir`s the target path, logs the call; never touches a repo. |
+| `git worktree add` / `list` / `status` | real repos | Fake `git` shim — `worktree add` `mkdir`s the target path and records it in a JSON registry (`FAKE_GIT_STATE`, seeded via `mock.setGitState`); `worktree list --porcelain` and `status --porcelain` answer from that registry, so an adopt-an-existing-worktree test can stage a dirty tree, a drifted branch or a bare directory. Logs every call; never touches a repo. |
 | `claude` launch / `xdg-open` | spawning agents / a browser | Fake shims that only record the invocation. |
 
 The shims live in `e2e/fakebin/` and are placed **first on `PATH`**. `TMUX` is
