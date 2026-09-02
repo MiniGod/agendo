@@ -132,3 +132,100 @@ Two limits, stated rather than papered over:
 
 `bun run doctor` runs [react-doctor](https://react.doctor) — not a CI gate, a
 periodic read on React/effect health.
+
+## CRAP score — the same ratchet, one level down
+
+The size limits above say how big a function may be. `bun run crap` says how
+risky it is to change, per function, with the CRAP score (Change Risk
+Anti-Patterns):
+
+    CRAP(m) = cc(m)² · (1 − cov(m))³ + cc(m)
+
+`cc` is cyclomatic complexity, `cov` the fraction of the function's own
+statements the test suites executed. A fully covered function scores its
+complexity; an uncovered one scores roughly its complexity squared. **The target
+is CRAP ≤ 7 for every function in `src/`** — cc 7 fully covered, or cc 2 with
+nothing — and the gate that drives there is a **blocking CI job** (`CRAP score`
+in `.github/workflows/ci.yml`) that fails when any function scores above its pin
+in `.craprc.jsonc`.
+
+The pins follow exactly the contract of `.oxlintrc.json`, so read that section
+first. Restated for this file:
+
+- **Every number in `.craprc.jsonc` holds today.** `max` is the shared budget,
+  pinned at the worst function not carrying a named override; the `overrides`
+  list names the outliers that would otherwise set it, each with its own pin.
+  Not one global number at the worst function in the tree, for the reason the
+  linting section gives: slack in a cap is room every other function can grow
+  into.
+- **A PR that makes a pin achievable lowers it in that same PR.** The report
+  says so in as many words: `NOTE shared max is N but the worst function it
+  covers is … — lower it`, and `NOTE … is inside the shared max — its override
+  can go`. Treat both as failures you happen to be allowed to fix in the same
+  commit.
+- **A lowered pin never goes back up.** Raising `max`, raising an override, or
+  adding a new override is the one change to that file that needs an argument in
+  the PR description. Editing the tool to score more kindly is the same change
+  wearing a different hat.
+- **An override for a function that no longer exists fails the run.** A pin
+  nothing answers to is slack, not history — delete it.
+- Overrides name a function by file and by the name oxlint gives it. A function
+  oxlint reports anonymously shows up as `(anonymous L<line>)`, which moves
+  whenever the file above it does; the fix for an anonymous outlier is to give
+  it a name, not to pin a line number.
+
+### How the two inputs are measured
+
+**Complexity comes from oxlint, not from a second implementation.** `scripts/crap/cc.ts`
+runs the same `complexity` rule `.oxlintrc.json` enforces, with its threshold at
+0 so every function is reported, and reads the number and the span out of
+`--format json`. The `complexity` line in the lint config and the `cc` column in
+the CRAP table are therefore the same figure by construction.
+
+**Coverage comes from the real suites, including e2e.** `bun --coverage` only
+exists for `bun test`, and the behaviour suite is Playwright driving `bun run
+src/index.tsx` as a child process. So `scripts/crap/preload.ts` is a Bun runtime
+plugin that instruments `src/**` with istanbul as bun loads each module, and
+writes the counters out when the process ends — on `exit`, and on the SIGHUP /
+SIGTERM the harness kills the TUI and the CLI with, re-raising the signal
+afterwards so the process still dies of it. `bun run crap` puts a `bun` shim on
+`PATH` that adds the preload to `bun run` (the harness builds its environment
+from scratch, and `PATH` is the only channel that reaches the app under test
+without editing `e2e/`), runs `bun test` and `playwright test`, merges every
+dump, and scores. Instrumented text is cached by content hash under
+`coverage/crap/.cache/`, because the suite starts the app several hundred times.
+
+Nothing in `src/` knows any of this exists. The package ships `src/` only; the
+preload, the shim and the scorer live in `scripts/crap/`, and the product binary
+is byte-for-byte what it was.
+
+### Running it
+
+    bun run crap                  # both suites under coverage, then score + gate
+    bun run crap -- --workers 2   # anything after the flags goes to playwright
+    bun run crap --report-only    # re-score the counters from the last run
+
+The full table lands in `coverage/crap/report.json` (gitignored); the summary is
+the top of it. Locally the e2e suite wants `--workers 2`, same as always.
+
+### What it does and does not tell you
+
+- **`cov` is per statement, per function.** Statements inside a nested function
+  belong to that function, the same way eslint's `complexity` does not charge an
+  outer function for an inner one's branches. A function with no statements of
+  its own is covered iff it was entered.
+- **A function no test ever reaches scores at cov 0**, whether or not its file
+  was loaded. That is the honest number, not a gap in the tool: on the first
+  measured run every file in `src/` was imported by some test, and 138 of the
+  1164 functions were still never entered — almost all of `src/activity.ts`'s
+  codex and copilot readers among them.
+- **Coverage is not perfectly deterministic.** Retried e2e attempts add
+  coverage; timing-dependent branches (a poll that does or does not loop) can
+  differ between runs. The gate compares the two-decimal value the table prints,
+  and the pins sit at the worst observed value, so a function riding exactly at
+  its pin can in principle cross it on noise. When that happens, the fix is a
+  test that makes the branch deterministic, not a raised pin.
+- **The `PostToolUse` lint hook does not run this.** It needs the whole e2e
+  suite, so it is a CI gate and a `bun run`, not a per-edit check. The math and
+  the gate contract are covered in `test/crap.test.ts`; the measurement itself
+  is only exercised by running it.
