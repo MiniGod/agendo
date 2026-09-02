@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -45,10 +45,13 @@
   // src/ui/keys/rowActions.ts with a unit suite, the worst of it at 5. Then
   // src/ui/keys/branch.ts `handleBranchKeys` (cc 21, 59%) set 50.57; it is
   // the last prompt on the shared table in lineEdit.ts, with a unit suite,
-  // the worst of it at 6. The holder is src/ui/App.tsx `(anonymous L296)`
-  // (cc 7, 7%) — `applyProvider`, an arrow the report cannot name — with
-  // src/github.ts `rollupCI` (cc 20, 59%) at 46.65 behind it.
-  "max": 46.84,
+  // the worst of it at 6. Then src/ui/App.tsx `(anonymous L296)` (cc 7, 7%)
+  // — `applyProvider`, an arrow the report could not name — set 46.84; it is
+  // now src/ui/providerActions.ts, a pure decision plus two closures with a
+  // unit suite, the worst of it at 5. The holder is src/github.ts `rollupCI`
+  // (cc 20, 59%), with src/cli/close.ts `runClose` (cc 45, 93%) at 45.78
+  // behind it.
+  "max": 46.65,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
