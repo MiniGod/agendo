@@ -1,7 +1,7 @@
 // Running `git clone`: asynchronously, with live progress, with no possibility
 // of an interactive prompt hanging the TUI, and with the partial directory
 // cleaned up on failure or cancellation.
-import { spawn } from "child_process";
+import { type ChildProcess, spawn } from "child_process";
 import { existsSync, readdirSync, rmSync } from "fs";
 import { join } from "path";
 
@@ -199,7 +199,7 @@ export function startClone(
   return {
     done,
     cancel(opts) {
-      const immediate = !!opts?.immediate;
+      const immediate = Boolean(opts?.immediate);
       // A repeat cancel is a no-op — EXCEPT an immediate one, which must still
       // escalate. esc (soft cancel) followed by the app going down is a real
       // sequence: git may not have exited yet, the `close` handler that owns the
@@ -207,23 +207,31 @@ export function startClone(
       // here would leave both the child and its half-written directory behind.
       if (canceled && !immediate) return;
       canceled = true;
-      try {
-        // SIGKILL on teardown: SIGTERM leaves git a window to keep writing, and
-        // there is no later tick in which to notice it finished.
-        child.kill(immediate ? "SIGKILL" : "SIGTERM");
-      } catch {
-        // Already gone — the close handler still runs the cleanup.
-      }
+      kill(child, immediate);
       // Normally the close handler owns cleanup (git may still be writing). On
-      // teardown that handler will never run, so do it here instead — twice,
-      // because SIGKILL delivery is asynchronous and an already-issued write can
-      // land after the first pass. What must not survive is a `.git` carrying an
-      // origin and no refs, which the next run would read as "already cloned".
-      if (immediate) {
-        cleanup();
-        if (existsSync(dest)) cleanup();
-      }
+      // teardown that handler will never run, so do it here instead.
+      if (immediate) teardownCleanup(cleanup, dest);
     },
   };
+}
+
+/** SIGKILL on teardown: SIGTERM leaves git a window to keep writing, and there is no later tick in which to notice it finished. */
+function kill(child: ChildProcess, immediate: boolean): void {
+  try {
+    child.kill(immediate ? "SIGKILL" : "SIGTERM");
+  } catch {
+    // Already gone — the close handler still runs the cleanup.
+  }
+}
+
+/**
+ * Cleanup on teardown runs twice, because SIGKILL delivery is asynchronous and
+ * an already-issued write can land after the first pass. What must not survive
+ * is a `.git` carrying an origin and no refs, which the next run would read as
+ * "already cloned".
+ */
+function teardownCleanup(cleanup: () => void, dest: string): void {
+  cleanup();
+  if (existsSync(dest)) cleanup();
 }
 

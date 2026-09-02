@@ -24,15 +24,19 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72. The convert flow's execFile callback (cc 12
-  // at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57. The convert flow's execFile callback
+  // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
   // `handleSearchInputKeys` (cc 27, 49%) set 127.82; both are now dispatch
   // over pure helpers (rowTree.ts, searchEdit.ts) with a unit suite, the worst
-  // of them at 7. The holder is src/clone/run.ts `cancel` (cc 8, never
-  // entered), with src/profiles.ts `moveSessionToProfile` at 67.26 behind it.
-  "max": 72,
+  // of them at 7. Then src/clone/run.ts `cancel` (cc 8, never entered) set 72
+  // with src/profiles.ts `moveSessionToProfile` (cc 25, 59%) behind it; the
+  // first is two named helpers under a stand-in git, the second is the three
+  // phases of src/profiles/move.ts, both with a unit suite, the worst at 7.
+  // The holder is src/ui/keys/lineEdit.ts `editLine` (cc 18, 47%), with
+  // src/ui/keys/clone.ts `handleCloneKeys` at 63.13 behind it.
+  "max": 64.57,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
