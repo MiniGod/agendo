@@ -3,8 +3,10 @@
 // beyond a keystroke, which is why every kill in it is exact-targeted.
 import { spawnSync } from "child_process";
 import { tmuxLines, tmuxQuiet } from "./exec.ts";
-import { LAUNCHER_SESSION, PLACEHOLDER_OPTION, insideTmux } from "./names.ts";
-import { exactTarget, hasSession, liveSessions, liveTargets, setSessionRoot } from "./server.ts";
+import { LAUNCHER_SESSION, PANE_TARGET_OPTION, PLACEHOLDER_OPTION, insideTmux, isPaneTarget } from "./names.ts";
+import {
+  exactTarget, hasSession, liveSessions, liveTargets, paneLocation, setSessionRoot, windowTarget,
+} from "./server.ts";
 
 /**
  * Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
@@ -54,6 +56,21 @@ function exactKillTarget(target: string): string {
 /** Kill the tmux SESSION `name` outright (exact-targeted; no-op if absent). */
 export function killSession(name: string): void {
   tmuxQuiet(["kill-session", "-t", exactTarget(name)]);
+}
+
+/**
+ * End a session that lives in a PANE of somebody else's window (see
+ * `PANE_TARGET_OPTION`) and report whether it is actually gone.
+ *
+ * `kill-window` is wrong here and would be destructive: the window belongs to
+ * the launcher's menu, and the pane is only a lodger in it. A pane id needs no
+ * `=` pin — `%12` cannot be a prefix of another target — but the post-check
+ * still matters for the same reason every kill in this file has one: `tmuxQuiet`
+ * throws the exit status away, so "we asked" is not "it's gone".
+ */
+export function killPane(pane: string, name: string): boolean {
+  tmuxQuiet(["kill-pane", "-t", pane]);
+  return paneLocation(name) === null;
 }
 
 /**
@@ -226,6 +243,45 @@ export function newWindow(name: string, cwd: string, argv: string[]): void {
 }
 
 /**
+ * Split window `target` and run `argv` in the new pane, stamping it with the
+ * managed name `name` so the launcher can find the session again (see
+ * `PANE_TARGET_OPTION`). Returns the new pane id, or null if tmux refused —
+ * typically "no space for new pane", which callers treat as "open a window
+ * instead" rather than as an error.
+ *
+ * `-h` splits left|right (side by side, the whole point of the exercise) and `-d`
+ * leaves the focus where it is, so the menu keeps the keyboard while the agent
+ * boots next to it. `-P -F #{pane_id}` prints the pane id we then address it by.
+ *
+ * Not routed through `tmuxQuiet`, unlike its `newWindow` neighbour: the pane id
+ * IS the result here, so both the exit status and stdout are load-bearing.
+ */
+export function splitPaneIn(target: string, name: string, cwd: string, argv: string[]): string | null {
+  const r = spawnSync(
+    "tmux",
+    ["split-window", "-h", "-d", "-P", "-F", "#{pane_id}", "-t", target, "-c", cwd, "--", ...argv],
+    { encoding: "utf-8" },
+  );
+  if (r.status !== 0) return null;
+  const pane = (r.stdout ?? "").trim();
+  // A pane we can't address is worse than no pane: the agent would be running
+  // where nothing can find it. Report failure and let the caller open a window.
+  if (!isPaneTarget(pane)) return null;
+  // The stamp is what makes the pane DISCOVERABLE: without it the agent runs in a
+  // pane no listing attributes to it, so `list`, `send`, `status`, `close` and
+  // even the duplicate guard in `openTarget` all miss it — and the next launch
+  // starts a rival beside it. A pane we cannot name is worse than no pane, so the
+  // status is checked (not thrown away by `tmuxQuiet`) and a failed stamp takes
+  // the pane back down, leaving the caller to open a window instead.
+  const stamped = spawnSync("tmux", ["set-option", "-p", "-t", pane, PANE_TARGET_OPTION, name], { stdio: "ignore" });
+  if (stamped.status !== 0) {
+    tmuxQuiet(["kill-pane", "-t", pane]);
+    return null;
+  }
+  return pane;
+}
+
+/**
  * Like `newWindow`, but targets a specific (named) session rather than the
  * current one — needed when restoring tabs into the canonical session from the
  * `--tmux` bootstrap process, which isn't itself inside that session.
@@ -236,17 +292,48 @@ export function newWindowIn(session: string, name: string, cwd: string, argv: st
 }
 
 /**
+ * The menu window of a launcher host session, as an exact-pinned tmux target.
+ *
+ * Exported so the split path (`src/launch/global.ts`) addresses the same window
+ * this module kills and rebuilds, rather than spelling the target a second time.
+ * BOTH halves are pinned: an unpinned window name is a PREFIX match, so a window
+ * the user happened to call "launcher-notes" could be split in place of the menu.
+ */
+export function launcherWindowTarget(session: string): string {
+  return windowTarget(session, "launcher");
+}
+
+/**
+ * The panes of the menu window, each tagged with whether it is dead and whether
+ * it hosts a managed session of its own.
+ *
+ * Read per PANE rather than per window because the window can outlive the menu:
+ * a global orchestrator is parked in a pane beside it, and tmux only destroys a
+ * window once its LAST pane exits. A `#{pane_dead}` read off `list-windows`
+ * answers for whichever pane is active, which after the menu quits is the
+ * orchestrator — so the window would keep reporting itself as a running menu.
+ */
+function launcherPanes(session: string): { dead: boolean; managed: boolean }[] {
+  return tmuxLines([
+    "list-panes", "-t", launcherWindowTarget(session), "-F", `#{pane_dead}\t#{?${PANE_TARGET_OPTION},1,0}`,
+  ]).map((line) => {
+    const [dead, managed] = line.split("\t");
+    return { dead: dead === "1", managed: managed === "1" };
+  });
+}
+
+/**
  * Whether a launcher host session currently has a live window running the menu.
  * The menu window is pinned to the name "launcher"; tmux destroys a window when
  * its program exits (default `remain-on-exit off`), so a missing — or dead, if a
  * config kept it around — "launcher" window means the menu isn't running.
+ *
+ * A pane hosting a managed session never counts as the menu, however alive it is
+ * (see `launcherPanes`): `--tmux` promises to be a way BACK INTO the launcher, and
+ * an orchestrator holding the window open must not make it answer "already there".
  */
 export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean {
-  for (const line of tmuxLines(["list-windows", "-t", exactTarget(session), "-F", "#{window_name}\t#{pane_dead}"])) {
-    const [name, dead] = line.split("\t");
-    if (name === "launcher" && dead !== "1") return true;
-  }
-  return false;
+  return launcherPanes(session).some((p) => !p.dead && !p.managed);
 }
 
 /**
@@ -257,7 +344,39 @@ export function launcherWindowLive(session: string = LAUNCHER_SESSION): boolean 
  * attaches after.
  */
 function spawnLauncherWindow(session: string, cwd: string, launcherArgv: string[]): void {
-  tmuxQuiet(["kill-window", "-t", `${exactTarget(session)}:launcher`]); // no-op if none exists
+  // A LIVE managed pane in that window — a global orchestrator parked beside the
+  // menu — outlives the menu itself. Killing the window to rebuild it would take
+  // a running agent down with it, so re-split instead: `-b` puts the new menu
+  // back on the LEFT, where it sat before the user quit it. A DEAD one (only
+  // possible under `remain-on-exit on`) protects nothing and must not divert us
+  // from the kill-and-rebuild below, or every quit-menu → `--tmux` cycle would
+  // stack another corpse pane in the window.
+  //
+  // And NO `-d` here, unlike every other split this launcher makes. At launch
+  // time `-d` is right: the menu keeps the keyboard while the agent boots. Here
+  // the menu IS what is being rebuilt, and the only other pane in the window is a
+  // running orchestrator's — leaving it active would attach the user straight
+  // into that agent's input box, so the next thing they typed to get their menu
+  // back would be pasted into it as a prompt.
+  //
+  // The status is checked rather than fire-and-forget: tmux refuses a split it
+  // has no room for, and a silently missing menu is exactly the outcome the
+  // paragraph above is trying to prevent. Falling through then costs the dead
+  // orchestrator's window, which is the lesser harm — the user asked to get back
+  // into their launcher.
+  if (launcherPanes(session).some((p) => !p.dead && p.managed)) {
+    const split = spawnSync(
+      "tmux",
+      ["split-window", "-h", "-b", "-t", launcherWindowTarget(session), "-c", cwd, "--", ...launcherArgv],
+      { stdio: "ignore" },
+    );
+    if (split.status === 0) return;
+    console.error(
+      `warning: could not split the launcher window in tmux session "${session}" to rebuild the menu.\n` +
+        `  Rebuilding the window instead — a session parked in a pane of it will be closed.`,
+    );
+  }
+  tmuxQuiet(["kill-window", "-t", launcherWindowTarget(session)]); // no-op if none exists
   const at0 = spawnSync(
     "tmux",
     ["new-window", "-d", "-t", `${exactTarget(session)}:0`, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],

@@ -15,9 +15,12 @@
 // changed no caller. The re-exports are written out one by one rather than as
 // `export *` on purpose: several helpers that used to be file-private are now
 // exported from their new module so a sibling can reach them, and `export *`
-// would quietly promote every one of those into agendo's public surface. This
-// list is exactly the 70 names the single-file version exported, and a symbol
-// only joins it by being added here deliberately.
+// would quietly promote every one of those into agendo's public surface. The
+// list started as exactly the 70 names the single-file version exported, and a
+// symbol only joins it by being added here deliberately — the pane-hosting nine
+// (PANE_TARGET_OPTION, MIN_SPLIT_COLS, isPaneTarget, isPaneHosted, paneLocation,
+// splitTargetWidth, splitPaneIn, killPane, launcherWindowTarget) are the only
+// additions since.
 //
 // Where things went, and why in that order — each module may only import from
 // the ones above it, which is what keeps `import/no-cycle` green:
@@ -41,6 +44,8 @@ export {
   LAUNCHER_SESSION,
   ROOT_OPTION,
   PLACEHOLDER_OPTION,
+  PANE_TARGET_OPTION,
+  MIN_SPLIT_COLS,
   ID_BEARING_NAME,
   tmuxAvailable,
   insideTmux,
@@ -48,6 +53,8 @@ export {
   sessionName,
   kindName,
   managedKind,
+  isPaneTarget,
+  isPaneHosted,
   type SessionKind,
   type LiveTarget,
   type ManagedTarget,
@@ -100,6 +107,8 @@ export {
   liveWindows,
   liveTargets,
   liveManagedPaths,
+  paneLocation,
+  splitTargetWidth,
   exactTarget,
   windowTarget,
   hasSession,
@@ -120,6 +129,9 @@ export {
   markPlaceholder,
   newWindow,
   newWindowIn,
+  killPane,
+  splitPaneIn,
   launcherWindowLive,
+  launcherWindowTarget,
   enterLauncherSession,
 } from "./tmux/windows.ts";

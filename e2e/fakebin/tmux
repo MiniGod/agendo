@@ -44,11 +44,23 @@ function readState() {
       // pane that is merely blank. No static screen text can express it, since
       // the difference lives in the exit status, not the output.
       captureFails: s.captureFails ?? {},
+      // Width in columns reported for `display-message '#{pane_width}'`, which
+      // decides whether the pane a split would cut in two is wide enough to hold
+      // the agendo menu and the global orchestrator side by side. Defaults to a normal-sized terminal so the split
+      // path is what a fixture gets without saying anything; set it to a small
+      // number for the narrow-terminal fallback, or to 0 for the "can't measure
+      // it" one (tmux answers an unresolvable target with no output, and agendo
+      // reads any non-positive answer as unmeasurable either way).
+      paneWidth: s.paneWidth ?? 200,
+      // Makes `split-window` fail the way a real server does when the window has
+      // no room left for another pane. Not expressible any other way: the whole
+      // signal is the exit status.
+      splitFails: s.splitFails ?? false,
     };
   } catch {
     // Also the mid-write case: setTmuxState rewrites the file non-atomically
     // while a launcher polls, so every key a command reads must be present here.
-    return { sessions: [], windows: [], panes: [], captures: {}, cursors: {}, captureQueue: {} };
+    return { sessions: [], windows: [], panes: [], captures: {}, cursors: {}, captureQueue: {}, paneWidth: 200, splitFails: false };
   }
 }
 function writeState(s) {
@@ -152,7 +164,15 @@ function emit(fmt, record) {
     .replace(/#\{pane_current_path\}/g, record.cwd ?? "")
     .replace(/#\{pane_dead\}/g, record.dead ? "1" : "0")
     // The placeholder conditional `#{?@cl_placeholder,1,0}` → the pane's flag.
-    .replace(/#\{\?@cl_placeholder,1,0\}/g, record.placeholder ? "1" : "0");
+    .replace(/#\{\?@cl_placeholder,1,0\}/g, record.placeholder ? "1" : "0")
+    // The same conditional over the PANE option, asked when deciding whether the
+    // menu window still runs a menu or only the orchestrator parked beside it.
+    .replace(/#\{\?@cl_pane_target,1,0\}/g, record.paneTarget ? "1" : "0")
+    // A pane's own id and its `@cl_pane_target` option — how a session parked in
+    // somebody else's window (the global orchestrator, beside the menu) is found
+    // at all: it owns no window, so its managed name lives on the pane.
+    .replace(/#\{pane_id\}/g, record.id ?? "")
+    .replace(/#\{@cl_pane_target\}/g, record.paneTarget ?? "");
 }
 
 log();
@@ -186,8 +206,42 @@ switch (cmd) {
   }
   case "list-panes": {
     const fmt = format() ?? "#{pane_current_path}";
-    process.stdout.write(state.panes.map((p) => emit(fmt, p)).join("\n"));
-    if (state.panes.length) process.stdout.write("\n");
+    // Real tmux scopes `list-panes -t <window>` to that ONE window, and only `-a`
+    // spans the server. Modelled because the launcher asks both ways for
+    // different reasons — `-a` to find every managed pane anywhere, `-t
+    // =<session>:launcher` to ask whether the menu window still runs a menu — and
+    // an unscoped answer would let panes from an unrelated window vouch for it.
+    const target = flag("-t");
+    const panes =
+      argv.includes("-a") || !target
+        ? state.panes
+        : state.panes.filter(
+            (p) => p.session === sessionOptionTarget(state, target) && p.window === targetName(state, target),
+          );
+    process.stdout.write(panes.map((p) => emit(fmt, p)).join("\n"));
+    if (panes.length) process.stdout.write("\n");
+    process.exit(0);
+  }
+  case "kill-pane": {
+    // Destructive and modelled for the same reason kill-window is: closing a
+    // pane-hosted session must show up as THAT pane disappearing. tmux addresses
+    // a pane by its `%N` id, which is unambiguous, so there is no prefix
+    // resolution to imitate here. A window whose last pane goes takes the window
+    // (and an emptied session) with it, exactly as the server does.
+    const id = flag("-t") ?? "";
+    const pane = state.panes.find((p) => p.id === id);
+    if (!pane) {
+      process.stderr.write(`can't find pane: ${id}\n`);
+      process.exit(1);
+    }
+    state.panes = state.panes.filter((p) => p !== pane);
+    if (!state.panes.some((p) => p.session === pane.session && p.window === pane.window)) {
+      state.windows = state.windows.filter((w) => !(w.session === pane.session && (w.name ?? w.window) === pane.window));
+    }
+    if (!state.windows.some((w) => w.session === pane.session) && !state.panes.some((p) => p.session === pane.session)) {
+      state.sessions = state.sessions.filter((x) => x !== pane.session);
+    }
+    writeState(state);
     process.exit(0);
   }
   case "capture-pane": {
@@ -225,6 +279,14 @@ switch (cmd) {
     const target = flag("-t");
     const cursor = state.cursors?.[targetName(state, target)];
     if (fmt.includes("#{cursor_x}") && cursor) process.stdout.write(`${cursor.x} ${cursor.y}\n`);
+    // How wide the pane a split would cut in two is (see state.paneWidth).
+    else if (fmt.includes("#{pane_width}")) process.stdout.write(`${state.paneWidth}\n`);
+    // `#{session_name}` with no -t is "which session am I in" (currentSessionName).
+    // Answered ONLY when a fixture says so: printing nothing is what this stub has
+    // always done, and several tests depend on that reading back as "unknown".
+    else if (fmt.includes("#{session_name}") && target === undefined) {
+      if (state.currentSession) process.stdout.write(`${state.currentSession}\n`);
+    }
     // `#{window_name}` at a `session:index` location — what agendo re-reads right
     // before a kill to prove the index still names the window it resolved.
     // Prints nothing when the location holds no window, as tmux does on an
@@ -306,6 +368,34 @@ switch (cmd) {
     }
     process.exit(0);
   }
+  case "split-window": {
+    // `split-window -h -d -P -F '#{pane_id}' -t <window> -c <cwd> -- <argv...>`:
+    // the global orchestrator being parked beside the menu. Modelled rather than
+    // stubbed because BOTH halves of the answer are load-bearing — the exit
+    // status says whether a pane was created at all, and the printed pane id is
+    // the only handle anything downstream has on the session that now runs there.
+    if (state.splitFails) {
+      process.stderr.write("create pane failed: pane too small\n");
+      process.exit(1);
+    }
+    const target = flag("-t") ?? "";
+    const colon = target.indexOf(":");
+    const session = colon === -1 ? resolveTarget(target.replace(/^=/, ""), state.sessions) : resolveTarget(target.slice(0, colon), state.sessions);
+    const window = targetName(state, target);
+    // tmux can only split a window it can find; agendo treats that refusal as
+    // "open a window instead", so the stub has to be able to produce it.
+    if (session === undefined || !windowNames(state).includes(window)) {
+      process.stderr.write(`can't find window: ${target}\n`);
+      process.exit(1);
+    }
+    const id = `%${state.nextPaneId ?? state.panes.length + 1}`;
+    state.nextPaneId = Number(id.slice(1)) + 1;
+    state.panes.push({ session, window, cwd: flag("-c") ?? "", id });
+    writeState(state);
+    const fmt = format();
+    if (argv.includes("-P") && fmt) process.stdout.write(`${emit(fmt, { id })}\n`);
+    process.exit(0);
+  }
   // Session options (`@cl_root`), modelled rather than stubbed, because the
   // WHOLE bug these two once had lived in the exit status a stub would have
   // thrown away.
@@ -329,6 +419,21 @@ switch (cmd) {
     // Their `=session:=window` target already carries a colon, so it parses.
     // Left as the silent success it has always been.
     if (argv.includes("-w")) process.exit(0);
+    // Pane options (-p) take a target-PANE and the launcher only ever writes one:
+    // `@cl_pane_target`, the managed name stamped on a pane so a session with no
+    // window of its own is still discoverable. Stored on the pane record, where
+    // the list-panes format reads it back from.
+    if (argv.includes("-p")) {
+      const pane = state.panes.find((x) => x.id === flag("-t"));
+      if (!pane) {
+        process.stderr.write(`can't find pane: ${flag("-t")}\n`);
+        process.exit(1);
+      }
+      const [opt, value] = argv.slice(argv.indexOf("-t") + 2).filter((a) => !a.startsWith("-"));
+      if (opt === "@cl_pane_target") pane.paneTarget = value ?? "";
+      writeState(state);
+      process.exit(0);
+    }
     const target = flag("-t") ?? "";
     const session = sessionOptionTarget(state, target);
     if (session === undefined) {
@@ -358,6 +463,7 @@ switch (cmd) {
   }
   // Navigation / config commands: nothing to do, just succeed.
   case "set-window-option":
+  case "select-pane":
   case "select-window":
   case "switch-client":
   case "attach-session":

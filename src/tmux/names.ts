@@ -32,6 +32,40 @@ export const ROOT_OPTION = "@cl_root";
  */
 export const PLACEHOLDER_OPTION = "@cl_placeholder";
 
+/**
+ * tmux *pane* user-option naming the managed target a pane hosts.
+ *
+ * Managed sessions are normally identified by a `cl-…` window (or session) name.
+ * The global orchestrator breaks that: it runs as a split pane BESIDE the menu,
+ * inside the launcher's own window, which keeps its own `launcher` name — so
+ * there is no `cl-…` name anywhere for the discovery pass to see, and the session
+ * would look dead to `list`, to the TUI and to `send`. Stamping the pane with its
+ * managed name puts it back on the one discovery path (`liveManagedPaths`), and
+ * the pane id read alongside it is a first-class tmux target, so capture /
+ * send-keys / navigate all work against it unchanged.
+ */
+export const PANE_TARGET_OPTION = "@cl_pane_target";
+
+/**
+ * Minimum width (columns) of the PANE a split would cut in two before doing it is
+ * worth it — the pane, not the window, because that is what tmux halves (see
+ * `splitTargetWidth`). Each half has to hold a full agent TUI — claude's own
+ * layout starts wrapping badly under ~74 columns — so below this the split
+ * produces two unusable panes and a separate window is the better answer.
+ * Callers fall back rather than refuse.
+ */
+export const MIN_SPLIT_COLS = 150;
+
+/**
+ * Whether a tmux target string is a pane id (`%42`) rather than a name. Pane ids
+ * are the only targets the launcher mints that are not managed names, and they
+ * need no `exactTarget` pin — tmux resolves `%N` by identity, so the prefix
+ * hazard `exactTarget` exists for cannot apply.
+ */
+export function isPaneTarget(target: string): boolean {
+  return /^%\d+$/.test(target);
+}
+
 export function tmuxAvailable(): boolean {
   return spawnSync("tmux", ["-V"], { encoding: "utf-8" }).status === 0;
 }
@@ -121,5 +155,16 @@ export interface LiveTarget {
 export interface ManagedTarget extends LiveTarget {
   cwd: string;
   placeholder: boolean;
+}
+
+/**
+ * Whether a managed target lives in a pane of somebody else's window rather than
+ * in a window or session of its own. The two are addressed identically once
+ * resolved — that is the point of carrying `target` — but only the pane-hosted
+ * one is invisible to the name-based lookups (`liveWindows`, `liveTargets`,
+ * `hasSession`), which is what callers actually need to know.
+ */
+export function isPaneHosted(t: ManagedTarget): boolean {
+  return isPaneTarget(t.target);
 }
 
