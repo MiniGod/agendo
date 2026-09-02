@@ -2,8 +2,8 @@ import type { Key } from "ink";
 import { openSession } from "../../launch.ts";
 import { sessionName } from "../../tmux.ts";
 import type { Row } from "../rows.ts";
-import { V } from "../vocabState.ts";
 import type { KeyContext, View } from "./context.ts";
+import { handleListRowActionKeys, type RowActionCtx } from "./rowActions.ts";
 import { ancestorIndex, expandKeyOf, firstChildIndex, isExpandable, isOpen } from "./rowTree.ts";
 
 type ViewCtx = Pick<
@@ -29,10 +29,6 @@ type ViewCtx = Pick<
   | "requested"
   | "setRescanKey"
   | "reload"
->;
-type RowActionCtx = Pick<
-  KeyContext,
-  "rows" | "cursor" | "setNotice" | "setMode" | "continueInOtherAgent" | "enterProfilePicker"
 >;
 type NavCtx = Pick<
   KeyContext,
@@ -165,57 +161,6 @@ function handleSessionStartKeys(
   // (no repo or worktree left to pick) beside this menu.
   if (input === "G") { ctx.enterGlobalOrchestrator(); return true; }
 
-  return false;
-}
-
-function handleListRowActionKeys(input: string, key: Key, ctx: RowActionCtx): boolean {
-  // continue the hovered session in the other agent: convert its transcript
-  // and resume the result. Works on a session row in any view. Guard against
-  // ctrl-c (handled earlier as quit) so a bare `c` is required.
-  if (input === "c" && !key.ctrl && !key.meta) {
-    const row = ctx.rows[ctx.cursor];
-    if (!row || row.kind !== "session") {
-      ctx.setNotice("Select a session row first to continue it in another agent.");
-      return true;
-    }
-    ctx.continueInOtherAgent(row.session);
-    return true;
-  }
-
-  // move the hovered session to another Claude profile (~/.claude*). Works on
-  // a session row in any view, like `c`.
-  if (input === "m" && !key.ctrl && !key.meta) {
-    const row = ctx.rows[ctx.cursor];
-    if (!row || row.kind !== "session") {
-      ctx.setNotice("Select a session row first to move it to another profile.");
-      return true;
-    }
-    ctx.enterProfilePicker(row.session);
-    return true;
-  }
-
-  // open the hovered work item / PR / session in the browser
-  if (input === "o") {
-    const row = ctx.rows[ctx.cursor];
-    if (!row || (row.kind !== "item" && row.kind !== "pr" && row.kind !== "session")) {
-      ctx.setNotice("Nothing to open in the browser for this row.");
-      return true;
-    }
-    const targets = row.open;
-    if (!targets || (!targets.pr && !targets.workItem)) {
-      ctx.setNotice("Nothing to open in the browser for this row.");
-      return true;
-    }
-    const title =
-      row.kind === "item"
-        ? `#${row.item.id} — ${row.item.title}`
-        : row.kind === "pr"
-          ? `PR ${V.prPrefix}${row.pr.id} — ${row.pr.title}`
-          : row.session.title;
-    ctx.setNotice(null);
-    ctx.setMode({ kind: "open", targets, title });
-    return true;
-  }
   return false;
 }
 
