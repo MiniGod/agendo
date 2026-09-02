@@ -1,6 +1,6 @@
 {
   "name": "agendo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Terminal UI to launch/resume Claude, Copilot and Codex agent sessions for Azure DevOps work items",
   "repository": {
     "type": "git",
@@ -39,7 +39,7 @@
     "prepare": "git config core.hooksPath .githooks || true",
     "typecheck:e2e": "tsc --noEmit -p e2e/tsconfig.json",
     "test": "bun test test/",
-  "test:e2e": "playwright test",
+    "test:e2e": "playwright test",
     "test:e2e:setup": "playwright install chromium"
   },
   "dependencies": {

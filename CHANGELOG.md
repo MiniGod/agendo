@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.2.1](https://github.com/MiniGod/agendo/compare/v0.2.0...v0.2.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **detection:** split "main agent busy" from "session still working" ([#44](https://github.com/MiniGod/agendo/issues/44)) ([#48](https://github.com/MiniGod/agendo/issues/48)) ([f568c90](https://github.com/MiniGod/agendo/commit/f568c9047d8780caee6b8810f3e2df8a0cff62ac)), closes [#47](https://github.com/MiniGod/agendo/issues/47) [#41](https://github.com/MiniGod/agendo/issues/41)
+* **hooks:** bound the pre-push lint range at the merge-base with master ([#64](https://github.com/MiniGod/agendo/issues/64)) ([0480123](https://github.com/MiniGod/agendo/commit/0480123022f1fa5505ed6705fbdc6f7a219c02dc))
+* **tmux:** address session options through a valid pane target ([#66](https://github.com/MiniGod/agendo/issues/66)) ([8dd89d3](https://github.com/MiniGod/agendo/commit/8dd89d3676f014034cda7e706d6205c78d8c3646)), closes [#45](https://github.com/MiniGod/agendo/issues/45) [#45](https://github.com/MiniGod/agendo/issues/45)
+* **transcripts:** recover the intact record from a torn JSONL append ([#53](https://github.com/MiniGod/agendo/issues/53)) ([fcae55b](https://github.com/MiniGod/agendo/commit/fcae55b8352432bea7af49de05a4e650d0e07e67))
+
+
+### Refactoring
+
+* **ado:** split src/ado.ts into six modules ([#57](https://github.com/MiniGod/agendo/issues/57)) ([515c382](https://github.com/MiniGod/agendo/commit/515c382322c2a8bbb6f24b1265e84b1f15f0bdad)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55) [#56](https://github.com/MiniGod/agendo/issues/56)
+* **cli:** split src/index.tsx and delete the last exemption ([#62](https://github.com/MiniGod/agendo/issues/62)) ([8b5dd9c](https://github.com/MiniGod/agendo/commit/8b5dd9c668ac41b36fafbad43bf99857238be5ef))
+* **clone:** split src/clone.ts into src/clone/ and drop the ratchet to 555 ([#60](https://github.com/MiniGod/agendo/issues/60)) ([4bbcb4b](https://github.com/MiniGod/agendo/commit/4bbcb4bc35c98a9b88c36b860691a1868cc718f9)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55) [#56](https://github.com/MiniGod/agendo/issues/56) [#57](https://github.com/MiniGod/agendo/issues/57) [#58](https://github.com/MiniGod/agendo/issues/58) [#59](https://github.com/MiniGod/agendo/issues/59)
+* **launch:** split src/launch.ts into four modules ([#56](https://github.com/MiniGod/agendo/issues/56)) ([d9ec46d](https://github.com/MiniGod/agendo/commit/d9ec46d17cf37b2f275218142565677583cbcf2a)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55) [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55)
+* **sessions:** split src/sessions.ts into src/sessions/ ([#58](https://github.com/MiniGod/agendo/issues/58)) ([1294ecb](https://github.com/MiniGod/agendo/commit/1294ecbd9744400ce1f409d423c2507ff06f5397)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55) [#56](https://github.com/MiniGod/agendo/issues/56) [#57](https://github.com/MiniGod/agendo/issues/57)
+* split App.tsx and index.tsx along their seams, and spend the ratchet ([#41](https://github.com/MiniGod/agendo/issues/41)) ([01257cf](https://github.com/MiniGod/agendo/commit/01257cf78ac5575b9bf24a328d0132412fb75fc7)), closes [#40](https://github.com/MiniGod/agendo/issues/40) [#39](https://github.com/MiniGod/agendo/issues/39) [#40](https://github.com/MiniGod/agendo/issues/40) [#39](https://github.com/MiniGod/agendo/issues/39)
+* split format.ts, restore.ts and model.ts, landing the ratchet at 486 ([#61](https://github.com/MiniGod/agendo/issues/61)) ([9d9c1b7](https://github.com/MiniGod/agendo/commit/9d9c1b7d0cdc6a0d216f17ce9d330c9a0a0d7443)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55) [#56](https://github.com/MiniGod/agendo/issues/56) [#57](https://github.com/MiniGod/agendo/issues/57) [#58](https://github.com/MiniGod/agendo/issues/58) [#59](https://github.com/MiniGod/agendo/issues/59) [#60](https://github.com/MiniGod/agendo/issues/60) [#59](https://github.com/MiniGod/agendo/issues/59)
+* **tmux:** split src/tmux.ts into src/tmux/ and delete its ratchet exemption ([#54](https://github.com/MiniGod/agendo/issues/54)) ([95843a1](https://github.com/MiniGod/agendo/commit/95843a1b2e5067014d791130fbc3e8bfaf609069))
+* **ui:** split src/ui/App.tsx and drop its complexity exemption ([#55](https://github.com/MiniGod/agendo/issues/55)) ([2ed55f4](https://github.com/MiniGod/agendo/commit/2ed55f4fcdd346c501b8263d9e3c5e507a6f832e)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#54](https://github.com/MiniGod/agendo/issues/54)
+* **wait:** split src/wait.ts into src/wait/ and drop the ratchet to 696 ([#59](https://github.com/MiniGod/agendo/issues/59)) ([6d3013d](https://github.com/MiniGod/agendo/commit/6d3013dab4b19b10ecdd22115ca92682ea812ca2)), closes [#54](https://github.com/MiniGod/agendo/issues/54) [#55](https://github.com/MiniGod/agendo/issues/55) [#56](https://github.com/MiniGod/agendo/issues/56) [#57](https://github.com/MiniGod/agendo/issues/57) [#58](https://github.com/MiniGod/agendo/issues/58)
+
+
+### Documentation
+
+* **cli:** say that close refuses a session whose subagent is running ([#67](https://github.com/MiniGod/agendo/issues/67)) ([72c12de](https://github.com/MiniGod/agendo/commit/72c12deff94a9da0734b84e74a73044491087d53)), closes [#44](https://github.com/MiniGod/agendo/issues/44) [#44](https://github.com/MiniGod/agendo/issues/44) [#45](https://github.com/MiniGod/agendo/issues/45)
+* verify the README against the built binary and refresh the hero ([#45](https://github.com/MiniGod/agendo/issues/45)) ([45929bc](https://github.com/MiniGod/agendo/commit/45929bc2f6521a732bde612b6898e353eb0bac0b)), closes [#41](https://github.com/MiniGod/agendo/issues/41) [#54](https://github.com/MiniGod/agendo/issues/54) [#63](https://github.com/MiniGod/agendo/issues/63) [#64](https://github.com/MiniGod/agendo/issues/64) [#44](https://github.com/MiniGod/agendo/issues/44) [#48](https://github.com/MiniGod/agendo/issues/48) [#44](https://github.com/MiniGod/agendo/issues/44)
+
 ## [0.2.0](https://github.com/MiniGod/agendo/compare/v0.1.1...v0.2.0) (2026-08-20)
 
 
