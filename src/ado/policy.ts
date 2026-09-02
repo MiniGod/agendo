@@ -1,4 +1,5 @@
 import type { Identity, PullRequest, ReviewPR } from "../types.ts";
+import { aggregateBuild, type BuildStatus, buildResult, worstExpired } from "./build.ts";
 import { API, cfg } from "./env.ts";
 import { adoGet } from "./http.ts";
 import { getTeamsForMember } from "./identity.ts";
@@ -13,53 +14,19 @@ async function getProjectId(): Promise<string> {
   return cachedProjectId;
 }
 
-type BuildStatus = "pass" | "fail" | "running" | "queued" | "expired" | "none";
-
-// Classify the build policies on a PR. ADO reports a build whose result has
-// aged out past the policy's `validDuration` as status "queued" with a context
-// flagged `isExpired` — even though nothing is actually queued. We separate
-// those (→ "expired", surfacing the build ids so the prior result can be
-// recovered) from genuinely-waiting builds (→ "queued").
-function aggregateBuild(evals: any[]): { status: BuildStatus; expiredBuildIds: number[] } {
-  const builds = (evals ?? []).filter(
-    (e) => e.configuration?.type?.displayName === "Build" && e.status && e.status !== "notApplicable",
-  );
-  if (builds.length === 0) return { status: "none", expiredBuildIds: [] };
-
-  const expiredBuildIds: number[] = [];
-  let hasFreshQueued = false;
-  for (const e of builds) {
-    if (e.status !== "queued") continue;
-    if (e.context?.isExpired && e.context?.buildId > 0) expiredBuildIds.push(e.context.buildId);
-    else hasFreshQueued = true;
-  }
-  const statuses = builds.map((e) => e.status as string);
-
-  // Worst / most-actionable state first. "expired" sits below genuinely-queued
-  // (a fresh build is in flight) but above a stale "pass".
-  if (statuses.includes("rejected")) return { status: "fail", expiredBuildIds };
-  if (statuses.includes("running")) return { status: "running", expiredBuildIds };
-  if (hasFreshQueued) return { status: "queued", expiredBuildIds };
-  if (expiredBuildIds.length) return { status: "expired", expiredBuildIds };
-  if (statuses.includes("approved")) return { status: "pass", expiredBuildIds };
-  return { status: "none", expiredBuildIds };
-}
-
 // A completed build's result is immutable and a purged build stays purged, so
 // cache every outcome (including "unknown") for the process lifetime.
 const buildResultCache = new Map<number, "pass" | "fail" | undefined>();
 
 // Pass/fail of a finished build, or undefined if it's no longer fetchable
-// (purged by retention) or didn't reach a clear pass/fail outcome.
-async function fetchBuildResult(buildId: number): Promise<"pass" | "fail" | undefined> {
+// (purged by retention) or didn't reach a clear pass/fail outcome. `get` is
+// the request, defaulted to the real one; the unit suite passes a fake, since
+// no fixture expires a build and a purged one cannot be staged.
+export async function fetchBuildResult(buildId: number, get: (path: string) => Promise<any> = adoGet): Promise<"pass" | "fail" | undefined> {
   if (buildResultCache.has(buildId)) return buildResultCache.get(buildId);
   let result: "pass" | "fail" | undefined;
   try {
-    const b = await adoGet(`${encodeURIComponent(cfg.project)}/_apis/build/builds/${buildId}?${API}`);
-    if (b.status === "completed") {
-      if (b.result === "succeeded") result = "pass";
-      else if (b.result === "failed") result = "fail";
-    }
+    result = buildResult(await get(`${encodeURIComponent(cfg.project)}/_apis/build/builds/${buildId}?${API}`));
   } catch {
     result = undefined; // 404 → build purged by retention; result unrecoverable.
   }
@@ -94,13 +61,7 @@ async function fetchBuildAndApprovers(
         `?artifactId=${encodeURIComponent(art)}&api-version=7.1-preview.1`,
     );
     const { status, expiredBuildIds } = aggregateBuild(data.value);
-    let expiredResult: "pass" | "fail" | undefined;
-    if (status === "expired") {
-      const results = await Promise.all(expiredBuildIds.map(fetchBuildResult));
-      // A failed expired build outranks a passed one in the summary.
-      if (results.includes("fail")) expiredResult = "fail";
-      else if (results.includes("pass")) expiredResult = "pass";
-    }
+    const expiredResult = status === "expired" ? worstExpired(await Promise.all(expiredBuildIds.map((id) => fetchBuildResult(id)))) : undefined;
     return { build: status, expiredResult, minCount: minApproverCount(data.value) };
   } catch {
     return { build: "none", minCount: 0 };
