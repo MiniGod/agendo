@@ -16,13 +16,19 @@ import { idleSeconds, isStalled, resolveStalledAfterMs } from "../idle.ts";
 import { resolveWindowSession } from "../restore.ts";
 import { scopeFilter, scopeNote, type SessionScope } from "../scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "../model.ts";
+import { orchestratorRoles, type OrchestratorRole } from "../orchestrator.ts";
+import { repoRootForCwd } from "../repos.ts";
 import { printJson } from "../output.ts";
 import type { AgentSession, AgentSource, BranchSync, BranchSyncReader, WorkflowStatus } from "../types.ts";
 import { workflowStatus } from "../workflows.ts";
 import { flushWarnings } from "./warnings.ts";
 import { padCell, readyCell, readyWidth, rowCompactionPercent, rowResetAt, timeAgo } from "./cells.ts";
 import { currentModelOptions } from "./links.ts";
-import { KIND_LABEL, STALLED_MARK } from "./glyphs.ts";
+import { STALLED_MARK } from "./glyphs.ts";
+import {
+  KIND_COL, printOrchestratorSummary, roleLabel, withRememberedOrchestrators,
+  type OrchestratorSummaryRow,
+} from "./orchestrators.ts";
 
 export interface ListOptions {
   /** Injected reader for a checkout's local-vs-tracked state (see the header). */
@@ -79,8 +85,31 @@ interface ListRow {
   shells: number;
   /** How it was launched, when running (from the live-tmux reconciliation). */
   kind: SessionKind | null;
+  /**
+   * Whether this session coordinates other sessions rather than doing work
+   * itself, and at which level of the hierarchy — `"repo"` runs one repository's
+   * sessions and merges their branches, `"global"` runs the repo orchestrators.
+   * `null` (and `orchestrator: false`) is an ordinary worktree session.
+   *
+   * A first-class field, not an inference from `kind`: an orchestrator launches
+   * as a `background` session and is indistinguishable from one by every other
+   * field on this row. Unlike the live-only `kind`, it is known for idle sessions
+   * too — the marker file outlives the tmux window.
+   */
+  orchestrator: boolean;
+  role: OrchestratorRole | null;
   branch: string | null;
   cwd: string;
+  /**
+   * The repo the session belongs to — its checkout's root, so every worktree
+   * folds back onto the repository itself. This is the grouping key for "which
+   * repos have an orchestrator and which do not", and a consumer cannot derive it
+   * from `cwd` without repeating agendo's worktree-path arithmetic.
+   *
+   * NULL for a `role: "global"` row, which belongs to no repository at all.
+   */
+  repoRoot: string | null;
+  repoName: string | null;
   dir: string;
   title: string;
   /** When the session was last active (ISO 8601), for machine consumers. */
@@ -163,6 +192,8 @@ export async function runList(opts: ListOptions): Promise<void> {
   flushWarnings("list");
 
   const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
+  // One read of the marker file for the whole listing, not one per row.
+  const roles = orchestratorRoles();
   const linkOf = (s: AgentSession) => model?.sessionLinks.get(`${s.source}:${s.id}`);
 
   let sessions: AgentSession[];
@@ -195,6 +226,7 @@ export async function runList(opts: ListOptions): Promise<void> {
   const rows: ListRow[] = sessions.map((s) => {
     const canon = sessionName(s);
     const running = live.has(canon);
+    const role = roles.get(s.id) ?? null;
     const window = liveWindows.get(canon);
     let readiness: Readiness | null = null;
     let shells = 0;
@@ -230,8 +262,19 @@ export async function runList(opts: ListOptions): Promise<void> {
       compactionPercent,
       shells,
       kind: running ? liveKinds.get(canon) ?? null : null,
+      orchestrator: roles.has(s.id),
+      role,
       branch: s.branch ?? null,
       cwd: s.cwd,
+      // NULL for the global orchestrator, which belongs to no repository. Its cwd
+      // is a vantage point picked precisely because it is not a checkout, so
+      // `repoRootForCwd` hands back that bare directory — and a consumer applying
+      // the rule this listing is documented by ("a repo whose rows carry no
+      // role:'repo' session is unmanaged") would read it as a repo nobody is
+      // coordinating and start an orchestrator in a non-repo. `list repos` leaves
+      // it out for the same reason.
+      repoRoot: role === "global" ? null : repoRootForCwd(s.cwd),
+      repoName: role === "global" ? null : basename(repoRootForCwd(s.cwd)) || repoRootForCwd(s.cwd),
       dir: basename(s.cwd) || s.cwd,
       title: s.title.replace(/\s+/g, " ").trim(),
       lastUsed: s.lastUsed.toISOString(),
@@ -283,7 +326,7 @@ export async function runList(opts: ListOptions): Promise<void> {
   );
   const rw = readyWidth(ready);
   console.log(
-    ["", "ready".padEnd(rw), "kind".padEnd(3), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+    ["", "ready".padEnd(rw), "kind".padEnd(KIND_COL), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
   );
   for (const [i, r] of rows.entries()) {
     const wfRunning = r.workflows.filter((w) => w.status === "running").length;
@@ -291,7 +334,7 @@ export async function runList(opts: ListOptions): Promise<void> {
       [
         r.running ? "●" : "○",
         ready[i].padEnd(rw),
-        (r.kind ? KIND_LABEL[r.kind] : "-").padEnd(3),
+        roleLabel(r.role, r.kind).padEnd(KIND_COL),
         r.shortId.padEnd(12),
         timeAgo(new Date(r.lastUsed)).padEnd(8),
         padCell(r.dir, 20),
@@ -304,6 +347,11 @@ export async function runList(opts: ListOptions): Promise<void> {
       ].join("  ").trimEnd(),
     );
   }
+  // Same summary the plain list prints, from the same rows the table just used —
+  // so `--all` reports a repo as unmanaged on exactly the sessions it showed.
+  printOrchestratorSummary(
+    rows.map((r) => ({ shortId: r.shortId, cwd: r.cwd, role: r.role, running: r.running })),
+  );
 }
 
 /**
@@ -317,6 +365,11 @@ export async function runList(opts: ListOptions): Promise<void> {
  * no selector was given); `thresholdMs` (already resolved by the caller) decides
  * the ⚠stalled marker. The two are independent: scoping picks which sessions are
  * listed, and each listed session is judged exactly as it would be unscoped.
+ *
+ * Coordinators are called out twice: `orch`/`global` in the kind column, and a
+ * per-repo summary underneath saying which repos have an orchestrator and which
+ * have none. That second one is the question a global orchestrator asks, and it
+ * cannot be read off a table sorted by session.
  */
 function runPlainList(
   index: SessionIndex,
@@ -324,9 +377,12 @@ function runPlainList(
   thresholdMs: number,
 ): void {
   const seen = new Set<string>();
+  // One read of the marker file for the whole listing, not one per row.
+  const roles = orchestratorRoles();
   // Cells, not finished lines: the readiness column's width isn't known until
   // every row is in (a `limited <time>` cell is wider than the state words).
   const rows: string[][] = [];
+  const summary: OrchestratorSummaryRow[] = [];
   for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
     const kind = managedKind(name);
     if (!kind) continue;
@@ -343,6 +399,8 @@ function runPlainList(
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const role = roles.get(s.id) ?? null;
+    summary.push({ shortId: shortId(s.id), cwd: s.cwd, role, running: true });
     const { raw, cursor } = capturePaneState(target);
     const shells = paneShells(raw);
     const readiness = paneReadiness(raw, cursor);
@@ -360,7 +418,7 @@ function runPlainList(
     rows.push([
       "●",
       readyCell(readiness, rowResetAt(readiness, raw), rowCompactionPercent(readiness, raw)),
-      KIND_LABEL[kind].padEnd(3),
+      roleLabel(role, kind).padEnd(KIND_COL),
       shortId(s.id).padEnd(12), // bounds at 12 but does not pad; a shorter id left the rest of the row ragged
       timeAgo(s.lastUsed).padEnd(8),
       padCell(basename(s.cwd) || s.cwd, 24),
@@ -376,6 +434,9 @@ function runPlainList(
   }
   const rw = readyWidth(rows.map((r) => r[1]));
   for (const [dot, ready, ...rest] of rows) console.log([dot, ready.padEnd(rw), ...rest].join("  ").trimEnd());
+  printOrchestratorSummary(
+    withRememberedOrchestrators(summary, index.all.filter(inScope), roles, shortId),
+  );
 }
 
 /**

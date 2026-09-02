@@ -50,10 +50,30 @@ Usage:
                                 background launches it keeps its approval prompts,
                                 since it acts on your main checkout; --unattended
                                 waives them.
-      --unattended              Only with --orchestrator: run it auto-approving, like
-                                an ordinary background session. It merges into your
-                                main checkout and spawns further sessions, so this
-                                hands all of that over unreviewed.
+      --global-orchestrator, -G Run the GLOBAL orchestrator — one level above
+                                --orchestrator. It writes no code and operates on no
+                                repository at all (not even a merge; that is each repo
+                                orchestrator's job). It surveys repos with
+                                "agendo list repos", starts a repo orchestrator where
+                                one is missing, and coordinates ONLY with those — never
+                                with an individual worktree session. Claude only, and
+                                tied to no repo, so it takes no worktree, no branch and
+                                no --name. By default it opens as a tmux pane BESIDE
+                                the agendo TUI so both are visible at once; --window
+                                gives it its own tab instead (for narrow terminals),
+                                and outside tmux it gets its own session. Also
+                                spellable as --orchestrator --global.
+      --window / --pane         Only with --global-orchestrator: open it as its own
+                                tmux window, or ask for the split pane (the default).
+                                Neither --pane nor the default can force it: a pane
+                                too narrow to split usefully, or no agendo menu to
+                                split at all, falls back to a window and says so.
+      --unattended              Only with --orchestrator or --global-orchestrator: run
+                                it auto-approving, like an ordinary background session.
+                                A repo orchestrator merges into your main checkout and
+                                spawns further sessions; a global one starts
+                                orchestrators in OTHER repos' main checkouts. Either
+                                way this hands all of that over unreviewed.
       --model <name>            Model for the new session, passed to the agent
       --fallback-model <name>   Claude only: model to fall back to when overloaded
                                 Any other dashed argument is an error; put prompt
@@ -67,10 +87,16 @@ Usage:
                                 says when it resets — waiting on a quota, so
                                 never ⚠stalled. With a dir, only sessions whose
                                 cwd is under it are shown.
+                                The kind column marks coordinators: "orch" is a repo
+                                orchestrator, "global" the global one; everything else
+                                is an ordinary session. Under the table, one line per
+                                repo names its orchestrator or says it has none.
       --json                    Emit machine-readable JSON (with branch + linked
                                 PR + work-item/issue + idleSeconds/stalled +
                                 ISO limitResetAt + unpushed-work state per session,
                                 each link carrying a full prUrl / workItemUrl).
+                                Also per session: orchestrator (boolean), role
+                                ("repo" | "global" | null) and repoRoot/repoName.
       --stalled-after <dur>     Idle time after which a live, non-busy session is
                                 flagged stalled (default 4h; persist your own via
                                 "stalledAfterMinutes" in ~/.agendo/config.json).
@@ -85,6 +111,20 @@ Usage:
                                 cwd is under dir. Combines with --repo.
       --repo <name>             Only sessions in that repo — a bare name or an
                                 owner/repo slug. Worktrees count as their repo.
+  agendo list repos [dir]      One row per repository: how many sessions it has, how
+                                many are running, and its orchestrator — or "none",
+                                which is the direct answer to "which repos is nobody
+                                coordinating?". Model-free, like the plain list; takes
+                                the same --path/--repo scoping. Rows come from the
+                                sessions that exist, so an untouched repo shows up
+                                only when you name a directory: "list repos [dir]"
+                                walks it for checkouts too, and lists the ones with no
+                                sessions at all. The GLOBAL orchestrator belongs to no
+                                repo, so it is not listed here — find it in
+                                "agendo list --json" as role "global".
+      --json                    Emit the same rows as JSON, each with root, name,
+                                sessions, running, orchestrators[], hasOrchestrator
+                                (any, even a closed one) and hasRunningOrchestrator.
   agendo list pr, prs [dir]    List your open pull requests from the active backend,
                                 each with its associated running session (pr#, ci,
                                 approvals, branch, session, title). With a dir, only

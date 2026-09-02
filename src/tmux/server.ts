@@ -3,7 +3,10 @@
 // everything that CHANGES the server lives in `windows.ts`.
 import { spawnSync } from "child_process";
 import { tmuxLines } from "./exec.ts";
-import { ID_BEARING_NAME, PLACEHOLDER_OPTION, ROOT_OPTION, insideTmux, type LiveTarget, type ManagedTarget } from "./names.ts";
+import {
+  ID_BEARING_NAME, PANE_TARGET_OPTION, PLACEHOLDER_OPTION, ROOT_OPTION,
+  insideTmux, isPaneHosted, type LiveTarget, type ManagedTarget,
+} from "./names.ts";
 
 /**
  * A live managed target whose name embeds this session short id under any
@@ -12,15 +15,47 @@ import { ID_BEARING_NAME, PLACEHOLDER_OPTION, ROOT_OPTION, insideTmux, type Live
  * whatever name it was launched under, instead of creating a duplicate.
  * Work-item / PR targets embed an item id rather than a session id, and tagged
  * id-less fresh names carry no session id at all, so both are excluded.
+ *
+ * Window/session names are checked first — the overwhelmingly common case, and
+ * two cheap tmux reads. Only then do we look for a PANE-hosted session, whose
+ * managed name lives in a pane option rather than on any window (see
+ * `PANE_TARGET_OPTION`); that costs a third read, so it stays the fallback.
  */
 export function liveTargetForShortId(sid: string): LiveTarget | null {
   for (const [name, target] of liveTargets()) {
     const m = name.match(ID_BEARING_NAME);
     if (m && m[1] === sid) return { name, target };
   }
+  for (const p of liveManagedPaths()) {
+    if (!isPaneHosted(p)) continue;
+    const m = p.name.match(ID_BEARING_NAME);
+    if (m && m[1] === sid) return { name: p.name, target: p.target };
+  }
   return null;
 }
 
+/** The pane id hosting managed target `name`, or null if no pane does. */
+export function paneLocation(name: string): string | null {
+  for (const p of liveManagedPaths()) if (isPaneHosted(p) && p.name === name) return p.target;
+  return null;
+}
+
+/**
+ * Width in columns of the pane a `split-window -t <target>` would actually cut in
+ * two, or null if it can't be read. Used to decide whether the halves would be
+ * usable.
+ *
+ * `#{pane_width}`, not `#{window_width}`: tmux splits a window's ACTIVE PANE, not
+ * the window, so a menu window the user has already split by hand is 200 columns
+ * wide while the pane about to be halved is 100. Measuring the window there would
+ * pass the check and hand the new agent 50 columns.
+ */
+export function splitTargetWidth(target: string): number | null {
+  const r = spawnSync("tmux", ["display-message", "-p", "-t", target, "#{pane_width}"], { encoding: "utf-8" });
+  if (r.status !== 0) return null;
+  const n = Number((r.stdout ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
 /** Names of all currently live tmux sessions (empty if no server running). */
 export function liveSessions(): Set<string> {
@@ -85,9 +120,11 @@ export function liveTargets(): Map<string, string> {
 /**
  * Every live managed (`cl-…`) target paired with the working directory of its
  * pane. A pane contributes its session name and/or window name, whichever is a
- * managed target. Used to attribute fresh-launch targets — named after a work
- * item / PR (`cl-wi-…`, `cl-pr-…`) rather than a session id — back to the
- * session actually running in them, so they register as running.
+ * managed target — plus, for a session the launcher parked in someone else's
+ * window, the name stamped on the pane itself (see `PANE_TARGET_OPTION`). Used to
+ * attribute fresh-launch targets — named after a work item / PR (`cl-wi-…`,
+ * `cl-pr-…`) rather than a session id — back to the session actually running in
+ * them, so they register as running.
  */
 export function liveManagedPaths(): ManagedTarget[] {
   const out: ManagedTarget[] = [];
@@ -95,10 +132,17 @@ export function liveManagedPaths(): ManagedTarget[] {
     "list-panes",
     "-a",
     "-F",
-    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}`,
+    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}`,
   ])) {
-    const [session, window, cwd, placeholder] = line.split("\t");
+    const [session, window, cwd, placeholder, paneId, paneTarget] = line.split("\t");
     if (!cwd) continue;
+    // A pane-hosted session: its managed name is on the PANE, and the pane id is
+    // how everything downstream (capture, send-keys, navigate) reaches it — no
+    // `exactTarget` pin needed, since `%N` cannot be a prefix of another target.
+    // Never a placeholder: restore recreates windows, never panes.
+    if (paneTarget?.startsWith("cl-") && paneId) {
+      out.push({ name: paneTarget, target: paneId, cwd, placeholder: false });
+    }
     // The marker is a *window* option, so it only attributes to the window name
     // (a restored placeholder is always a window); a managed session name is
     // never a placeholder.

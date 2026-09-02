@@ -35,6 +35,19 @@ import { STATE_DIR } from "./config.ts";
 export const ORCHESTRATOR_SLUG = "orchestrator";
 
 /**
+ * Which level of the coordination hierarchy a session sits at:
+ *
+ *     global orchestrator  →  per-repo orchestrators  →  per-worktree sessions
+ *
+ * `"repo"` coordinates the sessions of ONE repository and integrates their
+ * branches; `"global"` coordinates the repo orchestrators themselves and touches
+ * no repository at all (see src/orchestratorGlobal.ts). The two get different
+ * instructions, so the ROLE — not merely "is an orchestrator" — is what the
+ * marker file below has to remember for a cold resume.
+ */
+export type OrchestratorRole = "repo" | "global";
+
+/**
  * The orchestrator instructions, appended to the session's system prompt.
  *
  * `selfCmd` is how to re-invoke the launcher from a shell (see `SELF_CMD` in
@@ -196,26 +209,87 @@ export function orchestratorSystemPrompt(selfCmd: string): string {
 // orchestrator mode in a small file of our own and consult it from `resumeArgv`.
 
 const ORCHESTRATORS_PATH = join(STATE_DIR, "orchestrators.json");
+const ROLES_PATH = join(STATE_DIR, "orchestratorRoles.json");
 
 /** Cap the retained id list — this file only ever grows otherwise. */
 const MAX_REMEMBERED = 200;
 
-/** Session ids previously launched in orchestrator mode (newest last). */
-function loadOrchestratorIds(): string[] {
-  if (!existsSync(ORCHESTRATORS_PATH)) return [];
+/**
+ * The marker state, read from TWO files on purpose.
+ *
+ * `orchestrators.json` keeps exactly its historical shape — `{ ids: [...] }`,
+ * nothing else — because agendo versions are mixed in practice: an npx of an
+ * older release, or an older global install, may mark a session on the same
+ * machine tomorrow. That version does a read-modify-write of the whole object
+ * from a shape it defined before roles existed, so any role we tucked in
+ * alongside `ids` would be silently erased — and a global orchestrator that lost
+ * its role cold-resumes with the REPO prompt, i.e. as an agent told to merge
+ * branches in whatever checkout it woke up in. Roles therefore live in a second
+ * file that no other version reads or writes, so nothing can drop them.
+ *
+ * The map holds only the entries that differ from the default, so an id with no
+ * entry — every id an older agendo appends, and every pre-roles install — reads
+ * back as `"repo"`, which is what every orchestrator was before the global level.
+ */
+interface OrchestratorMarks {
+  ids: string[];
+  roles: Record<string, OrchestratorRole>;
+}
+
+/** Parse `orchestratorRoles.json`, keeping only entries for ids still remembered. */
+function loadRoles(ids: string[]): Record<string, OrchestratorRole> {
+  const roles: Record<string, OrchestratorRole> = {};
+  if (!existsSync(ROLES_PATH)) return roles;
+  const known = new Set(ids);
+  try {
+    const data = JSON.parse(readFileSync(ROLES_PATH, "utf-8"));
+    if (!data?.roles || typeof data.roles !== "object") return roles;
+    for (const [id, role] of Object.entries(data.roles as Record<string, unknown>)) {
+      // The two files are written separately and an older agendo rewrites only the
+      // first, so a role can outlive the id it describes; the id list is the
+      // authority on who exists. Unknown role values (a newer version, a hand
+      // edit) fall back to "repo" rather than reaching a prompt lookup that has no
+      // entry for them.
+      if (known.has(id) && (role === "repo" || role === "global")) roles[id] = role;
+    }
+  } catch {
+    // A hand-edited or truncated roles file costs framing, never resume itself.
+  }
+  return roles;
+}
+
+/** Session ids previously launched in orchestrator mode (newest last), with the
+ *  role of each one that isn't the default `"repo"`. */
+function loadOrchestratorMarks(): OrchestratorMarks {
+  if (!existsSync(ORCHESTRATORS_PATH)) return { ids: [], roles: {} };
   try {
     const data = JSON.parse(readFileSync(ORCHESTRATORS_PATH, "utf-8"));
-    return Array.isArray(data?.ids) ? data.ids.filter((x: unknown) => typeof x === "string") : [];
+    const ids = Array.isArray(data?.ids) ? data.ids.filter((x: unknown) => typeof x === "string") : [];
+    return { ids, roles: loadRoles(ids) };
   } catch {
     // A hand-edited or truncated file must not break resume; treat as empty.
-    return [];
+    return { ids: [], roles: {} };
   }
 }
 
 /**
- * Remember that `id` is an orchestrator session, so `resumeArgv` re-injects the
- * instructions when it's resumed cold. Best-effort: a failed write costs the
- * orchestrator framing on a later resume, never the launch itself.
+ * Write `data` as JSON to `path` via a temp file in the same directory.
+ *
+ * A crash or a full disk mid-write would otherwise leave truncated JSON, and the
+ * readers above treat unparseable as empty — so a single bad write would strip
+ * the framing from EVERY orchestrator, not just the one being marked. rename(2)
+ * within the directory is atomic.
+ */
+function writeAtomic(path: string, data: unknown): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2));
+  renameSync(tmp, path);
+}
+
+/**
+ * Remember that `id` is an orchestrator session of `role`, so `resumeArgv`
+ * re-injects the right instructions when it's resumed cold. Best-effort: a failed
+ * write costs the orchestrator framing on a later resume, never the launch itself.
  *
  * This is a read-modify-write, so two orchestrators launched in the very same
  * instant could have one drop the other's id. Not worth locking: the loser only
@@ -223,24 +297,66 @@ function loadOrchestratorIds(): string[] {
  * started with), and orchestrators are launched one at a time by a human or by
  * another agent, never fanned out in a batch.
  */
-export function markOrchestratorSession(id: string): void {
+export function markOrchestratorSession(id: string, role: OrchestratorRole = "repo"): void {
   try {
-    const ids = loadOrchestratorIds().filter((x) => x !== id);
-    ids.push(id);
+    const { ids, roles } = loadOrchestratorMarks();
+    const kept = ids.filter((x) => x !== id);
+    kept.push(id);
+    const retained = kept.slice(-MAX_REMEMBERED);
+    // "repo" is the default a missing entry already means, so recording it would
+    // only grow the file — and an id re-marked as "repo" must lose any stale
+    // "global" entry rather than keep it.
+    const next = { ...roles };
+    if (role === "repo") delete next[id];
+    else next[id] = role;
     if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-    // Write-then-rename: a crash or a full disk mid-write would otherwise leave
-    // truncated JSON, and `loadOrchestratorIds` reads unparseable as empty — so a
-    // single bad write would strip the framing from EVERY orchestrator, not just
-    // the one being marked. rename(2) within the directory is atomic.
-    const tmp = `${ORCHESTRATORS_PATH}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ ids: ids.slice(-MAX_REMEMBERED) }, null, 2));
-    renameSync(tmp, ORCHESTRATORS_PATH);
+    // ROLE FIRST, id second. Each write is atomic on its own, but nothing makes
+    // the pair atomic, and the two orders fail differently: an id with no role
+    // reads back as "repo", so a global orchestrator would cold-resume with the
+    // merge-branches prompt — the exact outcome this file split exists to
+    // prevent. A role with no id is pruned away on read, so the session merely
+    // degrades to a plain one. Only one of those is safe to crash into.
+    //
+    // `roles` came back already pruned to the ids that existed a moment ago, so
+    // re-writing it is also what drops entries the cap has since evicted. Skipped
+    // when nothing changed, so an install that never runs a global orchestrator
+    // never grows the second file at all.
+    const changed = JSON.stringify(next) !== JSON.stringify(roles);
+    if (changed || (existsSync(ROLES_PATH) && Object.keys(roles).length > 0)) {
+      const pruned: Record<string, OrchestratorRole> = {};
+      for (const k of retained) if (next[k]) pruned[k] = next[k];
+      writeAtomic(ROLES_PATH, { roles: pruned });
+    }
+    writeAtomic(ORCHESTRATORS_PATH, { ids: retained });
   } catch {
     // Persisting the marker is best-effort; ignore write failures.
   }
 }
 
-/** Whether `id` was launched in orchestrator mode. */
+/** Whether `id` was launched in orchestrator mode, at either level. */
 export function isOrchestratorSession(id: string): boolean {
-  return loadOrchestratorIds().includes(id);
+  return loadOrchestratorMarks().ids.includes(id);
+}
+
+/**
+ * Which level `id` was launched at, or null if it isn't an orchestrator at all.
+ * An id remembered without a role predates the global level (or was appended by
+ * an older agendo), so it reads back as the repo-level orchestrator it was.
+ */
+export function orchestratorRoleOf(id: string): OrchestratorRole | null {
+  const { ids, roles } = loadOrchestratorMarks();
+  if (!ids.includes(id)) return null;
+  return roles[id] ?? "repo";
+}
+
+/**
+ * Every remembered orchestrator id → its level, in ONE read of the marker file.
+ *
+ * `orchestratorRoleOf` is the right shape for `resumeArgv`, which asks about a
+ * single session; `list` asks about every session it prints, and doing that one
+ * id at a time would re-read and re-parse the file per row.
+ */
+export function orchestratorRoles(): Map<string, OrchestratorRole> {
+  const { ids, roles } = loadOrchestratorMarks();
+  return new Map(ids.map((id) => [id, roles[id] ?? "repo"]));
 }

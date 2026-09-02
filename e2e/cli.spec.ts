@@ -6,7 +6,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripAnsi, exactTarget, windowTarget } from "../src/tmux.ts";
 import { test, expect } from "./harness/test.ts";
@@ -4680,6 +4680,829 @@ test("orchestrator mode survives a cold resume; an ordinary session isn't given 
   );
   expect(other).toBeTruthy();
   expect(appendedPrompt(other!)).not.toContain("ORCHESTRATOR MODE");
+});
+
+// ── seeing the hierarchy from `list` ──────────────────────────────────────────
+// "Which repo has nobody coordinating it" is the question a global orchestrator
+// exists to answer, and it is not readable off a table sorted by session. These
+// cover the two places it is now answerable: the `kind` column plus the summary
+// block under `agendo list`, and the dedicated `agendo list repos` survey.
+
+/**
+ * Mark fixture sessions as orchestrators of the given roles, as a launch would.
+ * Two files, because that is what agendo writes: the id list keeps the flat shape
+ * every version of it has used, and the roles live beside it where an older
+ * agendo's read-modify-write cannot delete them.
+ */
+async function markOrchestrators(home: string, roles: Record<string, "repo" | "global">): Promise<void> {
+  await mkdir(join(home, ".agendo"), { recursive: true });
+  await writeFile(join(home, ".agendo", "orchestrators.json"), JSON.stringify({ ids: Object.keys(roles) }));
+  await writeFile(join(home, ".agendo", "orchestratorRoles.json"), JSON.stringify({ roles }));
+}
+
+test("agendo list marks orchestrators in the kind column and names them per repo", async ({ mock }) => {
+  // The role must WIN over how the session was launched: an orchestrator is
+  // started as an ordinary background session, and reporting it as `bg` is exactly
+  // what this column exists to stop.
+  await markOrchestrators(mock.home, { [CRASH_SESSION_ID]: "repo", [STANDALONE_SESSION_ID]: "global" });
+  const r = await agendoAsync(mock.env, "list", "--all").done;
+  expect(r.code).toBe(0);
+  const line = (id: string) => r.stdout.split("\n").find((l) => l.includes(shortIdOf(id))) ?? "";
+  expect(line(CRASH_SESSION_ID)).toContain("orch");
+  expect(line(STANDALONE_SESSION_ID)).toContain("global");
+
+  // …and the summary block underneath, which is where "nobody is coordinating
+  // this repo" becomes visible at all.
+  expect(r.stdout).toContain("orchestrators:");
+  const summary = r.stdout.slice(r.stdout.indexOf("orchestrators:"));
+  // ○, not ●: the crash fixture's window is gone. "Remembered but not running" is
+  // a different answer from "running" — it means resume this one, don't start a
+  // second — so the summary must not flatten the two into one glyph.
+  expect(summary).toMatch(new RegExp(`appweb\\s+○ ${shortIdOf(CRASH_SESSION_ID)}`));
+  // applib has sessions but no orchestrator — the unmanaged case, stated.
+  expect(summary).toMatch(/applib\s+none/);
+  // The global one belongs to no repo, so it is listed apart rather than folded
+  // into whichever checkout it happens to sit in.
+  expect(summary).toContain("(global)");
+});
+
+test("the plain list says ○, not none, for a repo whose orchestrator is closed", async ({ mock }) => {
+  // The default `list` walks LIVE tmux targets, so left to itself it can only
+  // print ● — and a repo whose only orchestrator has been closed would read
+  // `none`. `none` is the answer a coordinator acts on by starting one, and a
+  // second orchestrator in a repo squash-merges into the same main branch as the
+  // first. The marker outlives the window precisely so the answer can be ○.
+  await markOrchestrators(mock.home, { [CRASH_SESSION_ID]: "repo", [STANDALONE_SESSION_ID]: "global" });
+  const r = await agendoAsync(mock.env, "list").done;
+  expect(r.code).toBe(0);
+  const summary = r.stdout.slice(r.stdout.indexOf("orchestrators:"));
+  expect(summary).toMatch(new RegExp(`appweb\\s+○ ${shortIdOf(CRASH_SESSION_ID)}`));
+  expect(summary).not.toMatch(/appweb\s+none/);
+  // A closed GLOBAL one is listed too — there is at most one, and "the one you
+  // closed is still there to resume" is the whole of what its line says.
+  expect(summary).toContain(`(global)`);
+  // And no repo is invented for the marker's sake: this block describes the repos
+  // of the sessions listed above it, and applib has nothing running here.
+  expect(summary).not.toContain("applib");
+});
+
+test("agendo list --json carries orchestrator, role and the repo each session is in", async ({ mock }) => {
+  // Machine consumers are the point of this listing: a global orchestrator reads
+  // these fields to decide which repos need one started.
+  await markOrchestrators(mock.home, { [CRASH_SESSION_ID]: "repo" });
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, unknown>>;
+  const crash = rows.find((x) => x.id === CRASH_SESSION_ID);
+  expect(crash).toBeTruthy();
+  expect(crash!.orchestrator).toBe(true);
+  expect(crash!.role).toBe("repo");
+  // The repo, not the worktree: a session's worktree is not something you can
+  // start an orchestrator in.
+  expect(crash!.repoRoot).toBe(join(mock.home, "repos", "appweb"));
+  expect(crash!.repoName).toBe("appweb");
+
+  // Every other row carries the fields explicitly rather than omitting them, so a
+  // consumer never has to decide whether a missing key means "no" or "unknown".
+  const plain = rows.find((x) => x.id === LOGIN_SESSION_ID);
+  expect(plain!.orchestrator).toBe(false);
+  expect(plain!.role).toBeNull();
+  expect(plain!.repoRoot).toBe(join(mock.home, "repos", "appweb"));
+});
+
+test("the global orchestrator's list row belongs to no repo", async ({ mock }) => {
+  // Its cwd is a vantage point, not a checkout, so reporting a repoRoot would let
+  // a consumer applying this listing's own rule ("a repo whose rows carry no
+  // role:'repo' session is unmanaged") start an orchestrator in a non-repo.
+  await markOrchestrators(mock.home, { [STANDALONE_SESSION_ID]: "global" });
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  const global = rows.find((x) => x.id === STANDALONE_SESSION_ID)!;
+  expect(global.role).toBe("global");
+  expect(global.repoRoot).toBeNull();
+  expect(global.repoName).toBeNull();
+  // Explicitly null rather than absent, like every other field on this row.
+  expect("repoRoot" in global).toBe(true);
+  // An ordinary row still carries one, so this is the role talking, not a bug.
+  expect(rows.find((x) => x.id === LOGIN_SESSION_ID)!.repoRoot).toBe(join(mock.home, "repos", "appweb"));
+});
+
+test("agendo list repos [dir] finds a checkout that has never hosted a session", async ({ mock }) => {
+  // The most unmanaged repo there is, and the session index cannot see it at all.
+  // Unscoped the command has no directory to walk that isn't the whole home, so
+  // naming one is what turns the survey from "repos with sessions" into "repos".
+  await mkdir(join(mock.home, "repos", "untouched", ".git"), { recursive: true });
+  // A managed repo to sort against — without one, every row is unmanaged and no
+  // ordering could fail.
+  await markOrchestrators(mock.home, { [LOGIN_SESSION_ID]: "repo" });
+  const r = await agendoAsync(mock.env, "list", "repos", "--json", join(mock.home, "repos")).done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  const row = rows.find((x) => x.name === "untouched");
+  expect(row).toBeTruthy();
+  expect(row!.sessions).toBe(0);
+  expect(row!.hasOrchestrator).toBe(false);
+  // It leads, with the other unmanaged repos — appweb has a running orchestrator
+  // and is the one thing nobody has to act on.
+  expect(rows.findIndex((x) => x.name === "untouched")).toBeLessThan(
+    rows.findIndex((x) => x.name === "appweb"),
+  );
+  // Exactly one row per repo — see the symlinked-scope test below for the case
+  // that makes this fail if the walk's results aren't reconciled canonically.
+  const names = rows.map((x) => x.name);
+  expect(names.length).toBe(new Set(names).size);
+  // The repos that DO have sessions are still counted from the session index —
+  // the walk adds rows, it does not replace them.
+  expect(rows.find((x) => x.name === "appweb")!.sessions).toBeGreaterThan(0);
+});
+
+test("list repos inside a repo does not report the enclosing checkout as unmanaged", async ({ mock }) => {
+  // `discoverGitReposUnder` falls back to the checkout its target sits INSIDE when
+  // the walk finds nothing — right for a repo picker, wrong here: the row would
+  // carry the session counts of a scope that excludes almost all of that repo, so
+  // a repo with a running orchestrator would be reported as coordinated by nobody.
+  await markOrchestrators(mock.home, { [LOGIN_SESSION_ID]: "repo" });
+  const sub = join(mock.home, "repos", "appweb", "src");
+  await mkdir(sub, { recursive: true });
+  const r = await agendoAsync(mock.env, "list", "repos", "--json", sub).done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  expect(rows.find((x) => x.name === "appweb")).toBeUndefined();
+});
+
+test("agendo list repos surveys every repo, unmanaged ones first", async ({ mock }) => {
+  // The LOGIN fixture, because it is the one that is actually running: a repo
+  // counts as managed only while somebody is coordinating it right now.
+  await markOrchestrators(mock.home, { [LOGIN_SESSION_ID]: "repo" });
+  const r = await agendoAsync(mock.env, "list", "repos").done;
+  expect(r.code).toBe(0);
+  expect(r.stdout).toContain("orchestrator");
+  const rows = r.stdout.split("\n").filter((l) => /^(appweb|applib|standalone)\b/.test(l));
+  expect(rows.length).toBeGreaterThanOrEqual(3);
+  // appweb has one, so it sorts BELOW the repos that have none — the unmanaged
+  // ones are what a coordinator has to act on, so they lead.
+  expect(rows[rows.length - 1]).toMatch(new RegExp(`^appweb\\b.*${shortIdOf(LOGIN_SESSION_ID)}`));
+  expect(rows.slice(0, -1).every((l) => l.includes("none"))).toBe(true);
+});
+
+test("agendo list repos --json answers hasOrchestrator per repo", async ({ mock }) => {
+  // Both appweb fixtures marked: one running, one whose window is gone. A repo
+  // with two orchestrators is a mistake worth seeing (both would squash-merge
+  // into the same main branch), so they are listed, running first.
+  await markOrchestrators(mock.home, { [LOGIN_SESSION_ID]: "repo", [CRASH_SESSION_ID]: "repo" });
+  const r = await agendoAsync(mock.env, "list", "repos", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  const appweb = rows.find((x) => x.name === "appweb")!;
+  expect(appweb.hasOrchestrator).toBe(true);
+  expect(appweb.hasRunningOrchestrator).toBe(true);
+  expect(appweb.orchestrators.map((o: { shortId: string }) => o.shortId)).toEqual([
+    shortIdOf(LOGIN_SESSION_ID),
+    shortIdOf(CRASH_SESSION_ID),
+  ]);
+  expect(appweb.orchestrators[0].running).toBe(true);
+  expect(appweb.orchestrators[1].running).toBe(false);
+  expect(appweb.root).toBe(join(mock.home, "repos", "appweb"));
+  expect(appweb.sessions).toBeGreaterThan(0);
+  // The flat boolean exists so "is this repo unmanaged" is one field, not an
+  // inference about an empty array.
+  const applib = rows.find((x) => x.name === "applib")!;
+  expect(applib.hasOrchestrator).toBe(false);
+  expect(applib.hasRunningOrchestrator).toBe(false);
+  expect(applib.orchestrators).toEqual([]);
+});
+
+test("a repo whose only orchestrator is closed reads as HAVING one, but not a running one", async ({ mock }) => {
+  // The two mistakes here cost different amounts. Reading a closed orchestrator as
+  // absent starts a SECOND one in the repo and both squash-merge into the same
+  // main branch; reading it as present costs a `resume`. So the flat field a
+  // global orchestrator branches on stays true, and the liveness that decides
+  // resume-vs-nothing is a separate field — not the same one doing both jobs.
+  await markOrchestrators(mock.home, { [CRASH_SESSION_ID]: "repo" });
+  const r = await agendoAsync(mock.env, "list", "repos", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  const appweb = rows.find((x) => x.name === "appweb")!;
+  expect(appweb.hasOrchestrator).toBe(true);
+  expect(appweb.hasRunningOrchestrator).toBe(false);
+  expect(appweb.orchestrators).toEqual([
+    { id: CRASH_SESSION_ID, shortId: shortIdOf(CRASH_SESSION_ID), running: false },
+  ]);
+  // And it sorts BETWEEN the repos with nothing and the repos with a live one:
+  // the head of this list is where a global orchestrator launches, and this repo
+  // needs a resume instead.
+  const applib = rows.findIndex((x) => x.name === "applib");
+  expect(applib).toBeLessThan(rows.findIndex((x) => x.name === "appweb"));
+});
+
+test("list repos leaves the global orchestrator out entirely", async ({ mock }) => {
+  // Its cwd is a vantage point picked BECAUSE it isn't a checkout, so counting it
+  // would print a row for a directory that is not a repository — sorted to the
+  // top, since unmanaged repos lead — and the global orchestrator would then
+  // follow its own instructions and start a repo orchestrator there. Repeatedly.
+  await markOrchestrators(mock.home, { [STANDALONE_SESSION_ID]: "global" });
+  const r = await agendoAsync(mock.env, "list", "repos", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  // The standalone fixture is that session's only repo, so excluding the session
+  // removes the row outright — nothing else can be masking the result.
+  expect(rows.map((x) => x.name)).not.toContain("standalone");
+  // …and it did not merely lose its orchestrator: the session is not counted.
+  expect(rows.every((x) => x.root !== join(mock.home, "repos", "standalone"))).toBe(true);
+});
+
+test("agendo list repos [dir] lists a repo once when the directory is a symlink", async ({ mock }) => {
+  // `resolveScopeRoots` deliberately hands back BOTH the literal path and its
+  // symlink-resolved twin, because either can be the spelling a recorded session
+  // cwd carries. The checkout walk therefore sees every repo twice, under two
+  // spellings no string compare can equate — and an unreconciled second copy
+  // reads as "unmanaged" and sorts to the TOP, which is precisely the row a
+  // global orchestrator acts on by starting the repo's second orchestrator.
+  await mkdir(join(mock.home, "repos", "untouched", ".git"), { recursive: true });
+  await symlink(join(mock.home, "repos"), join(mock.home, "repos-link"));
+  await markOrchestrators(mock.home, { [LOGIN_SESSION_ID]: "repo" });
+  const r = await agendoAsync(mock.env, "list", "repos", "--json", join(mock.home, "repos-link")).done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  const names = rows.map((x) => x.name);
+  expect(names.length).toBe(new Set(names).size);
+  // Both kinds of row survive the de-duplication: the session-derived one keeps
+  // its counts rather than being replaced by an empty walked twin…
+  expect(rows.find((x) => x.name === "appweb")!.sessions).toBeGreaterThan(0);
+  expect(rows.find((x) => x.name === "appweb")!.hasOrchestrator).toBe(true);
+  // …and a repo only the walk can see is still added.
+  expect(rows.find((x) => x.name === "untouched")!.sessions).toBe(0);
+});
+
+test("agendo list repos --repo narrows the survey to that one repo", async ({ mock }) => {
+  const r = await agendoAsync(mock.env, "list", "repos", "--json", "--repo", "appweb").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, any>>;
+  expect(rows.map((x) => x.name)).toEqual(["appweb"]);
+});
+
+// ── the GLOBAL orchestrator (`launch --global-orchestrator`) ──────────────────
+// One level above `--orchestrator`: it coordinates the per-repo orchestrators and
+// touches no repository at all. Two things are only observable from out here —
+// which prompt the spawned claude was handed, and WHERE tmux was told to put it
+// (a pane beside the menu, or a window of its own). Both are asserted from the
+// tmux call log, because both fall back silently by design.
+
+/** `mock.env` as it looks from inside a tmux client, for the split-pane paths. */
+const inTmux = (env: Record<string, string>) => ({ ...env, TMUX: "/tmp/fake-tmux,1,0" });
+
+/**
+ * Fake-tmux state with a live agendo menu in `launcher-session`, which is the
+ * precondition for the split: `launchGlobalOrchestrator` splits the window named
+ * "launcher" in the session it is running under, and gives up if there isn't one.
+ */
+const withLauncherWindow = (extra: Record<string, unknown> = {}) => ({
+  sessions: ["launcher-session"],
+  windows: [{ session: "launcher-session", index: 0, name: "launcher" }],
+  panes: [{ session: "launcher-session", window: "launcher", cwd: "/tmp", id: "%0" }],
+  captures: {},
+  currentSession: "launcher-session",
+  ...extra,
+});
+
+test("--help documents the global orchestrator; --llm still hands agents neither flag", async ({ mock }) => {
+  const help = agendo(mock.env, "--help");
+  expect(help.status).toBe(0);
+  expect(help.stdout).toContain("--global-orchestrator, -G");
+  expect(help.stdout).toContain("--window / --pane");
+  // The two discovery commands a human is pointed at.
+  expect(help.stdout).toContain("agendo list repos [dir]");
+
+  // Same escalation argument as `--orchestrator`, and MORE so: a global
+  // orchestrator starts repo orchestrators in other people's main checkouts. The
+  // hierarchy itself is documented for agents (below); the flag that enters it
+  // from the bottom is not.
+  const llm = agendo(mock.env, "--llm");
+  expect(llm.status).toBe(0);
+  expect(llm.stdout).not.toContain("--global-orchestrator");
+  expect(llm.stdout).not.toContain("-G ");
+});
+
+test("agendo --llm teaches the three-level hierarchy and how to discover it", async ({ mock }) => {
+  const r = agendo(mock.env, "--llm");
+  expect(r.status).toBe(0);
+  const flat = stripAnsiText(r.stdout).replace(/\s+/g, " ");
+  // The model itself, and the one rule that makes it hold.
+  expect(flat).toContain("global orchestrator → per-repo orchestrators → per-worktree sessions");
+  expect(flat).toContain("Reaching past a level");
+  // Discovery is read-only, so it IS given to agents — a session that cannot see
+  // who its coordinator is has no way to route a question to the right place.
+  expect(r.stdout).toContain(" list repos");
+  expect(flat).toContain("orchestrator");
+});
+
+test("agendo launch --global-orchestrator injects the GLOBAL prompt and records the role", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Coordinate every repo");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched global orchestrator session");
+  const id = r.stdout.match(/launched global orchestrator session (\S+)/)?.[1];
+  expect(id).toBeTruthy();
+
+  const spawned = (await mock.tmuxLog()).find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(spawned).toBeTruthy();
+  const appended = appendedPrompt(spawned!);
+  expect(appended).toContain("GLOBAL ORCHESTRATOR MODE");
+  // …and specifically NOT the repo-level instructions, which would have it merging
+  // branches in whatever directory it happens to sit in.
+  expect(appended).not.toContain("# You are running in ORCHESTRATOR MODE");
+  expect(appended).toContain("You are the TOP level of a three-level hierarchy");
+  expect(spawned!).toContain("Coordinate every repo");
+
+  // It creates no worktree and no branch: it belongs to no repository.
+  expect(gitArgv(await mock.callLog()).some((a) => a.includes("worktree"))).toBe(false);
+
+  // The role is remembered, so a cold resume re-injects the GLOBAL prompt rather
+  // than the repo one — and it is remembered in a file of its OWN, leaving
+  // `orchestrators.json` byte-shaped exactly as every earlier agendo wrote it.
+  const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
+  expect(marker.ids).toContain(id);
+  expect(Object.keys(marker)).toEqual(["ids"]);
+  const roles = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestratorRoles.json"), "utf-8"));
+  expect(roles.roles[id!]).toBe("global");
+});
+
+test("outside tmux the global orchestrator gets its own session, and says so", async ({ mock }) => {
+  // There is no launcher pane to split when nobody is in tmux, so the pane default
+  // has to degrade to something that still runs — and report which it got, or the
+  // user goes looking for a split that was never made.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "-G", "Coordinate everything");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  its own tmux session");
+  expect(r.stdout).toContain("not inside tmux");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "split-window")).toBe(false);
+});
+
+test("inside tmux it splits the launcher window and stamps the pane with its name", async ({ mock }) => {
+  await mock.setTmuxState(withLauncherWindow());
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "--global-orchestrator", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  split pane beside the agendo TUI");
+
+  const tmux = await mock.tmuxLog();
+  const split = tmux.find((argv) => argv[0] === "split-window");
+  expect(split).toBeTruthy();
+  // Side by side (-h), focus stays on the menu (-d), and the pane id comes back
+  // (-P -F) — that id is the only handle anything downstream has on the session.
+  expect(split!).toContain("-h");
+  expect(split!).toContain("-d");
+  expect(split!.join(" ")).toContain("-P -F #{pane_id}");
+  // Split the MENU's window specifically, with BOTH halves exact-pinned: an
+  // unpinned name is a prefix match either side, so a session called
+  // "launcher-session-2" or a window called "launcher-notes" could be split
+  // instead. This is `windowTarget`, the same spelling every managed window is
+  // addressed by.
+  expect(split![split!.indexOf("-t") + 1]).toBe("=launcher-session:=launcher");
+  expect(split!).toContain("claude");
+
+  // The pane carries the managed name, which is how a session with no window of
+  // its own stays findable at all.
+  const stamp = tmux.find((argv) => argv[0] === "set-option" && argv.includes("@cl_pane_target"));
+  expect(stamp).toBeTruthy();
+  expect(stamp!).toContain("-p");
+  expect(stamp![stamp!.indexOf("@cl_pane_target") + 1]).toMatch(/^cl-bg-/);
+  // No window was opened for it — the pane IS where it lives.
+  expect(tmux.some((argv) => argv[0] === "new-window")).toBe(false);
+});
+
+test("a pane too narrow to split gets a window instead, with the width in the note", async ({ mock }) => {
+  // Half of a 100-column pane is unusable for both the menu and an agent, so the
+  // split is declined before it is attempted — and the reason is reported, since
+  // "why is it not beside my menu" is otherwise unanswerable. The pane, not the
+  // window: tmux splits the target's ACTIVE PANE, so a menu already sharing its
+  // window has less room than the window's width suggests.
+  await mock.setTmuxState(withLauncherWindow({ paneWidth: 100 }));
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  its own tmux window");
+  expect(r.stdout).toContain("the agendo menu's pane is 100 cols");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "split-window")).toBe(false);
+});
+
+test("--pane asks for the split but cannot force it through the width gate", async ({ mock }) => {
+  // `--pane` is the DEFAULT spelled out, not an override: the help text used to
+  // say "force", and a user on a narrow terminal reading that would file the
+  // fallback as a bug. Asserting it here is what keeps the two honest.
+  await mock.setTmuxState(withLauncherWindow({ paneWidth: 100 }));
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "--pane", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  its own tmux window");
+  expect(r.stdout).toContain("the agendo menu's pane is 100 cols");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "split-window")).toBe(false);
+});
+
+test("--window opts out of the split even on a wide terminal", async ({ mock }) => {
+  await mock.setTmuxState(withLauncherWindow());
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "--window", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  its own tmux window");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "split-window")).toBe(false);
+  expect(tmux.some((argv) => argv[0] === "new-window")).toBe(true);
+});
+
+test("a tmux that refuses the split falls back to a window rather than failing", async ({ mock }) => {
+  // "no space for new pane" is a runtime refusal no precondition can predict, and
+  // it must not cost the user their orchestrator.
+  await mock.setTmuxState(withLauncherWindow({ splitFails: true }));
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  its own tmux window");
+  expect(r.stdout).toContain("tmux would not split");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "split-window")).toBe(true); // it tried
+  expect(tmux.some((argv) => argv[0] === "new-window")).toBe(true); // and recovered
+});
+
+test("with no live agendo menu there is nothing to split, and it says which session", async ({ mock }) => {
+  // A tmux session that isn't running the menu (a plain shell someone launched
+  // from) has no "launcher" window; naming the session is what makes the message
+  // actionable rather than mysterious.
+  await mock.setTmuxState({
+    sessions: ["work"],
+    windows: [{ session: "work", index: 0, name: "shell" }],
+    panes: [{ session: "work", window: "shell", cwd: "/tmp", id: "%0" }],
+    captures: {},
+    currentSession: "work",
+  });
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  its own tmux window");
+  expect(r.stdout).toContain('no live agendo menu in tmux session "work"');
+});
+
+test("a global orchestrator survives a cold resume as a GLOBAL one", async ({ mock }) => {
+  // The role, not just "is an orchestrator", is what the marker has to remember:
+  // resumed with the repo prompt, this session would start merging branches.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: [CRASH_SESSION_ID], roles: { [CRASH_SESSION_ID]: "global" } }),
+  );
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorRoles.json"),
+    JSON.stringify({ roles: { [CRASH_SESSION_ID]: "global" } }),
+  );
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  const resumed = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  expect(appendedPrompt(resumed!)).toContain("GLOBAL ORCHESTRATOR MODE");
+  expect(appendedPrompt(resumed!)).not.toContain("# You are running in ORCHESTRATOR MODE");
+});
+
+test("an older agendo rewriting the id list cannot erase a recorded role", async ({ mock }) => {
+  // The reason the two files are separate at all. Versions are mixed in practice
+  // (an npx of an older release, an older global install), and that version does
+  // a read-modify-write of `orchestrators.json` from a shape it defined before
+  // roles existed — so a role stored alongside `ids` would come back deleted, and
+  // the global orchestrator would cold-resume as a repo one told to merge
+  // branches in whatever checkout it woke up in.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorRoles.json"),
+    JSON.stringify({ roles: { [CRASH_SESSION_ID]: "global" } }),
+  );
+  // Verbatim what an older agendo leaves behind: the flat array, nothing else.
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: [CRASH_SESSION_ID, "some-other-orchestrator"] }),
+  );
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  const resumed = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  expect(appendedPrompt(resumed!)).toContain("GLOBAL ORCHESTRATOR MODE");
+});
+
+test("a role outliving the id it describes is dropped, not resurrected", async ({ mock }) => {
+  // Roles are keyed by id and the id list is capped, so a role can name a session
+  // the marker no longer remembers. The id list is the authority: a stale entry
+  // must not make an ordinary session resume as an orchestrator.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorRoles.json"),
+    JSON.stringify({ roles: { [CRASH_SESSION_ID]: "global" } }),
+  );
+  await writeFile(join(mock.home, ".agendo", "orchestrators.json"), JSON.stringify({ ids: [] }));
+  const r = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  const resumed = (await mock.tmuxLog()).find(
+    (argv) => argv[0] === "new-session" && argv.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  expect(appendedPrompt(resumed!) ?? "").not.toContain("ORCHESTRATOR MODE");
+});
+
+test("a pre-roles marker file keeps every id, and its orchestrators stay repo-level", async ({ mock }) => {
+  // Back-compat is the whole reason roles live in a separate sparse map: an
+  // install written by an older agendo must not lose its markers, and every id in
+  // it predates the global level, so it can only mean "repo".
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestrators.json"),
+    JSON.stringify({ ids: ["older-one", CRASH_SESSION_ID] }),
+  );
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Coordinate every repo");
+  expect(r.status).toBe(0);
+
+  const marker = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8"));
+  // The pre-existing ids survived the rewrite…
+  expect(marker.ids).toContain("older-one");
+  expect(marker.ids).toContain(CRASH_SESSION_ID);
+  // …and picked up no role, so an older agendo reading this file sees exactly the
+  // array it wrote, and this one reads them back as repo orchestrators.
+  expect(marker.roles).toBeUndefined();
+  expect(existsSync(join(mock.home, ".agendo", "orchestratorRoles.json"))).toBe(true);
+  expect(appendedPrompt((await mock.tmuxLog()).find((a) => a[0] === "new-session" && a.includes("claude"))!))
+    .toContain("GLOBAL ORCHESTRATOR MODE");
+
+  // Proof of the read-back: resuming a pre-roles id gives it the REPO prompt.
+  const resumed = agendo(mock.env, "resume", CRASH_SHORT_ID);
+  expect(resumed.status).toBe(0);
+  const argv = (await mock.tmuxLog()).find(
+    (a) => a[0] === "new-session" && a.includes(`cl-claude-${CRASH_SHORT_ID}`),
+  );
+  expect(appendedPrompt(argv!)).toContain("# You are running in ORCHESTRATOR MODE");
+});
+
+test("the global orchestrator refuses the flags that belong to a repo", async ({ mock }) => {
+  // Accept-and-ignore is the failure mode to avoid: a caller who wrote
+  // `--global-orchestrator --no-worktree` believes it changed something.
+  const repo = mockRepo(mock.home);
+  const noWorktree = agendoIn(repo, mock.env, "launch", "-G", "--no-worktree", "Go");
+  expect(noWorktree.status).not.toBe(0);
+  expect(noWorktree.stderr).toContain("--worktree/--no-worktree don't apply");
+
+  const named = agendoIn(repo, mock.env, "launch", "-G", "--name", "fleet", "Go");
+  expect(named.status).not.toBe(0);
+  expect(named.stderr).toContain("--name doesn't apply");
+
+  // Copilot has no --append-system-prompt equivalent, so the prompt IS the mode.
+  const copilot = agendoIn(repo, mock.env, "launch", "-G", "--copilot", "Go");
+  expect(copilot.status).not.toBe(0);
+  expect(copilot.stderr).toContain("--global-orchestrator is Claude-only");
+
+  // And the layout flags mean nothing anywhere else.
+  const stray = agendoIn(repo, mock.env, "launch", "--window", "Go");
+  expect(stray.status).not.toBe(0);
+  expect(stray.stderr).toContain("--window/--pane only apply to --global-orchestrator");
+
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
+});
+
+test("-G=<value> is refused rather than sliding into the prompt", async ({ mock }) => {
+  // Single-dash args fall through to positionals, so without an explicit check
+  // `-G=false` would launch a plain session whose prompt starts with "-G=false".
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "-G=false", "Do a thing");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("--global-orchestrator takes no value");
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
+});
+
+test("a second global orchestrator is refused and the caller is pointed at the first", async ({ mock }) => {
+  // There is one fleet, so there is one coordinator of it. A rival would re-brief
+  // every repo orchestrator from scratch, unaware of what the first has already
+  // said, and both would split the same launcher window.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(join(mock.home, ".agendo", "orchestrators.json"), JSON.stringify({ ids: [LOGIN_SESSION_ID] }));
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorRoles.json"),
+    JSON.stringify({ roles: { [LOGIN_SESSION_ID]: "global" } }),
+  );
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "-G", "Coordinate the fleet");
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("a global orchestrator is already running");
+  // Actionable, not merely a refusal: how to reach the one that exists, and how
+  // to end it if a fresh one is genuinely wanted.
+  expect(r.stderr).toContain(`send ${SHORT_ID}`);
+  expect(r.stderr).toContain(`close ${SHORT_ID}`);
+  expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session")).toBe(false);
+});
+
+test("a MARKED but dead global orchestrator does not block a new one", async ({ mock }) => {
+  // Markers outlive the sessions they describe (they are what makes a cold resume
+  // work at all), so "is marked global" cannot be the question — liveness is.
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(join(mock.home, ".agendo", "orchestrators.json"), JSON.stringify({ ids: [LOGIN_SESSION_ID] }));
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorRoles.json"),
+    JSON.stringify({ roles: { [LOGIN_SESSION_ID]: "global" } }),
+  );
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "-G", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched global orchestrator session");
+});
+
+test("--pane asks for the default explicitly, and --unattended is allowed here", async ({ mock }) => {
+  // `--pane` exists so a script can state the layout it wants rather than relying
+  // on a default staying put; `--unattended` is refused everywhere except the two
+  // orchestrator modes, so the global one has to actually accept it.
+  await mock.setTmuxState(withLauncherWindow());
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "--pane", "--unattended", "Coordinate");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("layout:  split pane beside the agendo TUI");
+  const split = (await mock.tmuxLog()).find((argv) => argv[0] === "split-window");
+  expect(split).toBeTruthy();
+  // claude's autonomy flags, which an orchestrator only gets by asking.
+  expect(split!.join(" ")).toContain("--permission-mode auto");
+});
+
+test("without --unattended a global orchestrator still stops to ask", async ({ mock }) => {
+  // The default has to be the cautious one: this level starts repo orchestrators
+  // in other people's MAIN checkouts, a larger unreviewed surface than one repo.
+  await mock.setTmuxState(withLauncherWindow());
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "Coordinate");
+  expect(r.status).toBe(0);
+  const split = (await mock.tmuxLog()).find((argv) => argv[0] === "split-window");
+  expect(split!.join(" ")).not.toContain("--permission-mode");
+});
+
+// ── the pane-hosted lifecycle ────────────────────────────────────────────────
+// A session parked in somebody else's window owns no window and no session, so
+// every command that finds a session BY NAME would miss it. The name lives on
+// the pane (`@cl_pane_target`) and the pane id addresses it; these run the four
+// commands an orchestrator's owner actually uses against one.
+
+/** The fixture's running session, hosted in a pane of the menu's window. */
+const paneHosted = (paneCapture: string) => ({
+  sessions: ["agendo"],
+  windows: [{ session: "agendo", index: 0, name: "launcher" }],
+  panes: [
+    { session: "agendo", window: "launcher", cwd: "/repos", id: "%0" },
+    { session: "agendo", window: "launcher", cwd: "/run/login", id: "%4", paneTarget: RUNNING_TARGET },
+  ],
+  captures: { "%4": paneCapture } as Record<string, string>,
+});
+
+test("list and status find a pane-hosted session and address it by pane id", async ({ mock }) => {
+  await mock.setTmuxState(paneHosted(tmuxState.captures[RUNNING_TARGET]!));
+  const list = await agendoAsync(mock.env, "list", "--json").done;
+  expect(list.code).toBe(0);
+  const row = (JSON.parse(list.stdout) as Array<Record<string, any>>).find((x) => x.id === LOGIN_SESSION_ID);
+  // Running, despite no window and no session anywhere carrying its name.
+  expect(row?.running).toBe(true);
+
+  const status = agendo(mock.env, "status", SHORT_ID);
+  expect(status.status).toBe(0);
+  // The pane was read through the pane id itself — no `=` pin, because `%4`
+  // cannot be a prefix of another target the way `cl-pr-5` is of `cl-pr-50`.
+  expect((await mock.tmuxLog()).some((a) => a[0] === "capture-pane" && a.includes("%4"))).toBe(true);
+});
+
+test("send pastes into the hosting pane", async ({ mock }) => {
+  await mock.setTmuxState(paneHosted(tmuxState.captures[RUNNING_TARGET]!));
+  const r = agendo(mock.env, "send", SHORT_ID, "carry on");
+  expect(r.status).toBe(0);
+  // The line names the SESSION, as it does for every other session; what makes
+  // this one work is where the keys actually went.
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+  expect((await mock.tmuxLog()).some((a) => a[0] === "send-keys" && a.includes("%4"))).toBe(true);
+});
+
+test("close kills the pane, not the window it is borrowing", async ({ mock }) => {
+  // The window belongs to the menu. `kill-window` here would take the user's TUI
+  // down with the session they asked to close — and before this path existed,
+  // close saw no window for the name at all and simply refused.
+  await mock.setTmuxState(paneHosted(tmuxState.captures[RUNNING_TARGET]!));
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((a) => a[0] === "kill-pane" && a.includes("%4"))).toBe(true);
+  expect(tmux.some((a) => a[0] === "kill-window")).toBe(false);
+  // The menu's window and its own pane are still there.
+  const after = await mock.getTmuxState();
+  expect(after.windows.map((w: { name: string }) => w.name)).toEqual(["launcher"]);
+  expect(after.panes.map((x: { id: string }) => x.id)).toEqual(["%0"]);
+});
+
+test("close reaches a pane-hosted session that has no transcript yet", async ({ mock }) => {
+  // The launch → "that went wrong" → close flow, at the one moment it is most
+  // likely to be used: claude is still on its trust prompt, so nothing is indexed
+  // and the session is known only by the pane carrying its name. Resolving it and
+  // then addressing it by NAME would find no window, refuse on the read, and fail
+  // again under --force — while `tmux kill-window`, the thing this command exists
+  // to replace, would take the launcher's own menu down with it.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", id: "%0" },
+      { session: "agendo", window: "launcher", cwd: "/repos", id: "%6", paneTarget: "cl-bg-freshpane01" },
+    ],
+    captures: { "%6": tmuxState.captures[RUNNING_TARGET]! },
+  });
+  const r = agendo(mock.env, "close", "freshpane01");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((a) => a[0] === "kill-pane" && a.includes("%6"))).toBe(true);
+  expect(tmux.some((a) => a[0] === "kill-window")).toBe(false);
+  expect((await mock.getTmuxState()).panes.map((x: { id: string }) => x.id)).toEqual(["%0"]);
+});
+
+test("close refuses a busy pane-hosted session like any other", async ({ mock }) => {
+  // The readiness read has to reach the pane for the guard to mean anything; a
+  // capture that quietly came back empty would read as "not busy".
+  await mock.setTmuxState(paneHosted(BUSY_PANE));
+  const r = agendo(mock.env, "close", SHORT_ID);
+  expect(r.status).toBe(2);
+  expect(r.stderr).toContain("busy");
+  expect((await mock.getTmuxState()).panes.map((x: { id: string }) => x.id)).toEqual(["%0", "%4"]);
+});
+
+test("--tmux re-splits a window whose menu quit beside a live orchestrator", async ({ mock }) => {
+  // tmux only destroys a window when its LAST pane exits, so quitting the menu
+  // leaves the window alive with the orchestrator in it. Rebuilding the menu by
+  // killing that window would take the running agent with it.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [{ session: "agendo", window: "launcher", cwd: "/repos", id: "%4", paneTarget: RUNNING_TARGET }],
+    captures: {},
+  });
+  const r = agendo(mock.env, "--tmux");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((a) => a[0] === "kill-window")).toBe(false);
+  // `-b` puts the menu back on the LEFT, where it was before the user quit it.
+  const split = tmux.find((a) => a[0] === "split-window");
+  expect(split).toBeTruthy();
+  expect(split!).toContain("-b");
+  // And NOT detached, unlike every other split this launcher makes: the only
+  // other pane here is the orchestrator's, so leaving it active would attach the
+  // user into that agent's input box — and the next thing they typed to get their
+  // menu back would land in it as a prompt.
+  expect(split!).not.toContain("-d");
+  expect((await mock.getTmuxState()).panes.some((x: { id: string }) => x.id === "%4")).toBe(true);
+});
+
+test("a DEAD orchestrator pane does not protect the launcher window from a rebuild", async ({ mock }) => {
+  // Only reachable under `remain-on-exit on`, which leaves the exited pane in
+  // place still carrying its managed name. It protects nothing, and treating it
+  // as a live agent would skip the kill-and-rebuild — stacking another corpse
+  // pane into the window on every quit-menu → `--tmux` cycle.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [{ session: "agendo", window: "launcher", cwd: "/repos", id: "%4", paneTarget: RUNNING_TARGET, dead: true }],
+    captures: {},
+  });
+  const r = agendo(mock.env, "--tmux");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((a) => a[0] === "kill-window")).toBe(true);
+  expect(tmux.some((a) => a[0] === "split-window")).toBe(false);
+});
+
+test("a launcher window that will not split is rebuilt rather than left menu-less", async ({ mock }) => {
+  // tmux refuses a split it has no room for. Fire-and-forget there would leave no
+  // menu at all and attach the user into the orchestrator's pane — the exact
+  // outcome dropping `-d` exists to prevent — so the status is checked and the
+  // window is rebuilt, with the cost said out loud.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [{ session: "agendo", window: "launcher", cwd: "/repos", id: "%4", paneTarget: RUNNING_TARGET }],
+    captures: {},
+    splitFails: true,
+  });
+  const r = agendo(mock.env, "--tmux");
+  expect(r.status).toBe(0);
+  expect(r.stderr).toContain("could not split the launcher window");
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((a) => a[0] === "split-window")).toBe(true); // it tried
+  expect(tmux.some((a) => a[0] === "kill-window")).toBe(true); // and recovered
+});
+
+test("the split gate asks for the pane's width, not the window's", async ({ mock }) => {
+  // `split-window -t <window>` halves that window's ACTIVE PANE, so a menu window
+  // the user has already split by hand is wide while the pane about to be halved
+  // is not — and measuring the window there would hand the new agent half of half.
+  // The fake tmux models one width, so what is pinned here is WHICH MEASUREMENT is
+  // asked for; the fallback behaviour itself is the narrow-terminal test above.
+  await mock.setTmuxState(withLauncherWindow());
+  const r = agendoIn(mockRepo(mock.home), inTmux(mock.env), "launch", "-G", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  const asked = (await mock.tmuxLog()).filter((a) => a[0] === "display-message");
+  expect(asked.some((a) => a.join(" ").includes("#{pane_width}"))).toBe(true);
+  expect(asked.some((a) => a.join(" ").includes("#{window_width}"))).toBe(false);
+});
+
+test("--orchestrator --global is the same thing, spelled as a modifier", async ({ mock }) => {
+  // Both spellings exist because a reader who knows -O reaches for a modifier and
+  // a reader who knows neither looks for a long flag. They must not diverge.
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--global", "Coordinate every repo");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched global orchestrator session");
+  const spawned = (await mock.tmuxLog()).find((argv) => argv[0] === "new-session" && argv.includes("claude"));
+  expect(appendedPrompt(spawned!)).toContain("GLOBAL ORCHESTRATOR MODE");
 });
 
 // ── a session whose window is gone is not a lost session ──────────────────────
