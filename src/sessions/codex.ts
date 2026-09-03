@@ -59,7 +59,7 @@ function repoIdFromRemote(url: string): string | undefined {
   return bare || undefined;
 }
 
-interface CodexMeta {
+export interface CodexMeta {
   id?: string;
   cwd?: string;
   branch?: string;
@@ -70,55 +70,85 @@ interface CodexMeta {
   skip?: boolean;
 }
 
-function parseCodexHead(head: string): CodexMeta | null {
+/** One line of a rollout head, parsed: the event and its payload, both objects. */
+interface HeadLine {
+  e: Record<string, any>;
+  p: Record<string, any>;
+}
+
+function parseHeadLine(line: string): HeadLine | null {
+  const t = line.trim();
+  if (!t) return null;
+  let e: unknown;
+  try {
+    e = JSON.parse(t);
+  } catch {
+    // The last line of a bounded head read is usually truncated mid-JSON.
+    return null;
+  }
+  if (!e || typeof e !== "object") return null;
+  const p = (e as Record<string, any>).payload;
+  if (!p || typeof p !== "object") return null;
+  return { e: e as Record<string, any>, p };
+}
+
+const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+
+function dateOf(ts: unknown): Date | undefined {
+  if (!ts) return undefined;
+  const d = new Date(ts as string | number);
+  return isNaN(d.getTime()) ? undefined : d;
+}
+
+// Threads codex spawned for itself, and `codex exec` runs, are not sessions
+// the user can pick up interactively — `codex resume` hides them behind
+// --include-non-interactive — so they must not be listed. A sub-agent is
+// marked by `thread_source`, by a `{subagent: …}` source object, or by having
+// a parent thread. A user's own `codex fork` records `forked_from_id` instead
+// of `parent_thread_id`, so it stays listed.
+export function skipsListing(p: Record<string, any>): boolean {
+  const subagent = p.thread_source === "subagent" || (typeof p.source === "object" && p.source?.subagent);
+  return !!subagent || p.source === "exec" || !!p.parent_thread_id;
+}
+
+export function sessionMetaOf(p: Record<string, any>): CodexMeta {
+  const url = str(p.git?.repository_url);
+  return {
+    id: str(p.id),
+    cwd: str(p.cwd),
+    branch: str(p.git?.branch),
+    repository: url === undefined ? undefined : repoIdFromRemote(url),
+    createdAt: dateOf(p.timestamp),
+    skip: skipsListing(p),
+  };
+}
+
+// Title: codex records none, so the first genuine user message stands in.
+function takeTitle(meta: CodexMeta, line: HeadLine): boolean {
+  const msg = codexUserText(line.e, line.p);
+  if (!msg) return false;
+  meta.title = msg.slice(0, 120);
+  return true;
+}
+
+function headLines(head: string): HeadLine[] {
+  return head.split("\n").map(parseHeadLine).filter((l): l is HeadLine => l !== null);
+}
+
+export function parseCodexHead(head: string): CodexMeta | null {
   let meta: CodexMeta | null = null;
-  for (const line of head.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let e: Record<string, any>;
-    try {
-      e = JSON.parse(t);
-    } catch {
-      // The last line of a bounded head read is usually truncated mid-JSON.
+  for (const line of headLines(head)) {
+    if (line.e.type === "session_meta") {
+      meta = sessionMetaOf(line.p);
+      if (meta.skip) return meta; // nothing else to learn about a thread we won't list
       continue;
     }
-    if (!e || typeof e !== "object") continue;
-    const p = e.payload;
-    if (!p || typeof p !== "object") continue;
-    if (e.type === "session_meta") {
-      // Threads codex spawned for itself, and `codex exec` runs, are not
-      // sessions the user can pick up interactively — `codex resume` hides them
-      // behind --include-non-interactive — so they must not be listed. A
-      // sub-agent is marked by `thread_source`, by a `{subagent: …}` source
-      // object, or by having a parent thread. A user's own `codex fork` records
-      // `forked_from_id` instead of `parent_thread_id`, so it stays listed.
-      const subagent = p.thread_source === "subagent" || (typeof p.source === "object" && p.source?.subagent);
-      const skip = !!subagent || p.source === "exec" || !!p.parent_thread_id;
-      const created = p.timestamp ? new Date(p.timestamp) : undefined;
-      meta = {
-        id: typeof p.id === "string" ? p.id : undefined,
-        cwd: typeof p.cwd === "string" ? p.cwd : undefined,
-        branch: typeof p.git?.branch === "string" ? p.git.branch : undefined,
-        repository: typeof p.git?.repository_url === "string" ? repoIdFromRemote(p.git.repository_url) : undefined,
-        createdAt: created && !isNaN(created.getTime()) ? created : undefined,
-        skip,
-      };
-      if (skip) return meta; // nothing else to learn about a thread we won't list
-      continue;
-    }
-    // Title: codex records none, so the first genuine user message stands in.
-    if (meta && !meta.title) {
-      const msg = codexUserText(e, p);
-      if (msg) {
-        meta.title = msg.slice(0, 120);
-        return meta; // the meta line always precedes this, so we have everything
-      }
-    }
+    // The meta line always precedes the first message, so that is everything.
+    if (meta && !meta.title && takeTitle(meta, line)) return meta;
   }
   return meta;
 }
 
-/** The thread uuid trailing a `rollout-<timestamp>-<uuid>.jsonl` filename. */
 const CODEX_FILE_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 
 const codexParseCache = new TranscriptCache();
