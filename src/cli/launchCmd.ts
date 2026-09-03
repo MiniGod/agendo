@@ -112,7 +112,7 @@ function parseGlobalFlag(a: string, flag: string, inline: boolean): { global?: t
 }
 
 /** Everything `launch` reads out of argv, once. */
-interface LaunchArgs {
+export interface LaunchArgs {
   name?: string;
   /** undefined = not specified, so the default can depend on --orchestrator. */
   worktree?: boolean;
@@ -133,78 +133,126 @@ interface LaunchArgs {
 
 // Parse `launch`'s argv tail. Exits on a bad flag rather than returning, so a
 // typo can never be swallowed into the prompt as if it were part of the task.
-function parseLaunchArgs(): LaunchArgs {
-  let name: string | undefined;
-  // undefined = "not specified", so the default can depend on --orchestrator below.
-  let worktree: boolean | undefined;
-  let worktreePath: string | undefined;
-  let attach = false;
-  let orchestrator = false;
-  let global = false;
-  let layout: "pane" | "window" | undefined;
-  let unattended = false;
-  let agent: AgentSource = "claude";
-  // Flat `[flag, value, …]` tokens forwarded verbatim to the new agent.
-  const forwardArgv: string[] = [];
-  const positionals: string[] = [];
-  const rest = process.argv.slice(3);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    // Both agent CLIs accept the GNU `--model=opus` form as well as the two-token
-    // one, so split an inline value off here and normalize to `[flag, value]`.
-    // (`eq > 2` keeps the bare `--` separator and a leading `--=` out of this.)
-    const eq = a.indexOf("=");
-    const inline = a.startsWith("--") && eq > 2;
-    const flag = inline ? a.slice(0, eq) : a;
-    const globalFlag = parseGlobalFlag(a, flag, inline);
-    if (a === "--attach" || a === "-a") attach = true;
-    else if (a === "--no-worktree") worktree = false;
-    else if (flag === "--worktree") {
-      const p = parseWorktreeFlag(a, inline ? eq : -1, rest[i + 1]);
-      if (p === undefined) worktree = true;
-      else worktreePath = p;
-    }
-    else if (flag === "--name" || a === "-n") name = inline ? a.slice(eq + 1) : rest[++i];
-    // Must stay ABOVE the unknown-`--flag` catch-all below, or `--orchestrator`
-    // would be rejected outright and `-O` would fall through into the prompt —
-    // launching an ordinary session that looks like it was asked to orchestrate.
-    else if (parseOrchestratorFlag(a, flag, inline)) orchestrator = true;
-    else if (a === "--unattended") unattended = true;
-    else if (AGENT_SHORTHAND[a]) agent = AGENT_SHORTHAND[a];
-    else if (globalFlag) {
-      if (globalFlag.global) global = true;
-      if (globalFlag.layout) layout = globalFlag.layout;
-    }
-    else if (flag === "--agent") {
-      const v = inline ? a.slice(eq + 1) : rest[++i];
-      if (!AGENTS.includes(v as AgentSource)) {
-        console.error(`launch failed: --agent must be one of ${AGENTS.join(", ")}, got "${v ?? ""}"`);
-        process.exit(1);
-      }
-      agent = v as AgentSource;
-    } else if (Object.hasOwn(FORWARDABLE_LAUNCH_FLAGS, flag)) {
-      // Value flags: take the inline `=value`, else the next token verbatim. A
-      // missing value (empty, or end of argv) or — in the two-token form, where
-      // it's ambiguous — another flag in its place is a mistake, not a model
-      // named "--attach".
-      const v = inline ? a.slice(eq + 1) : rest[++i];
-      if (v === undefined || v === "" || (!inline && v.startsWith("--"))) {
-        console.error(`launch failed: ${flag} needs a value`);
-        process.exit(1);
-      }
-      forwardArgv.push(flag, v);
-    } else if (a === "--") { positionals.push(...rest.slice(i + 1)); break; }
-    else if (a.startsWith("--")) {
-      const known = Object.keys(FORWARDABLE_LAUNCH_FLAGS).join(", ");
-      console.error(
-        `launch failed: unknown flag "${a}" (forwardable agent flags: ${known}; ` +
-        `use -- before prompt text that starts with --)`,
-      );
-      process.exit(1);
-    } else positionals.push(a);
+/** One argv token, with the GNU `--flag=value` form split off. */
+interface Token {
+  a: string;
+  /** The flag without its inline value (`--model` for `--model=opus`), else the token itself. */
+  flag: string;
+  inline: boolean;
+  eq: number;
+}
+
+// Both agent CLIs accept the GNU `--model=opus` form as well as the two-token
+// one, so split an inline value off here and normalize to `[flag, value]`.
+// (`eq > 2` keeps the bare `--` separator and a leading `--=` out of this.)
+function tokenOf(a: string): Token {
+  const eq = a.indexOf("=");
+  const inline = a.startsWith("--") && eq > 2;
+  return { a, flag: inline ? a.slice(0, eq) : a, inline, eq };
+}
+
+// A flag that takes a value: the inline `=value`, else the next token, which is
+// then consumed (`used` is how many extra argv tokens the flag took).
+function takeValue(t: Token, next: string | undefined): { v: string | undefined; used: 0 | 1 } {
+  return t.inline ? { v: t.a.slice(t.eq + 1), used: 0 } : { v: next, used: 1 };
+}
+
+function initialLaunchArgs(): LaunchArgs {
+  return { attach: false, orchestrator: false, global: false, unattended: false, agent: "claude", forwardArgv: [], positionals: [] };
+}
+
+// The flags that are a switch and nothing more. True when the token was one.
+//
+// The orchestrator test must stay ahead of the unknown-`--flag` catch-all in
+// parseLaunchArgs, or `--orchestrator` would be rejected outright and `-O`
+// would fall through into the prompt — launching an ordinary session that
+// looks like it was asked to orchestrate.
+function applyToggle(d: LaunchArgs, t: Token): boolean {
+  const { a, flag, inline } = t;
+  if (a === "--attach" || a === "-a") d.attach = true;
+  else if (a === "--no-worktree") d.worktree = false;
+  else if (parseOrchestratorFlag(a, flag, inline)) d.orchestrator = true;
+  else if (a === "--unattended") d.unattended = true;
+  else if (AGENT_SHORTHAND[a]) d.agent = AGENT_SHORTHAND[a];
+  else return false;
+  return true;
+}
+
+function applyGlobalFlag(d: LaunchArgs, t: Token): boolean {
+  const g = parseGlobalFlag(t.a, t.flag, t.inline);
+  if (!g) return false;
+  if (g.global) d.global = true;
+  if (g.layout) d.layout = g.layout;
+  return true;
+}
+
+function agentOf(v: string | undefined): AgentSource {
+  if (!AGENTS.includes(v as AgentSource)) {
+    console.error(`launch failed: --agent must be one of ${AGENTS.join(", ")}, got "${v ?? ""}"`);
+    process.exit(1);
   }
-  checkForwardedFlags(forwardArgv, agent);
-  return { name, worktree, worktreePath, attach, orchestrator, global, layout, unattended, agent, forwardArgv, positionals };
+  return v as AgentSource;
+}
+
+// Value flags forwarded verbatim to the agent. A missing value (empty, or end
+// of argv) or — in the two-token form, where it's ambiguous — another flag in
+// its place is a mistake, not a model named "--attach".
+function pushForwarded(d: LaunchArgs, t: Token, v: string | undefined): void {
+  if (v === undefined || v === "" || (!t.inline && v.startsWith("--"))) {
+    console.error(`launch failed: ${t.flag} needs a value`);
+    process.exit(1);
+  }
+  d.forwardArgv.push(t.flag, v);
+}
+
+// The flags that take (or, for --worktree, may look at) a value. Returns how
+// many extra argv tokens were consumed, or null when the token was none of them.
+function applyWorktree(d: LaunchArgs, t: Token, next: string | undefined): 0 {
+  const p = parseWorktreeFlag(t.a, t.inline ? t.eq : -1, next);
+  if (p === undefined) d.worktree = true;
+  else d.worktreePath = p;
+  return 0;
+}
+
+function applyValueFlag(d: LaunchArgs, t: Token, next: string | undefined): 0 | 1 | null {
+  if (t.flag === "--worktree") return applyWorktree(d, t, next);
+  const { v, used } = takeValue(t, next);
+  if (t.flag === "--name" || t.a === "-n") d.name = v;
+  else if (t.flag === "--agent") d.agent = agentOf(v);
+  else if (Object.hasOwn(FORWARDABLE_LAUNCH_FLAGS, t.flag)) pushForwarded(d, t, v);
+  else return null;
+  return used;
+}
+
+function failUnknownFlag(a: string): never {
+  const known = Object.keys(FORWARDABLE_LAUNCH_FLAGS).join(", ");
+  console.error(
+    `launch failed: unknown flag "${a}" (forwardable agent flags: ${known}; ` +
+    `use -- before prompt text that starts with --)`,
+  );
+  process.exit(1);
+}
+
+/** `agendo launch`'s argv after the command word, one token at a time. */
+export function parseLaunchArgs(rest: string[]): LaunchArgs {
+  const d = initialLaunchArgs();
+  for (let i = 0; i < rest.length; i++) {
+    const t = tokenOf(rest[i]);
+    if (applyToggle(d, t) || applyGlobalFlag(d, t)) continue;
+    const used = applyValueFlag(d, t, rest[i + 1]);
+    if (used !== null) {
+      i += used;
+      continue;
+    }
+    if (t.a === "--") {
+      d.positionals.push(...rest.slice(i + 1));
+      break;
+    }
+    if (t.a.startsWith("--")) failUnknownFlag(t.a);
+    d.positionals.push(t.a);
+  }
+  checkForwardedFlags(d.forwardArgv, d.agent);
+  return d;
 }
 
 /**
@@ -305,7 +353,7 @@ function validateLaunchArgs(a: LaunchArgs): void {
 }
 
 export async function runLaunch(): Promise<void> {
-  const args = parseLaunchArgs();
+  const args = parseLaunchArgs(process.argv.slice(3));
   validateLaunchArgs(args);
   const { name, worktree, worktreePath, attach, orchestrator, global, layout, unattended, agent, forwardArgv, positionals } = args;
   // An orchestrator squash-merges into the main branch, and git allows the main
