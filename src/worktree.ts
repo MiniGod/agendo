@@ -198,37 +198,35 @@ export function createWorktree(root: string, branch: string): WorktreeResult {
  * remote ref first, then prefers a local branch tracking origin/<branch>,
  * falling back to an existing local branch, then a detached checkout.
  */
-export function checkoutWorktree(root: string, prBranch: string): WorktreeResult {
+/** A git call in the repo, as the worktree helpers need it: exit status and stderr. */
+export type GitRun = (args: string[]) => { status: number | null; stderr: string | null };
+
+function gitIn(root: string): GitRun {
+  return (args) => spawnSync("git", ["-C", root, ...args], { encoding: "utf-8" });
+}
+
+// The three ways to put the PR branch in a worktree, tried in order:
+//   1) a new local branch tracking the remote PR branch,
+//   2) the local branch that already exists, checked out into the worktree,
+//   3) a detached checkout at the remote ref (works even with no local branch).
+function worktreeAddAttempts(path: string, prBranch: string, remote: string): string[][] {
+  return [
+    ["worktree", "add", "--track", "-b", prBranch, path, remote],
+    ["worktree", "add", path, prBranch],
+    ["worktree", "add", "--detach", path, remote],
+  ];
+}
+
+export function checkoutWorktree(root: string, prBranch: string, run: GitRun = gitIn(root)): WorktreeResult {
   const path = worktreePath(root, prBranch);
   if (existsSync(path)) return { path, created: false };
-
   // Best-effort: make sure origin/<branch> is up to date before we base on it.
-  spawnSync("git", ["-C", root, "fetch", "origin", prBranch], { encoding: "utf-8" });
-  const remote = `origin/${prBranch}`;
-
-  // 1) New local branch tracking the remote PR branch.
-  const track = spawnSync(
-    "git",
-    ["-C", root, "worktree", "add", "--track", "-b", prBranch, path, remote],
-    { encoding: "utf-8" },
-  );
-  if (track.status === 0) return { path, created: true };
-
-  // 2) Local branch already exists — check it out into the worktree.
-  const existing = spawnSync("git", ["-C", root, "worktree", "add", path, prBranch], { encoding: "utf-8" });
-  if (existing.status === 0) return { path, created: true };
-
-  // 3) Detached checkout at the remote ref (works even with no local branch).
-  const detached = spawnSync("git", ["-C", root, "worktree", "add", "--detach", path, remote], { encoding: "utf-8" });
-  if (detached.status === 0) return { path, created: true };
-
-  return {
-    path,
-    created: false,
-    error:
-      (track.stderr || "").trim() ||
-      (existing.stderr || "").trim() ||
-      (detached.stderr || "").trim() ||
-      "git worktree add failed",
-  };
+  run(["fetch", "origin", prBranch]);
+  const failures: string[] = [];
+  for (const args of worktreeAddAttempts(path, prBranch, `origin/${prBranch}`)) {
+    const r = run(args);
+    if (r.status === 0) return { path, created: true };
+    failures.push((r.stderr || "").trim());
+  }
+  return { path, created: false, error: failures.find(Boolean) || "git worktree add failed" };
 }
