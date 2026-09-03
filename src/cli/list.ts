@@ -8,23 +8,22 @@ import { basename } from "path";
 import {
   capturePaneState, liveManagedPaths, managedKind,
   paneBackgroundAgents, paneReadiness, paneResumeDialogActive, paneShells, sessionName,
-  shortId, 
-  type Readiness, type SessionKind,
+  shortId,
 } from "../tmux.ts";
 import { SessionIndex } from "../sessions.ts";
 import { idleSeconds, isStalled, resolveStalledAfterMs } from "../idle.ts";
 import { resolveWindowSession } from "../restore.ts";
 import { scopeFilter, scopeNote, type SessionScope } from "../scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "../model.ts";
-import { orchestratorRoles, type OrchestratorRole } from "../orchestrator.ts";
-import { repoRootForCwd } from "../repos.ts";
+import { orchestratorRoles } from "../orchestrator.ts";
 import { printJson } from "../output.ts";
-import type { AgentSession, AgentSource, BranchSync, BranchSyncReader, WorkflowStatus } from "../types.ts";
+import type { AgentSession, BranchSyncReader } from "../types.ts";
 import { workflowStatus } from "../workflows.ts";
 import { flushWarnings } from "./warnings.ts";
 import { padCell, readyCell, readyWidth, rowCompactionPercent, rowResetAt, timeAgo } from "./cells.ts";
 import { currentModelOptions } from "./links.ts";
 import { STALLED_MARK } from "./glyphs.ts";
+import { listRow, type ListRow, type ListRowContext } from "./listRow.ts";
 import {
   KIND_COL, printOrchestratorSummary, roleLabel, withRememberedOrchestrators,
   type OrchestratorSummaryRow,
@@ -48,102 +47,96 @@ export interface ListOptions {
 }
 
 /** One session as reported by the enriched (`--json` / `--all` / query) list. */
-interface ListRow {
-  id: string;
-  shortId: string;
-  source: AgentSource;
-  running: boolean;
-  /** Input readiness from the live pane, or null when idle (no pane to read). */
-  readiness: Readiness | null;
-  /**
-   * Sitting on claude's OWN resume dialog — the same signal `wait --json`
-   * reports. Carried here because it is the one case where a large `idleSeconds`
-   * means the opposite of what it looks like: the session hasn't run yet, so the
-   * age belongs to the previous run and `stalled` is deliberately false. Without
-   * it a consumer would have to re-infer that from the pane itself.
-   */
-  resumeDialog: boolean;
-  /**
-   * When the usage limit resets, as an ISO 8601 instant — set only for a
-   * "limited" row whose pane states a time (the numbered limit dialog hides it,
-   * and we never press a key to reveal it), null otherwise. Machine-readable on
-   * purpose: the human list renders the same instant in the local locale.
-   *
-   * The other reason a consumer wants it: a `limited` row is never `stalled`
-   * however old it is (see src/idle.ts), and this is what says when it stops
-   * being someone else's problem.
-   */
-  limitResetAt: string | null;
-  /**
-   * How far a "compacting" row's progress bar has got (0-100), null for every other
-   * state and for a compacting pane that isn't drawing one yet. Like `limitResetAt`,
-   * it says how long someone else's pause has left to run — a compacting session is
-   * blocked but progressing, and this is the difference between "wait" and "stuck".
-   */
-  compactionPercent: number | null;
-  /** Background shells the running pane reports (0 when idle/unknown). */
-  shells: number;
-  /** How it was launched, when running (from the live-tmux reconciliation). */
-  kind: SessionKind | null;
-  /**
-   * Whether this session coordinates other sessions rather than doing work
-   * itself, and at which level of the hierarchy — `"repo"` runs one repository's
-   * sessions and merges their branches, `"global"` runs the repo orchestrators.
-   * `null` (and `orchestrator: false`) is an ordinary worktree session.
-   *
-   * A first-class field, not an inference from `kind`: an orchestrator launches
-   * as a `background` session and is indistinguishable from one by every other
-   * field on this row. Unlike the live-only `kind`, it is known for idle sessions
-   * too — the marker file outlives the tmux window.
-   */
-  orchestrator: boolean;
-  role: OrchestratorRole | null;
-  branch: string | null;
-  cwd: string;
-  /**
-   * The repo the session belongs to — its checkout's root, so every worktree
-   * folds back onto the repository itself. This is the grouping key for "which
-   * repos have an orchestrator and which do not", and a consumer cannot derive it
-   * from `cwd` without repeating agendo's worktree-path arithmetic.
-   *
-   * NULL for a `role: "global"` row, which belongs to no repository at all.
-   */
-  repoRoot: string | null;
-  repoName: string | null;
-  dir: string;
-  title: string;
-  /** When the session was last active (ISO 8601), for machine consumers. */
-  lastUsed: string;
-  /** Seconds since that last activity — idle age, without parsing a timestamp. */
-  idleSeconds: number;
-  /**
-   * QUALIFIER, not a readiness state: the session is live, isn't mid-turn, and
-   * has done nothing for at least `stalledAfterSeconds`. It does NOT mean the
-   * work is unfinished — agendo cannot know that. See src/idle.ts.
-   */
-  stalled: boolean;
-  /** The threshold `stalled` was judged against, so the flag reads standalone. */
-  stalledAfterSeconds: number;
-  /**
-   * Local-vs-origin state of the session's checkout, read from `.git` ref files
-   * (never a `git` process, never a fetch). `null` when undeterminable — which
-   * is NOT the same as "in sync". See src/gitrefs.ts.
-   */
-  git: BranchSync | null;
-  /** Linked PR, resolved through the model's reverse index (null if none/unknown). */
-  pr: { id: number; url: string } | null;
-  /** Linked work item / issue, resolved through the model's reverse index. */
-  workItem: { id: number; url: string } | null;
-  /**
-   * The same two links flattened to top-level fields — null when unlinked, never
-   * a partially-built URL. Agents consume this JSON to hand a human a clickable
-   * link; a first-class field beats making them reach into a nested object (or,
-   * worse, reconstruct the URL from an id and guess the host shape).
-   */
-  prUrl: string | null;
-  workItemUrl: string | null;
-  /** Workflow-tool runs the session launched, with their effective status. */
-  workflows: { runId: string; name: string; status: WorkflowStatus; summary: string | null }[];
+/**
+ * The model behind the enriched listing. Associations come from its reverse
+ * index. A query MUST have it (the whole point); the other enriched modes
+ * degrade gracefully if the backend is unreachable — we still list sessions,
+ * just without PR/work-item links.
+ */
+async function loadListModel(isQuery: boolean): Promise<LoadedModel | null> {
+  try {
+    return await loadModel(currentModelOptions());
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    if (isQuery) {
+      console.error(`list: could not resolve associations from the backend: ${msg}`);
+      process.exit(1);
+    }
+    console.error(`list: continuing without PR/work-item associations (${msg})`);
+    return null;
+  }
+}
+
+/**
+ * The sessions a `--pr` / `--issue` query names, resolved against the model's
+ * FORWARD associations (the same lists the TUI shows), NOT `sessionLinks` —
+ * that reverse index keeps only one PR + one work item per session, so a
+ * session on a PR linked to two items (or a branch matching two PRs) would be
+ * missed. Deduped by source:id across lists.
+ */
+export function querySessions(m: LoadedModel, pr: number | undefined, item: number | undefined): AgentSession[] {
+  const matched = new Map<string, AgentSession>();
+  const take = (sessions: AgentSession[]) => {
+    for (const s of sessions) matched.set(`${s.source}:${s.id}`, s);
+  };
+  for (const p of [...m.linkedPrs, ...m.orphanPrs, ...m.reviewPrs]) if (p.id === pr) take(p.sessions);
+  for (const it of [...m.current, ...m.other, ...m.prLinked]) if (it.id === item) take(it.sessions);
+  return [...matched.values()];
+}
+
+/** Which sessions the enriched listing covers: the query's, all on disk, or the live ones. */
+function selectSessions(opts: ListOptions, index: SessionIndex, live: Set<string>, model: LoadedModel | null): AgentSession[] {
+  // `model` is guaranteed for a query: a failed load already exited.
+  if (model && (opts.pr !== undefined || opts.item !== undefined)) return querySessions(model, opts.pr, opts.item);
+  if (opts.all) return [...index.all];
+  return index.all.filter((s) => live.has(sessionName(s)));
+}
+
+/** One line of the enriched table. */
+function tableLine(r: ListRow, ready: string): string {
+  const wfRunning = r.workflows.filter((w) => w.status === "running").length;
+  return [
+    r.running ? "●" : "○",
+    ready,
+    roleLabel(r.role, r.kind).padEnd(KIND_COL),
+    r.shortId.padEnd(12),
+    timeAgo(new Date(r.lastUsed)).padEnd(8),
+    padCell(r.dir, 20),
+    (r.pr ? `!${r.pr.id}` : "-").padEnd(6),
+    (r.workItem ? `#${r.workItem.id}` : "-").padEnd(6),
+    r.title.slice(0, 44) +
+      (r.stalled ? `  ${STALLED_MARK}` : "") +
+      (r.shells > 0 ? `  ⛁${r.shells}` : "") +
+      (wfRunning > 0 ? `  ◆${wfRunning}` : ""),
+  ].join("  ").trimEnd();
+}
+
+/** The enriched table, or the line that says why there is none. */
+function printListTable(rows: ListRow[], isQuery: boolean, itemLabel: string, scope: SessionScope | null): void {
+  if (rows.length === 0) {
+    // Name the scope when there is one: an empty listing under a `--repo` typo
+    // otherwise reads as "nothing is running" rather than "nothing matched".
+    const where = scopeNote(scope);
+    console.log(
+      isQuery
+        ? `No sessions linked to that item${where} (query covers open PRs / work items in the current identity's scope).`
+        : `No sessions${where}.`,
+    );
+    return;
+  }
+  const ready = rows.map((r) =>
+    readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt), r.compactionPercent),
+  );
+  const rw = readyWidth(ready);
+  console.log(
+    ["", "ready".padEnd(rw), "kind".padEnd(KIND_COL), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
+  );
+  for (const [i, r] of rows.entries()) console.log(tableLine(r, ready[i].padEnd(rw)));
+  // Same summary the plain list prints, from the same rows the table just used —
+  // so `--all` reports a repo as unmanaged on exactly the sessions it showed.
+  printOrchestratorSummary(
+    rows.map((r) => ({ shortId: r.shortId, cwd: r.cwd, role: r.role, running: r.running })),
+  );
 }
 
 /**
@@ -175,183 +168,24 @@ export async function runList(opts: ListOptions): Promise<void> {
   }
 
   const isQuery = opts.pr !== undefined || opts.item !== undefined;
-  // Associations come from the model's reverse index. A query MUST have it (the
-  // whole point); the other enriched modes degrade gracefully if the backend is
-  // unreachable — we still list sessions, just without PR/work-item links.
-  let model: LoadedModel | null = null;
-  try {
-    model = await loadModel(currentModelOptions());
-  } catch (e) {
-    const msg = (e as Error)?.message ?? String(e);
-    if (isQuery) {
-      console.error(`list: could not resolve associations from the backend: ${msg}`);
-      process.exit(1);
-    }
-    console.error(`list: continuing without PR/work-item associations (${msg})`);
-  }
+  const model = await loadListModel(isQuery);
   flushWarnings("list");
 
   const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
-  // One read of the marker file for the whole listing, not one per row.
-  const roles = orchestratorRoles();
-  const linkOf = (s: AgentSession) => model?.sessionLinks.get(`${s.source}:${s.id}`);
-
-  let sessions: AgentSession[];
-  if (isQuery) {
-    // Resolve the query against the model's FORWARD associations (the same lists
-    // the TUI shows), NOT `sessionLinks` — that reverse index keeps only one
-    // PR + one work item per session, so a session on a PR linked to two items
-    // (or a branch matching two PRs) would be missed. `model` is guaranteed here
-    // (a failed load already exited above). Dedupe by source:id across lists.
-    const m = model!;
-    const matched = new Map<string, AgentSession>();
-    if (opts.pr !== undefined) {
-      for (const pr of [...m.linkedPrs, ...m.orphanPrs, ...m.reviewPrs])
-        if (pr.id === opts.pr) for (const s of pr.sessions) matched.set(`${s.source}:${s.id}`, s);
-    }
-    if (opts.item !== undefined) {
-      for (const it of [...m.current, ...m.other, ...m.prLinked])
-        if (it.id === opts.item) for (const s of it.sessions) matched.set(`${s.source}:${s.id}`, s);
-    }
-    sessions = [...matched.values()];
-  } else if (opts.all) {
-    sessions = [...index.all];
-  } else {
-    sessions = index.all.filter((s) => live.has(sessionName(s)));
-  }
+  const ctx: ListRowContext = {
+    live, liveKinds, liveWindows,
+    roles: orchestratorRoles(),
+    linkOf: (s) => model?.sessionLinks.get(`${s.source}:${s.id}`),
+    thresholdMs,
+    readBranchSync: opts.json ? opts.readBranchSync : null,
+  };
   // Scoping (`[dir]`/`--path`, `--repo`): keep only the sessions it selects.
-  sessions = sessions.filter(inScope);
+  const sessions = selectSessions(opts, index, live, model).filter(inScope);
   sessions.sort((a, b) => b.lastUsed.getTime() - a.lastUsed.getTime());
+  const rows = sessions.map((s) => listRow(s, ctx));
 
-  const rows: ListRow[] = sessions.map((s) => {
-    const canon = sessionName(s);
-    const running = live.has(canon);
-    const role = roles.get(s.id) ?? null;
-    const window = liveWindows.get(canon);
-    let readiness: Readiness | null = null;
-    let shells = 0;
-    let backgroundAgents = 0;
-    // Parked on claude's own resume dialog: reads `ready`, but nothing has run
-    // yet, so its idle age is the previous run's and it is never stalled.
-    let resumeDialog = false;
-    let resetAt: number | null = null;
-    let compactionPercent: number | null = null;
-    if (running && window) {
-      const { raw, cursor } = capturePaneState(window.target);
-      readiness = paneReadiness(raw, cursor);
-      shells = paneShells(raw);
-      backgroundAgents = paneBackgroundAgents(raw);
-      resumeDialog = paneResumeDialogActive(raw);
-      resetAt = rowResetAt(readiness, raw);
-      compactionPercent = rowCompactionPercent(readiness, raw);
-    }
-    const l = linkOf(s);
-    const idle = idleSeconds(s.lastUsed);
-    // A link whose URL couldn't be built reads as absent — applied once here so
-    // the nested object and the flattened *Url field can never disagree.
-    const prLink = l?.pr?.url ? l.pr : null;
-    const itemLink = l?.workItem?.url ? l.workItem : null;
-    return {
-      id: s.id,
-      shortId: shortId(s.id),
-      source: s.source,
-      running,
-      readiness,
-      resumeDialog,
-      limitResetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
-      compactionPercent,
-      shells,
-      kind: running ? liveKinds.get(canon) ?? null : null,
-      orchestrator: roles.has(s.id),
-      role,
-      branch: s.branch ?? null,
-      cwd: s.cwd,
-      // NULL for the global orchestrator, which belongs to no repository. Its cwd
-      // is a vantage point picked precisely because it is not a checkout, so
-      // `repoRootForCwd` hands back that bare directory — and a consumer applying
-      // the rule this listing is documented by ("a repo whose rows carry no
-      // role:'repo' session is unmanaged") would read it as a repo nobody is
-      // coordinating and start an orchestrator in a non-repo. `list repos` leaves
-      // it out for the same reason.
-      repoRoot: role === "global" ? null : repoRootForCwd(s.cwd),
-      repoName: role === "global" ? null : basename(repoRootForCwd(s.cwd)) || repoRootForCwd(s.cwd),
-      dir: basename(s.cwd) || s.cwd,
-      title: s.title.replace(/\s+/g, " ").trim(),
-      lastUsed: s.lastUsed.toISOString(),
-      idleSeconds: idle,
-      stalled: isStalled({ running, readiness, resumeDialog, backgroundAgents, idleSeconds: idle }, thresholdMs),
-      // Exact, NOT floored: a consumer re-deriving `idleSeconds >= stalledAfterSeconds`
-      // must reach the same verdict this row already carries, including for
-      // sub-second thresholds.
-      stalledAfterSeconds: thresholdMs / 1000,
-      // Ref-file reads only, and only here on the one-shot CLI path — never from
-      // SessionIndex.build()/loadLocalSessions(), which the 2s rescan drives.
-      // Skipped entirely unless a JSON consumer will actually read it: the human
-      // table below doesn't render it, and `--all` can enumerate every session
-      // on disk.
-      git: opts.json ? opts.readBranchSync(s.cwd) : null,
-      // Siblings of the fields above, not nested under them: a consumer reads
-      // `stalled` and `prUrl` off the same row object.
-      pr: prLink,
-      workItem: itemLink,
-      prUrl: prLink?.url ?? null,
-      workItemUrl: itemLink?.url ?? null,
-      workflows: (s.workflows ?? []).map((w) => ({
-        runId: w.runId,
-        name: w.name,
-        status: workflowStatus(w, running),
-        summary: w.summary ?? null,
-      })),
-    };
-  });
-
-  if (opts.json) {
-    await printJson(rows);
-    return;
-  }
-  if (rows.length === 0) {
-    // Name the scope when there is one: an empty listing under a `--repo` typo
-    // otherwise reads as "nothing is running" rather than "nothing matched".
-    const where = scopeNote(opts.scope);
-    console.log(
-      isQuery
-        ? `No sessions linked to that item${where} (query covers open PRs / work items in the current identity's scope).`
-        : `No sessions${where}.`,
-    );
-    return;
-  }
-  const itemLabel = model?.provider === "github" ? "issue" : "wi";
-  const ready = rows.map((r) =>
-    readyCell(r.readiness, r.limitResetAt === null ? null : Date.parse(r.limitResetAt), r.compactionPercent),
-  );
-  const rw = readyWidth(ready);
-  console.log(
-    ["", "ready".padEnd(rw), "kind".padEnd(KIND_COL), "id".padEnd(12), "age".padEnd(8), "dir".padEnd(20), "pr".padEnd(6), itemLabel.padEnd(6), "title"].join("  "),
-  );
-  for (const [i, r] of rows.entries()) {
-    const wfRunning = r.workflows.filter((w) => w.status === "running").length;
-    console.log(
-      [
-        r.running ? "●" : "○",
-        ready[i].padEnd(rw),
-        roleLabel(r.role, r.kind).padEnd(KIND_COL),
-        r.shortId.padEnd(12),
-        timeAgo(new Date(r.lastUsed)).padEnd(8),
-        padCell(r.dir, 20),
-        (r.pr ? `!${r.pr.id}` : "-").padEnd(6),
-        (r.workItem ? `#${r.workItem.id}` : "-").padEnd(6),
-        r.title.slice(0, 44) +
-          (r.stalled ? `  ${STALLED_MARK}` : "") +
-          (r.shells > 0 ? `  ⛁${r.shells}` : "") +
-          (wfRunning > 0 ? `  ◆${wfRunning}` : ""),
-      ].join("  ").trimEnd(),
-    );
-  }
-  // Same summary the plain list prints, from the same rows the table just used —
-  // so `--all` reports a repo as unmanaged on exactly the sessions it showed.
-  printOrchestratorSummary(
-    rows.map((r) => ({ shortId: r.shortId, cwd: r.cwd, role: r.role, running: r.running })),
-  );
+  if (opts.json) return printJson(rows);
+  printListTable(rows, isQuery, model?.provider === "github" ? "issue" : "wi", opts.scope);
 }
 
 /**
