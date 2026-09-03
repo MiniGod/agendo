@@ -215,50 +215,78 @@ function resolveRef(dirs: GitDirs, ref: string, depth = 0): string | null {
  * failure isn't a null, it's a confident "never been pushed" for work that is
  * fully pushed. That is precisely the false signal an orchestrator would act on.
  */
-function configuredUpstream(commonDir: string, branch: string): string | null {
+/** The repo's `config`, read once per commonDir for the process (see the caches above). */
+function cachedConfig(commonDir: string): string | null {
   let raw = configCache.get(commonDir);
   if (raw === undefined) {
     raw = readText(join(commonDir, "config"));
     configCache.set(commonDir, raw);
   }
-  if (!raw) return null;
-  let inSection = false;
-  let remote: string | undefined;
-  let merge: string | undefined;
+  return raw;
+}
+
+/**
+ * The `[branch "<name>"]` header, if `line` is one: whether it opens the section
+ * for `branch`, and whatever key follows the `]` on the same line. Section
+ * keywords are case-insensitive; the quoted subsection (the branch name) is
+ * not. Anything after the closing `]` is a key git allows on the header line —
+ * so match the header as a PREFIX, not the whole line, or a
+ * `[branch "x"] remote = y` (or a trailing comment) silently loses the section
+ * and we fall back to guessing.
+ */
+function branchHeader(line: string, branch: string): { matches: boolean; tail: string } | null {
+  if (!line.startsWith("[")) return null;
+  const m = line.match(/^\[branch\s+"((?:[^"\\]|\\.)*)"\]/i);
+  if (!m) return { matches: false, tail: "" };
+  return { matches: unescape(m[1]) === branch, tail: line.slice(m[0].length).trim() };
+}
+
+/** The `remote` and `merge` keys of one branch section, read line by line. */
+function branchKeys(raw: string, branch: string): { remote?: string; merge?: string } {
+  const keys: { remote?: string; merge?: string } = {};
   const applyKv = (text: string): void => {
     const kv = text.match(/^([\w-]+)\s*=\s*(.*)$/);
     if (!kv) return;
     const value = unquote(kv[2].trim());
-    if (kv[1].toLowerCase() === "remote") remote = value;
-    else if (kv[1].toLowerCase() === "merge") merge = value;
+    if (kv[1].toLowerCase() === "remote") keys.remote = value;
+    else if (kv[1].toLowerCase() === "merge") keys.merge = value;
   };
+  let inSection = false;
   for (const line of raw.split("\n")) {
     const t = stripComment(line);
     if (!t) continue;
-    if (t.startsWith("[")) {
-      // Section keywords are case-insensitive; the quoted subsection (the branch
-      // name) is not. Anything after the closing `]` is a key git allows on the
-      // header line — so match the header as a PREFIX, not the whole line, or a
-      // `[branch "x"] remote = y` (or a trailing comment) silently loses the
-      // section and we fall back to guessing.
-      const m = t.match(/^\[branch\s+"((?:[^"\\]|\\.)*)"\]/i);
-      inSection = !!m && unescape(m[1]) === branch;
-      const tail = m ? t.slice(m[0].length).trim() : "";
-      if (inSection && tail) applyKv(tail);
-      continue;
+    const header = branchHeader(t, branch);
+    if (header) {
+      inSection = header.matches;
+      if (inSection && header.tail) applyKv(header.tail);
+    } else if (inSection) {
+      applyKv(t);
     }
-    if (inSection) applyKv(t);
   }
-  if (!remote || !merge) return null;
-  // `remote = .` means the upstream is another LOCAL branch (what
-  // `branch.autoSetupMerge=always` produces). There is no remote-tracking ref
-  // involved, so it can answer nothing about whether the work left this machine
-  // — treat it as "no usable candidate" and let the origin/<branch> fallback
-  // speak instead. Returning the local ref here would report `hasRemoteRef: true`
-  // for a ref that is not a remote at all.
-  if (remote === ".") return null;
+  return keys;
+}
+
+/**
+ * The remote-tracking ref a `remote`/`merge` pair names, or null when the pair
+ * is incomplete or local. `remote = .` means the upstream is another LOCAL
+ * branch (what `branch.autoSetupMerge=always` produces). There is no
+ * remote-tracking ref involved, so it can answer nothing about whether the work
+ * left this machine — treat it as "no usable candidate" and let the
+ * origin/<branch> fallback speak instead. Returning the local ref here would
+ * report `hasRemoteRef: true` for a ref that is not a remote at all.
+ */
+export function trackingRef(remote: string | undefined, merge: string | undefined): string | null {
+  if (!remote || !merge || remote === ".") return null;
   const short = merge.startsWith("refs/heads/") ? merge.slice("refs/heads/".length) : merge;
   return `refs/remotes/${remote}/${short}`;
+}
+
+/** Exported for the unit suite; `branchSync` is the module's surface. */
+export function configuredUpstream(commonDir: string, branch: string): string | null {
+  const raw = cachedConfig(commonDir);
+  if (!raw) return null;
+  const { remote, merge } = branchKeys(raw, branch);
+  return trackingRef(remote, merge);
 }
 
 /**

@@ -210,41 +210,60 @@ function linkedIssues(raw: any, issueNums: Set<number>): Set<number> {
 // Net review votes: the latest non-comment review per author. GitHub doesn't
 // expose the branch-protection required count cheaply, so we approximate the
 // gate from reviewDecision (any decision ⇒ at least one approval is required).
-function voteSummary(reviews: any[] | undefined, reviewDecision: string | undefined) {
+/** Review states that are not votes. */
+const NON_VOTES = new Set(["COMMENTED", "PENDING", "DISMISSED"]);
+
+/** Net review votes: the latest non-comment review per author. Reviews are chronological, so the last meaningful vote wins. */
+export function latestVotes(reviews: any[] | undefined): Map<string, string> {
   const latest = new Map<string, string>(); // login → latest meaningful state
   for (const r of reviews ?? []) {
     const login = r.author?.login;
-    const s = r.state;
-    if (!login) continue;
-    if (s === "COMMENTED" || s === "PENDING" || s === "DISMISSED") continue;
-    latest.set(login, s); // reviews are chronological; last meaningful vote wins
+    if (!login || NON_VOTES.has(r.state)) continue;
+    latest.set(login, r.state);
   }
+  return latest;
+}
+
+function countVotes(latest: Map<string, string>): { approvals: number; rejections: number } {
   let approvals = 0, rejections = 0;
   for (const s of latest.values()) {
     if (s === "APPROVED") approvals++;
     else if (s === "CHANGES_REQUESTED") rejections++;
   }
-  // `requiredCount` here is a LOWER BOUND, not a measurement. GitHub reports
-  // `reviewDecision` (non-null ⇔ the base branch requires review) but not how
-  // many approvals that takes — the number lives in branch protection /
-  // rulesets, behind a second per-branch call agendo deliberately doesn't make.
-  // 1 is the smallest gate that can produce a decision, so "0/1" and "1/1" read
-  // correctly at the boundary that matters, and it is what the X/Y column shows.
-  //
-  // What must NOT rest on it is the verdict. Comparing 2 approvals against a
-  // floor of 1 would call a two-approval gate satisfied at one; `gateMet`
-  // carries GitHub's own answer so nothing has to guess.
+  return { approvals, rejections };
+}
+
+/**
+ * `requiredCount` here is a LOWER BOUND, not a measurement. GitHub reports
+ * `reviewDecision` (non-null ⇔ the base branch requires review) but not how
+ * many approvals that takes — the number lives in branch protection /
+ * rulesets, behind a second per-branch call agendo deliberately doesn't make.
+ * 1 is the smallest gate that can produce a decision, so "0/1" and "1/1" read
+ * correctly at the boundary that matters, and it is what the X/Y column shows.
+ *
+ * What must NOT rest on it is the verdict. Comparing 2 approvals against a
+ * floor of 1 would call a two-approval gate satisfied at one; `gateMet`
+ * carries GitHub's own answer so nothing has to guess.
+ *
+ * The `Math.max(1, …)` is load-bearing, not defensive tidying. A decision of
+ * APPROVED with `approvals` counted as 0 is a real shape — the approving
+ * review can be older than the page of reviews `gh` returned, or dismissed
+ * and re-approved outside it — and it would render a GREEN "✓ 0/1": gate met,
+ * nobody approved. Flooring the count at 1 is the only thing that makes that
+ * cell unreachable. Don't remove it without giving the renderers another way
+ * to reconcile the two (src/ui/format.ts approvalProgress).
+ */
+export function reviewGate(reviewDecision: string | undefined, approvals: number): { approvedCount: number; requiredCount: number; gateMet: boolean | undefined } {
   const requiredCount = reviewDecision ? 1 : 0;
   const gateMet = reviewDecision ? reviewDecision === "APPROVED" : undefined;
-  // The `Math.max(1, …)` is load-bearing, not defensive tidying. A decision of
-  // APPROVED with `approvals` counted as 0 is a real shape — the approving
-  // review can be older than the page of reviews `gh` returned, or dismissed
-  // and re-approved outside it — and it would render a GREEN "✓ 0/1": gate met,
-  // nobody approved. Flooring the count at 1 is the only thing that makes that
-  // cell unreachable. Don't remove it without giving the renderers another way
-  // to reconcile the two (src/ui/format.ts approvalProgress).
   const approvedCount = reviewDecision === "APPROVED" ? Math.max(1, approvals) : approvals;
-  return { approvals, rejections, waiting: 0, approvedCount, requiredCount, gateMet };
+  return { approvedCount, requiredCount, gateMet };
+}
+
+/** Exported for the unit suite. */
+export function voteSummary(reviews: any[] | undefined, reviewDecision: string | undefined) {
+  const { approvals, rejections } = countVotes(latestVotes(reviews));
+  return { approvals, rejections, waiting: 0, ...reviewGate(reviewDecision, approvals) };
 }
 
 function mapPR(raw: any, ref: RepoRef): PullRequest {
