@@ -8,14 +8,14 @@ import { basename } from "path";
 import {
   capturePaneState, liveManagedPaths, managedKind,
   paneBackgroundAgents, paneReadiness, paneResumeDialogActive, paneShells, sessionName,
-  shortId,
+  shortId, type SessionKind,
 } from "../tmux.ts";
 import { SessionIndex } from "../sessions.ts";
 import { idleSeconds, isStalled, resolveStalledAfterMs } from "../idle.ts";
 import { resolveWindowSession } from "../restore.ts";
 import { scopeFilter, scopeNote, type SessionScope } from "../scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "../model.ts";
-import { orchestratorRoles } from "../orchestrator.ts";
+import { orchestratorRoles, type OrchestratorRole } from "../orchestrator.ts";
 import { printJson } from "../output.ts";
 import type { AgentSession, BranchSyncReader } from "../types.ts";
 import { workflowStatus } from "../workflows.ts";
@@ -205,62 +205,88 @@ export async function runList(opts: ListOptions): Promise<void> {
  * have none. That second one is the question a global orchestrator asks, and it
  * cannot be read off a table sorted by session.
  */
+/** A running session `list` will show: resolved from its live window, in scope, first sighting. */
+interface ListedSession {
+  s: AgentSession;
+  kind: SessionKind;
+  target: string;
+}
+
+/**
+ * The live `cl-…` windows resolved back to their sessions, once each. Same
+ * attribution the TUI uses (id-bearing → exact session; id-less cl-wi-/cl-pr-
+ * → MRU session in the pane's cwd, matched on a normalized path), shared so the
+ * CLI list can't drift from the menu's running state. Restored-but-unopened
+ * placeholder windows are skipped — they're idle bash waiting for a keypress,
+ * not running agents, so listing them would mislead — and so are sessions the
+ * requested path / repo filter doesn't select.
+ */
+function listedSessions(index: SessionIndex, inScope: (s: AgentSession) => boolean): ListedSession[] {
+  const seen = new Set<string>();
+  const out: ListedSession[] = [];
+  for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
+    const kind = managedKind(name);
+    if (!kind || placeholder) continue;
+    const s = resolveWindowSession(index.all, name, cwd);
+    if (!s || !inScope(s)) continue;
+    const key = `${s.source}:${s.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ s, kind, target });
+  }
+  return out;
+}
+
+/** The trailing marker cell: ⚠ when stalled, ⛁N background shells, ◆N running workflows. */
+function markerCell(stalled: boolean, shells: number, wfRunning: number): string {
+  return [stalled ? STALLED_MARK : "", shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** One line's cells for a running session, judged from its pane right now. */
+function plainRow({ s, kind, target }: ListedSession, role: OrchestratorRole | null, thresholdMs: number): string[] {
+  const { raw, cursor } = capturePaneState(target);
+  const shells = paneShells(raw);
+  const readiness = paneReadiness(raw, cursor);
+  // Running-workflow marker (◆N): the session is live here by construction.
+  const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
+  // …and so is the liveness the stall qualifier requires. A pane on claude's
+  // own resume dialog is excluded there: it reads `ready` but hasn't run yet.
+  // A `limited` one is excluded too, by the shared settled test — the readiness
+  // cell beside this already says when its cap lifts, so the two never both
+  // describe the same pause.
+  const stalled = isStalled(
+    { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), backgroundAgents: paneBackgroundAgents(raw), idleSeconds: idleSeconds(s.lastUsed) },
+    thresholdMs,
+  );
+  return [
+    "●",
+    readyCell(readiness, rowResetAt(readiness, raw), rowCompactionPercent(readiness, raw)),
+    roleLabel(role, kind).padEnd(KIND_COL),
+    shortId(s.id).padEnd(12), // bounds at 12 but does not pad; a shorter id left the rest of the row ragged
+    timeAgo(s.lastUsed).padEnd(8),
+    padCell(basename(s.cwd) || s.cwd, 24),
+    s.title.replace(/\s+/g, " ").slice(0, 44),
+    markerCell(stalled, shells, wfRunning),
+  ];
+}
+
 function runPlainList(
   index: SessionIndex,
   inScope: (s: AgentSession) => boolean,
   thresholdMs: number,
 ): void {
-  const seen = new Set<string>();
   // One read of the marker file for the whole listing, not one per row.
   const roles = orchestratorRoles();
   // Cells, not finished lines: the readiness column's width isn't known until
   // every row is in (a `limited <time>` cell is wider than the state words).
   const rows: string[][] = [];
   const summary: OrchestratorSummaryRow[] = [];
-  for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
-    const kind = managedKind(name);
-    if (!kind) continue;
-    // Skip restored-but-unopened placeholder windows — they're idle bash waiting
-    // for a keypress, not running agents, so listing them would mislead.
-    if (placeholder) continue;
-    // Same attribution the TUI uses (id-bearing → exact session; id-less
-    // cl-wi-/cl-pr- → MRU session in the pane's cwd, matched on a normalized
-    // path). Shared so the CLI list can't drift from the menu's running state.
-    const s = resolveWindowSession(index.all, name, cwd);
-    if (!s) continue;
-    // Scoping: skip sessions the requested path / repo filter doesn't select.
-    if (!inScope(s)) continue;
-    const key = `${s.source}:${s.id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const role = roles.get(s.id) ?? null;
-    summary.push({ shortId: shortId(s.id), cwd: s.cwd, role, running: true });
-    const { raw, cursor } = capturePaneState(target);
-    const shells = paneShells(raw);
-    const readiness = paneReadiness(raw, cursor);
-    // Running-workflow marker (◆N): the session is live here by construction.
-    const wfRunning = (s.workflows ?? []).filter((w) => workflowStatus(w, true) === "running").length;
-    // …and so is the liveness the stall qualifier requires. A pane on claude's
-    // own resume dialog is excluded there: it reads `ready` but hasn't run yet.
-    // A `limited` one is excluded too, by the shared settled test — the readiness
-    // cell beside this already says when its cap lifts, so the two never both
-    // describe the same pause.
-    const stalled = isStalled(
-      { running: true, readiness, resumeDialog: paneResumeDialogActive(raw), backgroundAgents: paneBackgroundAgents(raw), idleSeconds: idleSeconds(s.lastUsed) },
-      thresholdMs,
-    );
-    rows.push([
-      "●",
-      readyCell(readiness, rowResetAt(readiness, raw), rowCompactionPercent(readiness, raw)),
-      roleLabel(role, kind).padEnd(KIND_COL),
-      shortId(s.id).padEnd(12), // bounds at 12 but does not pad; a shorter id left the rest of the row ragged
-      timeAgo(s.lastUsed).padEnd(8),
-      padCell(basename(s.cwd) || s.cwd, 24),
-      s.title.replace(/\s+/g, " ").slice(0, 44),
-      [stalled ? STALLED_MARK : "", shells > 0 ? `⛁${shells}` : "", wfRunning > 0 ? `◆${wfRunning}` : ""]
-        .filter(Boolean)
-        .join(" "),
-    ]);
+  for (const listed of listedSessions(index, inScope)) {
+    const role = roles.get(listed.s.id) ?? null;
+    summary.push({ shortId: shortId(listed.s.id), cwd: listed.s.cwd, role, running: true });
+    rows.push(plainRow(listed, role, thresholdMs));
   }
   if (rows.length === 0) {
     console.log("No running sessions.");
