@@ -1,34 +1,41 @@
 import type { RepoInfo } from "../repos.ts";
 import type { Activity } from "./format.ts";
-import type { RepoSessions, TaskItem } from "../types.ts";
+import type { ActionLine, RepoSessions, TaskItem } from "../types.ts";
 import type { LiveTarget } from "../tmux.ts";
 
 // Cheap structural equality check to skip re-renders when the log hasn't changed.
 // "loading"/"error"/undefined are never equal so any state transition always fires.
+function sameTask(a: TaskItem, b: TaskItem): boolean {
+  return a.label === b.label && a.status === b.status;
+}
+
+/** Same checklist, item for item; an absent list is an empty one. */
 function sameTasks(a: TaskItem[] | undefined, b: TaskItem[] | undefined): boolean {
-  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
-  if (!a || !b) return true;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].label !== b[i].label || a[i].status !== b[i].status) return false;
-  }
-  return true;
+  const xs = a ?? [];
+  const ys = b ?? [];
+  return xs.length === ys.length && xs.every((x, i) => sameTask(x, ys[i]));
+}
+
+/** Two actions are the same when they happened at the same instant and say the same thing. */
+function sameAction(a: ActionLine, b: ActionLine): boolean {
+  return a.timestamp.getTime() === b.timestamp.getTime() && a.verb === b.verb && a.detail === b.detail;
+}
+
+/**
+ * Compare both ends of the (capped) rolling window: when the list is pinned at
+ * ACTIVITY_LIMIT, new appends shift the head off even if the tail looks stable,
+ * so checking only the last action could miss a change and freeze the display.
+ */
+function sameActionWindow(a: ActionLine[], b: ActionLine[]): boolean {
+  if (a.length !== b.length) return false;
+  if (a.length === 0) return true;
+  return sameAction(a[0], b[0]) && sameAction(a[a.length - 1], b[b.length - 1]);
 }
 
 export function sameActivity(a: Activity | undefined, b: Activity | undefined): boolean {
   if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
   if (a.lastPrompt !== b.lastPrompt) return false;
-  if (!sameTasks(a.tasks, b.tasks)) return false;
-  if (a.actions.length !== b.actions.length) return false;
-  if (a.actions.length === 0) return true;
-  // Compare both ends of the (capped) rolling window: when the list is pinned at
-  // ACTIVITY_LIMIT, new appends shift the head off even if the tail looks stable,
-  // so checking only the last action could miss a change and freeze the display.
-  const fa = a.actions[0];
-  const fb = b.actions[0];
-  if (fa.timestamp.getTime() !== fb.timestamp.getTime() || fa.verb !== fb.verb || fa.detail !== fb.detail) return false;
-  const la = a.actions[a.actions.length - 1];
-  const lb = b.actions[b.actions.length - 1];
-  return la.timestamp.getTime() === lb.timestamp.getTime() && la.verb === lb.verb && la.detail === lb.detail;
+  return sameTasks(a.tasks, b.tasks) && sameActionWindow(a.actions, b.actions);
 }
 
 // Set equality, order-independent: same size + every member of `a` is in `b`.

@@ -249,6 +249,49 @@ async function readScriptMeta(path?: string): Promise<{ description?: string; ph
   return parseWorkflowMeta(src);
 }
 
+/** The `{…}` of the script's `export const meta = {…}` literal, or null when there is no well-formed one. */
+function metaLiteral(src: string): string | null {
+  const head = src.match(/export\s+const\s+meta\s*=/);
+  if (head?.index === undefined) return null;
+  const open = src.indexOf("{", head.index);
+  if (open < 0) return null;
+  const close = scanBalanced(src, open, "{", "}");
+  return close < 0 ? null : src.slice(open, close + 1);
+}
+
+/** One `{ title, detail?, model? }` phase entry; null without a title. */
+function parsePhase(entry: string): WorkflowPhase | null {
+  const title = readStringProp(entry, "title");
+  if (!title) return null;
+  return { title, detail: readStringProp(entry, "detail"), model: readStringProp(entry, "model") };
+}
+
+/** The object literals inside the `[…]` starting at `arrOpen`, as slices. */
+function arrayEntries(meta: string, arrOpen: number): string[] {
+  const arrClose = scanBalanced(meta, arrOpen, "[", "]");
+  const entries: string[] = [];
+  let i = arrOpen + 1;
+  while (i < arrClose) {
+    const entryOpen = meta.indexOf("{", i);
+    if (entryOpen < 0 || entryOpen >= arrClose) break;
+    const entryClose = scanBalanced(meta, entryOpen, "{", "}");
+    if (entryClose < 0) break;
+    entries.push(meta.slice(entryOpen, entryClose + 1));
+    i = entryClose + 1;
+  }
+  return entries;
+}
+
+/** The `phases: [ … ]` of a meta literal, titled entries only; undefined when there are none. */
+function parsePhases(meta: string): WorkflowPhase[] | undefined {
+  const phasesKey = meta.match(/\bphases\s*:\s*/);
+  if (phasesKey?.index === undefined) return undefined;
+  const arrOpen = meta.indexOf("[", phasesKey.index);
+  if (arrOpen < 0) return undefined;
+  const phases = arrayEntries(meta, arrOpen).flatMap((entry) => parsePhase(entry) ?? []);
+  return phases.length ? phases : undefined;
+}
+
 /**
  * Extract description + phases from a workflow script's meta. The tool
  * contract makes meta a PURE literal (no computed values), so a string-aware
@@ -257,45 +300,12 @@ async function readScriptMeta(path?: string): Promise<{ description?: string; ph
  * Exported for tests.
  */
 export function parseWorkflowMeta(src: string): { description?: string; phases?: WorkflowPhase[] } {
-  const head = src.match(/export\s+const\s+meta\s*=/);
-  if (head?.index === undefined) return {};
-  const open = src.indexOf("{", head.index);
-  if (open < 0) return {};
-  const close = scanBalanced(src, open, "{", "}");
-  if (close < 0) return {};
-  const meta = src.slice(open, close + 1);
-
+  const meta = metaLiteral(src);
+  if (!meta) return {};
   const out: { description?: string; phases?: WorkflowPhase[] } = {};
   out.description = readStringProp(meta, "description");
-
-  const phasesKey = meta.match(/\bphases\s*:\s*/);
-  if (phasesKey?.index !== undefined) {
-    const arrOpen = meta.indexOf("[", phasesKey.index);
-    if (arrOpen >= 0) {
-      const arrClose = scanBalanced(meta, arrOpen, "[", "]");
-      if (arrClose > arrOpen) {
-        const phases: WorkflowPhase[] = [];
-        let i = arrOpen + 1;
-        while (i < arrClose) {
-          const entryOpen = meta.indexOf("{", i);
-          if (entryOpen < 0 || entryOpen >= arrClose) break;
-          const entryClose = scanBalanced(meta, entryOpen, "{", "}");
-          if (entryClose < 0) break;
-          const entry = meta.slice(entryOpen, entryClose + 1);
-          const title = readStringProp(entry, "title");
-          if (title) {
-            phases.push({
-              title,
-              detail: readStringProp(entry, "detail"),
-              model: readStringProp(entry, "model"),
-            });
-          }
-          i = entryClose + 1;
-        }
-        if (phases.length) out.phases = phases;
-      }
-    }
-  }
+  const phases = parsePhases(meta);
+  if (phases) out.phases = phases;
   return out;
 }
 

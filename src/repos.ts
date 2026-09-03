@@ -209,51 +209,68 @@ const scanCache = new Map<string, RepoInfo[]>();
  * (the launcher does that on an explicit `r` refresh, so a repo cloned into the
  * target after launch enters the scope without a restart).
  */
-export function discoverGitReposUnder(target: string, fresh = false): RepoInfo[] {
-  const cached = fresh ? undefined : scanCache.get(target);
-  if (cached) return cached;
-  const asRepo = (root: string): RepoInfo => ({
-    root,
-    name: basename(root),
-    total: 0,
-    claude: 0,
-    copilot: 0,
-    codex: 0,
-  });
+/** A checkout found by the walk, before any session has been counted into it. */
+function emptyRepo(root: string): RepoInfo {
+  return { root, name: basename(root), total: 0, claude: 0, copilot: 0, codex: 0 };
+}
+
+/** The directory `.git` sits in — a checkout, main or linked. */
+function isCheckout(dir: string): boolean {
+  return existsSync(join(dir, ".git"));
+}
+
+/** The readable child directories of `dir` worth descending into: no dot-dirs, no node_modules, no symlinks. */
+function scannableChildren(dir: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return []; // unreadable directory — skip it rather than fail the scan
+  }
+  // isDirectory() is false for a symlink, so links are never followed.
+  return entries
+    .filter((e) => e.isDirectory() && e.name !== "node_modules" && !e.name.startsWith("."))
+    .map((e) => join(dir, e.name));
+}
+
+/**
+ * Breadth-first over the directories below `target`, up to MAX_SCAN_DIRS of
+ * them; a checkout is collected and not descended into (its nested worktrees
+ * belong to it), anything else is queued.
+ */
+function walkForCheckouts(target: string): RepoInfo[] {
   const found: RepoInfo[] = [];
+  let budget = MAX_SCAN_DIRS;
+  const queue = [target];
+  while (queue.length > 0 && budget-- > 0) {
+    for (const child of scannableChildren(queue.shift()!)) {
+      if (isCheckout(child)) found.push(emptyRepo(child));
+      else queue.push(child);
+    }
+  }
+  return found;
+}
+
+/** The checkouts a target stands for: itself, else what lies below it, else the one it sits inside. */
+function checkoutsFor(target: string): RepoInfo[] {
   // The checkout the target is *in*, if any: itself when it carries `.git`, the
   // nearest ancestor checkout when it sits below a repo root, the main repo when
   // it's a worktree (all three are exactly repoRootForCwd's walk).
   const enclosing = repoRootForCwd(target);
-  if (enclosing === target && existsSync(join(target, ".git"))) {
-    // The target IS a checkout — it speaks for itself, and its nested worktrees
-    // belong to it, so there's nothing below worth walking for.
-    found.push(asRepo(target));
-  } else {
-    let budget = MAX_SCAN_DIRS;
-    const queue = [target];
-    while (queue.length > 0 && budget-- > 0) {
-      const dir = queue.shift()!;
-      let entries;
-      try {
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        continue; // unreadable directory — skip it rather than fail the scan
-      }
-      for (const e of entries) {
-        // isDirectory() is false for a symlink, so links are never followed.
-        if (!e.isDirectory()) continue;
-        if (e.name === "node_modules" || e.name.startsWith(".")) continue;
-        const child = join(dir, e.name);
-        if (existsSync(join(child, ".git"))) found.push(asRepo(child));
-        else queue.push(child);
-      }
-    }
-    // Nothing below: fall back to the checkout the target sits inside, if any —
-    // `agendo <repo>/packages/web` or a worktree path still means that repo.
-    if (found.length === 0 && existsSync(join(enclosing, ".git"))) found.push(asRepo(enclosing));
-  }
-  found.sort((a, b) => a.name.localeCompare(b.name));
+  // The target IS a checkout — it speaks for itself, and its nested worktrees
+  // belong to it, so there's nothing below worth walking for.
+  if (enclosing === target && isCheckout(target)) return [emptyRepo(target)];
+  const found = walkForCheckouts(target);
+  // Nothing below: fall back to the checkout the target sits inside, if any —
+  // `agendo <repo>/packages/web` or a worktree path still means that repo.
+  if (found.length === 0 && isCheckout(enclosing)) return [emptyRepo(enclosing)];
+  return found;
+}
+
+export function discoverGitReposUnder(target: string, fresh = false): RepoInfo[] {
+  const cached = fresh ? undefined : scanCache.get(target);
+  if (cached) return cached;
+  const found = checkoutsFor(target).sort((a, b) => a.name.localeCompare(b.name));
   scanCache.set(target, found);
   return found;
 }
