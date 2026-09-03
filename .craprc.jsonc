@@ -88,11 +88,14 @@
   // token at a time over three small questions, with a unit suite, the worst
   // of it at 7. Then src/workflows.ts `record` (cc 29, 91%) set 29.55; it is
   // now four lines over a launch reader and a notification reader, each with
-  // a unit suite, the worst of them at 6. The holder is src/worktree.ts
-  // `checkoutWorktree` (cc 11, 47%), with src/cli/open.ts `runOpen` (cc 28,
-  // 89%) at 28.91 and src/ui/screens/ListScreen.tsx `ListScreen` (cc 28,
-  // fully covered) at 28.00 behind it.
-  "max": 29.36,
+  // a unit suite, the worst of them at 6. Then src/worktree.ts
+  // `checkoutWorktree` (cc 11, 47%) set 29.36; it now tries the three
+  // `git worktree add` shapes as one list, with a unit suite over a scripted
+  // git, and scores 7. The holder is src/cli/open.ts `runOpen` (cc 28, 89%),
+  // with src/ui/screens/ListScreen.tsx `ListScreen` (cc 28, fully covered)
+  // at 28.00 and src/restore.ts `recordLaunchedSession` (cc 7, 25%) at 27.67
+  // behind it.
+  "max": 28.91,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
