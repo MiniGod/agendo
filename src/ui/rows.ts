@@ -13,6 +13,7 @@ import type {
   PRWithSessions,
   PullRequest,
   ReviewPRWithSessions,
+  SessionActivity,
   TaskItem,
   WorkItem,
 } from "../types.ts";
@@ -62,6 +63,30 @@ export function sessionMeta(s: AgentSession): Array<[string, string]> {
   return out;
 }
 
+function noteRow(key: string, text: string): Row {
+  return { kind: "sessnote", key: `${key}:note`, text };
+}
+
+/** The prompt, the task checklist and the actions of a loaded activity, and a note when it has none of the last two. */
+function loadedActivityRows(key: string, act: SessionActivity): Row[] {
+  const rows: Row[] = [];
+  if (act.lastPrompt) rows.push({ kind: "sessprompt", key: `${key}:prompt`, prompt: act.lastPrompt });
+  // The task checklist (Claude only) sits above the action stream so it reads as
+  // the session's overall plan rather than another recent-action line.
+  act.tasks?.forEach((t, i) => rows.push({ kind: "task", key: `${key}:t${i}`, task: t }));
+  // Tasks alone are still worth showing; only note "empty" when nothing at all.
+  if (act.actions.length === 0 && !act.tasks?.length) rows.push(noteRow(key, "no recent activity"));
+  act.actions.forEach((a, i) => rows.push({ kind: "action", key: `${key}:a${i}`, action: a }));
+  return rows;
+}
+
+/** The rows under an expanded session for its activity: a note while it loads or when it could not be read, else what it holds. */
+export function activityRows(key: string, act: Activity | undefined): Row[] {
+  if (act === undefined || act === "loading") return [noteRow(key, "loading activity…")];
+  if (act === "error") return [noteRow(key, "couldn't read session log")];
+  return loadedActivityRows(key, act);
+}
+
 // Push a session row plus, when it's expanded, its activity sub-rows (the last
 // prompt and recent actions, or a loading/empty/error note). `expanded` is the
 // raw key-set; `activity` is the lazy cache keyed by session identity. `open`
@@ -86,25 +111,7 @@ function pushSession(
   // known synchronously, so it shows immediately even while activity loads.
   for (const [label, value] of sessionMeta(s))
     rows.push({ kind: "sessmeta", key: `${key}:meta:${label}`, label, value });
-  const act = activity.get(sessionId(s));
-  if (act === undefined || act === "loading") {
-    rows.push({ kind: "sessnote", key: `${key}:note`, text: "loading activity…" });
-    return;
-  }
-  if (act === "error") {
-    rows.push({ kind: "sessnote", key: `${key}:note`, text: "couldn't read session log" });
-    return;
-  }
-  if (act.lastPrompt) rows.push({ kind: "sessprompt", key: `${key}:prompt`, prompt: act.lastPrompt });
-  // The task checklist (Claude only) sits above the action stream so it reads as
-  // the session's overall plan rather than another recent-action line.
-  if (act.tasks?.length) act.tasks.forEach((t, i) => rows.push({ kind: "task", key: `${key}:t${i}`, task: t }));
-  if (act.actions.length === 0) {
-    // Tasks alone are still worth showing; only note "empty" when nothing at all.
-    if (!act.tasks?.length) rows.push({ kind: "sessnote", key: `${key}:note`, text: "no recent activity" });
-    return;
-  }
-  act.actions.forEach((a, i) => rows.push({ kind: "action", key: `${key}:a${i}`, action: a }));
+  rows.push(...activityRows(key, activity.get(sessionId(s))));
 }
 
 function pushSessions(
