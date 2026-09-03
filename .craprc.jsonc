@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46 -> 20.16 -> 20. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46 -> 20.16 -> 20 -> 17. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -134,11 +134,18 @@
   // functions of their own, unit tested, the worst at 6. Then
   // src/ui/keys/open.ts `handleOpenKeys` (cc 10, 53%) set 20.16; openTargetOf
   // now names the link a letter opens, and every key is unit tested, the
-  // worst at 7. The holders are a tie: src/cli/launchCmd.ts
+  // worst at 7. Then nine holders came down in one PR: src/cli/launchCmd.ts
   // `validateLaunchArgs` (cc 20, fully covered) and src/sessions.ts
-  // `preferredDuplicate` (cc 4, never entered) both score exactly 20, with
-  // src/cli/dispatch.ts `runSubcommand` at 19.07 behind them.
-  "max": 20,
+  // `preferredDuplicate` (cc 4, never entered) at 20, src/cli/dispatch.ts
+  // `runSubcommand` at 19.07, src/model.ts `loadModel` and src/launchArgv.ts
+  // `freshArgv` at 19, src/cli/resume.ts `runResume` at 18.80,
+  // src/ui/keys/init.ts `handleInitKeys` at 18, src/ui/keys/profile.ts
+  // `handleProfileKeys` at 17.69 and src/gitrefs.ts `gitDirs` at 17.47; each
+  // is now named pieces in the order they always ran, unit tested where the
+  // e2e fixtures never reached, the worst of them at 7. The holder is
+  // src/ui/screens/RepoScreen.tsx `RepoScreen` (cc 17, fully covered) at
+  // exactly 17, with src/ui/equality.ts `sameActivity` at 16.55 behind it.
+  "max": 17,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
