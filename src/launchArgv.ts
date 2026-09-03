@@ -177,34 +177,43 @@ export interface FreshArgvOptions {
  * Either way the argv is prefixed with our `env` block, so the new session
  * inherits the invocation that started it (`SELF_CMD_ENV`).
  */
+/** The flags every agent takes, in the order they always came. */
+function commonArgv(argv: string[], opts: FreshArgvOptions, autonomy: readonly string[]): string[] {
+  if (opts.autonomy) argv.push(...autonomy);
+  if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
+  return argv;
+}
+
+function copilotArgv(opts: FreshArgvOptions): string[] {
+  const argv = ["copilot"];
+  if (opts.sessionId) argv.push("--session-id", opts.sessionId);
+  commonArgv(argv, opts, COPILOT_AUTONOMY_ARGV);
+  if (opts.prompt) argv.push("--interactive", opts.prompt);
+  return withSelfCmdEnv(argv);
+}
+
+function codexArgv(opts: FreshArgvOptions): string[] {
+  const argv = commonArgv(["codex"], opts, CODEX_AUTONOMY_ARGV);
+  // Codex's prompt is a bare positional, so it must come after every flag
+  // (a `[PROMPT]` before one would be read as that flag's value). The `env`
+  // prefix goes on afterwards and takes the whole thing as its command, so
+  // it doesn't disturb that ordering.
+  if (opts.prompt) argv.push(opts.prompt);
+  return withSelfCmdEnv(argv);
+}
+
+function claudeArgv(opts: FreshArgvOptions): string[] {
+  const argv = ["claude"];
+  if (opts.sessionId) argv.push("--session-id", opts.sessionId);
+  commonArgv(argv, opts, AUTONOMY_ARGV);
+  if (opts.prompt) argv.push(opts.prompt);
+  return withSelfCmdEnv(withLauncherPrompt(argv, opts.orchestrator));
+}
+
 export function freshArgv(agent: AgentSource, opts: FreshArgvOptions = {}): string[] {
   switch (agent) {
-    case "copilot": {
-      const argv = ["copilot"];
-      if (opts.sessionId) argv.push("--session-id", opts.sessionId);
-      if (opts.autonomy) argv.push(...COPILOT_AUTONOMY_ARGV);
-      if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
-      if (opts.prompt) argv.push("--interactive", opts.prompt);
-      return withSelfCmdEnv(argv);
-    }
-    case "codex": {
-      const argv = ["codex"];
-      if (opts.autonomy) argv.push(...CODEX_AUTONOMY_ARGV);
-      if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
-      // Codex's prompt is a bare positional, so it must come after every flag
-      // (a `[PROMPT]` before one would be read as that flag's value). The `env`
-      // prefix goes on afterwards and takes the whole thing as its command, so
-      // it doesn't disturb that ordering.
-      if (opts.prompt) argv.push(opts.prompt);
-      return withSelfCmdEnv(argv);
-    }
-    case "claude": {
-      const argv = ["claude"];
-      if (opts.sessionId) argv.push("--session-id", opts.sessionId);
-      if (opts.autonomy) argv.push(...AUTONOMY_ARGV);
-      if (opts.forwardArgv?.length) argv.push(...opts.forwardArgv);
-      if (opts.prompt) argv.push(opts.prompt);
-      return withSelfCmdEnv(withLauncherPrompt(argv, opts.orchestrator));
-    }
+    case "copilot": return copilotArgv(opts);
+    case "codex": return codexArgv(opts);
+    case "claude": return claudeArgv(opts);
   }
 }

@@ -278,49 +278,69 @@ async function launchGlobal(prompt: string, layout: "pane" | "window" | undefine
  * mode to avoid: a caller who wrote the second flag believes it changed
  * something. Exits rather than returning, so `runLaunch` reads as the happy path.
  */
-function validateLaunchArgs(a: LaunchArgs): void {
-  // `--worktree=<path>` says exactly where to run, so the flags that would pick
-  // a different directory are contradictions, not overrides to be resolved by
-  // position: `--name` would name a worktree that isn't used, `--no-worktree`
-  // would run in cwd, and a bare `--worktree` would create one.
-  if (a.worktreePath !== undefined && (a.name !== undefined || a.worktree !== undefined)) {
-    const other = a.name !== undefined ? "--name" : a.worktree ? "a bare --worktree" : "--no-worktree";
-    console.error(`launch failed: --worktree=<path> can't be combined with ${other} (it already says where to run)`);
-    process.exit(1);
+/** `--worktree=<path>` says exactly where to run, so the flags that would pick
+ * a different directory are contradictions, not overrides to be resolved by
+ * position: `--name` would name a worktree that isn't used, `--no-worktree`
+ * would run in cwd, and a bare `--worktree` would create one. */
+function worktreePathClash(a: LaunchArgs): string | null {
+  if (a.worktreePath === undefined || (a.name === undefined && a.worktree === undefined)) return null;
+  const other = a.name !== undefined ? "--name" : a.worktree ? "a bare --worktree" : "--no-worktree";
+  return `--worktree=<path> can't be combined with ${other} (it already says where to run)`;
+}
+
+/** Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
+ * equivalent for, so a Copilot orchestrator would run with none of the
+ * coordinate-don't-implement instructions. Refuse loudly rather than degrade.
+ * `agent` defaults to claude, so "copilot" here can only mean a flag asked for
+ * it — no need to track explicitness separately. */
+function orchestratorAgentClash(a: LaunchArgs): string | null {
+  if (!(a.orchestrator || a.global) || a.agent === "claude") return null;
+  const flag = a.global ? "--global-orchestrator" : "--orchestrator";
+  return `${flag} is Claude-only (no --append-system-prompt equivalent in --agent ${a.agent})`;
+}
+
+/** A global orchestrator belongs to no repository — it coordinates the per-repo
+ * orchestrators, never a checkout — so the repo-shaped flags have no meaning
+ * for it. */
+function globalRepoClash(a: LaunchArgs): string | null {
+  if (!a.global) return null;
+  if (a.worktree !== undefined || a.worktreePath !== undefined) {
+    return "--global-orchestrator is tied to no repo, so --worktree/--no-worktree don't apply";
   }
-  // Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
-  // equivalent for, so a Copilot orchestrator would run with none of the
-  // coordinate-don't-implement instructions. Refuse loudly rather than degrade.
-  // `agent` defaults to claude, so "copilot" here can only mean a flag asked for
-  // it — no need to track explicitness separately.
-  if ((a.orchestrator || a.global) && a.agent !== "claude") {
-    const flag = a.global ? "--global-orchestrator" : "--orchestrator";
-    console.error(`launch failed: ${flag} is Claude-only (no --append-system-prompt equivalent in --agent ${a.agent})`);
-    process.exit(1);
-  }
-  // A global orchestrator belongs to no repository — it coordinates the per-repo
-  // orchestrators, never a checkout — so the repo-shaped flags have no meaning
-  // for it.
-  if (a.global && (a.worktree !== undefined || a.worktreePath !== undefined)) {
-    console.error(`launch failed: --global-orchestrator is tied to no repo, so --worktree/--no-worktree don't apply`);
-    process.exit(1);
-  }
-  if (a.global && a.name !== undefined) {
-    console.error(`launch failed: --global-orchestrator creates no worktree or branch, so --name doesn't apply`);
-    process.exit(1);
-  }
-  if (a.layout !== undefined && !a.global) {
-    console.error(`launch failed: --window/--pane only apply to --global-orchestrator`);
-    process.exit(1);
-  }
-  // `--unattended` only ever loosens an ORCHESTRATOR's approvals — a plain
-  // background session is already unattended. `-G` IS an orchestrator flag, so it
-  // qualifies on its own; requiring `--orchestrator` beside it would refuse a
-  // combination that means exactly what it says.
+  if (a.name !== undefined) return "--global-orchestrator creates no worktree or branch, so --name doesn't apply";
+  return null;
+}
+
+/** The flags that only an orchestrator can use. `--unattended` only ever
+ * loosens an ORCHESTRATOR's approvals — a plain background session is already
+ * unattended. `-G` IS an orchestrator flag, so it qualifies on its own;
+ * requiring `--orchestrator` beside it would refuse a combination that means
+ * exactly what it says. */
+function orchestratorOnlyClash(a: LaunchArgs): string | null {
+  if (a.layout !== undefined && !a.global) return "--window/--pane only apply to --global-orchestrator";
   if (a.unattended && !a.orchestrator && !a.global) {
-    console.error(`launch failed: --unattended only applies with --orchestrator (background sessions already run unattended)`);
-    process.exit(1);
+    return "--unattended only applies with --orchestrator (background sessions already run unattended)";
   }
+  return null;
+}
+
+/** Every pair of flags that cannot both be honoured, checked in this order. */
+const CONTRADICTIONS = [worktreePathClash, orchestratorAgentClash, globalRepoClash, orchestratorOnlyClash];
+
+/** The first contradiction among the flags, as the message to refuse with, or null when they can all be honoured. */
+export function launchContradiction(a: LaunchArgs): string | null {
+  for (const clash of CONTRADICTIONS) {
+    const why = clash(a);
+    if (why !== null) return why;
+  }
+  return null;
+}
+
+function validateLaunchArgs(a: LaunchArgs): void {
+  const why = launchContradiction(a);
+  if (why === null) return;
+  console.error(`launch failed: ${why}`);
+  process.exit(1);
 }
 
 /**

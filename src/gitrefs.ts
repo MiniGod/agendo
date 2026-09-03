@@ -59,16 +59,18 @@ interface GitDirs {
   commonDir: string;
 }
 
+/** Whether `path` is a directory that is still there. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Resolve a working directory's git dirs, or null when it isn't inside a
- * checkout (or no longer exists — indexed sessions routinely point at deleted
- * worktrees).
- *
- * A linked worktree's `.git` is a FILE containing `gitdir: <path>`, and that dir
- * carries a `commondir` pointing back at the main `.git` where branches and
- * remote-tracking refs actually live. Following both is what makes this work for
- * agendo's own `<repo>/.claude/worktrees/<name>` sessions, which are the common
- * case.
+ * The nearest `.git` at or above `cwd`, with the directory holding it, or null
+ * when the walk reaches $HOME or the filesystem root first.
  *
  * The walk-up matters: a session's recorded cwd is wherever the agent was
  * started, which is routinely a SUBDIRECTORY of the checkout (`cd src && claude`
@@ -77,21 +79,8 @@ interface GitDirs {
  * repo root by design, which would make every worktree session report the main
  * checkout's branch instead of its own.
  */
-function gitDirs(cwd: string): GitDirs | null {
-  // The cwd itself must still exist before we walk anywhere. Indexed sessions
-  // routinely point at DELETED worktrees (`<repo>/.claude/worktrees/<name>`,
-  // removed after a merge), and walking up from one of those lands on the parent
-  // repo's `.git` three levels up — which would report the MAIN checkout's
-  // branch as if it were the dead session's, the most misleading answer this
-  // module could give. A vanished checkout is "unknown", i.e. null.
-  try {
-    if (!statSync(cwd).isDirectory()) return null;
-  } catch {
-    return null;
-  }
+function findDotGit(cwd: string): { dir: string; dotGit: string; isDir: boolean } | null {
   let dir = cwd;
-  let dotGit: string | null = null;
-  let st: ReturnType<typeof statSync> | null = null;
   while (true) {
     // Stop before $HOME, exactly as `bootstrapRepoRoot` (repos.ts) does and for
     // the same reason: on a machine whose $HOME is itself a checkout — chezmoi,
@@ -102,34 +91,66 @@ function gitDirs(cwd: string): GitDirs | null {
     // this module exists to avoid. A session whose cwd IS that checkout is a
     // different matter — nothing was inferred there, so it's allowed through.
     if (dir !== cwd && atOrAboveHome(dir)) return null;
-    const candidate = join(dir, ".git");
+    const dotGit = join(dir, ".git");
     try {
-      st = statSync(candidate);
-      dotGit = candidate;
-      break;
+      return { dir, dotGit, isDir: statSync(dotGit).isDirectory() };
     } catch {
       const parent = dirname(dir);
       if (parent === dir) return null; // reached the filesystem root
       dir = parent;
     }
   }
-  if (!dotGit || !st) return null;
-  let gitDir: string;
-  if (st.isDirectory()) {
-    gitDir = dotGit;
-  } else {
-    const raw = readText(dotGit);
-    const m = raw?.match(/^gitdir:\s*(.+)$/m);
-    if (!m) return null;
-    const p = m[1].trim();
-    // Relative to the directory holding `.git` — which after the walk-up is
-    // `dir`, not necessarily the cwd we started from.
-    gitDir = isAbsolute(p) ? p : resolve(dir, p);
-  }
-  let commonDir = gitDir;
+}
+
+/**
+ * A linked worktree's `.git` is a FILE containing `gitdir: <path>`, relative to
+ * the directory holding `.git` — which after the walk-up is `dir`, not
+ * necessarily the cwd we started from. Null when the file says nothing usable.
+ */
+function linkedGitDir(dotGit: string, dir: string): string | null {
+  const m = readText(dotGit)?.match(/^gitdir:\s*(.+)$/m);
+  if (!m) return null;
+  const p = m[1].trim();
+  return isAbsolute(p) ? p : resolve(dir, p);
+}
+
+/**
+ * The dir carrying the refs shared across the repo's worktrees: a linked
+ * worktree's git dir names it in `commondir`, pointing back at the main `.git`
+ * where branches and remote-tracking refs actually live; a main checkout's git
+ * dir is its own.
+ */
+function commonDirOf(gitDir: string): string {
   const common = readText(join(gitDir, "commondir"))?.trim();
-  if (common) commonDir = isAbsolute(common) ? common : resolve(gitDir, common);
-  return { gitDir, commonDir };
+  if (!common) return gitDir;
+  return isAbsolute(common) ? common : resolve(gitDir, common);
+}
+
+/**
+ * Resolve a working directory's git dirs, or null when it isn't inside a
+ * checkout (or no longer exists — indexed sessions routinely point at deleted
+ * worktrees).
+ *
+ * Following both the `gitdir:` file and `commondir` is what makes this work for
+ * agendo's own `<repo>/.claude/worktrees/<name>` sessions, which are the common
+ * case.
+ *
+ * The cwd itself must still exist before we walk anywhere. Indexed sessions
+ * routinely point at DELETED worktrees (`<repo>/.claude/worktrees/<name>`,
+ * removed after a merge), and walking up from one of those lands on the parent
+ * repo's `.git` three levels up — which would report the MAIN checkout's branch
+ * as if it were the dead session's, the most misleading answer this module
+ * could give. A vanished checkout is "unknown", i.e. null.
+ *
+ * Exported for the unit suite only; `branchSync` is the module's surface.
+ */
+export function gitDirs(cwd: string): GitDirs | null {
+  if (!isDirectory(cwd)) return null;
+  const found = findDotGit(cwd);
+  if (!found) return null;
+  const gitDir = found.isDir ? found.dotGit : linkedGitDir(found.dotGit, found.dir);
+  if (!gitDir) return null;
+  return { gitDir, commonDir: commonDirOf(gitDir) };
 }
 
 /** Whether `dir` is $HOME itself or an ancestor of it (i.e. we walked too far). */

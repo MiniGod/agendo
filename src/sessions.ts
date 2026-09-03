@@ -108,14 +108,14 @@ export class SessionIndex {
  * Only reached on an actual collision, so the realpath syscalls cost nothing on
  * the overwhelmingly common no-duplicates path.
  */
-async function preferredDuplicate(a: AgentSession, b: AgentSession): Promise<AgentSession> {
+export async function preferredDuplicate(a: AgentSession, b: AgentSession): Promise<AgentSession> {
   const [aOwns, bOwns] = await Promise.all([ownsLogPath(a), ownsLogPath(b)]);
   if (aOwns !== bOwns) return aOwns ? a : b;
   return b.lastUsed.getTime() > a.lastUsed.getTime() ? b : a;
 }
 
 /** Whether a session's transcript path reaches the file without a symlink hop. */
-async function ownsLogPath(s: AgentSession): Promise<boolean> {
+export async function ownsLogPath(s: AgentSession): Promise<boolean> {
   if (!s.logPath) return false;
   return (await realpath(s.logPath).catch(() => null)) === s.logPath;
 }
