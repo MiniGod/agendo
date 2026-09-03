@@ -59,8 +59,10 @@ export function handleListKeys(input: string, key: Key, ctx: Ctx): boolean {
   return false;
 }
 
-function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boolean {
-  // view switching (Tab forward, Shift-Tab back)
+const VIEW_KEYS: Record<string, View> = { "1": "items", "2": "prs", "3": "sessions" };
+
+/** Tab / Shift-Tab cycle the views; `1` `2` `3` jump to one. */
+export function handleViewSwitchKeys(input: string, key: Key, ctx: Pick<ViewCtx, "view" | "switchView">): boolean {
   if (key.tab) {
     const order: View[] = ["items", "prs", "sessions"];
     const dir = key.shift ? -1 : 1;
@@ -68,65 +70,99 @@ function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boolean {
     ctx.switchView(next);
     return true;
   }
-  if (input === "1") { ctx.switchView("items"); return true; }
-  if (input === "2") { ctx.switchView("prs"); return true; }
-  if (input === "3") { ctx.switchView("sessions"); return true; }
+  const jump = VIEW_KEYS[input];
+  if (jump) {
+    ctx.switchView(jump);
+    return true;
+  }
+  return false;
+}
 
-  // toggle path scope ↔ global (only when the launcher is scoped to a path;
-  // bare `agendo` is already global, so there's nothing to toggle). `a` = "all".
-  if (input === "a" && ctx.filterRoot) {
+/**
+ * `a` toggles path scope ↔ global and `f` the repo filter — only when the
+ * launcher is scoped to a path: bare `agendo` is already global, so there is
+ * nothing to toggle, and with no root there are no repos to narrow to. `a` =
+ * "all", `f` = "filter"; the repo filter is on the work-item / PR views.
+ */
+export function handleScopeKeys(
+  input: string,
+  ctx: Pick<ViewCtx, "filterRoot" | "setCursor" | "setGlobalView" | "setRepoFilterOn">,
+): boolean {
+  if (!ctx.filterRoot) return false;
+  if (input === "a") {
     ctx.setCursor(0);
     ctx.setGlobalView((v) => !v);
     return true;
   }
-
-  // toggle the repo filter on the work-item / PR views (only when scoped to a
-  // path — with no root there are no repos to narrow to). `f` = "filter".
-  if (input === "f" && ctx.filterRoot) {
+  if (input === "f") {
     ctx.setCursor(0);
     ctx.setRepoFilterOn((v) => !v);
     return true;
   }
+  return false;
+}
 
-  // toggle repo grouping (Sessions: whole view · PRs: subgroups per section)
-  if (input === "g" && (ctx.view === "sessions" || ctx.view === "prs")) {
-    ctx.setCursor(0);
-    if (ctx.view === "sessions") { ctx.setGrouped((v) => !v); return true; }
-    ctx.setPrsGrouped((v) => !v);
-    return true;
+/**
+ * `g` toggles repo grouping (Sessions: whole view · PRs: subgroups per section)
+ * and `s` flips the sort order (PRs: created ↔ last updated, drafts staying at
+ * the bottom · Sessions: updated ↔ created). Neither is bound on the items view.
+ */
+export function handleGroupSortKeys(
+  input: string,
+  ctx: Pick<ViewCtx, "view" | "setCursor" | "setGrouped" | "setPrsGrouped" | "setPrSort" | "setSessionSort">,
+): boolean {
+  if (ctx.view === "sessions") {
+    if (input === "g") {
+      ctx.setCursor(0);
+      ctx.setGrouped((v) => !v);
+      return true;
+    }
+    if (input === "s") {
+      ctx.setCursor(0);
+      ctx.setSessionSort((s) => (s === "updated" ? "created" : "updated"));
+      return true;
+    }
   }
+  if (ctx.view === "prs") {
+    if (input === "g") {
+      ctx.setCursor(0);
+      ctx.setPrsGrouped((v) => !v);
+      return true;
+    }
+    if (input === "s") {
+      ctx.setCursor(0);
+      ctx.setPrSort((s) => (s === "created" ? "updated" : "created"));
+      return true;
+    }
+  }
+  return false;
+}
 
-  if (handleSessionStartKeys(input, ctx)) return true;
-
-  // focus the fuzzy-search input (all list views)
+/** `/` focuses the fuzzy search, `,` opens Settings, `u` switches who you are (Work items & PRs only). */
+export function handleScreenKeys(input: string, ctx: Pick<ViewCtx, "setSearchFocus" | "enterSettings" | "enterIdentity">): boolean {
   if (input === "/") { ctx.setSearchFocus("input"); return true; }
-
-  // toggle PR sort order (created ↔ last updated); drafts stay at the bottom
-  if (input === "s" && ctx.view === "prs") {
-    ctx.setCursor(0);
-    ctx.setPrSort((s) => (s === "created" ? "updated" : "created"));
-    return true;
-  }
-
-  // toggle session sort order (updated ↔ created)
-  if (input === "s" && ctx.view === "sessions") {
-    ctx.setCursor(0);
-    ctx.setSessionSort((s) => (s === "updated" ? "created" : "updated"));
-    return true;
-  }
-
-  // open the Settings page (backend · identity · filters · auth status)
   if (input === ",") { ctx.enterSettings(); return true; }
-
-  // quick shortcut (also in Settings): switch who you are — Work items & PRs only
   if (input === "u") { ctx.enterIdentity(); return true; }
+  return false;
+}
 
+/** `r`: drop the notice and every cached activity, re-walk the path context, reload. */
+export function refreshList(ctx: Pick<ViewCtx, "setNotice" | "setActivity" | "requested" | "setRescanKey" | "reload">): void {
+  ctx.setNotice(null);
+  ctx.setActivity(new Map()); // drop cached activity so expanded sessions refetch
+  ctx.requested.current.clear();
+  ctx.setRescanKey((k) => k + 1); // re-walk the path context for new checkouts
+  ctx.reload();
+}
+
+export function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boolean {
+  if (handleViewSwitchKeys(input, key, ctx)) return true;
+  if (handleScopeKeys(input, ctx)) return true;
+  if (handleGroupSortKeys(input, ctx)) return true;
+  if (handleSessionStartKeys(input, ctx)) return true;
+  if (handleScreenKeys(input, ctx)) return true;
   if (input === "r") {
-    ctx.setNotice(null);
-    ctx.setActivity(new Map()); // drop cached activity so expanded sessions refetch
-    ctx.requested.current.clear();
-    ctx.setRescanKey((k) => k + 1); // re-walk the path context for new checkouts
-    ctx.reload();
+    refreshList(ctx);
     return true;
   }
   return false;
