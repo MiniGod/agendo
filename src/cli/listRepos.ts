@@ -22,6 +22,8 @@ import { orchestratorRoles } from "../orchestrator.ts";
 import { discoverGitReposUnder, repoRootForCwd } from "../repos.ts";
 import { isUnderRoot } from "../context.ts";
 import { scopeFilter, scopeNote, type SessionScope } from "../scope.ts";
+import type { AgentSession } from "../types.ts";
+import type { OrchestratorRole } from "../orchestrator.ts";
 import { printJson } from "../output.ts";
 import { padCell } from "./cells.ts";
 import { flushWarnings } from "./warnings.ts";
@@ -34,14 +36,14 @@ export interface ListReposOptions {
 }
 
 /** An orchestrator coordinating a repo, as reported by this listing. */
-interface RepoOrchestratorRow {
+export interface RepoOrchestratorRow {
   id: string;
   shortId: string;
   running: boolean;
 }
 
 /** One repository, as reported by `list repos`. */
-interface RepoRow {
+export interface RepoRow {
   /** Absolute repo root — the main checkout, never a worktree. */
   root: string;
   name: string;
@@ -124,23 +126,29 @@ function scopedCheckouts(scope: SessionScope | null): string[] {
   );
 }
 
-/**
- * List every known repo with its session counts and its orchestrator.
- *
- * The GLOBAL orchestrator is deliberately absent: it belongs to no repository,
- * so putting it in a per-repo listing would either invent a repo for it or make
- * every row's shape conditional. It is discoverable in `list --json`, which
- * carries `role: "global"` on the session itself.
- */
-export async function runListRepos(opts: ListReposOptions): Promise<void> {
-  const index = await SessionIndex.build();
-  const { live } = refreshLiveTmux(index.all);
-  const roles = orchestratorRoles();
-  const inScope = scopeFilter(opts.scope);
-  flushWarnings("list repos");
+/** A repo row before any session has been counted into it. */
+function emptyRow(root: string): RepoRow {
+  return {
+    root, name: basename(root) || root, sessions: 0, running: 0,
+    orchestrators: [], hasOrchestrator: false, hasRunningOrchestrator: false,
+  };
+}
 
+/** Count one session into its repo's row; a repo orchestrator is listed as well as counted. */
+export function addSession(row: RepoRow, s: Pick<AgentSession, "id">, running: boolean, role: OrchestratorRole | undefined): void {
+  row.sessions++;
+  if (running) row.running++;
+  if (role !== "repo") return;
+  row.orchestrators.push({ id: s.id, shortId: shortId(s.id), running });
+  row.hasOrchestrator = true;
+  if (running) row.hasRunningOrchestrator = true;
+}
+
+/** The rows the session index can see: one per repo root that hosted an in-scope session. */
+function sessionRows(opts: ListReposOptions, sessions: AgentSession[], live: Set<string>, roles: Map<string, OrchestratorRole>): Map<string, RepoRow> {
+  const inScope = scopeFilter(opts.scope);
   const byRoot = new Map<string, RepoRow>();
-  for (const s of index.all) {
+  for (const s of sessions) {
     if (!inScope(s)) continue;
     // The GLOBAL orchestrator contributes NO row, not even a session count. Its
     // cwd is a vantage point chosen precisely so it isn't a checkout, so
@@ -157,49 +165,88 @@ export async function runListRepos(opts: ListReposOptions): Promise<void> {
     const root = repoRootForCwd(s.cwd);
     let row = byRoot.get(root);
     if (!row) {
-      row = {
-        root, name: basename(root) || root, sessions: 0, running: 0,
-        orchestrators: [], hasOrchestrator: false, hasRunningOrchestrator: false,
-      };
+      row = emptyRow(root);
       byRoot.set(root, row);
     }
-    const running = live.has(sessionName(s));
-    row.sessions++;
-    if (running) row.running++;
-    if (roles.get(s.id) === "repo") {
-      row.orchestrators.push({ id: s.id, shortId: shortId(s.id), running });
-      row.hasOrchestrator = true;
-      if (running) row.hasRunningOrchestrator = true;
-    }
+    addSession(row, s, live.has(sessionName(s)), roles.get(s.id));
   }
+  return byRoot;
+}
 
-  // Compared canonically, not by string: a walked root and the root a session's
-  // cwd resolved to can be two spellings of one directory (`~/work` and
-  // `/mnt/big/work`), and letting the second through would print the repo twice —
-  // once real, once as a phantom with no sessions and no orchestrator. The ROW
-  // keeps the spelling it was found under, which is the one the user typed.
+/**
+ * Add the checkouts a scoped walk found that no session row already names.
+ *
+ * Compared canonically, not by string: a walked root and the root a session's
+ * cwd resolved to can be two spellings of one directory (`~/work` and
+ * `/mnt/big/work`), and letting the second through would print the repo twice —
+ * once real, once as a phantom with no sessions and no orchestrator. The ROW
+ * keeps the spelling it was found under, which is the one the user typed.
+ */
+function addWalkedCheckouts(byRoot: Map<string, RepoRow>, scope: SessionScope | null): void {
   const seen = new Set([...byRoot.keys()].map(canonicalPath));
-  for (const found of scopedCheckouts(opts.scope)) {
+  for (const found of scopedCheckouts(scope)) {
     const key = canonicalPath(found);
     if (seen.has(key)) continue;
     seen.add(key);
-    byRoot.set(found, {
-      root: found, name: basename(found) || found, sessions: 0, running: 0,
-      orchestrators: [], hasOrchestrator: false, hasRunningOrchestrator: false,
-    });
+    byRoot.set(found, emptyRow(found));
   }
+}
 
-  const rows = [...byRoot.values()].sort(
-    // Unmanaged repos first — they are the ones that need an answer — then the
-    // ones whose orchestrator is only remembered, which need a `resume` rather
-    // than a launch, then by how much is going on, then by name for stability.
-    (a, b) =>
-      Number(a.hasOrchestrator) - Number(b.hasOrchestrator) ||
-      Number(a.hasRunningOrchestrator) - Number(b.hasRunningOrchestrator) ||
-      b.running - a.running ||
-      b.sessions - a.sessions ||
-      a.name.localeCompare(b.name),
+/**
+ * Unmanaged repos first — they are the ones that need an answer — then the
+ * ones whose orchestrator is only remembered, which need a `resume` rather
+ * than a launch, then by how much is going on, then by name for stability.
+ */
+export function byNeed(a: RepoRow, b: RepoRow): number {
+  return (
+    Number(a.hasOrchestrator) - Number(b.hasOrchestrator) ||
+    Number(a.hasRunningOrchestrator) - Number(b.hasRunningOrchestrator) ||
+    b.running - a.running ||
+    b.sessions - a.sessions ||
+    a.name.localeCompare(b.name)
   );
+}
+
+/**
+ * Two different emptinesses, and saying which one saves the reader a guess: a
+ * scoped survey looked at the disk as well and found no checkout at all.
+ */
+export function emptyMessage(scope: SessionScope | null): string {
+  const what = scope?.roots.length && !scope.repo ? "git checkouts" : "repos with agent sessions";
+  return `No ${what}${scopeNote(scope)}.`;
+}
+
+export const REPO_HEADER = ["repo".padEnd(24), "sessions".padEnd(8), "running".padEnd(7), "orchestrator".padEnd(12), "root"].join("  ");
+
+/** One table line; the orchestrator column shows the best one, running before idle. */
+export function formatRepoRow(r: RepoRow): string {
+  const best = r.orchestrators[0];
+  return [
+    padCell(r.name, 24),
+    String(r.sessions).padEnd(8),
+    String(r.running).padEnd(7),
+    (best ? `${best.running ? "●" : "○"} ${best.shortId}` : "none").padEnd(12),
+    r.root,
+  ].join("  ").trimEnd();
+}
+
+/**
+ * List every known repo with its session counts and its orchestrator.
+ *
+ * The GLOBAL orchestrator is deliberately absent: it belongs to no repository,
+ * so putting it in a per-repo listing would either invent a repo for it or make
+ * every row's shape conditional. It is discoverable in `list --json`, which
+ * carries `role: "global"` on the session itself.
+ */
+export async function runListRepos(opts: ListReposOptions): Promise<void> {
+  const index = await SessionIndex.build();
+  const { live } = refreshLiveTmux(index.all);
+  const roles = orchestratorRoles();
+  flushWarnings("list repos");
+
+  const byRoot = sessionRows(opts, index.all, live, roles);
+  addWalkedCheckouts(byRoot, opts.scope);
+  const rows = [...byRoot.values()].sort(byNeed);
   for (const r of rows) r.orchestrators.sort((a, b) => Number(b.running) - Number(a.running));
 
   if (opts.json) {
@@ -207,23 +254,9 @@ export async function runListRepos(opts: ListReposOptions): Promise<void> {
     return;
   }
   if (rows.length === 0) {
-    // Two different emptinesses, and saying which one saves the reader a guess:
-    // a scoped survey looked at the disk as well and found no checkout at all.
-    const what = opts.scope?.roots.length && !opts.scope.repo ? "git checkouts" : "repos with agent sessions";
-    console.log(`No ${what}${scopeNote(opts.scope)}.`);
+    console.log(emptyMessage(opts.scope));
     return;
   }
-  console.log(["repo".padEnd(24), "sessions".padEnd(8), "running".padEnd(7), "orchestrator".padEnd(12), "root"].join("  "));
-  for (const r of rows) {
-    const best = r.orchestrators[0];
-    console.log(
-      [
-        padCell(r.name, 24),
-        String(r.sessions).padEnd(8),
-        String(r.running).padEnd(7),
-        (best ? `${best.running ? "●" : "○"} ${best.shortId}` : "none").padEnd(12),
-        r.root,
-      ].join("  ").trimEnd(),
-    );
-  }
+  console.log(REPO_HEADER);
+  for (const r of rows) console.log(formatRepoRow(r));
 }
