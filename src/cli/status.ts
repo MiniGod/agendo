@@ -12,6 +12,7 @@ import {
   capturePaneState, liveTargetForShortId, liveTargets, 
   paneBackgroundAgents, paneReadiness, paneResumeDialogActive, paneShells, sessionName,
   shortId, stripAnsi,
+  type LiveTarget,
   type Readiness,
 } from "../tmux.ts";
 import { formatResetTime, paneResetAt } from "../usageLimit.ts";
@@ -23,7 +24,8 @@ import { scopeFilter, scopeNote, type SessionScope } from "../scope.ts";
 import { refreshLiveTmux } from "../model.ts";
 import { resumeDialogChoice } from "../config.ts";
 import { linkLine, linkVocab } from "../output.ts";
-import type { AgentSession, BranchSync, BranchSyncReader } from "../types.ts";
+import type { SessionLink } from "../model/types.ts";
+import type { AgentSession, BranchSync, BranchSyncReader, WorkflowDetails, WorkflowRef, WorkflowStatus } from "../types.ts";
 import { loadWorkflowDetails, workflowStatus } from "../workflows.ts";
 import { flushWarnings } from "./warnings.ts";
 import { readyCell, rowCompactionPercent, timeAgo } from "./cells.ts";
@@ -39,15 +41,22 @@ import { STATUS_GLYPH, WF_GLYPH } from "./glyphs.ts";
  * `withUrls` additionally resolves the session's linked PR / work item from the
  * backend and prints their full URLs (see `resolveSessionLink`).
  */
+// As in runOpen: a link with no resolvable URL reads as absent, never as a
+// partial link a human might paste.
+function usableLink<T extends { url?: string }>(l: T | undefined): T | undefined {
+  return l?.url ? l : undefined;
+}
+
+export function usableLinks(link: SessionLink | undefined): { pr: SessionLink["pr"]; workItem: SessionLink["workItem"] } {
+  return { pr: usableLink(link?.pr), workItem: usableLink(link?.workItem) };
+}
+
 // Full, clickable links for whatever this session is working on. Vertical
 // output, so a long URL costs nothing here (unlike the `list` table).
 async function printLinks(s: AgentSession): Promise<void> {
   const resolved = await resolveSessionLink(s, "status");
   const V = linkVocab(resolved.provider);
-  // As in runOpen: a link with no resolvable URL reads as absent, never as a
-  // partial link a human might paste.
-  const pr = resolved.link?.pr?.url ? resolved.link.pr : undefined;
-  const workItem = resolved.link?.workItem?.url ? resolved.link.workItem : undefined;
+  const { pr, workItem } = usableLinks(resolved.link);
   if (resolved.error) {
     console.log(`  links:  (unavailable — ${resolved.error})`);
   } else if (!pr && !workItem) {
@@ -96,33 +105,51 @@ function printPane(pane: NonNullable<ReturnType<typeof capturePaneState>>,
   if (shells > 0) console.log(`  shells: ${shells} background shell${shells > 1 ? "s" : ""} running (e.g. a monitor)`);
 }
 
+// The tally after the status word: agents done, when it started, when it last did anything.
+export function workflowBits(w: WorkflowRef, wst: WorkflowStatus, d: WorkflowDetails): string[] {
+  const bits = [`${d.agentsDone}/${d.agentsStarted} agents done`];
+  if (w.launchedAt) bits.push(`started ${timeAgo(w.launchedAt)}`);
+  if (wst === "running" && d.lastActivity) bits.push(`active ${timeAgo(d.lastActivity)}`);
+  return bits;
+}
+
+// The one-line summary, cut at 120 unless --full asked for the whole of it.
+export function workflowDescription(w: WorkflowRef, d: WorkflowDetails, full: boolean): string | null {
+  const desc = w.summary ?? d.description;
+  if (!desc) return null;
+  return full ? desc : desc.slice(0, 120);
+}
+
+// Alphabetical: the tally is built concurrently, so insertion order is
+// nondeterministic — sort for stable output.
+export function workflowAgents(modelCounts: Record<string, number>): string {
+  return Object.entries(modelCounts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([m, n]) => (n > 1 ? `${m} ×${n}` : m))
+    .join(", ");
+}
+
+export function workflowPhases(phases: NonNullable<WorkflowDetails["phases"]>): string {
+  return phases.map((p) => (p.model ? `${p.title} (${p.model})` : p.title)).join(" → ");
+}
+
+// One workflow run: its line, then what is known about it, indented under it.
+async function printWorkflow(w: WorkflowRef, running: boolean, full: boolean): Promise<void> {
+  const wst = workflowStatus(w, running);
+  const d = await loadWorkflowDetails(w);
+  console.log(`    ${WF_GLYPH[wst]} ${w.name} — ${wst} · ${workflowBits(w, wst, d).join(" · ")}`);
+  const desc = workflowDescription(w, d, full);
+  if (desc) console.log(`        ${desc}`);
+  if (d.phases?.length) console.log(`        phases: ${workflowPhases(d.phases)}`);
+  if (d.modelCounts) console.log(`        agents: ${workflowAgents(d.modelCounts)}`);
+  console.log(`        run: ${w.runId}${full && w.transcriptDir ? `\n        transcripts: ${w.transcriptDir}` : ""}`);
+}
+
 // Workflow-tool runs this session launched (refs come from the cached
 // transcript parse; per-run detail is read here, on demand).
 async function printWorkflows(s: AgentSession, running: boolean, full: boolean): Promise<void> {
   console.log(`\n  workflows:`);
-  for (const w of s.workflows ?? []) {
-    const wst = workflowStatus(w, running);
-    const d = await loadWorkflowDetails(w);
-    const bits = [`${d.agentsDone}/${d.agentsStarted} agents done`];
-    if (w.launchedAt) bits.push(`started ${timeAgo(w.launchedAt)}`);
-    if (wst === "running" && d.lastActivity) bits.push(`active ${timeAgo(d.lastActivity)}`);
-    console.log(`    ${WF_GLYPH[wst]} ${w.name} — ${wst} · ${bits.join(" · ")}`);
-    const desc = w.summary ?? d.description;
-    if (desc) console.log(`        ${full ? desc : desc.slice(0, 120)}`);
-    if (d.phases?.length) {
-      console.log(`        phases: ${d.phases.map((p) => (p.model ? `${p.title} (${p.model})` : p.title)).join(" → ")}`);
-    }
-    if (d.modelCounts) {
-      // Alphabetical: the tally is built concurrently, so insertion order is
-      // nondeterministic — sort for stable output.
-      const models = Object.entries(d.modelCounts)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([m, n]) => (n > 1 ? `${m} ×${n}` : m))
-        .join(", ");
-      console.log(`        agents: ${models}`);
-    }
-    console.log(`        run: ${w.runId}${full && w.transcriptDir ? `\n        transcripts: ${w.transcriptDir}` : ""}`);
-  }
+  for (const w of s.workflows ?? []) await printWorkflow(w, running, full);
 }
 
 // Resolve the token to one on-disk session, or exit having said why.
@@ -160,6 +187,130 @@ if (!s) {
   return { s, index };
 }
 
+type Activity = Awaited<ReturnType<typeof loadActivity>>;
+type Peer = Awaited<ReturnType<typeof findPeer>>;
+type Pane = ReturnType<typeof capturePaneState>;
+
+/** Where the session is running, if anywhere: its window, or a peer outside agendo. */
+interface LiveFacts {
+  target: LiveTarget | null | undefined;
+  peer: Peer;
+  external: boolean;
+  running: boolean;
+}
+
+/** What one capture of the session's pane says. All null/false/0 without a window. */
+interface PaneFacts {
+  pane: Pane | null;
+  readiness: Readiness | null;
+  resumeDialog: boolean;
+  backgroundAgents: number;
+}
+
+// Resolve the window through the full reconciliation, NOT liveTargetForShortId
+// alone: a session launched from a work item / PR runs in a `cl-wi-…`/`cl-pr-…`
+// window, which that helper doesn't match. Getting this wrong would report a
+// perfectly attachable session as "running outside agendo".
+//
+// A claude running outside agendo has no window here but is very much alive;
+// report it as running (◆) rather than idle, and say why it can't be attached.
+// Only consulted when no window was found — with a window in hand the registry
+// adds nothing, and the scan would be pure cost on the common path.
+//
+// Deliberately NOT gated on `peerSocket`: that switch turns off SPEAKING an
+// undocumented protocol, and this reads a registry file. Gating it would make
+// a live session disappear from `status` — and make `resume` stop refusing to
+// put a second claude on a transcript that already has one — which is the
+// opposite of the caution the switch is for.
+async function liveFacts(s: AgentSession, index: SessionIndex): Promise<LiveFacts> {
+  const target = refreshLiveTmux(index.all).liveWindows.get(sessionName(s)) ?? liveTargetForShortId(shortId(s.id));
+  const peer = !target && s.source === "claude" ? await findPeer((id) => id === s.id) : null;
+  const external = !!peer;
+  const running = !!target || liveTargets().has(sessionName(s)) || external;
+  return { target, peer, external, running };
+}
+
+// The pane is captured up front (rather than where it prints) because the
+// stall qualifier needs readiness — a session that is mid-turn is never
+// stalled, however old its transcript looks — and it prints above the
+// readiness line.
+//
+// A pane parked on claude's own resume dialog reads as `ready` but hasn't run
+// yet, so its idle age belongs to the PREVIOUS run — never a stall (idle.ts).
+// Same signal `wait --json` reports as `resumeDialog`, not a second guess.
+// Everything reads off the ONE capture.
+export function paneFacts(target: LiveTarget | null | undefined): PaneFacts {
+  const pane = target ? capturePaneState(target.target) : null;
+  if (!pane) return { pane, readiness: null, resumeDialog: false, backgroundAgents: 0 };
+  return {
+    pane,
+    readiness: paneReadiness(pane.raw, pane.cursor),
+    resumeDialog: paneResumeDialogActive(pane.raw),
+    backgroundAgents: paneBackgroundAgents(pane.raw),
+  };
+}
+
+// The first block: what the session is, and whether it is live.
+function printHeader(s: AgentSession, live: LiveFacts): void {
+  console.log(`${live.external ? "◆ running" : live.running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
+  console.log(`  id:     ${s.id}`);
+  console.log(`  dir:    ${s.cwd}`);
+  if (s.branch) console.log(`  branch: ${s.branch}`);
+  console.log(`  last:   ${s.lastUsed.toISOString()}`);
+}
+
+// A peer outside agendo: its own state, and where it is.
+function printPeer(peer: NonNullable<Peer>): void {
+  console.log(`  state:  ${peer.status ?? "running"}${peer.waitingFor ? ` (${peer.waitingFor})` : ""}`);
+  // Don't claim "no window" on the registry's authority alone. The peer reports
+  // the pane it runs in, and a window agendo failed to ATTRIBUTE (an id-less
+  // `cl-wi-…` whose cwd matched a newer sibling session) is not the same thing
+  // as no window at all — saying so would send the user looking for a terminal
+  // that doesn't exist. Report what the session itself says.
+  console.log(
+    peer.tmux
+      ? `  where:  pid ${peer.pid}, tmux ${peer.tmux} — not attributed to an agendo window; \`${SELF_CMD} send\` reaches it`
+      : `  where:  pid ${peer.pid}, no tmux pane — \`${SELF_CMD} send\` reaches it, attach does not`,
+  );
+}
+
+// How long since anything happened, and the stall verdict when there is one.
+function printIdle(idle: number, stalled: boolean, thresholdMs: number): void {
+  console.log(`  idle:   ${shortAge(idle)} (${idle}s since its last recorded activity)`);
+  if (stalled) {
+    console.log(`          ⚠ stalled: live and not busy, but nothing has happened for ${shortAge(idle)}`);
+    console.log(`          (threshold ${durationLabel(thresholdMs)}). agendo cannot tell "finished" from "fell over" — read`);
+    console.log(`          the final response below to judge.`);
+  }
+}
+
+// Task checklist, if the agent kept one. A plain glyph per status keeps it
+// greppable in plain-text CLI output.
+function printTasks(tasks: Activity["tasks"]): void {
+  if (!tasks?.length) return;
+  console.log(`\n  tasks:`);
+  for (const t of tasks) console.log(`    ${STATUS_GLYPH[t.status]} ${t.label}`);
+}
+
+function printActions(actions: Activity["actions"]): void {
+  if (!actions.length) {
+    console.log(`\n  (no recent activity)`);
+    return;
+  }
+  console.log(`\n  recent activity:`);
+  for (const a of actions) console.log(`    ${a.verb}${a.detail ? `  ${a.detail}` : ""}`);
+}
+
+// The transcript's side of the report: prompt, tasks, workflows, actions, and
+// the FULL final response, always untruncated — the key orchestrator read.
+async function printActivity(s: AgentSession, act: Activity, running: boolean, full: boolean): Promise<void> {
+  if (act.lastPrompt) console.log(`\n  last prompt: ${act.lastPrompt}`);
+  printTasks(act.tasks);
+  if (s.workflows?.length) await printWorkflows(s, running, full);
+  printActions(act.actions);
+  if (act.finalResponse) console.log(`\n  final response:\n${indent(act.finalResponse)}`);
+}
+
 export async function runStatus(
   readBranchSync: BranchSyncReader,
   token: string | undefined,
@@ -169,40 +320,10 @@ export async function runStatus(
   stalledAfterMs?: number,
 ): Promise<void> {
   const { s, index } = await resolveStatusTarget(token, scope);
-  // Resolve the window through the full reconciliation, NOT liveTargetForShortId
-  // alone: a session launched from a work item / PR runs in a `cl-wi-…`/`cl-pr-…`
-  // window, which that helper doesn't match. Getting this wrong would report a
-  // perfectly attachable session as "running outside agendo".
-  const target = refreshLiveTmux(index.all).liveWindows.get(sessionName(s)) ?? liveTargetForShortId(shortId(s.id));
-  // A claude running outside agendo has no window here but is very much alive;
-  // report it as running (◆) rather than idle, and say why it can't be attached.
-  // Only consulted when no window was found — with a window in hand the registry
-  // adds nothing, and the scan would be pure cost on the common path.
-  //
-  // Deliberately NOT gated on `peerSocket`: that switch turns off SPEAKING an
-  // undocumented protocol, and this reads a registry file. Gating it would make
-  // a live session disappear from `status` — and make `resume` stop refusing to
-  // put a second claude on a transcript that already has one — which is the
-  // opposite of the caution the switch is for.
-  const peer = !target && s.source === "claude" ? await findPeer((id) => id === s.id) : null;
-  const external = !!peer;
-  const running = !!target || liveTargets().has(sessionName(s)) || external;
+  const live = await liveFacts(s, index);
+  const { running, peer } = live;
   const act = await loadActivity(s, { full });
-  // The pane is captured up front (rather than inside the `if (target)` block
-  // below) because the stall qualifier needs readiness — a session that is
-  // mid-turn is never stalled, however old its transcript looks — and it prints
-  // above the readiness line.
-  const pane = target ? capturePaneState(target.target) : null;
-  const readiness = pane ? paneReadiness(pane.raw, pane.cursor) : null;
-  // A pane parked on claude's own resume dialog reads as `ready` but hasn't run
-  // yet, so its idle age belongs to the PREVIOUS run — never a stall (idle.ts).
-  // Same signal `wait --json` reports as `resumeDialog`, not a second guess.
-  // Both read off the ONE capture, in the one branch that already tested for it —
-  // a second `pane ? … : …` would cost this function a complexity point for a
-  // question it has already asked.
-  const { resumeDialog, backgroundAgents } = pane
-    ? { resumeDialog: paneResumeDialogActive(pane.raw), backgroundAgents: paneBackgroundAgents(pane.raw) }
-    : { resumeDialog: false, backgroundAgents: 0 };
+  const { pane, readiness, resumeDialog, backgroundAgents } = paneFacts(live.target);
   const idle = idleSeconds(s.lastUsed);
   const thresholdMs = resolveStalledAfterMs(stalledAfterMs);
   // A peer with no window arrives here as running-but-`readiness: null`, which
@@ -224,30 +345,9 @@ export async function runStatus(
   // on EVERY status, and would otherwise print a stall verdict — or withhold one —
   // that the user has no way to explain.
   flushWarnings("status");
-  console.log(`${external ? "◆ running" : running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
-  console.log(`  id:     ${s.id}`);
-  console.log(`  dir:    ${s.cwd}`);
-  if (s.branch) console.log(`  branch: ${s.branch}`);
-  console.log(`  last:   ${s.lastUsed.toISOString()}`);
-  if (peer) {
-    console.log(`  state:  ${peer.status ?? "running"}${peer.waitingFor ? ` (${peer.waitingFor})` : ""}`);
-    // Don't claim "no window" on the registry's authority alone. The peer reports
-    // the pane it runs in, and a window agendo failed to ATTRIBUTE (an id-less
-    // `cl-wi-…` whose cwd matched a newer sibling session) is not the same thing
-    // as no window at all — saying so would send the user looking for a terminal
-    // that doesn't exist. Report what the session itself says.
-    console.log(
-      peer.tmux
-        ? `  where:  pid ${peer.pid}, tmux ${peer.tmux} — not attributed to an agendo window; \`${SELF_CMD} send\` reaches it`
-        : `  where:  pid ${peer.pid}, no tmux pane — \`${SELF_CMD} send\` reaches it, attach does not`,
-    );
-  }
-  console.log(`  idle:   ${shortAge(idle)} (${idle}s since its last recorded activity)`);
-  if (stalled) {
-    console.log(`          ⚠ stalled: live and not busy, but nothing has happened for ${shortAge(idle)}`);
-    console.log(`          (threshold ${durationLabel(thresholdMs)}). agendo cannot tell "finished" from "fell over" — read`);
-    console.log(`          the final response below to judge.`);
-  }
+  printHeader(s, live);
+  if (peer) printPeer(peer);
+  printIdle(idle, stalled, thresholdMs);
   // Unpushed-work state, read straight from the checkout's .git refs (no `git`
   // process, no fetch — see src/gitrefs.ts). Silent when it can't be determined.
   const sync = readBranchSync(s.cwd);
@@ -260,22 +360,7 @@ export async function runStatus(
   }
   if (withUrls) await printLinks(s);
   if (pane) printPane(pane, readiness, resumeDialog, resumeChoice);
-  if (act.lastPrompt) console.log(`\n  last prompt: ${act.lastPrompt}`);
-  // Task checklist, if the agent kept one. A plain glyph per status keeps it
-  // greppable in plain-text CLI output.
-  if (act.tasks && act.tasks.length) {
-    console.log(`\n  tasks:`);
-    for (const t of act.tasks) console.log(`    ${STATUS_GLYPH[t.status]} ${t.label}`);
-  }
-  if (s.workflows?.length) await printWorkflows(s, running, full);
-  if (act.actions.length) {
-    console.log(`\n  recent activity:`);
-    for (const a of act.actions) console.log(`    ${a.verb}${a.detail ? `  ${a.detail}` : ""}`);
-  } else {
-    console.log(`\n  (no recent activity)`);
-  }
-  // The FULL final response, always untruncated — the key orchestrator read.
-  if (act.finalResponse) console.log(`\n  final response:\n${indent(act.finalResponse)}`);
+  await printActivity(s, act, running, full);
 }
 
 /**
@@ -286,7 +371,7 @@ export async function runStatus(
  * When the branch has no configured upstream the wording stays hedged rather
  * than asserting the work was never pushed.
  */
-function describeSync(sync: BranchSync): string {
+export function describeSync(sync: BranchSync): string {
   const where = "(from .git refs, no fetch)";
   const head = `HEAD on ${sync.branch}`;
   if (!sync.unpushed) return `${head} — matches ${sync.upstream} ${where}`;
