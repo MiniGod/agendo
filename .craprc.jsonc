@@ -93,11 +93,13 @@
   // `git worktree add` shapes as one list, with a unit suite over a scripted
   // git, and scores 7. Then src/cli/open.ts `runOpen` (cc 28, 89%) set
   // 28.91; it is now a dozen lines over five steps, each fully covered, the
-  // worst of them at 5. The holder is src/ui/screens/ListScreen.tsx
-  // `ListScreen` (cc 28, fully covered), with src/restore.ts
-  // `recordLaunchedSession` (cc 7, 25%) at 27.67 and ListScreen.tsx
-  // `renderRow` (cc 27, fully covered) at 27 behind it.
-  "max": 28.00,
+  // worst of them at 5. Then src/ui/screens/ListScreen.tsx `ListScreen`
+  // (cc 28, fully covered) set 28.00; its header lines are now one function
+  // each in listLines.tsx, the worst of them at 6, and it scores 1. The
+  // holder is src/restore.ts `recordLaunchedSession` (cc 7, 25%), with
+  // ListScreen.tsx `renderRow` (cc 27, fully covered) at 27 and
+  // src/wait/args.ts `parseWaitArgs` at 25.3 behind it.
+  "max": 27.67,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,

@@ -2,21 +2,12 @@ import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import { itemKey, prKey, type LoadedModel } from "../../model.ts";
 import { sessionName } from "../../tmux.ts";
-import { homeShort, type PaneState } from "../format.ts";
+import type { PaneState } from "../format.ts";
 import { V } from "../vocabState.ts";
+import { ActionRow, ItemRow, PrRow, SessionRow, TaskRow } from "../components.tsx";
 import {
-  ActionRow,
-  ColumnHeader,
-  HEADERS_ITEMS,
-  CaretText,
-  ITEM_WIDTHS,
-  ItemRow,
-  PR_WIDTHS,
-  PrRow,
-  prHeaders,
-  SessionRow,
-  TaskRow,
-} from "../components.tsx";
+  columnHeader, edgeLine, hintLine, identityLine, noticeLine, scopeLine, searchLine, viewTab, type SearchFocus,
+} from "./listLines.tsx";
 import type { Row, PrSort, SessionSort } from "../rows.ts";
 import type { RepoInfo } from "../../repos.ts";
 import type { View } from "../keys/context.ts";
@@ -185,7 +176,7 @@ export function ListScreen({
   hostSession?: string;
   discoveredRepos: RepoInfo[];
   repoFilterOn: boolean;
-  searchFocus: "input" | "list" | null;
+  searchFocus: SearchFocus;
   search: { text: string; cursor: number };
   grouped: boolean;
   prsGrouped: boolean;
@@ -199,108 +190,31 @@ export function ListScreen({
   notice: string | null;
   panes: Map<string, PaneState>;
 }) {
-  const tab = (v: View, label: string) => (
-    <Text
-      bold={view === v}
-      backgroundColor={view === v ? "cyan" : undefined}
-      color={view === v ? "black" : undefined}
-      dimColor={view !== v}
-    >
-      {` ${label} `}
-    </Text>
-  );
   return (
     <Box flexDirection="column">
       <Box>
         <Text bold>agendo </Text>
         <Text color="cyan">{`[${providerLabel}]  `}</Text>
-        {tab("items", `1 ${V.itemsTab}`)}
+        {viewTab(view, "items", `1 ${V.itemsTab}`)}
         <Text> </Text>
-        {tab("prs", "2 PRs")}
+        {viewTab(view, "prs", "2 PRs")}
         <Text> </Text>
-        {tab("sessions", "3 Sessions")}
+        {viewTab(view, "sessions", "3 Sessions")}
       </Box>
-      {filterRoot ? (
-        <Box>
-          <Text wrap="truncate">
-            <Text color={scoped ? "green" : "yellow"}>
-              {scoped ? `⊙ ${hostSession}: ${homeShort(filterRoot)}` : "⊙ global — all paths"}
-            </Text>
-            <Text dimColor>{`  · a ${scoped ? "show all" : `rescope to ${hostSession}`}`}</Text>
-            {/* The repo filter's own state + key hint, next to the path scope's
-                so both toggles are discoverable in the same place. */}
-            <Text dimColor>
-              {discoveredRepos.length === 0
-                ? `  · f repo filter: no repos found here`
-                : `  · f repo filter: ${repoFilterOn ? `on (${discoveredRepos.length} repo${discoveredRepos.length > 1 ? "s" : ""})` : "off"}`}
-            </Text>
-          </Text>
-        </Box>
-      ) : null}
-      <Box>
-        <Text wrap="truncate" dimColor>
-          {searchFocus === "input"
-            ? `type to filter · ←/→ caret · ⌫ delete · ⌃w del word · ↓ results · enter ${view === "sessions" ? "resume" : "open"} · esc cancel`
-            : searchFocus === "list"
-              ? `↑/↓ move · ↑ at top edits search · → expand · / edit · enter ${view === "sessions" ? "resume" : "open"} · o browser · esc cancel`
-              : view === "sessions"
-                // `⇥ view` (not "switch view") matches the PRs hint and buys back
-                // 7 columns for the coordinator and `m →profile` entries — this
-                // line already truncated at ~120 cols before any of them, so tail
-                // hints are at a premium. `O orch · G global` spends 3 of those 7
-                // to name BOTH coordinator levels where one used to be spelled out
-                // as `O orchestrator`, in the same words the `kind` column of
-                // `agendo list` prints for those sessions.
-                ? `↑/↓ move · → expand · ⇥ view · g ${grouped ? "ungroup" : "group"} · s sort: ${sessionSort} · / search · n new · O orch · G global · enter resume · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`
-                : view === "prs"
-                  ? `↑/↓ move · → expand · ⇥ view · g ${prsGrouped ? "ungroup" : "group"} · s sort: ${prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`
-                  : "↑/↓ move · →/← expand · ⇥ switch view · / search · enter open/expand · o browser · , settings · r refresh · q/esc quit"}
-        </Text>
-      </Box>
-      {searchFocus ? (
-        <Box>
-          <Text wrap="truncate">
-            <Text color={searchFocus === "input" ? "cyan" : "gray"}>{"search "}</Text>
-            {searchFocus === "input" ? (
-              <Text>
-                <CaretText value={search.text} cursor={search.cursor} />
-              </Text>
-            ) : (
-              <Text dimColor>{search.text}</Text>
-            )}
-          </Text>
-        </Box>
-      ) : null}
-      {view !== "sessions" ? (
-        <Box>
-          <Text wrap="truncate">
-            <Text color="magenta">{"as "}</Text>
-            <Text bold>
-              {model.identity.displayName}
-              {model.identity.id === model.me.id ? " (you)" : ""}
-            </Text>
-          </Text>
-        </Box>
-      ) : null}
-      {view !== "sessions" ? (
-        <ColumnHeader
-          headers={view === "prs" ? prHeaders(prSort) : HEADERS_ITEMS}
-          widths={view === "prs" ? PR_WIDTHS : ITEM_WIDTHS}
-        />
-      ) : null}
-      <Text dimColor>{moreAbove > 0 ? `  ↑ ${moreAbove} more` : " "}</Text>
+      {scopeLine({ filterRoot, scoped, hostSession, discoveredRepos, repoFilterOn })}
+      {hintLine(searchFocus, view, { grouped, prsGrouped, prSort, sessionSort })}
+      {searchLine(searchFocus, search)}
+      {identityLine(view, model)}
+      {columnHeader(view, prSort)}
+      {edgeLine(moreAbove, "↑")}
 
       {visible.map((row, li) => {
         const i = scrollTop + li;
         return renderRow(row, i, { cursor, searchFocus, model, panes, prSort });
       })}
 
-      <Text dimColor>{moreBelow > 0 ? `  ↓ ${moreBelow} more` : " "}</Text>
-      {notice ? (
-        <Box>
-          <Text color="yellow">⚑ {notice}</Text>
-        </Box>
-      ) : null}
+      {edgeLine(moreBelow, "↓")}
+      {noticeLine(notice)}
     </Box>
   );
 }
