@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -106,11 +106,13 @@
   // a row in a table read one token at a time, every function in the file
   // unit tested and the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListViewKeys` (cc 23, 84%) set 25.08; it now asks five key groups
-  // in turn, each unit tested, and scores 7. The holder is src/peer.ts
-  // `livePeers`'s file reader (cc 20, 77%), with src/ado.ts
-  // `fetchWorkItemsForPRs` at 23.84 and src/ui/keys/provider.ts
-  // `handleProviderKeys` at 22.89 behind it.
-  "max": 24.70,
+  // in turn, each unit tested, and scores 7. Then src/peer.ts `livePeers`'s
+  // file reader (cc 20, 77%, anonymous) set 24.70; it is now
+  // `parsePeerEntry` over three named checks, unit tested, the worst of them
+  // at 6. The holder is src/ado.ts `fetchWorkItemsForPRs` (cc 12, 57%), with
+  // src/ui/keys/provider.ts `handleProviderKeys` at 22.89 and
+  // src/sessions/claude.ts `parseClaudeMeta` at 22.40 behind it.
+  "max": 23.84,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
