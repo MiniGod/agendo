@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseJsonLine, resetTranscriptWarnings, takeWarnings } from "../src/errors.ts";
+import { messageOf, parseJsonLine, resetTranscriptWarnings, takeWarnings } from "../src/errors.ts";
 
 // Torn-append recovery is a pure helper on a string, and the e2e suite cannot
 // reach it: driving it there would mean a fixture transcript that is corrupt in
@@ -257,5 +257,25 @@ describe("a walk over the fixture, as a reader does it", () => {
     ]);
     // Lines 4 and 5 are unrecoverable, line 6 is the live trailing write.
     expect(takeWarnings()).toHaveLength(1);
+  });
+});
+
+// `messageOf` is what every error site prints; the e2e suite only ever hands it
+// real Errors, so the shapes it exists for — a thrown string, a thrown object,
+// one JSON cannot serialise — never reach it there.
+describe("messageOf", () => {
+  test("an Error's message, a string as itself, anything else as JSON", () => {
+    expect(messageOf(new Error("boom"))).toBe("boom");
+    expect(messageOf("plain")).toBe("plain");
+    expect(messageOf({ code: 7 })).toBe('{"code":7}');
+    expect(messageOf(null)).toBe("null");
+  });
+
+  test("what JSON cannot say falls back to String(): undefined, a cycle, a bigint", () => {
+    expect(messageOf(undefined)).toBe("undefined");
+    const loop: { self?: unknown } = {};
+    loop.self = loop;
+    expect(messageOf(loop)).toBe("[object Object]");
+    expect(messageOf(10n)).toBe("10");
   });
 });

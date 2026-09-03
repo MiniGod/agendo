@@ -70,25 +70,7 @@ export function renderLoadState({
  * no state and calls no hook, and keeping it out of the element tree means App's
  * reconciler behaviour is byte-for-byte what it was when this block was inline.
  */
-export function renderMode({
-  mode,
-  model,
-  identity,
-  roster,
-  settingsItems,
-  providerLabel,
-  provider,
-  autoResume,
-  available,
-  authStatus,
-  cloneNote,
-  cloneUrl,
-  resolved,
-  filterRoot,
-  canClone,
-  anyHostableRepo,
-  reposForTarget,
-}: {
+export interface ModeProps {
   mode: Mode;
   model: LoadedModel;
   identity: Identity | null;
@@ -106,7 +88,14 @@ export function renderMode({
   canClone: boolean;
   anyHostableRepo: boolean;
   reposForTarget: (t: FreshTarget) => RepoInfo[];
-}): ReactElement | null {
+}
+
+export function renderMode(p: ModeProps): ReactElement | null {
+  return renderLaunchMode(p) ?? renderPromptMode(p) ?? renderSettingsMode(p);
+}
+
+/** The screens on the way to a session: which agent, which repo, worktree or not, the branch, a profile, a link. */
+function renderLaunchMode({ mode, cloneNote, filterRoot, canClone, anyHostableRepo, reposForTarget }: ModeProps): ReactElement | null {
   if (mode.kind === "agent") return <AgentScreen target={mode.target} cursor={mode.cursor} />;
 
   if (mode.kind === "repo") {
@@ -122,6 +111,36 @@ export function renderMode({
     );
   }
 
+  if (mode.kind === "wtchoice") {
+    return <WtChoiceScreen target={mode.target} repo={mode.repo} cursor={mode.cursor} cloneNote={cloneNote} />;
+  }
+
+  if (mode.kind === "branch") {
+    return (
+      <BranchScreen
+        target={mode.target}
+        agent={mode.agent}
+        repo={mode.repo}
+        value={mode.value}
+        cursor={mode.cursor}
+        worktree={mode.worktree}
+        cloneNote={cloneNote}
+      />
+    );
+  }
+
+  if (mode.kind === "profile") {
+    return <ProfileScreen title={mode.session.title} choices={mode.choices} cursor={mode.cursor} />;
+  }
+
+  if (mode.kind === "open") {
+    return <OpenScreen targets={mode.targets} title={mode.title} />;
+  }
+  return null;
+}
+
+/** The prompts that make a checkout: the clone URL and its progress, and the new repo's name, parent and path. */
+function renderPromptMode({ mode, cloneUrl, resolved, filterRoot }: ModeProps): ReactElement | null {
   if (mode.kind === "clone") {
     return (
       <CloneScreen
@@ -166,7 +185,13 @@ export function renderMode({
       />
     );
   }
+  return null;
+}
 
+/** The settings screen and its two pickers. */
+function renderSettingsMode({
+  mode, model, identity, roster, settingsItems, providerLabel, provider, autoResume, available, authStatus,
+}: ModeProps): ReactElement | null {
   if (mode.kind === "identity") {
     return <IdentityScreen cursor={mode.cursor} identity={identity} me={model.me} roster={roster} />;
   }
@@ -188,32 +213,6 @@ export function renderMode({
 
   if (mode.kind === "provider") {
     return <ProviderScreen cursor={mode.cursor} provider={provider} available={available} />;
-  }
-
-  if (mode.kind === "wtchoice") {
-    return <WtChoiceScreen target={mode.target} repo={mode.repo} cursor={mode.cursor} cloneNote={cloneNote} />;
-  }
-
-  if (mode.kind === "branch") {
-    return (
-      <BranchScreen
-        target={mode.target}
-        agent={mode.agent}
-        repo={mode.repo}
-        value={mode.value}
-        cursor={mode.cursor}
-        worktree={mode.worktree}
-        cloneNote={cloneNote}
-      />
-    );
-  }
-
-  if (mode.kind === "profile") {
-    return <ProfileScreen title={mode.session.title} choices={mode.choices} cursor={mode.cursor} />;
-  }
-
-  if (mode.kind === "open") {
-    return <OpenScreen targets={mode.targets} title={mode.title} />;
   }
   return null;
 }

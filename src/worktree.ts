@@ -144,13 +144,10 @@ function branchExists(root: string, branch: string): boolean {
 }
 
 /** The remote default branch (e.g. origin/main), or HEAD as a fallback. */
-function defaultBaseRef(root: string): string {
-  const r = spawnSync(
-    "git",
-    ["-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    { encoding: "utf-8" },
-  );
-  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : "HEAD";
+function defaultBaseRef(run: GitRun): string {
+  const r = run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  const ref = r.stdout?.trim();
+  return r.status === 0 && ref ? ref : "HEAD";
 }
 
 export interface WorktreeResult {
@@ -164,31 +161,16 @@ export interface WorktreeResult {
  * the repo's default ref; if the branch already exists, checks it out into the
  * worktree instead. Idempotent if the worktree path already exists.
  */
-export function createWorktree(root: string, branch: string): WorktreeResult {
+export function createWorktree(root: string, branch: string, run: GitRun = gitIn(root)): WorktreeResult {
   const path = worktreePath(root, branch);
   if (existsSync(path)) return { path, created: false };
-
-  const base = defaultBaseRef(root);
-  const add = spawnSync(
-    "git",
-    ["-C", root, "worktree", "add", "-b", branch, path, base],
-    { encoding: "utf-8" },
-  );
-  if (add.status === 0) return { path, created: true };
-
-  // Branch may already exist — retry without -b (check it out into worktree).
-  const retry = spawnSync(
-    "git",
-    ["-C", root, "worktree", "add", path, branch],
-    { encoding: "utf-8" },
-  );
-  if (retry.status === 0) return { path, created: true };
-
-  return {
-    path,
-    created: false,
-    error: (add.stderr || "").trim() || (retry.stderr || "").trim() || "git worktree add failed",
-  };
+  // A new branch off the default ref; if the branch already exists, the retry
+  // without -b checks it out into the worktree instead.
+  const attempts = [
+    ["worktree", "add", "-b", branch, path, defaultBaseRef(run)],
+    ["worktree", "add", path, branch],
+  ];
+  return addWorktree(path, attempts, run);
 }
 
 /**
@@ -198,8 +180,8 @@ export function createWorktree(root: string, branch: string): WorktreeResult {
  * remote ref first, then prefers a local branch tracking origin/<branch>,
  * falling back to an existing local branch, then a detached checkout.
  */
-/** A git call in the repo, as the worktree helpers need it: exit status and stderr. */
-export type GitRun = (args: string[]) => { status: number | null; stderr: string | null };
+/** A git call in the repo, as the worktree helpers need it: exit status, stderr, and stdout when read. */
+export type GitRun = (args: string[]) => { status: number | null; stderr: string | null; stdout?: string | null };
 
 function gitIn(root: string): GitRun {
   return (args) => spawnSync("git", ["-C", root, ...args], { encoding: "utf-8" });
@@ -217,16 +199,21 @@ function worktreeAddAttempts(path: string, prBranch: string, remote: string): st
   ];
 }
 
-export function checkoutWorktree(root: string, prBranch: string, run: GitRun = gitIn(root)): WorktreeResult {
-  const path = worktreePath(root, prBranch);
-  if (existsSync(path)) return { path, created: false };
-  // Best-effort: make sure origin/<branch> is up to date before we base on it.
-  run(["fetch", "origin", prBranch]);
+/** Try each `git worktree add` shape in turn: the first success wins, else the first real message. */
+function addWorktree(path: string, attempts: string[][], run: GitRun): WorktreeResult {
   const failures: string[] = [];
-  for (const args of worktreeAddAttempts(path, prBranch, `origin/${prBranch}`)) {
+  for (const args of attempts) {
     const r = run(args);
     if (r.status === 0) return { path, created: true };
     failures.push((r.stderr || "").trim());
   }
   return { path, created: false, error: failures.find(Boolean) || "git worktree add failed" };
+}
+
+export function checkoutWorktree(root: string, prBranch: string, run: GitRun = gitIn(root)): WorktreeResult {
+  const path = worktreePath(root, prBranch);
+  if (existsSync(path)) return { path, created: false };
+  // Best-effort: make sure origin/<branch> is up to date before we base on it.
+  run(["fetch", "origin", prBranch]);
+  return addWorktree(path, worktreeAddAttempts(path, prBranch, `origin/${prBranch}`), run);
 }

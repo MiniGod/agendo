@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { approvalCell, approvalInline, fit, padCell, prBadge } from "../src/ui/format.ts";
+import { approvalCell, approvalInline, fit, fmtDelta, padCell, prBadge } from "../src/ui/format.ts";
 import type { PullRequest } from "../src/types.ts";
 
 // The width helpers in src/ui/format.ts are the densest logic in the repo and
@@ -193,5 +193,22 @@ describe("approval rendering", () => {
         }
       }
     }
+  });
+});
+
+// The e2e fixtures' activity lines are all seconds apart, so under measurement
+// only the seconds arm of `fmtDelta` was ever taken.
+describe("fmtDelta", () => {
+  test("nothing for no delta, +0s for a non-positive one, then the coarsest whole unit", () => {
+    expect(fmtDelta(undefined)).toBe("");
+    expect(fmtDelta(0)).toBe("+0s");
+    expect(fmtDelta(-4_000)).toBe("+0s");
+    expect(fmtDelta(400)).toBe("+0s");
+    expect(fmtDelta(59_400)).toBe("+59s");
+    expect(fmtDelta(90_000)).toBe("+2m");
+    expect(fmtDelta(59 * 60_000)).toBe("+59m");
+    expect(fmtDelta(3 * 3_600_000)).toBe("+3h");
+    expect(fmtDelta(23 * 3_600_000)).toBe("+23h");
+    expect(fmtDelta(3 * 86_400_000)).toBe("+3d");
   });
 });

@@ -9,6 +9,7 @@
 // constructor the parser uses, so they hold in any zone the test runs in.
 import { describe, expect, test } from "bun:test";
 import { BARE_TIME_LOOKBACK_MS, parseResetTime } from "../src/usageLimit.ts";
+import { envLocale } from "../src/usageLimit/locale.ts";
 
 /** Wed Sep 2 2026, 10:00 local. */
 const now = new Date(2026, 8, 2, 10, 0);
@@ -75,5 +76,25 @@ describe("a bare time", () => {
     expect(at("resets 9am")).toBe(local(2026, 9, 3, 9));
     expect(at("resets 9am", 2 * 3600_000)).toBe(local(2026, 9, 2, 9));
     expect(parseResetTime("resets 1am", new Date(2026, 8, 2, 23, 0), 8 * 24 * 3600_000)).toBe(local(2026, 9, 3, 1));
+  });
+});
+
+// The locale the reset time is printed in comes from the environment the
+// process was started with, which under measurement is one fixed value.
+describe("envLocale", () => {
+  test("LC_ALL over LC_TIME over LANG, as a BCP-47 tag without codeset or modifier", () => {
+    expect(envLocale({ LANG: "en_US.UTF-8" })).toBe("en-US");
+    expect(envLocale({ LC_ALL: "is_IS@euro", LC_TIME: "de_DE", LANG: "en_US" })).toBe("is-IS");
+    expect(envLocale({ LC_TIME: "de_DE.UTF-8", LANG: "en_US" })).toBe("de-DE");
+  });
+
+  test("nothing set, an empty value, the C and POSIX locales, a bare codeset, and a tag the runtime cannot use are no locale", () => {
+    expect(envLocale({})).toBeUndefined();
+    expect(envLocale({ LANG: "" })).toBeUndefined();
+    expect(envLocale({ LANG: "C" })).toBeUndefined();
+    expect(envLocale({ LC_ALL: "POSIX.UTF-8" })).toBeUndefined();
+    expect(envLocale({ LANG: ".UTF-8" })).toBeUndefined();
+    expect(envLocale({ LANG: "e" })).toBeUndefined();
+    expect(envLocale({ LANG: "xq_ZZ" })).toBeUndefined();
   });
 });

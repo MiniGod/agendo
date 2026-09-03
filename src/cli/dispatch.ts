@@ -13,6 +13,7 @@ import type { BranchSyncReader } from "../types.ts";
 import { HELP } from "./help.ts";
 import { parseSessionArgs, requireDuration, requireValue } from "./args.ts";
 import { listRoute, parseRepoListArgs, parseResourceListArgs, parseSessionListArgs } from "./listArgs.ts";
+import { parseOpenArgs } from "./openArgs.ts";
 import { runStatus } from "./status.ts";
 import { runList } from "./list.ts";
 import { runLaunch } from "./launchCmd.ts";
@@ -77,38 +78,8 @@ async function statusCommand(readBranchSync: BranchSyncReader): Promise<void> {
 // index (`sessionLinks`). The URLs are always printed, so the command is useful
 // as a "give me the link" even on a headless host with no browser to launch.
 async function openCommand(): Promise<void> {
-  let token: string | undefined;
-  let want: "pr" | "item" | undefined;
-  let printOnly = false;
-  // Same scope selectors as `status`, for the same reason: `open` resolves a
-  // short id too, and launching a browser at the wrong repo's PR is a worse
-  // outcome than printing the wrong status.
-  let pathArg: string | undefined;
-  let repoArg: string | undefined;
-  const rest = process.argv.slice(3);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    const sel = a === "--pr" ? "pr" : a === "--issue" || a === "--work-item" || a === "--workitem" ? "item" : null;
-    if (sel) {
-      // Two conflicting selectors is a mistake, not a silent last-one-wins.
-      if (want && want !== sel) {
-        console.error(`open: use only one of --pr / --work-item`);
-        process.exit(1);
-      }
-      want = sel;
-    } else if (a === "--print" || a === "-p") printOnly = true;
-    else if (a === "--path") pathArg = requireValue("open", a, rest[++i]);
-    else if (a === "--repo") repoArg = requireValue("open", a, rest[++i]);
-    else if (a.startsWith("-")) {
-      console.error(`open: unknown argument "${a}"`);
-      process.exit(1);
-    } else if (token === undefined) token = a;
-    else {
-      console.error(`open: unexpected argument "${a}"`);
-      process.exit(1);
-    }
-  }
-  await runOpen(token, want, printOnly, makeSessionScope({ path: pathArg, repo: repoArg }, process.cwd()));
+  const o = parseOpenArgs(process.argv.slice(3));
+  await runOpen(o.token, o.want, o.printOnly, makeSessionScope({ path: o.pathArg, repo: o.repoArg }, process.cwd()));
   process.exit(0);
 }
 
