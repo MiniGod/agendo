@@ -149,7 +149,10 @@
         // of it 7. The holders were src/cli/status.ts `runStatus` and
         // src/cli/list.ts `runList`, tied at 32; `runList` is now 10, so
         // `runStatus` holds it alone.
-        "complexity": ["error", 32], // src/cli/status.ts runStatus
+        // LOWERED 32 -> 31. `runStatus` set 32 and is now the same report with
+        // each part named, the worst of them 7. The holder is
+        // src/cli/launchCmd.ts `parseLaunchArgs`.
+        "complexity": ["error", 31], // src/cli/launchCmd.ts parseLaunchArgs
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
