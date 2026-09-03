@@ -27,33 +27,68 @@ import { claudeBaseDirs, type SessionProvider } from "./provider.ts";
 // remote-default-branch helper here; it shells out to git.)
 const BASE_BRANCHES = new Set(["master", "main"]);
 
-async function parseClaudeMeta(
-  filePath: string,
-): Promise<{ cwd?: string; branch?: string; title?: string; createdAt?: Date; workflows?: WorkflowRef[] } | null> {
-  let raw: string;
-  try {
-    raw = await readFile(filePath, "utf-8");
-  } catch {
-    return null;
+type ClaudeMeta = { cwd?: string; branch?: string; title?: string; createdAt?: Date; workflows?: WorkflowRef[] };
+
+interface MetaDraft {
+  cwd?: string;
+  createdAt?: Date;
+  customTitle?: string;
+  aiTitle?: string;
+  agentName?: string;
+  lastNonBase?: string;
+  lastAnyBranch?: string;
+}
+
+/** The first cwd and the first parseable timestamp win. */
+function recordFirsts(d: MetaDraft, e: Record<string, any>): void {
+  if (!d.cwd && e.cwd) d.cwd = e.cwd;
+  if (!d.createdAt && e.timestamp) {
+    const t = new Date(e.timestamp);
+    if (!isNaN(t.getTime())) d.createdAt = t;
   }
-  let cwd: string | undefined;
-  let customTitle: string | undefined;
-  let aiTitle: string | undefined;
-  let agentName: string | undefined;
-  let createdAt: Date | undefined;
-  // Take the most-RECENT gitBranch, demoting base branches (master/main). A
-  // worktree that was later switched/renamed to its real feature branch (e.g. a
-  // PR branch created after most of the work) should file under that current
-  // branch, not the historically-dominant one — so a stale but frequent branch
-  // can't outvote the branch the worktree actually ended on. We keep the last
-  // NON-base branch seen (chronological — the log is append-only), falling back
-  // to the last branch overall only for genuinely base-only sessions. Demoting
-  // base still stops a first-few-records `master` (before HEAD settles on the
-  // worktree branch), or a brief mid-session switch back to master, from winning.
-  let lastNonBase: string | undefined;
-  let lastAnyBranch: string | undefined;
-  // Workflow runs ride the same line walk (and thus the same parse cache) —
-  // launches and completion notifications are both transcript records.
+}
+
+/**
+ * Take the most-RECENT gitBranch, demoting base branches (master/main). A
+ * worktree that was later switched/renamed to its real feature branch (e.g. a
+ * PR branch created after most of the work) should file under that current
+ * branch, not the historically-dominant one — so a stale but frequent branch
+ * can't outvote the branch the worktree actually ended on. We keep the last
+ * NON-base branch seen (chronological — the log is append-only), falling back
+ * to the last branch overall only for genuinely base-only sessions. Demoting
+ * base still stops a first-few-records `master` (before HEAD settles on the
+ * worktree branch), or a brief mid-session switch back to master, from winning.
+ */
+function recordBranch(d: MetaDraft, e: Record<string, any>): void {
+  if (!e.gitBranch) return;
+  d.lastAnyBranch = e.gitBranch;
+  if (!BASE_BRANCHES.has(e.gitBranch)) d.lastNonBase = e.gitBranch;
+}
+
+/** The last of each title kind wins — renames can happen more than once. */
+function recordTitle(d: MetaDraft, e: Record<string, any>): void {
+  if (e.type === "custom-title" && e.customTitle) d.customTitle = e.customTitle;
+  else if (e.type === "ai-title" && e.aiTitle) d.aiTitle = e.aiTitle;
+  else if (e.type === "agent-name" && e.agentName) d.agentName = e.agentName;
+}
+
+function metaOf(d: MetaDraft, workflows: WorkflowScan): ClaudeMeta {
+  return {
+    cwd: d.cwd,
+    branch: d.lastNonBase ?? d.lastAnyBranch,
+    title: d.customTitle ?? d.aiTitle ?? d.agentName,
+    createdAt: d.createdAt,
+    workflows: workflows.finish(),
+  };
+}
+
+/**
+ * One transcript's text as its session metadata. Workflow runs ride the same
+ * line walk (and thus the same parse cache) — launches and completion
+ * notifications are both transcript records.
+ */
+export function scanClaudeMeta(raw: string, filePath: string): ClaudeMeta {
+  const d: MetaDraft = {};
   const workflows = new WorkflowScan();
   const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -63,25 +98,23 @@ async function parseClaudeMeta(
     // a live agent's half-written trailing record is normal, not corruption.
     const e: Record<string, any> | null = parseJsonLine(t, filePath, i + 1, { isLast: i === lines.length - 1 });
     if (!e || typeof e !== "object") continue;
-    if (!cwd && e.cwd) cwd = e.cwd;
-    if (!createdAt && e.timestamp) {
-      const d = new Date(e.timestamp);
-      if (!isNaN(d.getTime())) createdAt = d;
-    }
-    if (e.gitBranch) {
-      lastAnyBranch = e.gitBranch;
-      if (!BASE_BRANCHES.has(e.gitBranch)) lastNonBase = e.gitBranch;
-    }
-    if (e.type === "custom-title" && e.customTitle) customTitle = e.customTitle;
-    else if (e.type === "ai-title" && e.aiTitle) aiTitle = e.aiTitle;
-    else if (e.type === "agent-name" && e.agentName) agentName = e.agentName;
+    recordFirsts(d, e);
+    recordBranch(d, e);
+    recordTitle(d, e);
     workflows.record(e);
   }
-  const branch = lastNonBase ?? lastAnyBranch;
-  return { cwd, branch, title: customTitle ?? aiTitle ?? agentName, createdAt, workflows: workflows.finish() };
+  return metaOf(d, workflows);
 }
 
-
+async function parseClaudeMeta(filePath: string): Promise<ClaudeMeta | null> {
+  let raw: string;
+  try {
+    raw = await readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+  return scanClaudeMeta(raw, filePath);
+}
 
 const claudeParseCache = new TranscriptCache();
 
