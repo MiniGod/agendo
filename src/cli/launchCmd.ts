@@ -10,12 +10,11 @@
 
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
-import { currentSessionName } from "../tmux.ts";
 import {
-  FORWARDABLE_LAUNCH_FLAGS, launchGlobalOrchestrator, launchTask, SELF_CMD,
-  type GlobalLayout, type LaunchResult,
+  FORWARDABLE_LAUNCH_FLAGS, launchGlobalOrchestrator, launchTask,
+  type GlobalLaunchResult, type LaunchResult, type OpenPlan,
 } from "../launch.ts";
-import { recordLaunchedSession } from "../restore.ts";
+import { adoptionNotice, launchSummary, recordLaunch } from "./launchReport.ts";
 import { SessionIndex } from "../sessions.ts";
 import { discoverRepos, globalOrchestratorCwd } from "../repos.ts";
 
@@ -256,34 +255,6 @@ export function parseLaunchArgs(rest: string[]): LaunchArgs {
 }
 
 /**
- * The stderr line for a launch that landed in a worktree that already existed.
- * Always printed — reusing a directory is worth a sentence even when it is
- * exactly what was asked for — and upgraded to a `warning:` when there is
- * something in it the caller may not have expected: uncommitted entries, or a
- * branch other than the one the slug names (a `--name` adopt only; an explicit
- * `--worktree=<path>` has no expected branch). Either way the tree is used as
- * found: nothing in it is reset, stashed or checked out — those uncommitted
- * files are the work the launch exists to get back to (#37).
- */
-function adoptionNotice(a: NonNullable<LaunchResult["adopted"]>): string {
-  const branch = a.branch === null ? "a detached HEAD" : `branch ${a.branch}`;
-  const drifted = a.expectedBranch !== undefined && a.branch !== a.expectedBranch;
-  const dirty = a.dirty === 1 ? "1 uncommitted change" : `${a.dirty} uncommitted changes`;
-  const parts = [`adopting existing worktree ${a.path} on ${branch}`];
-  if (drifted) parts.push(`(expected ${a.expectedBranch})`);
-  parts.push(a.dirty ? `with ${dirty}` : "(clean)");
-  const line = parts.join(" ");
-  return drifted || a.dirty ? `warning: ${line} — left as found, nothing reset, stashed or checked out` : `▸ ${line}`;
-}
-
-/** How each resolved layout reads in the launch report. */
-const LAYOUT_NOTE: Record<GlobalLayout, string> = {
-  pane: "split pane beside the agendo TUI",
-  window: "its own tmux window",
-  session: "its own tmux session",
-};
-
-/**
  * Launch the global orchestrator, choosing where it should sit.
  *
  * It belongs to no repo, so there is nothing to derive a cwd from the way
@@ -352,33 +323,45 @@ function validateLaunchArgs(a: LaunchArgs): void {
   }
 }
 
-export async function runLaunch(): Promise<void> {
-  const args = parseLaunchArgs(process.argv.slice(3));
-  validateLaunchArgs(args);
-  const { name, worktree, worktreePath, attach, orchestrator, global, layout, unattended, agent, forwardArgv, positionals } = args;
-  // An orchestrator squash-merges into the main branch, and git allows the main
-  // branch in only ONE working tree — the primary checkout. A worktree would give
-  // it an empty branch it never commits to while forcing every merge to reach out
-  // to the repo root, so orchestrators run in the main checkout unless asked
-  // otherwise. Ordinary background sessions keep their isolation.
-  const useWorktree = worktree ?? !orchestrator;
-  const prompt = positionals.join(" ").trim();
-  // Resolved once so the layout report below can read it off the same value the
-  // launch produced — `"layout" in result` would widen the union and lose it.
-  const globalRes = global ? await launchGlobal(prompt, layout, unattended) : null;
-  const launched: LaunchResult =
+/**
+ * The session the flags ask for. An orchestrator squash-merges into the main
+ * branch, and git allows the main branch in only ONE working tree — the primary
+ * checkout. A worktree would give it an empty branch it never commits to while
+ * forcing every merge to reach out to the repo root, so orchestrators run in the
+ * main checkout unless asked otherwise. Ordinary background sessions keep their
+ * isolation.
+ */
+function launchFrom(a: LaunchArgs, prompt: string, globalRes: GlobalLaunchResult | null): LaunchResult {
+  const { name, worktree, worktreePath, orchestrator, unattended, agent, forwardArgv } = a;
+  return (
     globalRes ??
     launchTask(process.cwd(), {
       prompt,
       name,
-      worktree: useWorktree,
+      worktree: worktree ?? !orchestrator,
       worktreePath,
       agent,
       orchestrator,
       unattended,
       forwardArgv,
-    });
-  const { plan, id, cwd, adopted, error } = launched;
+    })
+  );
+}
+
+/** Hand the terminal over to the new window; returns when the user detaches. */
+function attachTo(plan: OpenPlan): void {
+  const [cmd, ...args] = plan.handover;
+  spawnSync(cmd, args, { stdio: "inherit" });
+}
+
+export async function runLaunch(): Promise<void> {
+  const args = parseLaunchArgs(process.argv.slice(3));
+  validateLaunchArgs(args);
+  const prompt = args.positionals.join(" ").trim();
+  // Resolved once so the layout report below can read it off the same value the
+  // launch produced — `"layout" in result` would widen the union and lose it.
+  const globalRes = args.global ? await launchGlobal(prompt, args.layout, args.unattended) : null;
+  const { plan, id, cwd, adopted, error } = launchFrom(args, prompt, globalRes);
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);
     process.exit(1);
@@ -386,46 +369,9 @@ export async function runLaunch(): Promise<void> {
   // On stderr, so a caller parsing the stdout summary still sees the same shape
   // it always did; the directory itself is repeated in the `window:` line below.
   if (adopted) console.error(adoptionNotice(adopted));
-  // Persist this background session into the restore snapshot right away. The CLI
-  // runs as its own process and never goes through loadModel, so `captureRestore`
-  // wouldn't see it until the menu's next full reload — and a brand-new session
-  // has no on-disk log yet to attribute by, only the short id in its tmux name.
-  // Recording it here (with the full id we just minted) makes the tab survive a
-  // relaunch immediately; no-op if the window didn't land in the canonical session.
-  //
-  // Skipped for Codex, which mints its own id: there's nothing to resume by yet.
-  // Its window is attributed by cwd instead, so the menu's next reload picks the
-  // session up and `captureRestore` snapshots it from there.
-  if (id) {
-    recordLaunchedSession(
-      {
-        id,
-        cwd,
-        title: prompt || (global ? "global orchestrator session" : orchestrator ? "orchestrator session" : "background session"),
-        source: agent,
-        // Claude is profile-scoped via CLAUDE_CONFIG_DIR; Copilot keeps all state
-        // under ~/.copilot, so it carries no config dir.
-        configDir: agent === "claude" ? process.env.CLAUDE_CONFIG_DIR : undefined,
-      },
-      plan.tmuxName,
-      // Record into the restore bucket of the host session the window landed in
-      // (the current tmux session), so a scoped launcher restores its own tabs.
-      currentSessionName() ?? undefined,
-    );
-  }
-  if (attach) {
-    const [cmd, ...args] = plan.handover;
-    spawnSync(cmd, args, { stdio: "inherit" });
-  } else {
-    // Print machine-readable next steps for the agent/human that launched it.
-    // `status` is keyed by session id; codex assigns its own only once the
-    // session starts, so send the caller to `list` to pick it up from there.
-    const kind = global ? "global orchestrator" : orchestrator ? "orchestrator" : "background";
-    console.log(`▸ launched ${kind} session ${id ?? `— ${agent} assigns its own id`}`);
-    console.log(`  window:  ${plan.tmuxName}   (in ${cwd})`);
-    console.log(id ? `  status:  ${SELF_CMD} status ${id}` : `  id:      ${SELF_CMD} list   (then: ${SELF_CMD} status <id>)`);
-    if (globalRes) console.log(`  layout:  ${LAYOUT_NOTE[globalRes.layout]}${globalRes.layoutNote ? ` — ${globalRes.layoutNote}` : ""}`);
-    console.log(`  attach:  open agendo and pick it (running → attach), or rerun with --attach`);
-  }
+  const landed = { id, cwd, tmuxName: plan.tmuxName };
+  recordLaunch(args, prompt, landed);
+  if (args.attach) attachTo(plan);
+  else console.log(launchSummary(args, landed, globalRes).join("\n"));
   process.exit(0);
 }
