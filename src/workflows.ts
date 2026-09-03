@@ -26,6 +26,52 @@ import type { WorkflowDetails, WorkflowPhase, WorkflowRef, WorkflowStatus } from
  * A relaunch (resume) of the same runId replaces the ref — new taskId, cleared
  * status — so a stale notification for the old taskId can't mark it finished.
  */
+const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+
+function dateOf(ts: unknown): Date | undefined {
+  if (!ts) return undefined;
+  const d = new Date(ts as string | number);
+  return isNaN(d.getTime()) ? undefined : d;
+}
+
+/** A launch: the Workflow tool_result's structured `toolUseResult`. */
+function isLaunch(tur: unknown): tur is Record<string, any> & { runId: string } {
+  return !!tur && typeof tur === "object" && (tur as any).taskType === "local_workflow" && typeof (tur as any).runId === "string";
+}
+
+function launchRef(e: Record<string, any>, tur: Record<string, any> & { runId: string }): WorkflowRef {
+  return {
+    runId: tur.runId,
+    taskId: str(tur.taskId),
+    name: str(tur.workflowName) || tur.runId,
+    summary: str(tur.summary),
+    transcriptDir: str(tur.transcriptDir),
+    scriptPath: str(tur.scriptPath),
+    launchedAt: dateOf(e.timestamp),
+  };
+}
+
+// Completion notifications are delivered as a user message with STRING
+// content (also mirrored in queue-operation records, whose text lives in a
+// top-level `content`).
+function stringContent(e: Record<string, any>): string | null {
+  return str(e.content) ?? str(e.message?.content) ?? null;
+}
+
+// Requiring the block to START with the tag keeps a conversation that merely
+// quotes one from matching. The task id is checked against the known launches
+// by the caller, which keeps plain sub-agent notifications out.
+function tagText(content: string, tag: string): string | undefined {
+  return content.match(new RegExp(`<${tag}>([^<]+)</${tag}>`))?.[1];
+}
+
+export function notificationOf(content: string | null): { taskId: string; status: string } | null {
+  if (!content || !content.trimStart().startsWith("<task-notification>")) return null;
+  const taskId = tagText(content, "task-id");
+  const status = tagText(content, "status")?.trim();
+  return taskId && status ? { taskId, status } : null;
+}
+
 export class WorkflowScan {
   private byRunId = new Map<string, WorkflowRef>();
   private byTaskId = new Map<string, WorkflowRef>();
@@ -33,39 +79,25 @@ export class WorkflowScan {
 
   record(e: Record<string, any>): void {
     const tur = e.toolUseResult;
-    if (tur && typeof tur === "object" && tur.taskType === "local_workflow" && typeof tur.runId === "string") {
-      const prev = this.byRunId.get(tur.runId);
-      if (prev?.taskId) this.byTaskId.delete(prev.taskId);
-      const launchedAt = e.timestamp ? new Date(e.timestamp) : undefined;
-      const ref: WorkflowRef = {
-        runId: tur.runId,
-        taskId: typeof tur.taskId === "string" ? tur.taskId : undefined,
-        name: typeof tur.workflowName === "string" && tur.workflowName ? tur.workflowName : tur.runId,
-        summary: typeof tur.summary === "string" ? tur.summary : undefined,
-        transcriptDir: typeof tur.transcriptDir === "string" ? tur.transcriptDir : undefined,
-        scriptPath: typeof tur.scriptPath === "string" ? tur.scriptPath : undefined,
-        launchedAt: launchedAt && !isNaN(launchedAt.getTime()) ? launchedAt : undefined,
-      };
-      if (!prev) this.order.push(ref.runId);
-      this.byRunId.set(ref.runId, ref);
-      if (ref.taskId) this.byTaskId.set(ref.taskId, ref);
+    if (isLaunch(tur)) {
+      this.recordLaunch(launchRef(e, tur));
       return;
     }
-    // Completion notifications are delivered as a user message with STRING
-    // content (also mirrored in queue-operation records, whose text lives in a
-    // top-level `content`). Requiring the block to START with the tag keeps a
-    // conversation that merely quotes one from matching; requiring the task-id
-    // to be a known workflow taskId keeps plain sub-agent notifications out.
-    const content =
-      typeof e.content === "string" ? e.content
-      : typeof e.message?.content === "string" ? e.message.content
-      : null;
-    if (!content || !content.trimStart().startsWith("<task-notification>")) return;
-    const taskId = content.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
-    const status = content.match(/<status>([^<]+)<\/status>/)?.[1]?.trim();
-    if (!taskId || !status) return;
-    const ref = this.byTaskId.get(taskId);
-    if (ref) ref.notifiedStatus = status;
+    const n = notificationOf(stringContent(e));
+    if (!n) return;
+    const ref = this.byTaskId.get(n.taskId);
+    if (ref) ref.notifiedStatus = n.status;
+  }
+
+  // A relaunch (resume) of the same runId replaces the ref — new taskId,
+  // cleared status — so a stale notification for the old taskId can't mark it
+  // finished.
+  private recordLaunch(ref: WorkflowRef): void {
+    const prev = this.byRunId.get(ref.runId);
+    if (prev?.taskId) this.byTaskId.delete(prev.taskId);
+    if (!prev) this.order.push(ref.runId);
+    this.byRunId.set(ref.runId, ref);
+    if (ref.taskId) this.byTaskId.set(ref.taskId, ref);
   }
 
   /** The refs in launch order, or undefined when the transcript had none. */
