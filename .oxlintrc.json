@@ -154,8 +154,9 @@
         // src/cli/launchCmd.ts `parseLaunchArgs`.
         // LOWERED 31 -> 29. `parseLaunchArgs` set 31 and now walks its argv one
         // token at a time, the worst of it 7. The holders are src/workflows.ts
-        // `record` and src/tmux/inputBox.ts `inputRealText`, tied at 29.
-        "complexity": ["error", 29], // src/workflows.ts record, src/tmux/inputBox.ts inputRealText
+        // `record` and src/tmux/inputBox.ts `inputRealText`, tied at 29;
+        // `record` is now 4, so `inputRealText` holds it alone.
+        "complexity": ["error", 29], // src/tmux/inputBox.ts inputRealText
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
