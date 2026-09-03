@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46 -> 20.16 -> 20 -> 17. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46 -> 20.16 -> 20 -> 17 -> 15.10. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -142,10 +142,17 @@
   // src/ui/keys/init.ts `handleInitKeys` at 18, src/ui/keys/profile.ts
   // `handleProfileKeys` at 17.69 and src/gitrefs.ts `gitDirs` at 17.47; each
   // is now named pieces in the order they always ran, unit tested where the
-  // e2e fixtures never reached, the worst of them at 7. The holder is
-  // src/ui/screens/RepoScreen.tsx `RepoScreen` (cc 17, fully covered) at
-  // exactly 17, with src/ui/equality.ts `sameActivity` at 16.55 behind it.
-  "max": 17,
+  // e2e fixtures never reached, the worst of them at 7. Then eight more in one
+  // PR: src/ui/screens/RepoScreen.tsx `RepoScreen` (cc 17, fully covered) at
+  // 17, src/ui/equality.ts `sameActivity` at 16.55, src/repos.ts
+  // `discoverGitReposUnder` at 16.01, src/github.ts `voteSummary` at 15.57,
+  // src/gitrefs.ts `configuredUpstream` at 15.35, src/workflows.ts
+  // `parseWorkflowMeta` at 15.34, src/ui/rows.ts `pushSession` at 15.17 and
+  // src/cli/list.ts `runPlainList` at 15.15; the same treatment, the worst of
+  // them at 7. The holder is src/cli/dispatch.ts `openCommand` (cc 15, 92%)
+  // at 15.10, with src/ui/keys/identity.ts `handleIdentityKeys` at 15.08
+  // behind it.
+  "max": 15.10,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
