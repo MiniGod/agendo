@@ -137,6 +137,73 @@ function procStartTime(pid: number): string | null {
  * so a live session's profile qualifies — but a registry sitting in a dir that
  * has never held one is invisible here, and its session takes the tmux path.
  */
+const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+
+/**
+ * A registry file's text as an object, or null. A truncated write can leave a
+ * file holding literal `null`, which parses fine and then throws on the first
+ * property read — the one corrupt shape a parse guard alone doesn't absorb.
+ * Every other scalar (`1`, `"s"`, `[]`) is harmless: the field reads come back
+ * undefined and the entry is skipped.
+ */
+function registryObject(raw: string): Record<string, unknown> | null {
+  try {
+    const r = JSON.parse(raw);
+    return r && typeof r === "object" ? r : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The three fields without which an entry is not a peer at all. */
+function peerIdentity(r: Record<string, unknown>): { pid: number; sessionId: string; socketPath: string } {
+  return {
+    pid: typeof r.pid === "number" ? r.pid : NaN,
+    sessionId: str(r.sessionId) ?? "",
+    socketPath: str(r.messagingSocketPath) ?? "",
+  };
+}
+
+/**
+ * Whether an entry is a live, interactive, current-protocol peer. Only a
+ * session with a human at a TUI will ever render a queued prompt. The registry
+ * is not exclusively those — `kind` distinguishes them, and every protocol-1
+ * entry observed carries it — so anything that isn't explicitly interactive is
+ * treated as "no peer" and left to the tmux path, the same safe direction as an
+ * unrecognized peerProtocol.
+ */
+function isLivePeer(
+  r: Record<string, unknown>,
+  id: { pid: number; sessionId: string; socketPath: string },
+  alive: typeof pidAlive,
+): boolean {
+  if (!Number.isFinite(id.pid) || !id.sessionId || !id.socketPath) return false;
+  if (r.peerProtocol !== PEER_PROTOCOL || r.kind !== "interactive") return false;
+  return alive(id.pid, str(r.procStart));
+}
+
+/**
+ * One registry file's text as a live peer, or null for anything that is not
+ * one: unparseable, the wrong shape, another protocol or kind, a dead pid.
+ * `alive` is the pid check, a parameter so the shapes can be tested without a
+ * process behind each.
+ */
+export function parsePeerEntry(raw: string, alive: typeof pidAlive = pidAlive): PeerSession | null {
+  const r = registryObject(raw);
+  if (!r) return null;
+  const id = peerIdentity(r);
+  if (!isLivePeer(r, id, alive)) return null;
+  return {
+    ...id,
+    cwd: str(r.cwd) ?? "",
+    status: str(r.status),
+    waitingFor: str(r.waitingFor),
+    tmux: str(r.tmux),
+    kind: "interactive",
+    peerProtocol: PEER_PROTOCOL,
+  };
+}
+
 export async function livePeers(): Promise<PeerSession[]> {
   const profiles = await discoverProfiles();
   const out: PeerSession[] = [];
@@ -149,41 +216,8 @@ export async function livePeers(): Promise<PeerSession[]> {
           if (!f.endsWith(".json")) return;
           const raw = await readFile(join(dir, f), "utf-8").catch(() => null);
           if (raw === null) return;
-          let r: Record<string, unknown>;
-          try {
-            r = JSON.parse(raw);
-          } catch {
-            return;
-          }
-          // A truncated write can leave a file holding literal `null`, which
-          // parses fine and then throws on the first property read — the one
-          // corrupt shape the parse guard above doesn't already absorb. Every
-          // other scalar (`1`, `"s"`, `[]`) is harmless: the field reads below
-          // just come back undefined and the entry is skipped.
-          if (!r || typeof r !== "object") return;
-          const pid = typeof r.pid === "number" ? r.pid : NaN;
-          const sessionId = typeof r.sessionId === "string" ? r.sessionId : "";
-          const socketPath = typeof r.messagingSocketPath === "string" ? r.messagingSocketPath : "";
-          if (!Number.isFinite(pid) || !sessionId || !socketPath) return;
-          if (r.peerProtocol !== PEER_PROTOCOL) return;
-          // Only a session with a human at a TUI will ever render a queued prompt.
-          // The registry is not exclusively those — `kind` distinguishes them, and
-          // every protocol-1 entry observed carries it — so anything that isn't
-          // explicitly interactive is treated as "no peer" and left to the tmux
-          // path, the same safe direction as an unrecognized peerProtocol.
-          if (r.kind !== "interactive") return;
-          if (!pidAlive(pid, typeof r.procStart === "string" ? r.procStart : undefined)) return;
-          out.push({
-            pid,
-            sessionId,
-            cwd: typeof r.cwd === "string" ? r.cwd : "",
-            socketPath,
-            status: typeof r.status === "string" ? r.status : undefined,
-            waitingFor: typeof r.waitingFor === "string" ? r.waitingFor : undefined,
-            tmux: typeof r.tmux === "string" ? r.tmux : undefined,
-            kind: "interactive",
-            peerProtocol: PEER_PROTOCOL,
-          });
+          const peer = parsePeerEntry(raw);
+          if (peer) out.push(peer);
         }),
       );
     }),
