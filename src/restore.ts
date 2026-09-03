@@ -179,6 +179,46 @@ export function buildTabs(
   return [...byName.values()];
 }
 
+/** The launched session's own record and the resume tab that stands in for it. */
+export function launchedTab(info: LaunchedInfo): RestoreTab {
+  const s: AgentSession = {
+    id: info.id,
+    source: info.source ?? "claude",
+    cwd: info.cwd,
+    title: info.title ?? "",
+    lastUsed: new Date(),
+    configDir: info.configDir,
+  };
+  const canonical = sessionName(s);
+  return {
+    name: canonical,
+    cwd: info.cwd,
+    title: (info.title ?? "").replace(/\s+/g, " ").trim() || canonical,
+    argv: resumeArgv(s),
+  };
+}
+
+export interface LaunchedInfo {
+  id: string;
+  cwd: string;
+  title?: string;
+  configDir?: string;
+  source?: AgentSession["source"];
+}
+
+/** The launcher session's windows and its restore file, as this needs them. */
+export interface RestoreHost {
+  windowNames: (hostSession: string) => string[];
+  load: (hostSession: string) => RestoreTab[];
+  save: (hostSession: string, tabs: RestoreTab[]) => void;
+}
+
+const REAL_HOST: RestoreHost = {
+  windowNames: (host) => launcherWindowPaths(host).map((w) => w.name),
+  load: loadRestore,
+  save: saveRestore,
+};
+
 /**
  * Record a just-launched managed session into the restore snapshot immediately.
  *
@@ -193,30 +233,17 @@ export function buildTabs(
  * outside-tmux launch is its own detached session, not a tab the launcher restores.
  */
 export function recordLaunchedSession(
-  info: { id: string; cwd: string; title?: string; configDir?: string; source?: AgentSession["source"] },
+  info: LaunchedInfo,
   tmuxName: string,
   hostSession: string = LAUNCHER_SESSION,
+  host: RestoreHost = REAL_HOST,
 ): void {
-  if (!launcherWindowPaths(hostSession).some((w) => w.name === tmuxName)) return;
-  const s: AgentSession = {
-    id: info.id,
-    source: info.source ?? "claude",
-    cwd: info.cwd,
-    title: info.title ?? "",
-    lastUsed: new Date(),
-    configDir: info.configDir,
-  };
-  const canonical = sessionName(s);
-  const tab: RestoreTab = {
-    name: canonical,
-    cwd: info.cwd,
-    title: (info.title ?? "").replace(/\s+/g, " ").trim() || canonical,
-    argv: resumeArgv(s),
-  };
+  if (!host.windowNames(hostSession).includes(tmuxName)) return;
+  const tab = launchedTab(info);
   // Dedup by canonical name: drop any prior tab for this session, then append.
-  const tabs = loadRestore(hostSession).filter((t) => t.name !== canonical);
+  const tabs = host.load(hostSession).filter((t) => t.name !== tab.name);
   tabs.push(tab);
-  saveRestore(hostSession, tabs);
+  host.save(hostSession, tabs);
 }
 
 /**
