@@ -190,58 +190,64 @@ function adoUrl(opts: { org: string; project: string; repo: string; remote: stri
   };
 }
 
+/** The scp-like or `ssh://` clone URL ADO hands out, on either SSH host. */
+function adoFromSsh(m: RegExpMatchArray): RepoUrl {
+  const [, userinfo = "", host, port = "", org, project, repo] = m;
+  // The legacy host wants the org as the SSH user; `git@` is right for
+  // ssh.dev.azure.com. Keep whatever was pasted when it was explicit.
+  const user = userinfo || (/^vs-ssh\./i.test(host) ? `${org}@` : "git@");
+  const path = `v3/${org}/${project}/${repo}`;
+  // A non-default port can't be expressed in the scp-like form (`:` is the
+  // path separator there), so it needs the explicit ssh:// URL — same call
+  // githubRemote makes, and for the same reason: silently rewriting it to
+  // port 22 would connect somewhere the user didn't ask for.
+  return adoUrl({
+    org,
+    project,
+    repo,
+    remote:
+      port && port !== "22"
+        ? `ssh://${user}${host.toLowerCase()}:${port}/${path}`
+        : `${user}${host.toLowerCase()}:${path}`,
+  });
+}
+
+/** A dev.azure.com URL, web or clone: the org is the first path segment. */
+function adoFromHttps(m: RegExpMatchArray): RepoUrl | null {
+  const [, userinfo = "", path] = m;
+  const segs = segments(path);
+  const org = segs[0];
+  const pr = org ? adoProjectAndRepo(segs.slice(1)) : null;
+  if (!org || !pr) return null;
+  return adoUrl({
+    org,
+    project: pr.project,
+    repo: pr.repo,
+    remote: `https://${userinfo}dev.azure.com/${enc(org)}/${enc(pr.project)}/_git/${enc(pr.repo)}`,
+  });
+}
+
+/** A `{org}.visualstudio.com` URL: the org is the host label. */
+function adoFromLegacy(m: RegExpMatchArray): RepoUrl | null {
+  const [, userinfo = "", org, path] = m;
+  const pr = adoProjectAndRepo(segments(path));
+  if (!pr) return null;
+  return adoUrl({
+    org,
+    project: pr.project,
+    repo: pr.repo,
+    remote: `https://${userinfo}${org}.visualstudio.com/${enc(pr.project)}/_git/${enc(pr.repo)}`,
+  });
+}
+
 /** Azure DevOps, all four shapes; null if this isn't an ADO URL. */
 function parseAdo(url: string): RepoUrl | null {
   const ssh = url.match(ADO_SSH_RE);
-  if (ssh) {
-    const [, userinfo = "", host, port = "", org, project, repo] = ssh;
-    // The legacy host wants the org as the SSH user; `git@` is right for
-    // ssh.dev.azure.com. Keep whatever was pasted when it was explicit.
-    const user = userinfo || (/^vs-ssh\./i.test(host) ? `${org}@` : "git@");
-    const path = `v3/${org}/${project}/${repo}`;
-    // A non-default port can't be expressed in the scp-like form (`:` is the
-    // path separator there), so it needs the explicit ssh:// URL — same call
-    // githubRemote makes, and for the same reason: silently rewriting it to
-    // port 22 would connect somewhere the user didn't ask for.
-    return adoUrl({
-      org,
-      project,
-      repo,
-      remote:
-        port && port !== "22"
-          ? `ssh://${user}${host.toLowerCase()}:${port}/${path}`
-          : `${user}${host.toLowerCase()}:${path}`,
-    });
-  }
-
+  if (ssh) return adoFromSsh(ssh);
   const https = url.match(ADO_HTTPS_RE);
-  if (https) {
-    const [, userinfo = "", path] = https;
-    const segs = segments(path);
-    const org = segs[0];
-    const pr = org ? adoProjectAndRepo(segs.slice(1)) : null;
-    if (!org || !pr) return null;
-    return adoUrl({
-      org,
-      project: pr.project,
-      repo: pr.repo,
-      remote: `https://${userinfo}dev.azure.com/${enc(org)}/${enc(pr.project)}/_git/${enc(pr.repo)}`,
-    });
-  }
-
+  if (https) return adoFromHttps(https);
   const legacy = url.match(ADO_LEGACY_RE);
-  if (legacy) {
-    const [, userinfo = "", org, path] = legacy;
-    const pr = adoProjectAndRepo(segments(path));
-    if (!pr) return null;
-    return adoUrl({
-      org,
-      project: pr.project,
-      repo: pr.repo,
-      remote: `https://${userinfo}${org}.visualstudio.com/${enc(pr.project)}/_git/${enc(pr.repo)}`,
-    });
-  }
-
+  if (legacy) return adoFromLegacy(legacy);
   return null;
 }
 
