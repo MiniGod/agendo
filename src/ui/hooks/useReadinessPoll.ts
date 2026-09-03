@@ -19,6 +19,137 @@ import type { PaneState } from "../format.ts";
 // captures one pane per running session (cheap tmux calls), so keep it modest.
 const READINESS_MS = 1500;
 
+/** The three per-limited-session records the poll keeps between ticks (see useReadinessPoll). */
+export interface LimitBooks {
+  limitWindows: Map<string, number | null>;
+  resumeFired: Map<string, number>;
+  dialogRevealed: Set<string>;
+}
+
+/**
+ * The reset instant of a limited pane, frozen on first *successful* parse of
+ * this limit window: a bare "3pm" parses as the next 3pm, which would jump to
+ * tomorrow the moment the clock passes it — freezing keeps a stable target to
+ * fire on. Re-parse while still null (a first capture can race the TUI paint
+ * and miss the reset line) so a transient miss doesn't permanently disable
+ * auto-resume for the window.
+ */
+export function frozenResetAt(books: LimitBooks, canon: string, raw: string): number | null {
+  const frozen = books.limitWindows.get(canon);
+  if (frozen != null) return frozen;
+  const resetAt = paneResetAt(stripAnsi(raw));
+  books.limitWindows.set(canon, resetAt);
+  return resetAt;
+}
+
+/**
+ * Auto-resume: once the frozen reset has passed (plus grace) and we haven't
+ * already fired for it, re-verify the pane is STILL safely limited — empty
+ * input box, no open dialog (guarding the sample→act gap and never clobbering
+ * a draft/dialog) — then send `continue`. True when this was the tick's step,
+ * whether or not the send went out.
+ */
+function maybeSendResume(books: LimitBooks, canon: string, target: string, readiness: PaneState["readiness"], resetAt: number | null): boolean {
+  const fired = books.resumeFired.get(canon) ?? null;
+  if (!shouldAutoResume({ enabled: true, readiness, resetAt, now: Date.now(), firedFor: fired })) return false;
+  const fresh = capturePaneState(target);
+  if (paneResumeSafe(fresh.raw, fresh.cursor)) {
+    sendResume(target);
+    books.resumeFired.set(canon, resetAt as number); // non-null per shouldAutoResume
+  }
+  return true;
+}
+
+/**
+ * No reset time yet AND we're parked in the numbered dialog (which hides it):
+ * send ONE Escape to reveal the "resets <time>" notice, so the NEXT poll can
+ * parse+freeze it and shouldAutoResume can fire. Never sends `continue` this
+ * tick — just reveals. Re-captures fresh to guard the sample→act gap, and
+ * confirms it's STILL the active dialog before pressing Escape (only ever
+ * Escape a pane whose own "Esc to cancel" affordance is showing).
+ */
+function maybeRevealDialog(books: LimitBooks, canon: string, target: string, raw: string, readiness: PaneState["readiness"], resetAt: number | null): void {
+  const wanted = shouldRevealDialog({
+    enabled: true,
+    readiness,
+    dialogActive: paneLimitDialogActive(raw),
+    resetAt,
+    revealed: books.dialogRevealed.has(canon),
+  });
+  if (!wanted) return;
+  if (paneLimitDialogActive(capturePane(target))) {
+    sendDialogReveal(target);
+    books.dialogRevealed.add(canon);
+  }
+}
+
+/** A limited pane's tick: its frozen reset instant, and the resume or reveal step when auto-resume is on. */
+function limitedTick(books: LimitBooks, canon: string, target: string, raw: string, readiness: PaneState["readiness"], autoResume: boolean): number | null {
+  const resetAt = frozenResetAt(books, canon, raw);
+  if (autoResume && !maybeSendResume(books, canon, target, readiness, resetAt)) {
+    maybeRevealDialog(books, canon, target, raw, readiness, resetAt);
+  }
+  return resetAt;
+}
+
+/**
+ * Definitively recovered (ready / queued / dialog / compacting): drop the
+ * frozen window + fire record so a *future* limit window starts fresh. We
+ * deliberately keep them through "busy" (the generation our own `continue`
+ * kicks off) and "unknown" (a transient blank capture), so a single flicker
+ * can't wipe the fire-once guard and re-fire.
+ */
+export function forgetLimit(books: LimitBooks, canon: string): void {
+  books.limitWindows.delete(canon);
+  books.resumeFired.delete(canon);
+  books.dialogRevealed.delete(canon);
+}
+
+/**
+ * One pane's snapshot: capture it once and derive readiness, shell count,
+ * and — when limited — the reset time from the same capture. Auto-resume is
+ * folded in here so it rides the same cadence and the same fresh capture.
+ */
+function samplePane(books: LimitBooks, canon: string, target: string, autoResume: boolean): PaneState {
+  const { raw, cursor } = capturePaneState(target);
+  const readiness = paneReadiness(raw, cursor);
+  let resetAt: number | null | undefined;
+  if (readiness === "limited") resetAt = limitedTick(books, canon, target, raw, readiness, autoResume);
+  else if (readiness !== "busy" && readiness !== "unknown") forgetLimit(books, canon);
+  return {
+    readiness,
+    shells: paneShells(raw),
+    resetAt,
+    // Read from the same snapshot as the readiness it belongs to, so the
+    // percent shown can never be a different frame's than the state word.
+    compactionPercent: readiness === "compacting" ? paneCompactionPercent(raw) : null,
+  };
+}
+
+/** A window that vanished between reloads leaves stale bookkeeping; prune it. */
+export function pruneVanished(books: LimitBooks, live: { has(canon: string): boolean }): void {
+  for (const canon of books.limitWindows.keys()) if (!live.has(canon)) books.limitWindows.delete(canon);
+  for (const canon of books.resumeFired.keys()) if (!live.has(canon)) books.resumeFired.delete(canon);
+  for (const canon of books.dialogRevealed) if (!live.has(canon)) books.dialogRevealed.delete(canon);
+}
+
+function samePane(a: PaneState | undefined, b: PaneState): boolean {
+  return (
+    a !== undefined &&
+    a.readiness === b.readiness &&
+    a.shells === b.shells &&
+    a.resetAt === b.resetAt &&
+    // Load-bearing: without it the map is judged "same" for the whole
+    // compaction and the percent freezes at whatever the first poll saw.
+    a.compactionPercent === b.compactionPercent
+  );
+}
+
+/** Whether the new snapshot says nothing the old one did not, so the state can keep its identity. */
+export function samePanes(prev: Map<string, PaneState>, next: Map<string, PaneState>): boolean {
+  return prev.size === next.size && [...next].every(([k, v]) => samePane(prev.get(k), v));
+}
+
 /**
  * Input-readiness polling for every running session, plus the #8 auto-resume
  * bookkeeping that rides the same capture.
@@ -78,100 +209,17 @@ export function useReadinessPoll({
       dialogRevealed.current.clear();
       return;
     }
+    const books: LimitBooks = {
+      limitWindows: limitWindows.current,
+      resumeFired: resumeFired.current,
+      dialogRevealed: dialogRevealed.current,
+    };
     const sample = () => {
-      // Capture each pane once (outside the state updater, which must stay pure)
-      // and derive readiness, shell count, and — when limited — the reset time
-      // from the same snapshot. Auto-resume is folded in here so it rides the
-      // same cadence and the same fresh capture.
+      // Capture each pane once (outside the state updater, which must stay pure).
       const next = new Map<string, PaneState>();
-      for (const [canon, win] of windows) {
-        const { raw, cursor } = capturePaneState(win.target);
-        const readiness = paneReadiness(raw, cursor);
-        let resetAt: number | null | undefined;
-        if (readiness === "limited") {
-          // Freeze the reset instant on first *successful* parse of this limit
-          // window: a bare "3pm" parses as the next 3pm, which would jump to
-          // tomorrow the moment the clock passes it — freezing keeps a stable
-          // target to fire on. Re-parse while still null (a first capture can
-          // race the TUI paint and miss the reset line) so a transient miss
-          // doesn't permanently disable auto-resume for the window.
-          const frozen = limitWindows.current.get(canon);
-          if (frozen != null) resetAt = frozen;
-          else {
-            resetAt = paneResetAt(stripAnsi(raw));
-            limitWindows.current.set(canon, resetAt ?? null);
-          }
-          // Auto-resume: once the frozen reset has passed (plus grace) and we
-          // haven't already fired for it, re-verify the pane is STILL safely
-          // limited — empty input box, no open dialog (guarding the sample→act
-          // gap and never clobbering a draft/dialog) — then send `continue`.
-          if (autoResumeRef.current) {
-            const fired = resumeFired.current.get(canon) ?? null;
-            if (shouldAutoResume({ enabled: true, readiness, resetAt: resetAt ?? null, now: Date.now(), firedFor: fired })) {
-              const fresh = capturePaneState(win.target);
-              if (paneResumeSafe(fresh.raw, fresh.cursor)) {
-                sendResume(win.target);
-                resumeFired.current.set(canon, resetAt as number); // non-null per shouldAutoResume
-              }
-            } else if (
-              // No reset time yet AND we're parked in the numbered dialog (which
-              // hides it): send ONE Escape to reveal the "resets <time>" notice, so
-              // the NEXT poll can parse+freeze it and shouldAutoResume can fire.
-              // Never sends `continue` this tick — just reveals.
-              shouldRevealDialog({
-                enabled: true,
-                readiness,
-                dialogActive: paneLimitDialogActive(raw),
-                resetAt: resetAt ?? null,
-                revealed: dialogRevealed.current.has(canon),
-              })
-            ) {
-              // Re-capture fresh to guard the sample→act gap, and confirm it's STILL
-              // the active dialog before pressing Escape (only ever Escape a pane
-              // whose own "Esc to cancel" affordance is showing).
-              if (paneLimitDialogActive(capturePane(win.target))) {
-                sendDialogReveal(win.target);
-                dialogRevealed.current.add(canon);
-              }
-            }
-          }
-        } else if (readiness !== "busy" && readiness !== "unknown") {
-          // Definitively recovered (ready / queued / dialog / compacting): drop
-          // the frozen window + fire record so a *future* limit window starts
-          // fresh. We deliberately keep them through "busy" (the generation our
-          // own `continue` kicks off) and "unknown" (a transient blank capture),
-          // so a single flicker can't wipe the fire-once guard and re-fire.
-          limitWindows.current.delete(canon);
-          resumeFired.current.delete(canon);
-          dialogRevealed.current.delete(canon);
-        }
-        next.set(canon, {
-          readiness,
-          shells: paneShells(raw),
-          resetAt,
-          // Read from the same snapshot as the readiness it belongs to, so the
-          // percent shown can never be a different frame's than the state word.
-          compactionPercent: readiness === "compacting" ? paneCompactionPercent(raw) : null,
-        });
-      }
-      // A window that vanished between reloads leaves stale bookkeeping; prune it.
-      for (const canon of limitWindows.current.keys()) if (!windows.has(canon)) limitWindows.current.delete(canon);
-      for (const canon of resumeFired.current.keys()) if (!windows.has(canon)) resumeFired.current.delete(canon);
-      for (const canon of dialogRevealed.current) if (!windows.has(canon)) dialogRevealed.current.delete(canon);
-      setPanes((prev) => {
-        const same =
-          prev.size === next.size &&
-          [...next].every(
-            ([k, v]) =>
-              prev.get(k)?.readiness === v.readiness &&
-              prev.get(k)?.shells === v.shells &&
-              prev.get(k)?.resetAt === v.resetAt &&
-              // Load-bearing: without it the map is judged "same" for the whole
-              // compaction and the percent freezes at whatever the first poll saw.
-              prev.get(k)?.compactionPercent === v.compactionPercent,
-          );
-        return same ? prev : next;
-      });
+      for (const [canon, win] of windows) next.set(canon, samplePane(books, canon, win.target, autoResumeRef.current));
+      pruneVanished(books, windows);
+      setPanes((prev) => (samePanes(prev, next) ? prev : next));
     };
     sample(); // paint without waiting a full interval
     const handle = setInterval(sample, READINESS_MS);
