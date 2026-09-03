@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -113,11 +113,13 @@
   // pure middle is three unit-tested functions in src/ado/prWorkItems.ts, the
   // worst at 6, and the fetch itself scores 3. Then src/ui/keys/provider.ts
   // `handleProviderKeys` (cc 9, 44%) set 22.89; it is now a switch over a
-  // named action, unit tested, and scores 6. The holder is
-  // src/sessions/claude.ts `parseClaudeMeta` (cc 22, 91%), with
-  // src/ui/hooks/useReadinessPoll.ts's poll callback at 22.26 and
-  // src/cli/launchCmd.ts `runLaunch` at 21.20 behind it.
-  "max": 22.40,
+  // named action, unit tested, and scores 6. Then src/sessions/claude.ts
+  // `parseClaudeMeta` (cc 22, 91%) set 22.40; the walk is now scanClaudeMeta
+  // over three recorders, unit tested, the worst at 7. The holder is
+  // src/ui/hooks/useReadinessPoll.ts's poll callback (cc 22, 92%, anonymous),
+  // with src/cli/launchCmd.ts `runLaunch` at 21.20 and src/cli/listRepos.ts
+  // `runListRepos` at 21.12 behind it.
+  "max": 22.26,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
