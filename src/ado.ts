@@ -18,6 +18,7 @@ import { API, cfg } from "./ado/env.ts";
 import { adoGet, adoPost } from "./ado/http.ts";
 import { getPullRequest, getPullRequestWorkItems, parsePrArtifact } from "./ado/pr.ts";
 import { mapLimit } from "./ado/policy.ts";
+import { attachSurfacingPrs, groupPrsByWorkItem, surfacedPrIdsOf } from "./ado/prWorkItems.ts";
 import type { PullRequest, WorkItem } from "./types.ts";
 
 import { urls } from "./ado/urls.ts";
@@ -158,36 +159,16 @@ export async function fetchWorkItemsForPRs(
     if (wiIds.length) prToWis.set(pr.id, wiIds);
   });
 
-  // 2: build WI→PRs, skipping WIs already loaded as assigned items.
-  const wiToPrs = new Map<number, PullRequest[]>();
-  for (const pr of prs) {
-    for (const wiId of prToWis.get(pr.id) ?? []) {
-      if (opts.excludeWorkItemIds.has(wiId)) continue;
-      const arr = wiToPrs.get(wiId) ?? [];
-      arr.push(pr);
-      wiToPrs.set(wiId, arr);
-    }
-  }
+  // 2: WI→PRs, skipping WIs already loaded as assigned items.
+  const wiToPrs = groupPrsByWorkItem(prs, prToWis, opts.excludeWorkItemIds);
   const newWiIds = [...wiToPrs.keys()];
 
   // 3: fetch + map the newly-discovered WIs.
   const rawNew = newWiIds.length ? await getWorkItemBatch(newWiIds) : [];
   const items = await Promise.all(rawNew.map((w) => mapRawWorkItem(w, opts.currentIterationPath)));
 
-  // 4: union the surfacing PR(s) into each mapped WI's prs (dedupe by id, since
-  // mapRawWorkItem may have already resolved the link bidirectionally).
-  for (const wi of items) {
-    const have = new Set(wi.prs.map((p) => p.id));
-    for (const pr of wiToPrs.get(wi.id) ?? []) if (!have.has(pr.id)) wi.prs.push(pr);
-  }
-
-  // Only PRs under a WI we actually fetched count as surfaced.
-  const mappedIds = new Set(items.map((w) => w.id));
-  const surfacedPrIds = new Set(
-    [...wiToPrs.entries()]
-      .filter(([wiId]) => mappedIds.has(wiId))
-      .flatMap(([, prs]) => prs)
-      .map((p) => p.id),
-  );
+  // 4: the surfacing PR(s) onto each mapped WI, and which PRs that surfaced.
+  attachSurfacingPrs(items, wiToPrs);
+  const surfacedPrIds = surfacedPrIdsOf(items, wiToPrs);
   return { items, surfacedPrIds };
 }
