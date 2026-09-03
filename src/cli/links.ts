@@ -46,3 +46,13 @@ export async function resolveSessionLink(
     flushWarnings(prefix);
   }
 }
+
+// A link with no resolvable URL reads as absent, never as a
+// partial link a human might paste.
+function usableLink<T extends { url?: string }>(l: T | undefined): T | undefined {
+  return l?.url ? l : undefined;
+}
+
+export function usableLinks(link: SessionLink | undefined): { pr: SessionLink["pr"]; workItem: SessionLink["workItem"] } {
+  return { pr: usableLink(link?.pr), workItem: usableLink(link?.workItem) };
+}
