@@ -1,140 +1,14 @@
 import { Box, Text } from "ink";
-import type { ReactElement } from "react";
-import { itemKey, prKey, type LoadedModel } from "../../model.ts";
-import { sessionName } from "../../tmux.ts";
+import type { LoadedModel } from "../../model.ts";
 import type { PaneState } from "../format.ts";
 import { V } from "../vocabState.ts";
-import { ActionRow, ItemRow, PrRow, SessionRow, TaskRow } from "../components.tsx";
 import {
   columnHeader, edgeLine, hintLine, identityLine, noticeLine, scopeLine, searchLine, viewTab, type SearchFocus,
 } from "./listLines.tsx";
+import { renderRow } from "./listRows.tsx";
 import type { Row, PrSort, SessionSort } from "../rows.ts";
 import type { RepoInfo } from "../../repos.ts";
 import type { View } from "../keys/context.ts";
-
-
-/**
- * One row of the list. A plain function rather than a component so the rendered
- * element tree is byte-for-byte what it was when this was an inline `.map`
- * callback — turning it into a component would insert a new fibre per row and
- * change reconciliation on every scroll.
- */
-function renderRow(
-  row: Row,
-  i: number,
-  d: {
-    cursor: number;
-    searchFocus: "input" | "list" | null;
-    model: LoadedModel;
-    panes: Map<string, PaneState>;
-    prSort: PrSort;
-  },
-): ReactElement {
-      
-      const selected = i === d.cursor && d.searchFocus !== "input";
-      if (row.kind === "spacer") return <Text key={`s${i}`}> </Text>;
-      if (row.kind === "header") {
-        return (
-          <Box key={`h${i}`}>
-            <Text wrap="truncate" bold color="blue">{row.label}</Text>
-            {row.sub ? <Text dimColor>{`  ${row.sub}`}</Text> : null}
-          </Box>
-        );
-      }
-      if (row.kind === "item") {
-        return (
-          <ItemRow key={`i${itemKey(row.item)}`} item={row.item} expanded={row.expanded} running={row.running} selected={selected} />
-        );
-      }
-      if (row.kind === "pr") {
-        return (
-          <PrRow
-            key={`p${prKey(row.pr)}`}
-            pr={row.pr}
-            expanded={row.expanded}
-            running={row.running}
-            selected={selected}
-            contextCell={row.contextCell}
-            sort={d.prSort}
-          />
-        );
-      }
-      if (row.kind === "session") {
-        return (
-          <SessionRow
-            key={row.key}
-            session={row.session}
-            running={row.running}
-            kind={row.running ? d.model.liveKinds.get(sessionName(row.session)) : undefined}
-            pane={row.running ? d.panes.get(sessionName(row.session)) : undefined}
-            expanded={row.expanded}
-            selected={selected}
-            timeField={row.timeField}
-            open={row.open}
-            showLink={row.showLink}
-            placeholder={row.placeholder}
-          />
-        );
-      }
-      if (row.kind === "sessmeta") {
-        return (
-          <Box key={row.key} marginLeft={6}>
-            <Text wrap="truncate" dimColor>
-              <Text color="gray">{row.label.padEnd(8)}</Text>
-              {row.value}
-            </Text>
-          </Box>
-        );
-      }
-      if (row.kind === "sessprompt") {
-        return (
-          <Box key={row.key} marginLeft={6}>
-            <Text wrap="truncate" dimColor>{`↳ "${row.prompt.replace(/\s+/g, " ")}"`}</Text>
-          </Box>
-        );
-      }
-      if (row.kind === "task") {
-        return <TaskRow key={row.key} task={row.task} />;
-      }
-      if (row.kind === "action") {
-        return <ActionRow key={row.key} action={row.action} />;
-      }
-      if (row.kind === "sessnote") {
-        return (
-          <Box key={row.key} marginLeft={6}>
-            <Text dimColor italic>{row.text}</Text>
-          </Box>
-        );
-      }
-      if (row.kind === "newsess") {
-        return (
-          <Box key="newsess">
-            <Text bold color={selected ? "black" : "green"} backgroundColor={selected ? "cyan" : undefined}>
-              {"＋ new session"}
-            </Text>
-          </Box>
-        );
-      }
-      if (row.kind === "fresh") {
-        return (
-          <Box key={row.key} marginLeft={4}>
-            <Text color={selected ? "black" : "gray"} backgroundColor={selected ? "cyan" : undefined}>
-              {"+ start a fresh session…"}
-            </Text>
-          </Box>
-        );
-      }
-      // toggle section
-      const caret = row.open ? "▾" : "▸";
-      return (
-        <Box key={`toggle:${row.id}`} marginLeft={row.indent ?? 0}>
-          <Text wrap="truncate" color={selected ? "black" : "blue"} backgroundColor={selected ? "cyan" : undefined} bold>
-            {`${caret} ${row.label} (${row.count})`}
-            {row.sub ? <Text color={selected ? "black" : "gray"}>{`  ${row.sub}`}</Text> : null}
-          </Text>
-        </Box>
-      );
-}
 
 /**
  * The main list — the screen the launcher spends nearly all its time on.
