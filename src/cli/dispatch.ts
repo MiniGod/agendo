@@ -198,73 +198,102 @@ async function listCommand(readBranchSync: BranchSyncReader): Promise<void> {
   process.exit(0);
 }
 
-export async function runSubcommand(readBranchSync: BranchSyncReader): Promise<void> {
-  if (process.argv.includes("--help") || process.argv.includes("-h") || process.argv[2] === "help") {
-    console.log(HELP);
-    process.exit(0);
-  }
+/** `--help`/`-h` anywhere on the line, or `help` as the verb. */
+function wantsHelp(argv: string[]): boolean {
+  return argv.includes("--help") || argv.includes("-h") || argv[2] === "help";
+}
 
-  // `--llm`: the detailed background-session workflow, kept out of the injected
-  // system prompt so it's only loaded when an agent actually needs it.
-  if (process.argv.includes("--llm") || process.argv[2] === "llm") {
-    console.log(llmGuide());
-    process.exit(0);
-  }
+/**
+ * `--llm`: the detailed background-session workflow, kept out of the injected
+ * system prompt so it's only loaded when an agent actually needs it.
+ */
+function wantsLlmGuide(argv: string[]): boolean {
+  return argv.includes("--llm") || argv[2] === "llm";
+}
 
-  if (!tmuxAvailable()) {
-    console.error("tmux is required but was not found on PATH.");
-    process.exit(1);
-  }
-
-  if (process.argv[2] === "status") await statusCommand(readBranchSync);
-
-  if (process.argv[2] === "open") await openCommand();
+/** The verbs that take no session id; each reads the rest of argv itself. */
+const PLAIN_VERBS: Record<string, (readBranchSync: BranchSyncReader) => Promise<void>> = {
+  status: statusCommand,
+  open: () => openCommand(),
   // `launch` is long enough to be its own module; see ./launchCmd.ts.
-  if (process.argv[2] === "launch") await runLaunch();
+  launch: () => runLaunch(),
+  send: () => sendCommand(),
+  list: listCommand,
+  ls: listCommand,
+};
 
-  if (process.argv[2] === "send") await sendCommand();
+/** A verb that acts on one session: `<verb> <id> [flag]`, then exit 0. */
+interface SessionVerb {
+  long: string;
+  short: string;
+  run: (id: string | undefined, flag: boolean, verb: string) => Promise<void>;
+}
 
-  if (process.argv[2] === "list" || process.argv[2] === "ls") await listCommand(readBranchSync);
+// `close <id>` (aliases `kill`, `stop`): end a running session by killing the
+// tmux window it lives in, and nothing else. The aliases exist because an agent
+// that guesses the wrong verb and gets "no such command" falls back to raw
+// `tmux kill-window` — the exact hand-rolled tmux this subcommand exists to
+// remove. Everything the session produced (worktree, branch, commits) stays on
+// disk, so `resume` can bring it back.
+const CLOSE: SessionVerb = { long: "--force", short: "-f", run: (id, force, verb) => runClose(id, force, verb) };
 
+const SESSION_VERBS: Record<string, SessionVerb> = {
   // `resume <id>`: headless resume of an idle (or already-running) session. By
   // default we create/attach its tmux window *detached* — the orchestrator gets
   // the session back running without stealing the terminal — and print how to
   // reach it. `--attach` hands the terminal over the way `launch --attach` does.
-  if (process.argv[2] === "resume") {
-    const { id, flag: attach } = parseSessionArgs("resume", process.argv.slice(3), { long: "--attach", short: "-a" });
-    await runResume(id, attach);
-    process.exit(0);
-  }
-
-  // `close <id>` (aliases `kill`, `stop`): end a running session by killing the
-  // tmux window it lives in, and nothing else. The aliases exist because an agent
-  // that guesses the wrong verb and gets "no such command" falls back to raw
-  // `tmux kill-window` — the exact hand-rolled tmux this subcommand exists to
-  // remove. Everything the session produced (worktree, branch, commits) stays on
-  // disk, so `resume` can bring it back.
-  if (process.argv[2] === "close" || process.argv[2] === "kill" || process.argv[2] === "stop") {
-    const verb = process.argv[2];
-    const { id, flag: force } = parseSessionArgs(verb, process.argv.slice(3), { long: "--force", short: "-f" });
-    await runClose(id, force, verb);
-    process.exit(0);
-  }
-
+  resume: { long: "--attach", short: "-a", run: (id, attach) => runResume(id, attach) },
+  close: CLOSE,
+  kill: CLOSE,
+  stop: CLOSE,
   // `unblock <id>`: nudge a session sitting at its usage limit to continue — sends
   // <esc>continue<enter>. Distinct from `resume` (which relaunches an idle session
   // in a fresh window); this pokes a live, limited pane. Refuses unless the pane is
   // still showing the usage-limit notice, so a recovered session isn't clobbered.
-  if (process.argv[2] === "unblock") {
-    const { id, flag: force } = parseSessionArgs("unblock", process.argv.slice(3), { long: "--force", short: "-f" });
-    await runUnblock(id, force);
+  unblock: { long: "--force", short: "-f", run: (id, force) => runUnblock(id, force) },
+};
+
+/** Every verb below drives tmux; without it there is nothing to do. No suite runs without tmux, so this is the one branch here no test reaches. */
+function requireTmux(): void {
+  if (tmuxAvailable()) return;
+  console.error("tmux is required but was not found on PATH.");
+  process.exit(1);
+}
+
+/** The table's entry for a verb, and nothing for a verb it does not list (or an inherited name like `constructor`). */
+function verbEntry<T>(table: Record<string, T>, verb: string): T | undefined {
+  return Object.hasOwn(table, verb) ? table[verb] : undefined;
+}
+
+async function runSessionVerb(verb: string, spec: SessionVerb): Promise<never> {
+  const { id, flag } = parseSessionArgs(verb, process.argv.slice(3), { long: spec.long, short: spec.short });
+  await spec.run(id, flag, verb);
+  process.exit(0);
+}
+
+export async function runSubcommand(readBranchSync: BranchSyncReader): Promise<void> {
+  if (wantsHelp(process.argv)) {
+    console.log(HELP);
     process.exit(0);
   }
+  if (wantsLlmGuide(process.argv)) {
+    console.log(llmGuide());
+    process.exit(0);
+  }
+  requireTmux();
+
+  const verb = process.argv[2] ?? "";
+  const plain = verbEntry(PLAIN_VERBS, verb);
+  if (plain) await plain(readBranchSync);
+  const session = verbEntry(SESSION_VERBS, verb);
+  if (session) await runSessionVerb(verb, session);
 
   // `wait [id...]`: block until the selected session(s) reach a desired state (like
   // `gh run watch`), then exit 0; exit non-zero on timeout. It's the notification
   // primitive for an orchestrator watching background sessions — run it in the
   // background and let its EXIT be the wake-up, instead of re-polling `status` on a
   // guessed cadence. See wait.ts for the poll contract and its cost.
-  if (process.argv[2] === "wait") {
+  if (verb === "wait") {
     process.exit(await runWaitCli(process.argv.slice(3)));
   }
 }
