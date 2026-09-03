@@ -4,6 +4,7 @@ import { discoverGitReposUnder } from "../repos.ts";
 import { sessionName, shortId } from "../tmux.ts";
 import type { AgentSession, AgentSource } from "../types.ts";
 import { currentModelOptions } from "./links.ts";
+import { flushWarnings } from "./warnings.ts";
 
 /** A session working a PR / issue's branch, as reported by the resource lists. */
 export interface AssocSession {
@@ -58,3 +59,30 @@ export async function loadScopedModel(opts: ResourceListOptions): Promise<Loaded
   const model = await loadModel({ ...currentModelOptions(forced), scopeRepos });
   return filterModelByRepos(model, opts.repoFilter ? model.repoScope : null);
 }
+
+/**
+ * The model for a listing, or exit 1 saying why. The warnings are flushed
+ * either way — under `what`, the command's name — so a failed load still
+ * reports what it saw on the way there.
+ */
+export async function loadModelOrExit(opts: ResourceListOptions, what: string, noun: string): Promise<LoadedModel> {
+  let model: LoadedModel;
+  try {
+    model = await loadScopedModel(opts);
+  } catch (e) {
+    flushWarnings(what);
+    console.error(`${what}: could not load ${noun} from the backend: ${(e as Error)?.message ?? e}`);
+    process.exit(1);
+  }
+  flushWarnings(what);
+  return model;
+}
+
+/** The first column of a resource table: ● a running session, ○ an idle one, blank for none. */
+export function sessionMark(sessions: AssocSession[]): string {
+  if (sessions[0]?.running) return "●";
+  return sessions.length ? "○" : " ";
+}
+
+/** One line of whitespace, as a title reads in a table. */
+export const oneLine = (title: string): string => title.replace(/\s+/g, " ").trim();

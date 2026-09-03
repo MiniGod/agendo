@@ -1,9 +1,44 @@
 import { type LoadedModel } from "../model.ts";
 import { printJson } from "../output.ts";
 import type { WorkItem } from "../types.ts";
-import { type ResourceListOptions, assocSessions, loadScopedModel } from "./resources.ts";
-import { flushWarnings } from "./warnings.ts";
+import { type ResourceListOptions, assocSessions, loadModelOrExit, oneLine, sessionMark } from "./resources.ts";
 import { padCell } from "../ui/format.ts";
+
+/** One issue / work item, as `list issues --json` emits it. */
+export type IssueRow = ReturnType<typeof issueRows>[number];
+
+/** The model's item lists (current + other + prLinked) as one deduplicated, newest-first list of rows. */
+export function issueRows(model: Pick<LoadedModel, "current" | "other" | "prLinked" | "liveTmux">) {
+  const seen = new Set<number>();
+  const items: WorkItem[] = [];
+  for (const it of [...model.current, ...model.other, ...model.prLinked]) {
+    if (seen.has(it.id)) continue;
+    seen.add(it.id);
+    items.push(it);
+  }
+  items.sort((a, b) => b.id - a.id);
+  return items.map((it) => ({
+    id: it.id,
+    type: it.type,
+    title: oneLine(it.title),
+    state: it.state,
+    url: it.url || null,
+    sessions: assocSessions(it.sessions, model.liveTmux),
+  }));
+}
+
+export const issueHeader = (label: string): string => ["", "id".padEnd(7), "state".padEnd(14), "session".padEnd(12), label].join("  ");
+
+/** One table line: the session mark, the id, the state, the best session and the title. */
+export function formatIssueRow(r: IssueRow): string {
+  return [
+    sessionMark(r.sessions),
+    `#${r.id}`.padEnd(7),
+    padCell(r.state || "-", 14),
+    (r.sessions[0]?.shortId ?? "-").padEnd(12),
+    r.title.slice(0, 50),
+  ].join("  ").trimEnd();
+}
 
 /**
  * `list issues` (aliases `wi` / `work-items`): issues / work items known to the
@@ -13,35 +48,9 @@ import { padCell } from "../ui/format.ts";
  * (id + state + sessions[]).
  */
 export async function runListIssues(opts: ResourceListOptions): Promise<void> {
-  let model: LoadedModel;
-  try {
-    model = await loadScopedModel(opts);
-  } catch (e) {
-    flushWarnings("list issues");
-    console.error(`list issues: could not load work items from the backend: ${(e as Error)?.message ?? e}`);
-    process.exit(1);
-    return;
-  }
-  flushWarnings("list issues");
+  const model = await loadModelOrExit(opts, "list issues", "work items");
   const label = model.provider === "github" ? "issue" : "work item";
-  const seen = new Set<number>();
-  const items: WorkItem[] = [];
-  for (const it of [...model.current, ...model.other, ...model.prLinked]) {
-    if (seen.has(it.id)) continue;
-    seen.add(it.id);
-    items.push(it);
-  }
-  items.sort((a, b) => b.id - a.id);
-
-  const rows = items.map((it) => ({
-    id: it.id,
-    type: it.type,
-    title: it.title.replace(/\s+/g, " ").trim(),
-    state: it.state,
-    url: it.url || null,
-    sessions: assocSessions(it.sessions, model.liveTmux),
-  }));
-
+  const rows = issueRows(model);
   if (opts.json) {
     await printJson(rows);
     return;
@@ -50,19 +59,6 @@ export async function runListIssues(opts: ResourceListOptions): Promise<void> {
     console.log(`No ${label}s found.`);
     return;
   }
-  console.log(
-    ["", "id".padEnd(7), "state".padEnd(14), "session".padEnd(12), label].join("  "),
-  );
-  for (const r of rows) {
-    const best = r.sessions[0];
-    console.log(
-      [
-        best?.running ? "●" : r.sessions.length ? "○" : " ",
-        `#${r.id}`.padEnd(7),
-        padCell(r.state || "-", 14),
-        (best?.shortId ?? "-").padEnd(12),
-        r.title.slice(0, 50),
-      ].join("  ").trimEnd(),
-    );
-  }
+  console.log(issueHeader(label));
+  for (const r of rows) console.log(formatIssueRow(r));
 }
