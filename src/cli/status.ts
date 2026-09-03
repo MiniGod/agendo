@@ -24,12 +24,11 @@ import { scopeFilter, scopeNote, type SessionScope } from "../scope.ts";
 import { refreshLiveTmux } from "../model.ts";
 import { resumeDialogChoice } from "../config.ts";
 import { linkLine, linkVocab } from "../output.ts";
-import type { SessionLink } from "../model/types.ts";
 import type { AgentSession, BranchSync, BranchSyncReader, WorkflowDetails, WorkflowRef, WorkflowStatus } from "../types.ts";
 import { loadWorkflowDetails, workflowStatus } from "../workflows.ts";
 import { flushWarnings } from "./warnings.ts";
 import { readyCell, rowCompactionPercent, timeAgo } from "./cells.ts";
-import { resolveSessionLink } from "./links.ts";
+import { resolveSessionLink, usableLinks } from "./links.ts";
 import { STATUS_GLYPH, WF_GLYPH } from "./glyphs.ts";
 
 /**
@@ -41,16 +40,6 @@ import { STATUS_GLYPH, WF_GLYPH } from "./glyphs.ts";
  * `withUrls` additionally resolves the session's linked PR / work item from the
  * backend and prints their full URLs (see `resolveSessionLink`).
  */
-// As in runOpen: a link with no resolvable URL reads as absent, never as a
-// partial link a human might paste.
-function usableLink<T extends { url?: string }>(l: T | undefined): T | undefined {
-  return l?.url ? l : undefined;
-}
-
-export function usableLinks(link: SessionLink | undefined): { pr: SessionLink["pr"]; workItem: SessionLink["workItem"] } {
-  return { pr: usableLink(link?.pr), workItem: usableLink(link?.workItem) };
-}
-
 // Full, clickable links for whatever this session is working on. Vertical
 // output, so a long URL costs nothing here (unlike the `list` table).
 async function printLinks(s: AgentSession): Promise<void> {

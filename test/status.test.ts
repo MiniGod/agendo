@@ -5,7 +5,8 @@
 // tally with one of each, a link whose URL could not be built, a branch with
 // no upstream at all. Those are here, one arm beside the next.
 import { describe, expect, test } from "bun:test";
-import { describeSync, paneFacts, usableLinks, workflowAgents, workflowBits, workflowDescription, workflowPhases } from "../src/cli/status.ts";
+import { usableLinks } from "../src/cli/links.ts";
+import { describeSync, paneFacts, workflowAgents, workflowBits, workflowDescription, workflowPhases } from "../src/cli/status.ts";
 import type { BranchSync, WorkflowDetails, WorkflowRef } from "../src/types.ts";
 
 const ref = (over: Partial<WorkflowRef> = {}): WorkflowRef => ({ runId: "wf_1", name: "review", ...over });
