@@ -164,8 +164,10 @@
         "max-statements": ["error", 56], // src/ui/keys/list.ts handleListViewKeys
         "max-params": ["error", 6], // src/usageLimit.ts
         // DROPPED 6 -> 5. `loadClaudeActivity` set 6 and is now a walk over
-        // per-record handlers two levels deep at most; 5 is a four-way tie.
-        "max-depth": ["error", 5], // src/workflows.ts, src/tmux/inputBox.ts, src/ui/hooks/useReadinessPoll.ts, src/ui/hooks/useModelLoader.ts
+        // per-record handlers two levels deep at most; 5 was a four-way tie, and
+        // is a three-way one since src/ui/hooks/useReadinessPoll.ts's poll became
+        // a loop over samplePane.
+        "max-depth": ["error", 5], // src/workflows.ts, src/tmux/inputBox.ts, src/ui/hooks/useModelLoader.ts
         "max-nested-callbacks": ["error", 4] // src/sessions.ts:212
       }
     },
