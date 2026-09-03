@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -127,10 +127,12 @@
   // byNeed and the printing, unit tested, the worst at 5. Then
   // src/clone/url.ts `parseAdo` (cc 16, 74%) set 20.54; each Azure DevOps URL
   // shape now parses in a function of its own, unit tested, the worst at 7.
-  // The holder is src/ui/keys/repo.ts `handleRepoKeys` (cc 20, 89%), with
-  // src/cli/listIssues.ts `runListIssues` at 20.46 and src/ui/keys/open.ts
-  // `handleOpenKeys` at 20.16 behind it.
-  "max": 20.47,
+  // Then src/ui/keys/repo.ts `handleRepoKeys` (cc 20, 89%) set 20.47;
+  // repoAction now names the key and a table runs it, unit tested, the worst
+  // at 6. The holder is src/cli/listIssues.ts `runListIssues` (cc 16, 74%),
+  // with src/ui/keys/open.ts `handleOpenKeys` at 20.16 and
+  // src/cli/launchCmd.ts `validateLaunchArgs` at 20 behind it.
+  "max": 20.46,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
