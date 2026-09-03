@@ -98,11 +98,14 @@
   // each in listLines.tsx, the worst of them at 6, and it scores 1. Then
   // src/restore.ts `recordLaunchedSession` (cc 7, 25%) set 27.67; the e2e
   // suite never got past its first line, so it now takes its tmux listing
-  // and restore file as a host and is unit tested on one of maps, at 4. The
-  // holder is src/ui/screens/ListScreen.tsx `renderRow` (cc 27, fully
-  // covered), with src/wait/args.ts `parseWaitArgs` at 25.3 and
-  // src/ui/keys/list.ts `handleListViewKeys` at 25.08 behind it.
-  "max": 27.00,
+  // and restore file as a host and is unit tested on one of maps, at 4. Then
+  // src/ui/screens/ListScreen.tsx `renderRow` (cc 27, fully covered) set
+  // 27.00; each row kind is now its own function in listRows.tsx, the worst
+  // of them at 7, behind a table the dispatcher reads at 2. The holder is
+  // src/wait/args.ts `parseWaitArgs` (cc 25, 92%), with src/ui/keys/list.ts
+  // `handleListViewKeys` at 25.08 and src/peer.ts `livePeers`'s file reader
+  // at 24.7 behind it.
+  "max": 25.30,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
