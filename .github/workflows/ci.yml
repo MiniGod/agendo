@@ -60,12 +60,23 @@ jobs:
         run: bun run test
 
   e2e:
-    name: E2E (browser)
+    name: E2E + CRAP score
     runs-on: ubuntu-latest
-    # A wedged Playwright install once burned two hours against GitHub's
-    # 360-minute default before anyone noticed. The job runs in ~4 minutes; past
-    # 20 it is stuck, and a stuck job should read as a red X, not as progress.
-    timeout-minutes: 20
+    # One instrumented run, gating two things. `bun run crap` runs the unit
+    # suite and then the e2e suite with src/ instrumented for coverage, and
+    # fails if either suite fails OR if any function in src/ scores above its
+    # pin in .craprc.jsonc (see scripts/crap/).
+    #
+    # This used to be two jobs: a plain `test:e2e` run and a CRAP run that
+    # executed the very same specs a second time in parallel. That bought no
+    # signal — the instrumented run already fails on any spec failure — and cost
+    # a second chance to hit the keystroke-timing flake, so a flaky PR went red
+    # twice as often for the same reason. The plain copy was the one deleted
+    # because it is the one whose result the instrumented run subsumes.
+    #
+    # Instrumentation roughly doubles the e2e wall clock; past 30 minutes it is
+    # stuck, not slow.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -77,10 +88,13 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Install Playwright Chromium + OS deps
         run: bunx playwright install --with-deps chromium
-      - name: Run e2e suite
-        # CI is set automatically by GitHub → the Playwright config enables
-        # forbidOnly, 2 workers, and 2 retries for the known keystroke-timing flake.
-        run: bun run test:e2e
+      # CI is set automatically by GitHub → the Playwright config enables
+      # forbidOnly, 2 workers, and 2 retries for the known keystroke-timing
+      # flake. The CRAP pins are the same one-directional ratchet as
+      # .oxlintrc.json: lowered in the PR that makes a lower value hold, never
+      # raised.
+      - name: E2E suite under coverage, then CRAP score
+        run: bun run crap
       - name: Upload e2e artifacts on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
@@ -91,31 +105,6 @@ jobs:
             e2e/screenshots
           if-no-files-found: ignore
           retention-days: 7
-
-  crap:
-    name: CRAP score
-    runs-on: ubuntu-latest
-    # Runs BOTH suites again, this time with src/ instrumented for coverage, then
-    # scores every function in src/ (see scripts/crap/ and .craprc.jsonc). The
-    # e2e run is the bulk of it, so budget roughly twice the e2e job; past 30
-    # minutes it is stuck, not slow.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      # Same split as the e2e job: Playwright and node-pty run under Node, the
-      # app under test runs under bun.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: bun install --frozen-lockfile
-      - name: Install Playwright Chromium + OS deps
-        run: bunx playwright install --with-deps chromium
-      # Fails when any function in src/ scores above its pin in .craprc.jsonc.
-      # The pins are the same one-directional ratchet as .oxlintrc.json: lowered
-      # in the PR that makes a lower value hold, never raised.
-      - name: CRAP score
-        run: bun run crap
       - name: Upload CRAP report
         if: ${{ always() }}
         uses: actions/upload-artifact@v4

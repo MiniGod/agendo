@@ -144,9 +144,13 @@ Anti-Patterns):
 statements the test suites executed. A fully covered function scores its
 complexity; an uncovered one scores roughly its complexity squared. **The target
 is CRAP ≤ 7 for every function in `src/`** — cc 7 fully covered, or cc 2 with
-nothing — and the gate that drives there is a **blocking CI job** (`CRAP score`
-in `.github/workflows/ci.yml`) that fails when any function scores above its pin
-in `.craprc.jsonc`.
+nothing — and the gate that drives there is a **blocking CI job**
+(`E2E + CRAP score` in `.github/workflows/ci.yml`) that fails when any function
+scores above its pin in `.craprc.jsonc`. That one job is also the e2e gate: it
+runs both suites with `src/` instrumented, so a spec failure and a pin breach
+both come back as the same red X. There is no separate plain e2e job — running
+the same specs twice in parallel bought no signal and doubled the exposure to
+the keystroke-timing flake.
 
 The pins follow exactly the contract of `.oxlintrc.json`, so read that section
 first. Restated for this file:
