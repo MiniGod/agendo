@@ -24,7 +24,7 @@
 // pin it. See CLAUDE.md, "CRAP score".
 // ─────────────────────────────────────────────────────────────────────────
 {
-  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46 -> 20.16 -> 20 -> 17 -> 15.10. The convert flow's execFile callback
+  // LOWERED 156 -> 127.82 -> 72 -> 64.57 -> 56 -> 50.57 -> 46.84 -> 46.65 -> 45.78 -> 42 -> 41.35 -> 34 -> 33.66 -> 33.10 -> 33.00 -> 32.25 -> 32.05 -> 32.00 -> 31.63 -> 31.00 -> 29.55 -> 29.36 -> 28.91 -> 28.00 -> 27.67 -> 27.00 -> 25.30 -> 25.08 -> 24.70 -> 23.84 -> 22.89 -> 22.40 -> 22.26 -> 21.20 -> 21.12 -> 20.54 -> 20.47 -> 20.46 -> 20.16 -> 20 -> 17 -> 15.10 -> 13.17. The convert flow's execFile callback
   // (cc 12 at 0%) set 156; it is now `parseConvertOutput` and friends, pure and
   // unit-tested, the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
@@ -149,10 +149,19 @@
   // src/gitrefs.ts `configuredUpstream` at 15.35, src/workflows.ts
   // `parseWorkflowMeta` at 15.34, src/ui/rows.ts `pushSession` at 15.17 and
   // src/cli/list.ts `runPlainList` at 15.15; the same treatment, the worst of
-  // them at 7. The holder is src/cli/dispatch.ts `openCommand` (cc 15, 92%)
-  // at 15.10, with src/ui/keys/identity.ts `handleIdentityKeys` at 15.08
-  // behind it.
-  "max": 15.10,
+  // them at 7. Then eleven more in one PR: src/cli/dispatch.ts `openCommand`
+  // at 15.10, src/ui/keys/identity.ts `handleIdentityKeys` at 15.08,
+  // src/ui/App.tsx's anonymous `useInput` callback at 15.01, src/errors.ts
+  // `messageOf` at 14.11, src/gitrefs.ts `branchSync` at 14.06,
+  // src/worktree.ts `createWorktree` at 14.01, src/usageLimit.ts `envLocale`
+  // at 13.70, src/ui/keys/wtchoice.ts `handleWtchoiceKeys` at 13.49,
+  // src/ui/screens/ModeScreens.tsx `renderMode` at 15.00, src/ado/build.ts
+  // `aggregateBuild` at 14.00 and src/ui/format.ts `fmtDelta` at 12.72; every
+  // function they were split into is at 7 or below and fully covered. The
+  // holder is src/ui/format/columns.ts `clusterWidth` (cc 13, 90%) at 13.17,
+  // with src/ado/pr.ts `mapPr`, src/clone/url.ts `githubRemote` and
+  // src/worktreeAdopt.ts `inspectWorktree` at 13.00 behind it.
+  "max": 13.17,
 
   "overrides": [
     // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
