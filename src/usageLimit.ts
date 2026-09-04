@@ -39,6 +39,9 @@
 // separately-parsed reset time — never a brittle full-string match — so copy
 // tweaks, the ⎿ prefix, NBSP padding and line-wrapping don't break detection.
 import type { Readiness } from "./tmux.ts";
+import { envLocale } from "./usageLimit/locale.ts";
+// Re-exported: the e2e suite reaches it through this module.
+export { envLocale };
 
 /**
  * Stable-token match for the usage-limit notice, on already-plain (ANSI-stripped)
@@ -331,28 +334,6 @@ export function paneResetAt(plain: string, now: Date = new Date()): number | nul
 // "2:00 PM") — short enough to sit next to the readiness word in a list column.
 // 24h vs 12h is the locale's call, never hand-rolled.
 
-/**
- * The user's BCP-47 locale, taken from the POSIX locale environment
- * (LC_ALL > LC_TIME > LANG) and normalized: `en_GB.UTF-8@euro` → `en-GB`.
- * Returns undefined for the C/POSIX locale, an unset environment, or a tag ICU
- * doesn't know — callers then fall back to the runtime default.
- *
- * We resolve this ourselves because Bun's default `Intl` locale is a hardcoded
- * en-US regardless of the environment, which would give every user 12-hour
- * times; its ICU *data* is complete, so an explicit tag formats correctly.
- */
-export function envLocale(env: Record<string, string | undefined> = process.env): string | undefined {
-  const raw = env.LC_ALL || env.LC_TIME || env.LANG;
-  if (!raw) return undefined;
-  // Drop the .codeset and @modifier suffixes, then POSIX `_` → BCP-47 `-`.
-  const tag = raw.split(/[.@]/)[0].replace(/_/g, "-");
-  if (!tag || tag === "C" || tag === "POSIX") return undefined;
-  try {
-    return Intl.DateTimeFormat.supportedLocalesOf(tag).length ? tag : undefined;
-  } catch {
-    return undefined; // structurally invalid tag (supportedLocalesOf throws)
-  }
-}
 
 /**
  * Format a reset instant as a locale-appropriate time of day, e.g. "14:00" or

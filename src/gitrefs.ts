@@ -332,32 +332,42 @@ function displayRef(ref: string): string {
  * detached, or the branch has no commits yet. Null means "unknown", never
  * "in sync".
  */
-export function branchSync(cwd: string): BranchSync | null {
-  const dirs = gitDirs(cwd);
-  if (!dirs) return null;
-  // HEAD is per-worktree, so it comes from gitDir — not the shared commonDir.
+/**
+ * The branch HEAD names, or null when HEAD is detached or unreadable. HEAD is
+ * per-worktree, so it comes from gitDir — not the shared commonDir.
+ */
+function headBranch(dirs: GitDirs): string | null {
   const head = looseRef(dirs.gitDir, "HEAD");
-  const m = head?.match(/^ref:\s*(refs\/heads\/.+)$/);
-  if (!m) return null;
-  const ref = m[1].trim();
-  const branch = ref.slice("refs/heads/".length);
-  const local = resolveRef(dirs, ref);
-  if (!local) return null;
-  // Two candidates, because neither alone is right for the workflows agendo
-  // creates. The CONFIGURED upstream is authoritative when it exists — but
-  // `git worktree add -b x` sets it to the BASE branch (`origin/master`), so a
-  // branch that has since been pushed under its own name would read as
-  // "differs from origin/master: unpushed" forever. Meanwhile assuming
-  // `origin/<branch>` alone is wrong for forks and renamed remotes. So: if the
-  // local tip equals EITHER candidate, this commit exists on a remote and the
-  // work is not stranded here — which is the question actually being asked.
-  const configured = configuredUpstream(dirs.commonDir, branch);
+  const m = head?.match(/^ref:\s*refs\/heads\/(.+)$/);
+  return m ? m[1].trim() : null;
+}
+
+/**
+ * The remote refs the local tip is checked against. Two candidates, because
+ * neither alone is right for the workflows agendo creates. The CONFIGURED
+ * upstream is authoritative when it exists — but `git worktree add -b x` sets
+ * it to the BASE branch (`origin/master`), so a branch that has since been
+ * pushed under its own name would read as "differs from origin/master:
+ * unpushed" forever. Meanwhile assuming `origin/<branch>` alone is wrong for
+ * forks and renamed remotes. So: if the local tip equals EITHER candidate, this
+ * commit exists on a remote and the work is not stranded here — which is the
+ * question actually being asked.
+ */
+export function remoteCandidates(configured: string | null, branch: string): string[] {
   const candidates = configured ? [configured] : [];
   const assumed = `refs/remotes/origin/${branch}`;
   if (!candidates.includes(assumed)) candidates.push(assumed);
+  return candidates;
+}
 
-  let matched: string | null = null; // a candidate whose tip IS the local tip
-  let present: string | null = null; // the first candidate that exists at all
+/** The first candidate whose tip IS `local`, and the first that exists at all. */
+function matchCandidates(
+  dirs: GitDirs,
+  candidates: string[],
+  local: string,
+): { matched: string | null; present: string | null } {
+  let matched: string | null = null;
+  let present: string | null = null;
   for (const candidate of candidates) {
     const sha = resolveRef(dirs, candidate);
     if (sha === null) continue;
@@ -367,14 +377,28 @@ export function branchSync(cwd: string): BranchSync | null {
       break;
     }
   }
+  return { matched, present };
+}
+
+export function branchSync(cwd: string): BranchSync | null {
+  const dirs = gitDirs(cwd);
+  if (!dirs) return null;
+  const branch = headBranch(dirs);
+  if (!branch) return null;
+  const local = resolveRef(dirs, `refs/heads/${branch}`);
+  if (!local) return null;
+  const configured = configuredUpstream(dirs.commonDir, branch);
+  const candidates = remoteCandidates(configured, branch);
+  const { matched, present } = matchCandidates(dirs, candidates, local);
   // Report the ref the verdict actually rests on: the match if there was one,
   // else whichever candidate exists, else the one we looked for and didn't find.
-  const chosen = matched ?? present ?? candidates[0];
+  const found = matched ?? present;
+  const chosen = found ?? candidates[0];
   return {
     branch,
     upstream: displayRef(chosen),
     upstreamConfigured: chosen === configured,
-    hasRemoteRef: (matched ?? present) !== null,
+    hasRemoteRef: found !== null,
     unpushed: matched === null,
   };
 }

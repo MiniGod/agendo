@@ -38,9 +38,9 @@ export function duplicatePathScope(): never {
 
 /**
  * A dashed token nobody recognises is refused rather than repurposed — see
- * `parseSessionArgs` for the three times that bug was fixed. `status` and
- * `open` phrase their own refusal in dispatch.ts; `list` and its subcommands
- * share this one.
+ * `parseSessionArgs` for the three times that bug was fixed. `status` phrases
+ * its own refusal in dispatch.ts; `open`, `list` and its subcommands share
+ * this one.
  */
 export function unknownArgument(cmd: string, a: string): never {
   console.error(`${cmd}: unknown argument "${a}"`);

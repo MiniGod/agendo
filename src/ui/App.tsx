@@ -29,20 +29,7 @@ import { useRowModel } from "./hooks/useRowModel.ts";
 import { useSearch } from "./hooks/useSearch.ts";
 import { useLocalRescan } from "./hooks/useLocalRescan.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
-import { handleAgentKeys } from "./keys/agent.ts";
-import { handleBranchKeys } from "./keys/branch.ts";
-import { handleCloneKeys, handleCloningKeys } from "./keys/clone.ts";
-import { handleIdentityKeys } from "./keys/identity.ts";
-import { handleInitKeys } from "./keys/init.ts";
-import { handleListKeys } from "./keys/list.ts";
-import { handleOpenKeys } from "./keys/open.ts";
-import { handleProfileKeys } from "./keys/profile.ts";
-import { handleProviderKeys } from "./keys/provider.ts";
-import { handleQuitKeys } from "./keys/quit.ts";
-import { handleRepoKeys } from "./keys/repo.ts";
-import { handleWtchoiceKeys } from "./keys/wtchoice.ts";
-import { handleSearchKeys } from "./keys/search.ts";
-import { handleSettingsKeys } from "./keys/settings.ts";
+import { dispatchKey } from "./keys/chain.ts";
 import { ListScreen } from "./screens/ListScreen.tsx";
 import { renderLoadState, renderMode } from "./screens/ModeScreens.tsx";
 import type { AgentSession, Identity, ProviderName } from "../types.ts";
@@ -347,34 +334,7 @@ export default function App({
     continueInOtherAgent, enterProfilePicker, moveToProfile,
   };
 
-  useInput((input, key) => {
-    if (handleOpenKeys(input, key, ctx)) return;
-    if (handleSearchKeys(input, key, ctx)) return;
-
-    if (handleQuitKeys(input, key, ctx)) return;
-
-    if (handleAgentKeys(input, key, ctx)) return;
-
-    if (handleRepoKeys(input, key, ctx)) return;
-
-    if (handleCloneKeys(input, key, ctx)) return;
-    if (handleCloningKeys(input, key, ctx)) return;
-    if (handleInitKeys(input, key, ctx)) return;
-
-    if (handleWtchoiceKeys(input, key, ctx)) return;
-
-    if (handleBranchKeys(input, key, ctx)) return;
-
-    if (handleSettingsKeys(input, key, ctx)) return;
-
-    if (handleProviderKeys(input, key, ctx)) return;
-
-    if (handleIdentityKeys(input, key, ctx)) return;
-
-    if (handleProfileKeys(input, key, ctx)) return;
-
-    handleListKeys(input, key, ctx); // last link: nothing left to guard
-  });
+  useInput((input, key) => dispatchKey(input, key, ctx));
 
   // ── render ──
   // Every overlay screen lives in ./screens/ModeScreens.tsx as a plain function
