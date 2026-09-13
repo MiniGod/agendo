@@ -25,6 +25,7 @@ import { runUnblock } from "./commands/unblock.ts";
 import { runListPrs } from "./list/pullRequests.ts";
 import { runListIssues } from "./list/issues.ts";
 import { runListRepos } from "./list/repositories.ts";
+import { readVersion } from "./version.ts";
 
 // `status <id>`: print a session's state + the same recent-activity summary the
 // menu shows, so an agent that launched a background session can poll it.
@@ -182,6 +183,21 @@ function wantsLlmGuide(argv: string[]): boolean {
   return argv.includes("--llm") || argv[2] === "llm";
 }
 
+/**
+ * `--version` / `-v` / `version` — but only as the FIRST argument, unlike
+ * `--help`, which is honoured anywhere on the line.
+ *
+ * The difference is `-v`. It is an ordinary word inside a prompt (`agendo send
+ * <id> -- run the thing -v`) and an ordinary flag of the commands agents wrap,
+ * so a scan of the whole argv would swallow a message and print a version
+ * instead of sending it. Nobody types `agendo status <id> --version` meaning to
+ * ask the version, so scoping it to the verb slot costs nothing real.
+ */
+function wantsVersion(argv: string[]): boolean {
+  const first = argv[2];
+  return first === "--version" || first === "-v" || first === "version";
+}
+
 /** The verbs that take no session id; each reads the rest of argv itself. */
 const PLAIN_VERBS: Record<string, (readBranchSync: BranchSyncReader) => Promise<void>> = {
   status: statusCommand,
@@ -249,6 +265,12 @@ export async function runSubcommand(readBranchSync: BranchSyncReader): Promise<v
   }
   if (wantsLlmGuide(process.argv)) {
     console.log(llmGuide());
+    process.exit(0);
+  }
+  // Before requireTmux, with --help and --llm: "which version is this?" has to
+  // be answerable on a host where agendo itself cannot run.
+  if (wantsVersion(process.argv)) {
+    console.log(readVersion());
     process.exit(0);
   }
   requireTmux();

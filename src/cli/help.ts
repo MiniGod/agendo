@@ -250,6 +250,10 @@ Usage:
   agendo --llm                 Print agent-facing instructions for the background-
                                 session workflow (what the system prompt points to)
   agendo --help, -h            Show this help
+  agendo --version, -v         Print the version and exit (alias: \`agendo version\`).
+       (first argument only)    Bare, so it needs no parsing. Only in the verb
+                                slot: \`-v\` is too common a word inside a prompt
+                                to be claimed everywhere on the line.
 
 Sessions are listed in the menu and marked running → attach. Background sessions
 carry a {bg} badge, manually-started ones {new}.
