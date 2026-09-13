@@ -133,7 +133,9 @@
         // 197 -> 195: src/cli/list/index.ts `runList` set 197 and is now load, select,
         // sort, map, print, each step named, `runList` itself 38 lines. The
         // holder is src/app/model/index.ts `loadModel`.
-        "max-lines-per-function": ["error", { "max": 195, "skipBlankLines": false, "skipComments": false }], // src/app/model/index.ts loadModel
+        // LOWERED 195 -> 183. The current holder is src/launch/prompt.ts
+        // `llmGuide`; 182 fails against the current tree.
+        "max-lines-per-function": ["error", { "max": 183, "skipBlankLines": false, "skipComments": false }], // src/launch/prompt.ts llmGuide
         // Was also src/cli/wait/index.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/sessions/activity/index.ts; both are now
         // walks over small per-record handlers under src/sessions/activity/, the worst of
@@ -157,18 +159,20 @@
         // `record` and src/runtime/tmux/inputBox.ts `inputRealText`, tied at 29;
         // `record` is now 4, so `inputRealText` holds it alone.
         "complexity": ["error", 29], // src/runtime/tmux/inputBox.ts inputRealText
-        // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
+        // DROPPED 61 -> 56. `handleListViewKeys` held this before the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
         // would have pushed it the other way.
-        "max-statements": ["error", 56], // src/ui/keys/list.ts handleListViewKeys
+        // LOWERED 56 -> 33. The current holder is src/ui/models/rows.ts
+        // `buildPrsRows`; 32 fails against the current tree.
+        "max-statements": ["error", 33], // src/ui/models/rows.ts buildPrsRows
         "max-params": ["error", 6], // src/sessions/usageLimit/index.ts
         // DROPPED 6 -> 5. `loadClaudeActivity` set 6 and is now a walk over
         // per-record handlers two levels deep at most; 5 was a four-way tie, and
         // is a three-way one since src/ui/hooks/useReadinessPoll.ts's poll became
         // a loop over samplePane.
         "max-depth": ["error", 5], // src/orchestration/workflows.ts, src/runtime/tmux/inputBox.ts, src/ui/hooks/useModelLoader.ts
-        "max-nested-callbacks": ["error", 4] // src/sessions/index.ts:212
+        "max-nested-callbacks": ["error", 4] // src/sessions/claude.ts:172
       }
     },
 

@@ -14,7 +14,8 @@
 //
 // See docs/cloning.md for the flow and the decisions behind it.
 //
-// Each of the three is a module under src/clone/: url.ts, checkout.ts and
+// Each of the three is a module under src/repositories/clone/: url.ts,
+// checkout.ts and
 // run.ts. This file stays the one import path — the UI, e2e/clone.spec.ts and
 // src/ui/format/index.ts all name it — so the re-exports below are the same 13 names
 // it exported before.

@@ -14,7 +14,7 @@ import {
 import type { Provider } from "../../providers/index.ts";
 import type { LoadedModel, LoadModelOptions, LocalSessions } from "./types.ts";
 
-// Three pieces live in src/model/: types.ts (the shapes), live.ts (what tmux
+// Three pieces live in src/app/model/: types.ts (the shapes), live.ts (what tmux
 // says is running, and reconciling that onto a loaded model) and scope.ts (the
 // identity keys and the repo-scope filters). What is left here is the assembly
 // itself — the backend fetch joined to on-disk sessions.

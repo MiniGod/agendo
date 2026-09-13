@@ -5,13 +5,14 @@
 // interface so more agent types can be added later. Each indexes its own
 // on-disk sessions and each resumes natively (Claude via `claude --resume`,
 // Copilot via `copilot --resume=<id>`, Codex via `codex resume <id>`); see
-// launch.ts:resumeArgv.
+// src/launch/argv.ts:resumeArgv.
 //
 // Each provider now lives in src/sessions/ alongside the parse cache they share
 // and the repo-scoping predicate; what stays here is the INDEX built on top of
 // them — the merge, the duplicate resolution and the branch lookup. This file
-// remains the one import path (App.tsx, index.tsx, model.ts, wait.ts and three
-// e2e specs all name it), so the re-exports below are the same six names it
+// remains the one import path (App.tsx, index.tsx, src/app/model/index.ts,
+// src/cli/wait/index.ts and three e2e specs all name it), so the re-exports
+// below are the same six names it
 // exported before.
 import { realpath } from "fs/promises";
 import type { AgentSession } from "../shared/types.ts";

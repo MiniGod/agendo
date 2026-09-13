@@ -3,14 +3,15 @@
 // extension. The default az tenant returns 401 for the org, so we always
 // request a token scoped to the configured tenant.
 //
-// The layer is split across src/ado/: env.ts (config + base URLs, resolved
-// once), urls.ts (canonical web links), http.ts (token + fetch), pr.ts (pull
-// requests), identity.ts (who am I / the team), policy.ts (CI + merge gates).
+// The layer is split across src/providers/azureDevOps/: env.ts (config + base
+// URLs, resolved once), urls.ts (canonical web links), http.ts (token + fetch),
+// pr.ts (pull requests), identity.ts (who am I / the team), and policy.ts (CI +
+// merge gates).
 // What stays here is the work-item side and the public assembly on top of it.
 //
-// This file remains the single import path — src/providers/index.ts does
-// `import * as ado from "./index.ts"` and e2e/provider.spec.ts imports the URL
-// builders by name — so the re-exports below are exactly the 18 names it
+// This file remains the single import path — src/providers/index.ts imports it
+// as namespace `ado`; e2e/provider.spec.ts imports the URL builders by name —
+// so the re-exports below are exactly the 18 names it
 // exported before, written out rather than `export *` so that helpers which
 // only became cross-module for the split (mapPr, getTeamsForMember,
 // adoGet/adoPost) are not promoted into the public surface.

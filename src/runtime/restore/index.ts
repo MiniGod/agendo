@@ -26,7 +26,7 @@ import type { AgentSession } from "../../shared/types.ts";
 import { loadRestore, saveRestore, type RestoreTab } from "./store.ts";
 import { refreshPlaceholder } from "./placeholder.ts";
 
-// Two pieces live in src/restore/: store.ts (where a snapshot lives on disk and
+// Two pieces live in src/runtime/restore/: store.ts (where a snapshot lives on disk and
 // the legacy locations still read from) and placeholder.ts (the paused tab and
 // the tmux window behind it). What is left here is the snapshot itself — which
 // live windows become which tabs, and which session each one is attributed to.

@@ -2,16 +2,16 @@
 // (`cl-…`) so it can tell whether a given agent already has a live tmux target
 // and navigate to it. A managed agent runs as either a tmux *session* (when the
 // launcher was started outside tmux) or a *window* in the current session (when
-// started inside tmux) — see launch.ts for which path is chosen.
+// started inside tmux) — see src/launch/index.ts for which path is chosen.
 //
 // The `--tmux` CLI flag bootstraps a single canonical session (LAUNCHER_SESSION)
 // whose first window runs the menu, so every agent ends up as a tab next to it.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// This file is now a FACADE over src/tmux/. It holds no logic of its own.
+// This file is now a FACADE over src/runtime/tmux/. It holds no logic of its own.
 //
 // It stays the single import path for the whole tree — 23 modules under src/ and
-// three frozen specs under e2e/ import `./tmux.ts` by name — so the split below
+// three specs under e2e/ import `src/runtime/tmux/index.ts` — so the split below
 // changed no caller. The re-exports are written out one by one rather than as
 // `export *` on purpose: several helpers that used to be file-private are now
 // exported from their new module so a sibling can reach them, and `export *`

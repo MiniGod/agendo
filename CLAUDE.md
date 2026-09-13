@@ -92,7 +92,7 @@ pattern from a careless one. `react-hooks/exhaustive-deps` is the standing
 example: `src/ui/hooks/useAuthProbe.ts` and
 `src/ui/hooks/useActivityWatchers.ts` each have an effect keyed to a narrower
 dependency on purpose, and both carry a `-- <why>` saying so.
-`react/no-array-index-key` is the other: `src/ui/components.tsx` and
+`react/no-array-index-key` is the other: `src/ui/components/index.tsx` and
 `src/ui/screens/CloneScreen.tsx` render lists where the index genuinely IS the
 identity and the obvious alternative key is not unique. A single-line
 `// eslint-disable-line <rule> -- <why>` is the sanctioned way to say "I meant
@@ -223,7 +223,7 @@ the top of it. Locally the e2e suite wants `--workers 2`, same as always.
   1164 functions were still never entered — almost all of the codex and copilot
   activity readers among them, even though the e2e fixtures write a rollout and
   an `events.jsonl` for each: no spec ever expanded those rows. (They are unit
-  tested now, under `src/activity/`; the count is 121 of 1202.)
+  tested now, under `src/sessions/activity/`; the count is 121 of 1202.)
 - **Coverage is not perfectly deterministic.** Retried e2e attempts add
   coverage; timing-dependent branches (a poll that does or does not loop) can
   differ between runs. The gate compares the two-decimal value the table prints,

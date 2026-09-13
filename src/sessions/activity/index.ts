@@ -1,11 +1,12 @@
 // ── On-demand activity (recent action lines) ────────────────────────────────
-// The session index in sessions.ts stays cheap (metadata only). When a session
-// row is expanded in the UI we parse its full log here to surface the last few
+// The session index in src/sessions/index.ts stays cheap (metadata only). When a
+// session row is expanded in the UI we parse its full log here to surface the
+// last few
 // actions — the same idea as the standalone claude-tasks dashboard, but loaded
 // one file at a time so it's only paid for sessions the user actually opens.
 //
-// One reader per agent lives under src/activity/; this is the dispatch, and
-// the import path sessions.ts re-exports from.
+// One reader per agent lives under src/sessions/activity/; this is the dispatch
+// that src/sessions/index.ts re-exports.
 
 import { loadClaudeActivity } from "./claude.ts";
 import { loadCodexActivity } from "./codex.ts";

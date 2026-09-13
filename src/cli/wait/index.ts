@@ -17,7 +17,7 @@
  * Latency therefore bottoms out at `--interval`.
  */
 
-// The pieces live in src/wait/: types.ts (states, options, result shapes and the
+// The pieces live in src/cli/wait/: types.ts (states, options, result shapes and the
 // satisfaction predicate), args.ts (argv parsing and the CLI entry point) and
 // loop.ts (the poll loop, the usage banner and `runWait` itself).
 //
