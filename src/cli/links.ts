@@ -1,7 +1,7 @@
-import { loadState } from "../config.ts";
-import { loadModel, type SessionLink } from "../model.ts";
-import { resolveInitialProvider } from "../provider.ts";
-import type { AgentSession, Identity, ProviderName } from "../types.ts";
+import { loadState } from "../app/config.ts";
+import { loadModel, type SessionLink } from "../app/model/index.ts";
+import { resolveInitialProvider } from "../providers/index.ts";
+import type { AgentSession, Identity, ProviderName } from "../shared/types.ts";
 import { flushWarnings } from "./warnings.ts";
 
 /**

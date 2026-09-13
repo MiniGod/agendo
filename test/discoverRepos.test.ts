@@ -1,4 +1,4 @@
-// The path-context walk for checkouts (src/repos.ts `discoverGitReposUnder`),
+// The path-context walk for checkouts (src/repositories/index.ts `discoverGitReposUnder`),
 // on scratch trees. The e2e suite points `agendo <dir>` at a folder holding one
 // or two fixture checkouts; it never puts a checkout inside a checkout, a
 // symlink back up the tree, a node_modules with a repo in it, an unreadable
@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverGitReposUnder } from "../src/repos.ts";
+import { discoverGitReposUnder } from "../src/repositories/index.ts";
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "agendo-discover-")); });

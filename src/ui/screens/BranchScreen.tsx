@@ -1,9 +1,9 @@
 import { Box, Text } from "ink";
-import { CaretText } from "../components.tsx";
-import { worktreeDirName } from "../../worktree.ts";
-import type { AgentSource } from "../../types.ts";
-import type { RepoInfo } from "../../repos.ts";
-import type { FreshTarget } from "../targets.ts";
+import { CaretText } from "../components/index.tsx";
+import { worktreeDirName } from "../../repositories/worktree/index.ts";
+import type { AgentSource } from "../../shared/types.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
+import type { FreshTarget } from "../models/targets.ts";
 
 /**
  * The name prompt for a fresh session — a new branch when `worktree` is set,

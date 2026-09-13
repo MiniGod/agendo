@@ -7,9 +7,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeAction, loadClaudeActivity, newTaskReplay, parseClaudeLog, recordTaskEvent, replayedTasks, todosToTasks, userText } from "../src/activity/claude.ts";
-import { ACTIVITY_LIMIT } from "../src/activity/common.ts";
-import type { ActionLine } from "../src/types.ts";
+import { claudeAction, loadClaudeActivity, newTaskReplay, parseClaudeLog, recordTaskEvent, replayedTasks, todosToTasks, userText } from "../src/sessions/activity/claude.ts";
+import { ACTIVITY_LIMIT } from "../src/sessions/activity/common.ts";
+import type { ActionLine } from "../src/shared/types.ts";
 
 const T0 = "2026-06-18T08:00:00.000Z";
 const at = (s: number) => new Date(Date.parse(T0) + s * 1000).toISOString();

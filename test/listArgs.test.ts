@@ -1,4 +1,4 @@
-// The argv of `list` and its subcommands (src/cli/listArgs.ts). The e2e suite
+// The argv of `list` and its subcommands (src/cli/list/args.ts). The e2e suite
 // runs every listing end to end and reaches the flags orchestrators use; what
 // it never does is name the path scope twice, hand `--pr` a word, put a dashed
 // token nobody knows on `list repos`, or give a switch its own tail. Those
@@ -6,7 +6,7 @@
 // assertion, and every accepted shape beside the one next to it.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { duplicatePathScope, requireDuration, requireValue, unknownArgument } from "../src/cli/args.ts";
-import { listRoute, parseRepoListArgs, parseResourceListArgs, parseSessionListArgs } from "../src/cli/listArgs.ts";
+import { listRoute, parseRepoListArgs, parseResourceListArgs, parseSessionListArgs } from "../src/cli/list/args.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

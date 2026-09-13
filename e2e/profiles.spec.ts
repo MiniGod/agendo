@@ -1,5 +1,5 @@
 // Moving a session between Claude config profiles (~/.claude, ~/.claude-work, …)
-// and the symlink-awareness that goes with it — see src/profiles.ts.
+// and the symlink-awareness that goes with it — see src/sessions/profiles/index.ts.
 //
 // Profile discovery reads os.homedir(), which is fixed at process start, so the
 // scenarios run in a child (profileDriver.ts) against a throwaway multi-profile

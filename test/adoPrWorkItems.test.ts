@@ -1,12 +1,12 @@
-// The pure middle of fetchWorkItemsForPRs (src/ado/prWorkItems.ts): which WIs
+// The pure middle of fetchWorkItemsForPRs (src/providers/azureDevOps/prWorkItems.ts): which WIs
 // a set of orphan PRs surface, how their PRs are merged in, and which PRs
 // count as surfaced. The e2e ADO fixture links each PR to at most one WI and
 // never has a WI both assigned and PR-linked, a PR whose WI the batch could
 // not fetch, or a WI whose PR was already resolved from the other direction —
 // so the exclusion, the dedupe and the not-surfaced verdict were unreached.
 import { describe, expect, test } from "bun:test";
-import { attachSurfacingPrs, groupPrsByWorkItem, surfacedPrIdsOf } from "../src/ado/prWorkItems.ts";
-import type { PullRequest, WorkItem } from "../src/types.ts";
+import { attachSurfacingPrs, groupPrsByWorkItem, surfacedPrIdsOf } from "../src/providers/azureDevOps/prWorkItems.ts";
+import type { PullRequest, WorkItem } from "../src/shared/types.ts";
 
 const pr = (id: number) => ({ id, repositoryId: "r" }) as PullRequest;
 const item = (id: number, ...prs: PullRequest[]) => ({ id, prs }) as unknown as Omit<WorkItem, "sessions">;

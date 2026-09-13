@@ -8,7 +8,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import { handleListNavKeys, navKeyOf } from "../src/ui/keys/list.ts";
 import { ancestorIndex, depthOf, expandKeyOf, firstChildIndex, isExpandable, isOpen } from "../src/ui/keys/rowTree.ts";
-import type { Row } from "../src/ui/rows.ts";
+import type { Row } from "../src/ui/models/rows.ts";
 
 const NONE: Key = {
   upArrow: false,

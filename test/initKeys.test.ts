@@ -6,7 +6,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import type { Mode } from "../src/ui/keys/context.ts";
 import { backToName, handleInitKeys, nextInitCursor } from "../src/ui/keys/init.ts";
-import type { FreshTarget } from "../src/ui/targets.ts";
+import type { FreshTarget } from "../src/ui/models/targets.ts";
 
 const NONE: Key = {
   upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, pageDown: false, pageUp: false,

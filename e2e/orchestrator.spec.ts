@@ -1,4 +1,4 @@
-// Unit-level coverage for the orchestrator-mode prompt module (src/orchestrator.ts).
+// Unit-level coverage for the orchestrator-mode prompt module (src/orchestration/index.ts).
 //
 // These are pure assertions on the generated instruction text — no TUI, no child
 // process, no filesystem. The prompt IS the feature: if a directive silently
@@ -16,8 +16,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
-import { ORCHESTRATOR_SLUG, orchestratorSystemPrompt } from "../src/orchestrator.ts";
-import { freeWorktreeBranch, worktreePath } from "../src/worktree.ts";
+import { ORCHESTRATOR_SLUG, orchestratorSystemPrompt } from "../src/orchestration/index.ts";
+import { freeWorktreeBranch, worktreePath } from "../src/repositories/worktree/index.ts";
 
 // A distinctive stand-in for SELF_CMD, so every assertion that the prompt points
 // at the launcher's own CLI is provably reading the injected value (and not a

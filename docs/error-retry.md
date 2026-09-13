@@ -238,7 +238,7 @@ Stated plainly, because the rest of the design is built around them:
 
 ### 2.1 Why the pane cannot be the primary signal
 
-`src/tmux.ts` learned this the hard way twice, and the lesson generalises
+`src/runtime/tmux/index.ts` learned this the hard way twice, and the lesson generalises
 exactly:
 
 * **#33** moved busy/compacting detection to read positionally from the CLI's
@@ -577,7 +577,7 @@ Notes on specific choices:
 
 ### 4.3 Delivery route: socket first
 
-`send` already knows how to do this. Prefer the peer socket (`src/peer.ts`),
+`send` already knows how to do this. Prefer the peer socket (`src/orchestration/peer.ts`),
 falling back to the tmux pane, honouring `peerSocketEnabled()` in both
 directions. Three reasons, one of them decisive:
 
@@ -704,7 +704,7 @@ Follows `autoResumeOnUsageLimit` exactly: a runtime toggle on the Settings page,
 persisted in `~/.agendo/state.json`.
 
 ```ts
-// src/config.ts — ILLUSTRATIVE
+// src/app/config.ts — ILLUSTRATIVE
 export interface LauncherState {
   // …
   /**
@@ -828,7 +828,7 @@ phase is independently shippable and independently testable.
 
 ### Phase 0 — prerequisite
 
-Wait for the `src/tmux.ts` / `src/index.tsx` / `src/ui/App.tsx` refactor to land.
+Wait for the `src/runtime/tmux/index.ts` / `src/index.tsx` / `src/ui/App.tsx` refactor to land.
 Phases 3 and 4 touch two of those three files directly.
 
 ### Phase 1 — `src/transcriptError.ts` (new module, pure, no I/O in the core)
@@ -876,7 +876,7 @@ floor; attempts exhausted; a `rate_limit` tail never retried; malformed config �
 defaults; `AGENDO_AUTO_RETRY` in both directions and its unrecognised-value
 refusal.
 
-### Phase 3 — `paneRetrySafe` in `src/tmux.ts`
+### Phase 3 — `paneRetrySafe` in `src/runtime/tmux/index.ts`
 
 Small, and deliberately last among the detection pieces so it is written against
 tests that already exist.

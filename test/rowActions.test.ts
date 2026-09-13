@@ -5,8 +5,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import { handleListRowActionKeys, hasLink, hoveredSession, isOpenable, openTitle } from "../src/ui/keys/rowActions.ts";
-import type { Row } from "../src/ui/rows.ts";
-import { V } from "../src/ui/vocabState.ts";
+import type { Row } from "../src/ui/models/rows.ts";
+import { V } from "../src/ui/models/vocabState.ts";
 
 const NONE: Key = {
   upArrow: false,

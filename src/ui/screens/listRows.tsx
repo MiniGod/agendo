@@ -1,10 +1,10 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { itemKey, prKey, type LoadedModel } from "../../model.ts";
-import { sessionName } from "../../tmux.ts";
-import type { PaneState } from "../format.ts";
-import { ActionRow, ItemRow, PrRow, SessionRow, TaskRow } from "../components.tsx";
-import type { Row, PrSort } from "../rows.ts";
+import { itemKey, prKey, type LoadedModel } from "../../app/model/index.ts";
+import { sessionName } from "../../runtime/tmux/index.ts";
+import type { PaneState } from "../format/index.ts";
+import { ActionRow, ItemRow, PrRow, SessionRow, TaskRow } from "../components/index.tsx";
+import type { Row, PrSort } from "../models/rows.ts";
 import type { SearchFocus } from "./listLines.tsx";
 
 /**

@@ -3,7 +3,7 @@
 // Same shape as cacheDriver.ts and for the same reason: os.homedir() is read at
 // process start, so profile discovery can only be exercised against a fixture
 // corpus inside a child whose HOME is that corpus. It builds a multi-profile
-// $HOME, drives src/profiles.ts + src/sessions.ts through the move scenarios in
+// $HOME, drives src/sessions/profiles/index.ts + src/sessions/index.ts through the move scenarios in
 // order, and prints one JSON blob for the parent spec to assert on.
 //
 // Scenarios (one session each, so a failure names itself):
@@ -29,7 +29,7 @@
 import { mkdirSync, writeFileSync, symlinkSync, existsSync, readFileSync, rmSync, chmodSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { SessionIndex, __claudeCacheSize } from "../../src/sessions.ts";
+import { SessionIndex, __claudeCacheSize } from "../../src/sessions/index.ts";
 import {
   discoverProfiles,
   dedupeProfiles,
@@ -37,10 +37,10 @@ import {
   profileChoices,
   __setForceCrossDevice,
   type ClaudeProfile,
-} from "../../src/profiles.ts";
-import { loadWorkflowDetails } from "../../src/workflows.ts";
-import { retargetRestoreProfile } from "../../src/restore.ts";
-import type { AgentSession } from "../../src/types.ts";
+} from "../../src/sessions/profiles/index.ts";
+import { loadWorkflowDetails } from "../../src/orchestration/workflows.ts";
+import { retargetRestoreProfile } from "../../src/runtime/restore/index.ts";
+import type { AgentSession } from "../../src/shared/types.ts";
 
 const HOME = homedir();
 const ENC = "-repo-a"; // one encoded-cwd dir, shared by every session

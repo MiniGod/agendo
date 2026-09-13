@@ -3,9 +3,9 @@
 // becomes on the other side — is exactly what a green e2e run says nothing
 // about.
 import { describe, expect, test } from "bun:test";
-import { convertTarget, parseConvertOutput } from "../src/ui/convert.ts";
-import { convertedSession, planConvert } from "../src/ui/convertAgent.ts";
-import type { AgentSession } from "../src/types.ts";
+import { convertTarget, parseConvertOutput } from "../src/ui/models/convert.ts";
+import { convertedSession, planConvert } from "../src/ui/actions/convertAgent.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 
 describe("parseConvertOutput", () => {
   test("takes the last JSON object line, ignoring npx chatter around it", () => {

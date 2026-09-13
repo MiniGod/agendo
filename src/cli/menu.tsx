@@ -1,8 +1,8 @@
 import React from "react";
 import { render } from "ink";
 import App from "../ui/App.tsx";
-import type { LauncherContext } from "../context.ts";
-import type { OpenPlan } from "../launch.ts";
+import type { LauncherContext } from "../app/context.ts";
+import type { OpenPlan } from "../launch/index.ts";
 
 /**
  * Render the menu once; resolves with the chosen plan, or null if the user quit.

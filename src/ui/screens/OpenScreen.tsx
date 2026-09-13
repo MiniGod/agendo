@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
-import { V } from "../vocabState.ts";
-import type { OpenTargets } from "../targets.ts";
+import { V } from "../models/vocabState.ts";
+import type { OpenTargets } from "../models/targets.ts";
 
 /** The open-in-browser dialog: whichever of the PR / work item carries a URL. */
 export function OpenScreen({ targets, title }: { targets: OpenTargets; title: string }) {

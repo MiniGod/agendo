@@ -4,8 +4,8 @@
 // never disagree about what a state looks like on a terminal.
 
 
-import type { SessionKind } from "../tmux.ts";
-import type { WorkflowStatus } from "../types.ts";
+import type { SessionKind } from "../runtime/tmux/index.ts";
+import type { WorkflowStatus } from "../shared/types.ts";
 
 /** CLI glyphs for the three task states (plain ASCII markers stay greppable). */
 export const STATUS_GLYPH: Record<string, string> = {

@@ -1,4 +1,4 @@
-// `agendo close` (src/cli/close.ts): the guards and the reports, each on its
+// `agendo close` (src/cli/commands/close.ts): the guards and the reports, each on its
 // own. The e2e suite drives the command end to end against a fixture tmux and
 // reaches every guard that a real session can trip; what it never does is call
 // the command with no id, point it at an unmanaged window, or make tmux
@@ -9,9 +9,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   closedSuffix, closeTargetOf, killFailure, liveHandle, refuseManyWindows, refuseNoSession, refuseUnmanaged,
   refuseUnread, reportClosed, reportNotRunning, runClose, unsafeCloseReason, usageExit,
-} from "../src/cli/close.ts";
-import type { PaneSnapshot } from "../src/tmux.ts";
-import type { AgentSession } from "../src/types.ts";
+} from "../src/cli/commands/close.ts";
+import type { PaneSnapshot } from "../src/runtime/tmux/index.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

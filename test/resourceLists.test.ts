@@ -1,15 +1,15 @@
-// The pure halves of `list issues` and `list pr` (src/cli/listIssues.ts,
-// src/cli/listPrs.ts, src/cli/resources.ts): the rows each builds from the
+// The pure halves of `list issues` and `list pr` (src/cli/list/issues.ts,
+// src/cli/list/pullRequests.ts, src/cli/list/resources.ts): the rows each builds from the
 // model, and the table line each prints. The e2e suite runs both commands
 // against the fixture backend and reads the tables; it never lists a work item
 // that appears in two of the model's lists, never a PR number shared by two
 // repos, never an idle session on a row, and never a draft PR.
 import { describe, expect, test } from "bun:test";
-import { formatIssueRow, issueHeader, issueRows } from "../src/cli/listIssues.ts";
-import { formatPrRow, PR_HEADER, prRows } from "../src/cli/listPrs.ts";
-import { oneLine, sessionMark } from "../src/cli/resources.ts";
-import { sessionName } from "../src/tmux.ts";
-import type { AgentSession, LinkedPR, PRWithSessions, WorkItem } from "../src/types.ts";
+import { formatIssueRow, issueHeader, issueRows } from "../src/cli/list/issues.ts";
+import { formatPrRow, PR_HEADER, prRows } from "../src/cli/list/pullRequests.ts";
+import { oneLine, sessionMark } from "../src/cli/list/resources.ts";
+import { sessionName } from "../src/runtime/tmux/index.ts";
+import type { AgentSession, LinkedPR, PRWithSessions, WorkItem } from "../src/shared/types.ts";
 
 const session = (id: string, lastUsed = 1): AgentSession => ({ id, source: "claude", cwd: "/w", title: id, lastUsed: new Date(lastUsed) });
 const item = (id: number, p: Partial<WorkItem> = {}): WorkItem => ({

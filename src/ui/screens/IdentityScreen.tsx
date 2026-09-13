@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
-import type { Identity, TeamMember } from "../../types.ts";
-import { padCell } from "../format.ts";
+import type { Identity, TeamMember } from "../../shared/types.ts";
+import { padCell } from "../format/index.ts";
 
 /**
  * The identity switcher. `identity` is the override picked in a previous visit

@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
-import { loadLocalSessions, type LoadedModel } from "../../model.ts";
-import { mergeRepos, type RepoInfo } from "../../repos.ts";
-import { sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "../equality.ts";
+import { loadLocalSessions, type LoadedModel } from "../../app/model/index.ts";
+import { mergeRepos, type RepoInfo } from "../../repositories/index.ts";
+import { sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "../models/equality.ts";
 
 const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
 

@@ -1,9 +1,9 @@
 import { Box, Text } from "ink";
 import type { ReactNode } from "react";
-import { homeShort, padCell, repoBreakdown } from "../format.ts";
+import { homeShort, padCell, repoBreakdown } from "../format/index.ts";
 import { CLONE_ROW, INIT_ROW } from "../keys/repo.ts";
-import type { FreshTarget } from "../targets.ts";
-import type { RepoInfo } from "../../repos.ts";
+import type { FreshTarget } from "../models/targets.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
 
 /** The title line: which flow this picker serves. */
 export function repoHeading(target: FreshTarget): string {

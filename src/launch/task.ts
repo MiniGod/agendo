@@ -1,12 +1,12 @@
 // The repo-shaped launches: a fresh session for a work item / PR, and the
 // worktree-creating `agendo launch` behind `launchTask`.
 import { existsSync, realpathSync } from "node:fs";
-import type { AgentSource } from "../types.ts";
-import { slugify, createWorktree, freeWorktreeBranch, worktreePath } from "../worktree.ts";
-import { inspectWorktree, type AdoptedWorktree } from "../worktreeAdopt.ts";
-import { repoRootForCwd } from "../repos.ts";
-import { ORCHESTRATOR_SLUG } from "../orchestrator.ts";
-import { freshArgv } from "../launchArgv.ts";
+import type { AgentSource } from "../shared/types.ts";
+import { slugify, createWorktree, freeWorktreeBranch, worktreePath } from "../repositories/worktree/index.ts";
+import { inspectWorktree, type AdoptedWorktree } from "../repositories/worktree/adopt.ts";
+import { repoRootForCwd } from "../repositories/index.ts";
+import { ORCHESTRATOR_SLUG } from "../orchestration/index.ts";
+import { freshArgv } from "./argv.ts";
 import { openTarget, type OpenPlan } from "./open.ts";
 import { launchManaged } from "./managed.ts";
 
@@ -68,7 +68,7 @@ export interface LaunchOptions {
   /**
    * Run the new session in orchestrator mode: it delegates every unit of work to
    * further background sessions instead of implementing anything itself (see
-   * src/orchestrator.ts). Claude only. This is the REPO level by construction —
+   * src/orchestration/index.ts). Claude only. This is the REPO level by construction —
    * a global orchestrator belongs to no repo, so it takes no worktree and has its
    * own entry point (`launchGlobalOrchestrator`) rather than a repo-shaped one.
    */

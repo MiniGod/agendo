@@ -132,8 +132,8 @@ agendo must never guess where to write. Here the user names the parent folder
 explicitly on every path through the flow, so there is nothing to guess — the
 row is offered from a bare `agendo` and from inside a checkout alike. What it
 shares with cloning is everything after: the hand-off, the note, the picker
-merge. `src/initRepo.ts` knows nothing about sessions, worktrees or tmux, and
-`src/ui/initActions.ts` is `cloneActions.ts` with `git init` where `git clone`
+merge. `src/repositories/init.ts` knows nothing about sessions, worktrees or tmux, and
+`src/ui/actions/init.ts` is `cloneActions.ts` with `git init` where `git clone`
 was.
 
 ## What is deliberately not here

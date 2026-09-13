@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
-import { reconcileLive, filterModelByRepos, itemInRepoScope, prInRepoScope, type LoadedModel } from "../src/model.ts";
+import { reconcileLive, filterModelByRepos, itemInRepoScope, prInRepoScope, type LoadedModel } from "../src/app/model/index.ts";
 import {
   discoverGitReposUnder,
   mergeRepos,
@@ -23,17 +23,17 @@ import {
   ensureRepoAtTop,
   bootstrapRepoRoot,
   type RepoInfo,
-} from "../src/repos.ts";
-import { resolveWindowSession, bestSessionForCwd } from "../src/restore.ts";
-import { isStalled } from "../src/idle.ts";
-import { type ManagedTarget, isPaneTarget, isPaneHosted, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/tmux.ts";
-import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/config.ts";
-import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/usageLimit.ts";
-import { freshName, prFreshName } from "../src/launch.ts";
-import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/context.ts";
-import { SessionIndex } from "../src/sessions.ts";
-import { resolveScopeRoots, makeSessionScope, describeScope, scopeFilter } from "../src/scope.ts";
-import type { AgentSession, PullRequest, WorkItem } from "../src/types.ts";
+} from "../src/repositories/index.ts";
+import { resolveWindowSession, bestSessionForCwd } from "../src/runtime/restore/index.ts";
+import { isStalled } from "../src/sessions/idle.ts";
+import { type ManagedTarget, isPaneTarget, isPaneHosted, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/runtime/tmux/index.ts";
+import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/app/config.ts";
+import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/sessions/usageLimit/index.ts";
+import { freshName, prFreshName } from "../src/launch/index.ts";
+import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/app/context.ts";
+import { SessionIndex } from "../src/sessions/index.ts";
+import { resolveScopeRoots, makeSessionScope, describeScope, scopeFilter } from "../src/app/scope.ts";
+import type { AgentSession, PullRequest, WorkItem } from "../src/shared/types.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
 function sess(id: string, cwd: string, lastUsedMs: number, source: AgentSession["source"] = "claude"): AgentSession {
@@ -522,7 +522,7 @@ test.describe("paneReadiness: finished-turn summary is idle, not a live counter"
 // prints a notice with (usually) a reset time; without this state such a pane —
 // an idle input box under a notice — would read "ready" and invite a doomed
 // send/auto-resume. The exact wording matched here is verbatim from a throttled
-// pane; see src/usageLimit.ts.
+// pane; see src/sessions/usageLimit/index.ts.
 // VERBATIM capture from a REAL throttled Claude Code session (read-only capture
 // of tmux window cl-claude-b5652803ec7e / agendo:8). Reproduced exactly, control
 // chars spelled out: ⎿ = U+23BF (tool-result glyph),   = NBSP padding,

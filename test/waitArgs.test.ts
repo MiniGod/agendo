@@ -1,11 +1,11 @@
-// `agendo wait`'s argv (src/wait/args.ts). The e2e suite drives the command
+// `agendo wait`'s argv (src/cli/wait/args.ts). The e2e suite drives the command
 // with the flags a real wait uses and reaches the happy paths and a couple of
 // refusals; here every flag sits beside the next, with the refusals as return
 // codes — the function reports rather than exits, which is what makes this
 // possible — and `console.error` captured so each one's line is checked too.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { parseDuration, parseWaitArgs } from "../src/wait/args.ts";
-import type { WaitOptions } from "../src/wait/types.ts";
+import { parseDuration, parseWaitArgs } from "../src/cli/wait/args.ts";
+import type { WaitOptions } from "../src/cli/wait/types.ts";
 
 const realError = console.error;
 let errors: string[];

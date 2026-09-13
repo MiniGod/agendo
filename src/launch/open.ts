@@ -3,7 +3,7 @@
 //
 // The bottom of src/launch/ — every other module here builds a target and then
 // asks this one to open it, so nothing in this file may import a sibling.
-import type { AgentSession } from "../types.ts";
+import type { AgentSession } from "../shared/types.ts";
 import {
   sessionName,
   shortId,
@@ -16,8 +16,8 @@ import {
   windowLocation,
   insideTmux,
   tmuxQuiet,
-} from "../tmux.ts";
-import { resumeArgv } from "../launchArgv.ts";
+} from "../runtime/tmux/index.ts";
+import { resumeArgv } from "./argv.ts";
 
 export interface OpenPlan {
   /** Whether a live tmux target already existed (we just navigate to it). */

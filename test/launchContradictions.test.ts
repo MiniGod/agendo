@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { launchContradiction, type LaunchArgs } from "../src/cli/launchCmd.ts";
+import { launchContradiction, type LaunchArgs } from "../src/cli/commands/launch.ts";
 
 /** A `launch` with no flags: nothing to contradict. */
 function args(over: Partial<LaunchArgs> = {}): LaunchArgs {

@@ -1,10 +1,10 @@
-// A GitHub PR's review votes and gate (src/github.ts `voteSummary`). The e2e
+// A GitHub PR's review votes and gate (src/providers/github/index.ts `voteSummary`). The e2e
 // fixture's PRs carry one approving review at most; they never carry a
 // re-vote by the same author, a dismissed or pending review, an author-less
 // review, a CHANGES_REQUESTED, or an APPROVED decision with no approval in the
 // page of reviews returned.
 import { describe, expect, test } from "bun:test";
-import { latestVotes, reviewGate, voteSummary } from "../src/github.ts";
+import { latestVotes, reviewGate, voteSummary } from "../src/providers/github/index.ts";
 
 const review = (login: string | undefined, state: string) => ({ author: login ? { login } : null, state });
 

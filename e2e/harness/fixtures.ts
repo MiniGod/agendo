@@ -2,7 +2,7 @@
 //
 // `materializeHome` writes a fake $HOME containing exactly the on-disk session
 // state the launcher discovers (Claude JSONL logs, a Copilot session dir, a
-// Codex rollout) and a config.json, so `src/sessions.ts` / `src/config.ts` read fixtures instead
+// Codex rollout) and a config.json, so `src/sessions/index.ts` / `src/app/config.ts` read fixtures instead
 // of the real machine. `ADO` + the `resolve*` helpers below model the REST
 // surface the mock server serves. `tmuxState` is the initial fake-tmux state
 // (which `cl-…` targets are "live", and what their panes show).
@@ -23,7 +23,7 @@ import { mkdir, writeFile, utimes } from "node:fs/promises";
 import { join } from "node:path";
 
 // ── identity helpers ─────────────────────────────────────────────────────────
-// Mirror of src/tmux.ts sessionName(), duplicated so the harness never imports
+// Mirror of src/runtime/tmux/index.ts sessionName(), duplicated so the harness never imports
 // app code. Kept in sync by the "running badge" test, which asserts the name.
 export function sessionName(source: string, id: string): string {
   const shortId = id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
@@ -107,7 +107,7 @@ export async function materializeHome(home: string): Promise<void> {
 
   // Real `.git` REF FILES (no git binary involved) for the unpushed-work signal
   // in `agendo status` / `list --json`, which reads them directly rather than
-  // spawning git (see src/gitrefs.ts).
+  // spawning git (see src/repositories/gitRefs.ts).
   //
   //  • standalone: a plain checkout on `main` with a CONFIGURED origin upstream,
   //    in sync — and the remote ref is PACKED, the normal state right after a

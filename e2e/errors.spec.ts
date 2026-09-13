@@ -8,7 +8,7 @@
 // Two separate defects in two lines. The message is the runtime's bare
 // `Response.json()` failure with no hint of WHAT failed to parse, and the screen
 // dead-ends until a human presses `r` — so an unattended launcher just sits
-// there. So: every decode site names its source (src/errors.ts), and a load that
+// there. So: every decode site names its source (src/shared/errors.ts), and a load that
 // fails transiently retries itself with bounded backoff (src/ui/App.tsx).
 //
 // Everything here runs against the fully mocked harness — fixture $HOME, mock
@@ -48,7 +48,7 @@ const LOGIN_PAGE =
 const WIDE = { cols: 220, rows: 30 };
 
 // Short retry loop so the bounded-backoff tests don't spend real seconds
-// waiting. Both knobs are the ones production reads (see src/errors.ts). The
+// waiting. Both knobs are the ones production reads (see src/shared/errors.ts). The
 // base stays well above the harness's ~80ms screen poll: the "retrying…" screen
 // has to be on-grid long enough to be observed, or the assertion on it would
 // race the next attempt.

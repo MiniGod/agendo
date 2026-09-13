@@ -3,7 +3,7 @@
 ## Problem
 
 agendo already classifies a Claude Code pane that has hit its cap as `limited`
-(`src/usageLimit.ts`, `paneUsageLimited` in `src/tmux.ts`). Codex has the same
+(`src/sessions/usageLimit/index.ts`, `paneUsageLimited` in `src/runtime/tmux/index.ts`). Codex has the same
 failure mode and **none** of the detection, so a capped Codex session reads as
 `ready` and `agendo send` pastes into it.
 

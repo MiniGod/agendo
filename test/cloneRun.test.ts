@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startClone } from "../src/clone/run.ts";
+import { startClone } from "../src/repositories/clone/run.ts";
 
 // Writes a `.git` the way a real clone does (origin before refs), reports
 // progress on stderr, then behaves per FAKE_GIT: exits 0, fails like a rejected

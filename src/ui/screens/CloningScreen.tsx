@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
-import { homeShort } from "../format.ts";
-import { repoUrlLabel, type RepoUrl } from "../../clone.ts";
+import { homeShort } from "../format/index.ts";
+import { repoUrlLabel, type RepoUrl } from "../../repositories/clone/index.ts";
 
 /** The live `git clone`: what is being cloned, where to, and its progress. */
 export function CloningScreen({

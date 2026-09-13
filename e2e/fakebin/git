@@ -119,7 +119,7 @@ if (args[0] === "clone") {
 
 // ── worktree registry ─────────────────────────────────────────────────────────
 // `worktree list --porcelain` and `status --porcelain` are what `launch` reads
-// before ADOPTING an existing worktree (src/worktreeAdopt.ts), and neither can
+// before ADOPTING an existing worktree (src/repositories/worktree/adopt.ts), and neither can
 // be derived from the directories the fake `worktree add` creates: a test needs
 // a worktree that is dirty, on an unexpected branch, or living outside
 // `.claude/worktrees/`, and — the case the real bug was about — a directory

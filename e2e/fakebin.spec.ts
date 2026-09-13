@@ -1,7 +1,7 @@
 // The fake `gh` is a test double, so it does not normally get tested itself —
 // but this one earns a spec, because its failure mode is invisible. It used to
 // answer any subcommand it did not implement with `process.exit(0)` and no
-// output, and `gh()` in src/github.ts resolves empty stdout to `null` rather
+// output, and `gh()` in src/providers/github/index.ts resolves empty stdout to `null` rather
 // than throwing. A call the fake had never heard of therefore looked exactly
 // like a successful call that returned nothing, and every test around it stayed
 // green while the code under test received no data at all.
@@ -116,7 +116,7 @@ test.describe("fake gh: unrecognised input fails instead of exiting 0", () => {
   test("an unmodelled flag fails, because ignoring it would change what stdout means", async ({ mock }) => {
     await mock.setGhState({ authed: true, graphql: { AgendoProject: { data: { ok: true } } } });
     // These two are the dangerous ones. Real `gh api --paginate` emits one JSON
-    // object PER PAGE, concatenated — `JSON.parse` in src/github.ts would throw
+    // object PER PAGE, concatenated — `JSON.parse` in src/providers/github/index.ts would throw
     // on that — and `--jq` emits a transformed value instead of the body. A fake
     // that ignored them would answer with a body shape production never sees:
     // the original silent-success bug, moved down one level.
@@ -185,7 +185,7 @@ test.describe("fake gh: unrecognised input fails instead of exiting 0", () => {
 
   test("a missing or empty --repo fails rather than reporting an empty repo", async ({ mock }) => {
     // "this repo has no issues" and "you never said which repo" are different
-    // answers, and only one of them is `[]`. src/github.ts always passes --repo,
+    // answers, and only one of them is `[]`. src/providers/github/index.ts always passes --repo,
     // so a call that does not is a caller bug and has to read as one.
     await mock.setGhState({ authed: true, issues: { "ada/appweb": [{ number: 301 }] } });
     for (const args of [
@@ -296,7 +296,7 @@ test.describe("fake gh: registered GraphQL operations", () => {
   });
 
   test("concurrent calls to one sequence get distinct pages, not the same one twice", async ({ mock }) => {
-    // src/github.ts fans its fetches out with `Promise.all`, so the same operation
+    // src/providers/github/index.ts fans its fetches out with `Promise.all`, so the same operation
     // really can be in flight more than once. The counter therefore cannot be
     // increment-then-read-back — not a read-modify-write on a shared JSON file
     // (both processes read N, both serve page N), and not an atomic append
@@ -333,7 +333,7 @@ test.describe("fake gh: registered GraphQL operations", () => {
     // `process.stdout.write` is ASYNCHRONOUS when stdout is a pipe — which is
     // what every spawned `gh` gets — and `process.exit()` does not drain it. The
     // fake used to lose everything past ~8 KB, silently, and only for bodies big
-    // enough to matter: `JSON.parse` in src/github.ts throws on the fragment,
+    // enough to matter: `JSON.parse` in src/providers/github/index.ts throws on the fragment,
     // `ghSafe` swallows the throw, and the app sees `[]`. That is precisely the
     // silent-empty failure this file exists to remove, reintroduced as a function
     // of size. Every other fixture here is under 100 bytes, so nothing else in
@@ -376,7 +376,7 @@ test.describe("fake gh: registered GraphQL operations", () => {
     expect(r.status).toBe(1);
     expect(JSON.parse(r.stdout)).toEqual(scopeError); // body still on stdout
     expect(r.stderr).toContain("gh: ");
-    expect(r.stderr).toContain("read:project"); // what src/github.ts's gh() surfaces
+    expect(r.stderr).toContain("read:project"); // what src/providers/github/index.ts's gh() surfaces
   });
 });
 
@@ -442,7 +442,7 @@ test.describe("fake gh: call logging", () => {
 });
 
 test.describe("fake gh: the paths the backend already relies on still work", () => {
-  // Regression guard on making the fallthrough strict. src/github.ts makes six
+  // Regression guard on making the fallthrough strict. src/providers/github/index.ts makes six
   // distinct `gh` calls; the four shapes below are what the fake can distinguish.
   // The one it CANNOT is noted where it bites: `issue list --author <login>`
   // (github.ts:359, the not-owned-repo path) is accepted but ignored for fixture

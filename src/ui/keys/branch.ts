@@ -18,7 +18,7 @@ type BranchMode = Extract<Mode, { kind: "branch" }>;
  * `worktree-þróun` is a perfectly legal ref while the punctuation this guard
  * has always accepted is not. That path is unchanged and already handles a
  * bad name: the value reaches git only as one argv element of a `spawnSync`
- * (`createWorktree`, src/worktree.ts), never a shell, so an invalid refname
+ * (`createWorktree`, src/repositories/worktree/index.ts), never a shell, so an invalid refname
  * fails loudly as "Worktree failed: <git's own message>" with nothing
  * created. The worktree DIRECTORY is not this string either —
  * `worktreeDirName` reduces it to letters, digits and interior dashes (a

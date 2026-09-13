@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
-import { PROVIDER_INFO } from "../../provider.ts";
-import type { Identity, ProviderName } from "../../types.ts";
-import { padCell } from "../format.ts";
+import { PROVIDER_INFO } from "../../providers/index.ts";
+import type { Identity, ProviderName } from "../../shared/types.ts";
+import { padCell } from "../format/index.ts";
 
 /**
  * The Settings page: the actionable rows on top (in `settingsItems` order, the

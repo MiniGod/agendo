@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commonParent, globalOrchestratorCwd } from "../src/repos.ts";
-import { roleLabel, repoOrchestrators, KIND_COL } from "../src/cli/orchestrators.ts";
+import { commonParent, globalOrchestratorCwd } from "../src/repositories/index.ts";
+import { roleLabel, repoOrchestrators, KIND_COL } from "../src/cli/list/orchestrators.ts";
 
 // Pure path/label arithmetic behind the global orchestrator, unit-tested here
 // because the e2e suite cannot reach the interesting inputs: every fixture repo

@@ -1,4 +1,4 @@
-// Checking a PR branch out into a worktree (src/worktree.ts). The e2e suite
+// Checking a PR branch out into a worktree (src/repositories/worktree/index.ts). The e2e suite
 // does this against a fixture repo where the first attempt — a new local
 // branch tracking the remote — always succeeds. What it never sees is that
 // attempt failing: the local branch that already exists, the detached fallback
@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { checkoutWorktree, worktreePath, type GitRun } from "../src/worktree.ts";
+import { checkoutWorktree, worktreePath, type GitRun } from "../src/repositories/worktree/index.ts";
 
 const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "agendo-wt-"));
 

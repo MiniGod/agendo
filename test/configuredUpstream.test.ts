@@ -1,4 +1,4 @@
-// Reading a branch's upstream out of the repo's config file (src/gitrefs.ts
+// Reading a branch's upstream out of the repo's config file (src/repositories/gitRefs.ts
 // `configuredUpstream`), on scratch git dirs. The e2e fixtures' checkouts are
 // made by a real `git clone`, so their config is always the plain
 // `[branch "x"]\n\tremote = origin\n\tmerge = refs/heads/x` shape; they never
@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configuredUpstream, trackingRef } from "../src/gitrefs.ts";
+import { configuredUpstream, trackingRef } from "../src/repositories/gitRefs.ts";
 
 let root: string;
 let n = 0;

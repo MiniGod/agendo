@@ -1,14 +1,14 @@
-// The joins loadModel makes (src/model/join.ts). The e2e fixtures load a model
+// The joins loadModel makes (src/app/model/join.ts). The e2e fixtures load a model
 // with one PR per item and one session per branch; they never share a PR
 // between two items, never carry a finished PR, never put a session under both
 // a linked PR and an orphan one, and never resolve an ADO iteration path with
 // no backslash in it.
 import { describe, expect, test } from "bun:test";
-import type { AgentSession, LinkedPR, PullRequest, ReviewPR, WorkItem } from "../src/types.ts";
+import type { AgentSession, LinkedPR, PullRequest, ReviewPR, WorkItem } from "../src/shared/types.ts";
 import {
   iterationName, linkedPrKeys, linkedPrsOf, orphanPrsOf, reviewPrsOf, sessionLinksOf, withSessions,
   type SessionLookup,
-} from "../src/model/join.ts";
+} from "../src/app/model/join.ts";
 
 const session = (id: string, lastUsed: number, branch?: string): AgentSession =>
   ({ id, source: "claude", cwd: "/w", branch, title: id, lastUsed: new Date(lastUsed) }) as AgentSession;

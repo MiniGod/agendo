@@ -1,4 +1,4 @@
-// The codex pane classifier (src/tmux/codex.ts) over the real captures in
+// The codex pane classifier (src/runtime/tmux/codex.ts) over the real captures in
 // e2e/fixtures. e2e/detection.spec.ts asserts the same verdicts, but it runs
 // in Playwright's own process, outside the instrumented bun the CRAP
 // measurement watches — so to the gate every line of `codexReadiness` was
@@ -6,9 +6,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { codexPane, codexReadiness } from "../src/tmux/codex.ts";
-import { stripAnsi } from "../src/tmux/pane.ts";
-import { paneReadiness } from "../src/tmux/paneReadiness.ts";
+import { codexPane, codexReadiness } from "../src/runtime/tmux/codex.ts";
+import { stripAnsi } from "../src/runtime/tmux/pane.ts";
+import { paneReadiness } from "../src/runtime/tmux/paneReadiness.ts";
 
 const fixture = (name: string) => readFileSync(join(import.meta.dirname, "..", "e2e", "fixtures", name), "utf-8");
 const cursor = (name: string) => {

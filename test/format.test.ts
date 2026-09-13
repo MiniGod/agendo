@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { approvalCell, approvalInline, fit, fmtDelta, padCell, prBadge } from "../src/ui/format.ts";
-import type { PullRequest } from "../src/types.ts";
+import { approvalCell, approvalInline, fit, fmtDelta, padCell, prBadge } from "../src/ui/format/index.ts";
+import type { PullRequest } from "../src/shared/types.ts";
 
-// The width helpers in src/ui/format.ts are the densest logic in the repo and
+// The width helpers in src/ui/format/index.ts are the densest logic in the repo and
 // the e2e suite cannot reach them: every fixture value that flows into a table
 // cell is ASCII, which is exactly the input class for which the old and new
 // implementations agree. These tests exist because a green e2e run proves
@@ -46,7 +46,7 @@ describe("padCell — ASCII equivalence", () => {
   });
 
   test("shortId's invariants hold, so leaving those two sites unconverted is safe", () => {
-    // src/tmux.ts shortId(): id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12).
+    // src/runtime/tmux/index.ts shortId(): id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12).
     // Both CLI tables still spell those cells `.padEnd(12)`; that is only
     // correct while the value is ASCII and never longer than 12.
     const shortId = (id: string) => id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);

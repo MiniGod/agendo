@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStdout } from "ink";
-import type { Row } from "../rows.ts";
+import type { Row } from "../models/rows.ts";
 import type { View } from "../keys/context.ts";
 
 /**

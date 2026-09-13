@@ -1,4 +1,4 @@
-// Which of two entries for one session id survives the index (src/sessions.ts).
+// Which of two entries for one session id survives the index (src/sessions/index.ts).
 // The e2e fixtures never hold the same transcript under two profiles, so the
 // collision path is entered by no spec at all; the symlink it exists for is
 // made here.
@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ownsLogPath, preferredDuplicate } from "../src/sessions.ts";
-import type { AgentSession } from "../src/types.ts";
+import { ownsLogPath, preferredDuplicate } from "../src/sessions/index.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 
 let dir = "";
 let owned = "";

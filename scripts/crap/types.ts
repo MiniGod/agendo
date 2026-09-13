@@ -11,7 +11,7 @@ export interface Range {
 
 /** One function as oxlint's `complexity` rule sees it. */
 export interface FunctionCc {
-  /** Path relative to the repo root, e.g. `src/cli/send.ts`. */
+  /** Path relative to the repo root, e.g. `src/cli/commands/send.ts`. */
   file: string;
   /** oxlint's name for the function, or null when it reports it anonymously. */
   name: string | null;

@@ -14,7 +14,7 @@ import {
   __claudeParseCount,
   __resetClaudeParseCount,
   __claudeCacheSize,
-} from "../../src/sessions.ts";
+} from "../../src/sessions/index.ts";
 
 const proj = join(homedir(), ".claude", "projects", "proj");
 mkdirSync(proj, { recursive: true });

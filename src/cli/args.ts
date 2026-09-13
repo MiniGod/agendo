@@ -1,5 +1,5 @@
-import { parseDuration } from "../wait.ts";
-import { scopeFlagValue } from "../scope.ts";
+import { parseDuration } from "./wait/index.ts";
+import { scopeFlagValue } from "../app/scope.ts";
 
 /**
  * Parse a required duration flag, exiting with a clear error on bad/missing

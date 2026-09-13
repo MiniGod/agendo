@@ -1,14 +1,14 @@
-// What a session row says (src/ui/sessionRow.ts). The e2e suite renders the
+// What a session row says (src/ui/models/sessionRow.ts). The e2e suite renders the
 // list from fixtures and so reaches most of these states, one per fixture
 // session; here every arm is beside the one next to it — placeholder against
 // idle against live, each readiness detail, the shell count in the singular
 // and the plural — so a change to one reads against the rest.
 import { describe, expect, test } from "bun:test";
-import type { AgentSession } from "../src/types.ts";
-import { timeAgo, type PaneState } from "../src/ui/format.ts";
+import type { AgentSession } from "../src/shared/types.ts";
+import { timeAgo, type PaneState } from "../src/ui/format/index.ts";
 import {
   displayTimeOf, kindBadge, linkBadge, readinessDetail, sessionRowParts, shellsLabel, statusGlyph, statusTag,
-} from "../src/ui/sessionRow.ts";
+} from "../src/ui/models/sessionRow.ts";
 
 const created = new Date("2026-09-01T10:00:00Z");
 const used = new Date("2026-09-02T10:00:00Z");

@@ -17,8 +17,8 @@
 import { writeFileSync, appendFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { SessionIndex, __claudeParseCount, __resetClaudeParseCount } from "../../src/sessions.ts";
-import { runWait } from "../../src/wait.ts";
+import { SessionIndex, __claudeParseCount, __resetClaudeParseCount } from "../../src/sessions/index.ts";
+import { runWait } from "../../src/cli/wait/index.ts";
 import { BUSY_PANE, LOGIN_SESSION_ID, RUNNING_TARGET, tmuxState } from "./fixtures.ts";
 
 const STATE = process.env.FAKE_TMUX_STATE as string;

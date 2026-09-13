@@ -4,7 +4,7 @@
 
 Today agendo runs a single, global launcher:
 
-- One hardcoded host tmux session, `LAUNCHER_SESSION = "agendo"` (`src/tmux.ts`),
+- One hardcoded host tmux session, `LAUNCHER_SESSION = "agendo"` (`src/runtime/tmux/index.ts`),
   assumed at ~14 call sites.
 - The session list is global — `tmux list-windows -a` / `list-panes -a` feed the
   live reconciliation, and the Sessions view lists every on-disk session on the
@@ -46,7 +46,7 @@ takes a scope.
 
 ### Scope selectors on the CLI (`--path` / `--repo`)
 
-`src/scope.ts` generalizes that `[dir]` filter into the selector pair `list`,
+`src/app/scope.ts` generalizes that `[dir]` filter into the selector pair `list`,
 `status` and `wait` share, so the three can't drift into different ideas of
 "in this repo":
 
@@ -58,7 +58,7 @@ takes a scope.
 Both are optional and AND-ed. On `list` they apply to every mode (plain, `--all`,
 `--json`, `--pr`/`--issue` queries); `--path` is the flag spelling of the `[dir]`
 positional. `list` and `status` parse and apply them in the CLI entrypoint;
-`wait` owns its whole argv tail (`parseWaitArgs` in `src/wait.ts`), so it parses
+`wait` owns its whole argv tail (`parseWaitArgs` in `src/cli/wait/index.ts`), so it parses
 them there and carries the resolved `SessionScope` on `WaitOptions` — one shared
 `scope.ts` predicate either way.
 
@@ -91,7 +91,7 @@ a scoping flag must not have is quietly returning *more* than was asked for.
 
 ### The context
 
-A path resolves to a `LauncherContext` (`src/context.ts`):
+A path resolves to a `LauncherContext` (`src/app/context.ts`):
 
 ```ts
 interface LauncherContext {
@@ -192,7 +192,7 @@ when a `filterRoot` exists; bare `agendo` is already global.
 
 The path filter above scopes *sessions* by cwd. A path context also scopes the
 **backend data**: the launcher resolves the path to git checkouts
-(`discoverGitReposUnder`, `src/repos.ts` — the checkout the path belongs to when
+(`discoverGitReposUnder`, `src/repositories/index.ts` — the checkout the path belongs to when
 there is one (itself, its enclosing repo when the path sits below a repo root, or
 the main repo when it's a worktree), else every repo nested under it, skipping
 dot-directories, worktrees and `node_modules`, never following symlinks) and
@@ -269,11 +269,11 @@ so a launch from inside a scoped host session is restored by that same launcher.
 
 | File | Change |
 |------|--------|
-| `src/context.ts` (new) | `resolveContext`, `isUnderRoot`, `tmuxSafeName`. Pure, unit-tested. |
-| `src/tmux.ts` | `LAUNCHER_SESSION` stays the default; `launcherWindowPaths`/`launcherWindowLive`/`spawnLauncherWindow`/`enterLauncherSession` take a `session` param (defaulted). New `sessionRoot`/`setSessionRoot` (`@cl_root`) and `currentSessionName`. |
-| `src/restore.ts` | Restore keyed per host session; legacy fallback; `captureRestore`/`restoreTabs`/`recordLaunchedSession` take a session name. Attribution helpers (`resolveWindowSession`, `bestSessionForCwd`) unchanged. |
-| `src/model.ts` | `LoadModelOptions.hostSession`; passed to `captureRestore`. Reconciliation unchanged. |
-| `src/provider.ts` | New `detectRepoProvider(path)` (github.com remote → `"github"`, else `null`). `resolveInitialProvider` gains a `forced?` arg that overrides the persisted default when its CLI is installed. |
+| `src/app/context.ts` (new) | `resolveContext`, `isUnderRoot`, `tmuxSafeName`. Pure, unit-tested. |
+| `src/runtime/tmux/index.ts` | `LAUNCHER_SESSION` stays the default; `launcherWindowPaths`/`launcherWindowLive`/`spawnLauncherWindow`/`enterLauncherSession` take a `session` param (defaulted). New `sessionRoot`/`setSessionRoot` (`@cl_root`) and `currentSessionName`. |
+| `src/runtime/restore/index.ts` | Restore keyed per host session; legacy fallback; `captureRestore`/`restoreTabs`/`recordLaunchedSession` take a session name. Attribution helpers (`resolveWindowSession`, `bestSessionForCwd`) unchanged. |
+| `src/app/model/index.ts` | `LoadModelOptions.hostSession`; passed to `captureRestore`. Reconciliation unchanged. |
+| `src/providers/index.ts` | New `detectRepoProvider(path)` (github.com remote → `"github"`, else `null`). `resolveInitialProvider` gains a `forced?` arg that overrides the persisted default when its CLI is installed. |
 | `src/index.tsx` | Parse `[path]`/`-s`; build the context; thread it into the default tmux-host bootstrap (collision check + `restoreTabs`), the `--no-tmux` menu render (now `runMenu(ctx)` in `src/cli/menu.tsx`, which passes the App props), and `launch`. Subcommands stay global. |
 | `src/ui/App.tsx` | `filterRoot`/`hostSession` props; `globalView` state + `a` toggle; scope filter applied in the row builders and repo picker; header/status scope indicator. `openTarget` (launch.ts) needs no change — the host session is set by `enterLauncherSession`, and inside-tmux `new-window` already targets the current session. |
 

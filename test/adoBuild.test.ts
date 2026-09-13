@@ -1,10 +1,10 @@
-// The pure half of the ADO CI status (src/ado/build.ts). The e2e ADO fixture
+// The pure half of the ADO CI status (src/providers/azureDevOps/build.ts). The e2e ADO fixture
 // answers the policy-evaluations endpoint with fresh builds only: it never
 // expires one, never rejects one, and never has to recover a purged build's
 // result, so the whole of the expired path was unreachable from a spec.
 import { describe, expect, test } from "bun:test";
-import { aggregateBuild, buildResult, worstExpired } from "../src/ado/build.ts";
-import { fetchBuildResult } from "../src/ado/policy.ts";
+import { aggregateBuild, buildResult, worstExpired } from "../src/providers/azureDevOps/build.ts";
+import { fetchBuildResult } from "../src/providers/azureDevOps/policy.ts";
 
 const build = (status: string, context?: { isExpired?: boolean; buildId?: number }) => ({
   status,

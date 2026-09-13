@@ -1,4 +1,4 @@
-// Finding a checkout's two git dirs (src/gitrefs.ts `gitDirs`), on scratch
+// Finding a checkout's two git dirs (src/repositories/gitRefs.ts `gitDirs`), on scratch
 // directories. The e2e suite reaches this through `agendo status` on fixture
 // checkouts that are all main checkouts under a real .git directory; it never
 // hands it a linked worktree with a relative `gitdir:`, an absolute one, a
@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitDirs } from "../src/gitrefs.ts";
+import { gitDirs } from "../src/repositories/gitRefs.ts";
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "agendo-gitdirs-")); });

@@ -1,4 +1,4 @@
-// Creating a fresh session's worktree (src/worktree.ts `createWorktree`). The
+// Creating a fresh session's worktree (src/repositories/worktree/index.ts `createWorktree`). The
 // e2e suite does this against a fixture clone where origin/HEAD resolves and
 // the new branch never exists yet, so under measurement only the first `git
 // worktree add` ever ran. What it never sees: no remote HEAD to base on, the
@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWorktree, worktreePath, type GitRun } from "../src/worktree.ts";
+import { createWorktree, worktreePath, type GitRun } from "../src/repositories/worktree/index.ts";
 
 const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "agendo-wtc-"));
 

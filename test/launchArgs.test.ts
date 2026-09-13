@@ -1,11 +1,11 @@
-// `agendo launch`'s argv (src/cli/launchCmd.ts), one token at a time. The e2e
+// `agendo launch`'s argv (src/cli/commands/launch.ts), one token at a time. The e2e
 // suite launches real sessions with the flags a user would type; what it never
 // types is the rejected forms — a value on a switch, a flag where a value
 // should be, a bare --worktree followed by a path, a flag the agent does not
 // take — nor every spelling of the same flag side by side. Those are here,
 // with `process.exit` stubbed to throw so a refusal is an assertion.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { parseLaunchArgs } from "../src/cli/launchCmd.ts";
+import { parseLaunchArgs } from "../src/cli/commands/launch.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

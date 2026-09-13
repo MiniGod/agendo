@@ -6,7 +6,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import type { Mode } from "../src/ui/keys/context.ts";
 import { handleOpenKeys, openTargetOf } from "../src/ui/keys/open.ts";
-import { V } from "../src/ui/vocabState.ts";
+import { V } from "../src/ui/models/vocabState.ts";
 
 const NONE: Key = {
   upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, pageDown: false, pageUp: false,

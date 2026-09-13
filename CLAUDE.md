@@ -16,7 +16,7 @@ against fixture backends. It is the suite that catches behaviour, and it is
 blocking in CI.
 
 `bun run test` (bun's runner, `test/`) covers the pure helpers that e2e
-structurally cannot reach. The width and approval logic in `src/ui/format.ts` is
+structurally cannot reach. The width and approval logic in `src/ui/format/index.ts` is
 the standing example: every fixture value that reaches a table cell is ASCII, and
 ASCII is exactly the input class for which a correct and an incorrect cell
 measure agree. Three separate bugs there were found by review rather than by a
@@ -31,7 +31,7 @@ letting a green run imply coverage that does not exist.
 
 `test/gitrefsReach.test.ts` is the other thing `test/` is for: an ARCHITECTURAL
 invariant, walked rather than spot-checked. `e2e/cli.spec.ts` pins a proxy for it
-— a filename whitelist of who may import `src/gitrefs.ts` — and that proxy is one
+— a filename whitelist of who may import `src/repositories/gitRefs.ts` — and that proxy is one
 hop deep, so it both false-alarms on a type-only import and says nothing about
 what the whitelisted file is itself reachable from. The unit test walks the real
 import graph from the rescan roots. **When the two disagree, the unit test is the
@@ -55,7 +55,7 @@ became a facade or an entrypoint over a directory of its own parts. The budget i
 worst remaining file rather than at the round 500, for the reason above: slack
 in a cap is room every other file can grow into.
 
-**There is no headroom, and that is deliberate.** 453 is where `src/tmux/windows.ts`
+**There is no headroom, and that is deliberate.** 453 is where `src/runtime/tmux/windows.ts`
 already sits, so a new 460-line file fails lint on the day it lands. That is not
 the ratchet misfiring — it is the whole mechanism. The answer is to split the
 file, never to raise the number. If a genuinely irreducible file ever needs more,
@@ -92,7 +92,7 @@ pattern from a careless one. `react-hooks/exhaustive-deps` is the standing
 example: `src/ui/hooks/useAuthProbe.ts` and
 `src/ui/hooks/useActivityWatchers.ts` each have an effect keyed to a narrower
 dependency on purpose, and both carry a `-- <why>` saying so.
-`react/no-array-index-key` is the other: `src/ui/components.tsx` and
+`react/no-array-index-key` is the other: `src/ui/components/index.tsx` and
 `src/ui/screens/CloneScreen.tsx` render lists where the index genuinely IS the
 identity and the obvious alternative key is not unique. A single-line
 `// eslint-disable-line <rule> -- <why>` is the sanctioned way to say "I meant
@@ -223,7 +223,7 @@ the top of it. Locally the e2e suite wants `--workers 2`, same as always.
   1164 functions were still never entered — almost all of the codex and copilot
   activity readers among them, even though the e2e fixtures write a rollout and
   an `events.jsonl` for each: no spec ever expanded those rows. (They are unit
-  tested now, under `src/activity/`; the count is 121 of 1202.)
+  tested now, under `src/sessions/activity/`; the count is 121 of 1202.)
 - **Coverage is not perfectly deterministic.** Retried e2e attempts add
   coverage; timing-dependent branches (a poll that does or does not loop) can
   differ between runs. The gate compares the two-decimal value the table prints,

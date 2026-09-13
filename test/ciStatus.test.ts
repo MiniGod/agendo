@@ -1,11 +1,11 @@
-// A PR's CI status: the GitHub rollup fold (src/github/ci.ts) and the table
+// A PR's CI status: the GitHub rollup fold (src/providers/github/ci.ts) and the table
 // cell it renders as (src/ui/format/approvals.ts). The e2e suite's GitHub
 // fixture carries a handful of check runs, all completed; it never reaches a
 // commit status, a queued or running run, the failing conclusions, the
 // conflict short-circuit, or the expired cell's three faces.
 import { describe, expect, test } from "bun:test";
-import { rollupCI, verdictOf } from "../src/github/ci.ts";
-import type { PullRequest } from "../src/types.ts";
+import { rollupCI, verdictOf } from "../src/providers/github/ci.ts";
+import type { PullRequest } from "../src/shared/types.ts";
 import { ciCell } from "../src/ui/format/approvals.ts";
 
 const status = (state: string) => ({ __typename: "StatusContext", state });

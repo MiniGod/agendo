@@ -1,9 +1,9 @@
 import { Box, Text } from "ink";
 import { homedir } from "os";
 import { join } from "path";
-import { CaretText } from "../components.tsx";
-import { resolveParentInput } from "../../initRepo.ts";
-import { homeShort } from "../format.ts";
+import { CaretText } from "../components/index.tsx";
+import { resolveParentInput } from "../../repositories/init.ts";
+import { homeShort } from "../format/index.ts";
 
 /** The three screens of the new-local-repo flow (docs/new-local-repo.md). */
 

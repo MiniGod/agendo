@@ -1,13 +1,13 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import type { LoadedModel } from "../../model.ts";
-import type { OpenPlan } from "../../launch.ts";
-import type { ClaudeProfile, ProfileChoice } from "../../profiles.ts";
-import type { RepoInfo } from "../../repos.ts";
-import type { RepoUrl } from "../../clone.ts";
-import type { AgentSession, AgentSource, Identity, ProviderName, TeamMember } from "../../types.ts";
-import type { Activity } from "../format.ts";
-import type { FreshTarget, OpenTargets } from "../targets.ts";
-import type { PrSort, Row, SessionSort } from "../rows.ts";
+import type { LoadedModel } from "../../app/model/index.ts";
+import type { OpenPlan } from "../../launch/index.ts";
+import type { ClaudeProfile, ProfileChoice } from "../../sessions/profiles/index.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
+import type { RepoUrl } from "../../repositories/clone/index.ts";
+import type { AgentSession, AgentSource, Identity, ProviderName, TeamMember } from "../../shared/types.ts";
+import type { Activity } from "../format/index.ts";
+import type { FreshTarget, OpenTargets } from "../models/targets.ts";
+import type { PrSort, Row, SessionSort } from "../models/rows.ts";
 
 // ── top-level views & fresh-session flow state ────────────────────────────────
 export type View = "items" | "prs" | "sessions";

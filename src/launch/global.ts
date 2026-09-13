@@ -1,5 +1,5 @@
 // Launching the GLOBAL orchestrator — the session that coordinates the per-repo
-// orchestrators rather than any repository (see src/orchestratorGlobal.ts).
+// orchestrators rather than any repository (see src/orchestration/global.ts).
 //
 // It belongs to no repo, so — unlike `launchTask` — there is no worktree and no
 // branch, and its cwd is only a vantage point the caller picked
@@ -16,9 +16,9 @@ import {
   shortId,
   splitPaneIn,
   splitTargetWidth,
-} from "../tmux.ts";
-import { orchestratorRoles } from "../orchestrator.ts";
-import { SELF_CMD } from "../selfCmd.ts";
+} from "../runtime/tmux/index.ts";
+import { orchestratorRoles } from "../orchestration/index.ts";
+import { SELF_CMD } from "./selfCommand.ts";
 import { freshPanePlan, openTarget, type OpenPlan } from "./open.ts";
 import { launchManaged } from "./managed.ts";
 import type { LaunchResult } from "./task.ts";

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { LoadedModel } from "../../model.ts";
+import type { LoadedModel } from "../../app/model/index.ts";
 import {
   capturePane,
   capturePaneState,
@@ -11,9 +11,9 @@ import {
   paneShells,
   paneCompactionPercent,
   stripAnsi,
-} from "../../tmux.ts";
-import { paneResetAt, shouldAutoResume, shouldRevealDialog } from "../../usageLimit.ts";
-import type { PaneState } from "../format.ts";
+} from "../../runtime/tmux/index.ts";
+import { paneResetAt, shouldAutoResume, shouldRevealDialog } from "../../sessions/usageLimit/index.ts";
+import type { PaneState } from "../format/index.ts";
 
 // How often to re-read running sessions' panes for input readiness. Each tick
 // captures one pane per running session (cheap tmux calls), so keep it modest.

@@ -1,9 +1,9 @@
 import { open, readdir, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import { parseGithubRemote } from "../github.ts";
-import { codexUserText } from "../transcript.ts";
-import type { AgentSession } from "../types.ts";
+import { parseGithubRemote } from "../providers/github/index.ts";
+import { codexUserText } from "./transcript.ts";
+import type { AgentSession } from "../shared/types.ts";
 import { TranscriptCache } from "./cache.ts";
 import type { SessionProvider } from "./provider.ts";
 

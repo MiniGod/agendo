@@ -1,9 +1,9 @@
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
-import { parseGithubRemote } from "../github.ts";
-import { repoRootForCwd } from "../repos.ts";
+import { parseGithubRemote } from "../providers/github/index.ts";
+import { repoRootForCwd } from "../repositories/index.ts";
 import { basename } from "path";
-import type { AgentSession } from "../types.ts";
+import type { AgentSession } from "../shared/types.ts";
 
 // ── Repo scoping for forWorkItem ─────────────────────────────────────────────
 // The scope comparison must happen in ONE identity domain. The obvious-looking

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { countDirty, parseWorktreeList } from "../src/worktreeAdopt.ts";
+import { countDirty, parseWorktreeList } from "../src/repositories/worktree/adopt.ts";
 
 // The porcelain parsers behind adopting an existing worktree (`agendo launch
 // --worktree=<path>` / `--name <existing>`). The e2e suite drives the adopt

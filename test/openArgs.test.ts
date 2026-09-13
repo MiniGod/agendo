@@ -1,10 +1,10 @@
-// The argv of `open` (src/cli/openArgs.ts). The e2e suite opens a session's PR
+// The argv of `open` (src/cli/commands/openArgs.ts). The e2e suite opens a session's PR
 // and work item and prints the links; what it never does is name both
 // selectors, hand `open` a dashed token nobody knows, give it two ids, or
 // leave `--path` without a value. Those refusals are here, with `process.exit`
 // stubbed to throw so each one is an assertion.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { parseOpenArgs } from "../src/cli/openArgs.ts";
+import { parseOpenArgs } from "../src/cli/commands/openArgs.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

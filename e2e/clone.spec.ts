@@ -20,7 +20,7 @@ import {
   findMatchingCheckout,
   freeCloneDest,
   startClone,
-} from "../src/clone.ts";
+} from "../src/repositories/clone/index.ts";
 
 // Just the identity, for the cases where the remote isn't what's under test.
 const key = (url: string) => parseRepoUrl(url)?.key ?? null;

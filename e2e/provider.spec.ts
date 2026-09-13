@@ -13,7 +13,7 @@ import { test, expect } from "@playwright/test";
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { vocab } from "../src/vocab.ts";
+import { vocab } from "../src/ui/models/vocab.ts";
 import {
   detectProviders,
   resolveInitialProvider,
@@ -21,10 +21,10 @@ import {
   detectScopeProvider,
   PROVIDER_INFO,
   getProvider,
-} from "../src/provider.ts";
-import { parseGithubRemote, githubIssueUrl, githubPullRequestUrl } from "../src/github.ts";
-import { adoPullRequestUrl, adoWorkItemUrl } from "../src/ado.ts";
-import type { RepoInfo } from "../src/repos.ts";
+} from "../src/providers/index.ts";
+import { parseGithubRemote, githubIssueUrl, githubPullRequestUrl } from "../src/providers/github/index.ts";
+import { adoPullRequestUrl, adoWorkItemUrl } from "../src/providers/azureDevOps/index.ts";
+import type { RepoInfo } from "../src/repositories/index.ts";
 
 test.describe("vocab: per-backend UI terminology", () => {
   test("ADO speaks work-items / sprint / '!' PRs", () => {

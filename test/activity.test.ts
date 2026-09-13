@@ -8,11 +8,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadActivity } from "../src/activity.ts";
-import { codexAction, codexPlanToTasks, loadCodexActivity, parseCodexLog } from "../src/activity/codex.ts";
-import { ACTIVITY_LIMIT, finalizeActivity, shortPath } from "../src/activity/common.ts";
-import { copilotAction, loadCopilotActivity, parseCopilotEvents } from "../src/activity/copilot.ts";
-import type { ActionLine } from "../src/types.ts";
+import { loadActivity } from "../src/sessions/activity/index.ts";
+import { codexAction, codexPlanToTasks, loadCodexActivity, parseCodexLog } from "../src/sessions/activity/codex.ts";
+import { ACTIVITY_LIMIT, finalizeActivity, shortPath } from "../src/sessions/activity/common.ts";
+import { copilotAction, loadCopilotActivity, parseCopilotEvents } from "../src/sessions/activity/copilot.ts";
+import type { ActionLine } from "../src/shared/types.ts";
 
 const T0 = "2026-06-18T08:00:00.000Z";
 const at = (s: number) => new Date(Date.parse(T0) + s * 1000).toISOString();

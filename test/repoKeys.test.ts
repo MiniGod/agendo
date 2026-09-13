@@ -5,9 +5,9 @@
 // the updater, and never presses enter on an empty list.
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
-import type { RepoInfo } from "../src/repos.ts";
+import type { RepoInfo } from "../src/repositories/index.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
-import type { FreshTarget } from "../src/ui/targets.ts";
+import type { FreshTarget } from "../src/ui/models/targets.ts";
 import { CLONE_ROW, handleRepoKeys, INIT_ROW, nextRepoCursor, repoAction, repoOrder } from "../src/ui/keys/repo.ts";
 
 const NONE: Key = {

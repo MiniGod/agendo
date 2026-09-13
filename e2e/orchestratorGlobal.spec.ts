@@ -1,4 +1,4 @@
-// Unit-level coverage for the GLOBAL orchestrator prompt (src/orchestratorGlobal.ts).
+// Unit-level coverage for the GLOBAL orchestrator prompt (src/orchestration/global.ts).
 //
 // Same reasoning as orchestrator.spec.ts next door: the prompt IS the feature.
 // A global orchestrator differs from a repo one ONLY in what it was told, so a
@@ -10,8 +10,8 @@
 // is the whole reason the three-level model holds together, and it is the rule an
 // agent is most tempted to break when a worktree session is visibly stuck.
 import { test, expect } from "./harness/test.ts";
-import { globalOrchestratorSystemPrompt, systemPromptForRole } from "../src/orchestratorGlobal.ts";
-import { orchestratorSystemPrompt } from "../src/orchestrator.ts";
+import { globalOrchestratorSystemPrompt, systemPromptForRole } from "../src/orchestration/global.ts";
+import { orchestratorSystemPrompt } from "../src/orchestration/index.ts";
 
 // A distinctive stand-in for SELF_CMD — see the note in orchestrator.spec.ts.
 const SELF = "npx agendo@test";

@@ -54,8 +54,8 @@ jobs:
       # measure agree — so a green e2e run proves nothing about the width logic.
       # Same for torn-transcript recovery (the screen draws a recovered record
       # no differently from any other) and for the rule that the TUI's rescan
-      # timer must never pull in src/gitrefs.ts, which has no rendered output to
-      # assert on at all.
+      # timer must never pull in src/repositories/gitRefs.ts, which has no
+      # rendered output to assert on at all.
       - name: Unit tests
         run: bun run test
 

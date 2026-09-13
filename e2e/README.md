@@ -81,7 +81,7 @@ fixtures `mock` + `launch`):
 | Boundary | Real dependency | How it's mocked |
 | --- | --- | --- |
 | Sessions + config | `~/.claude*/projects`, `~/.copilot`, `~/.codex/sessions`, `~/.claude-launcher` | `HOME` → a fixture home tree (`fixtures.ts` → `materializeHome`). `os.homedir()` honors `$HOME`. |
-| Azure DevOps REST | `dev.azure.com`, `app.vssps.visualstudio.com` | A local mock HTTP server (`adoServer.ts`); the app points at it via the `ADO_BASE_URL` / `ADO_VSSPS_URL` env seams added to `src/ado.ts`. |
+| Azure DevOps REST | `dev.azure.com`, `app.vssps.visualstudio.com` | A local mock HTTP server (`adoServer.ts`); the app points at it via the `ADO_BASE_URL` / `ADO_VSSPS_URL` env seams added to `src/providers/azureDevOps/index.ts`. |
 | `az` token | `az account get-access-token` | Fake `az` shim returns a static token. |
 | `tmux` | the user's tmux server | Fake `tmux` shim — answers `list-*`/`has-session` from a JSON state file and logs every call; **starts nothing**. Live "running" state is just fixture data. |
 | `git worktree add` / `list` / `status` | real repos | Fake `git` shim — `worktree add` `mkdir`s the target path and records it in a JSON registry (`FAKE_GIT_STATE`, seeded via `mock.setGitState`); `worktree list --porcelain` and `status --porcelain` answer from that registry, so an adopt-an-existing-worktree test can stage a dirty tree, a drifted branch or a bare directory. Logs every call; never touches a repo. |

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { getProvider, PROVIDER_INFO } from "../../provider.ts";
+import { getProvider, PROVIDER_INFO } from "../../providers/index.ts";
 import type { Mode } from "../keys/context.ts";
-import type { ProviderName } from "../../types.ts";
+import type { ProviderName } from "../../shared/types.ts";
 
 /**
  * Per-backend auth status for the Settings page.

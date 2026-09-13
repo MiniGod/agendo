@@ -4,27 +4,27 @@
 // invocation is the interactive menu — which is exactly what index.tsx does
 // with it. Keeping the chain in one place keeps that contract checkable.
 
-import { RESUME_DIALOG_WAIT_MS, tmuxAvailable } from "../tmux.ts";
-import { llmGuide } from "../launch.ts";
-import { resolveContext } from "../context.ts";
-import { makeSessionScope } from "../scope.ts";
-import { parseDuration, runWaitCli } from "../wait.ts";
-import type { BranchSyncReader } from "../types.ts";
+import { RESUME_DIALOG_WAIT_MS, tmuxAvailable } from "../runtime/tmux/index.ts";
+import { llmGuide } from "../launch/index.ts";
+import { resolveContext } from "../app/context.ts";
+import { makeSessionScope } from "../app/scope.ts";
+import { parseDuration, runWaitCli } from "./wait/index.ts";
+import type { BranchSyncReader } from "../shared/types.ts";
 import { HELP } from "./help.ts";
 import { parseSessionArgs, requireDuration, requireValue } from "./args.ts";
-import { listRoute, parseRepoListArgs, parseResourceListArgs, parseSessionListArgs } from "./listArgs.ts";
-import { parseOpenArgs } from "./openArgs.ts";
-import { runStatus } from "./status.ts";
-import { runList } from "./list.ts";
-import { runLaunch } from "./launchCmd.ts";
-import { runOpen } from "./open.ts";
-import { runSend } from "./send.ts";
-import { runResume } from "./resume.ts";
-import { runClose } from "./close.ts";
-import { runUnblock } from "./unblock.ts";
-import { runListPrs } from "./listPrs.ts";
-import { runListIssues } from "./listIssues.ts";
-import { runListRepos } from "./listRepos.ts";
+import { listRoute, parseRepoListArgs, parseResourceListArgs, parseSessionListArgs } from "./list/args.ts";
+import { parseOpenArgs } from "./commands/openArgs.ts";
+import { runStatus } from "./commands/status.ts";
+import { runList } from "./list/index.ts";
+import { runLaunch } from "./commands/launch.ts";
+import { runOpen } from "./commands/open.ts";
+import { runSend } from "./commands/send.ts";
+import { runResume } from "./commands/resume.ts";
+import { runClose } from "./commands/close.ts";
+import { runUnblock } from "./commands/unblock.ts";
+import { runListPrs } from "./list/pullRequests.ts";
+import { runListIssues } from "./list/issues.ts";
+import { runListRepos } from "./list/repositories.ts";
 
 // `status <id>`: print a session's state + the same recent-activity summary the
 // menu shows, so an agent that launched a background session can poll it.

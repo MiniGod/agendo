@@ -1,6 +1,6 @@
 import type { Key } from "ink";
-import type { OpenTargets } from "../targets.ts";
-import { V } from "../vocabState.ts";
+import type { OpenTargets } from "../models/targets.ts";
+import { V } from "../models/vocabState.ts";
 import type { KeyContext } from "./context.ts";
 
 type Ctx = Pick<KeyContext, "mode" | "setMode" | "openInBrowser" | "exit">;

@@ -1,4 +1,4 @@
-// The reset time in a usage-limit notice (src/usageLimit.ts `parseResetTime`).
+// The reset time in a usage-limit notice (src/sessions/usageLimit/index.ts `parseResetTime`).
 // The e2e suite's spec cases for this function run in-process under Playwright,
 // which the instrumented bun never sees, and the fixture panes it drives the
 // TUI and CLI with all say a same-day "2:10pm": under measurement only that
@@ -8,8 +8,8 @@
 // standing by the lookback. Expectations are built with the same local-time
 // constructor the parser uses, so they hold in any zone the test runs in.
 import { describe, expect, test } from "bun:test";
-import { BARE_TIME_LOOKBACK_MS, parseResetTime } from "../src/usageLimit.ts";
-import { envLocale } from "../src/usageLimit/locale.ts";
+import { BARE_TIME_LOOKBACK_MS, parseResetTime } from "../src/sessions/usageLimit/index.ts";
+import { envLocale } from "../src/sessions/usageLimit/locale.ts";
 
 /** Wed Sep 2 2026, 10:00 local. */
 const now = new Date(2026, 8, 2, 10, 0);

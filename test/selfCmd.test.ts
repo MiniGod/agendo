@@ -1,11 +1,11 @@
-// How agendo names itself (src/selfCmd.ts). `SELF_CMD` is decided once, at
+// How agendo names itself (src/launch/selfCommand.ts). `SELF_CMD` is decided once, at
 // module load, from the real environment, so any one process — the e2e
 // suite's included — runs exactly one arm of the derivation. Here the inputs
 // are explicit, so every arm sits beside the one next to it: a bunx cache with
 // its spec, an npx cache with none, an inherited spec that must not be
 // adopted, a global install on PATH, and the plain argv fallback.
 import { describe, expect, test } from "bun:test";
-import { deriveSelfCmd, runnerCacheArgv, runnerName, runnerSpec, type SelfCmdInputs } from "../src/selfCmd.ts";
+import { deriveSelfCmd, runnerCacheArgv, runnerName, runnerSpec, type SelfCmdInputs } from "../src/launch/selfCommand.ts";
 
 const inputs = (over: Partial<SelfCmdInputs>): SelfCmdInputs => ({
   argv0: "/usr/bin/bun",
