@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import type { AgentSession } from "../types.ts";
+import type { AgentSession } from "../shared/types.ts";
 import type { SessionProvider } from "./provider.ts";
 
 const COPILOT_STATE = join(homedir(), ".copilot", "session-state");

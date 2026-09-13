@@ -1,8 +1,8 @@
 // Pull-request approval and CI state, as the reader sees it: the glyphs, the
 // "met / not met" reading of a review count, and the two cells the PR table
 // puts them in.
-import type { PullRequest } from "../../types.ts";
-import { V } from "../vocabState.ts";
+import type { PullRequest } from "../../shared/types.ts";
+import { V } from "../models/vocabState.ts";
 import type { Cell } from "./columns.ts";
 
 const CI_GLYPH: Record<PullRequest["ci"], string> = {
@@ -16,7 +16,7 @@ const CI_GLYPH: Record<PullRequest["ci"], string> = {
 };
 
 // The three approval fields, as every renderer needs them. Structural rather
-// than `PullRequest` because the `list pr` row model (src/cli/listPrs.ts)
+// than `PullRequest` because the `list pr` row model (src/cli/list/pullRequests.ts)
 // carries the same three and has to print the same figure — a JSON row spells
 // "unknown" as `null` where a `PullRequest` leaves it `undefined`, so both
 // spellings are accepted and neither is `false`.
@@ -28,7 +28,7 @@ export interface ApprovalCounts {
 
 // Whether the review gate is satisfied — the one question both PR renderings
 // answer with colour. A provider that states its own verdict wins: GitHub's
-// `requiredCount` is a floor rather than a count (src/github.ts voteSummary),
+// `requiredCount` is a floor rather than a count (src/providers/github/index.ts voteSummary),
 // so `approvedCount >= requiredCount` is not evidence of anything there.
 function approvalsMet(pr: ApprovalCounts): boolean {
   if (pr.gateMet != null) return pr.gateMet;
@@ -44,7 +44,7 @@ function approvalsMet(pr: ApprovalCounts): boolean {
 //
 // The column's version was the wrong one. `requiredCount` is 0 when the gate is
 // UNKNOWN, not when it is zero: ADO leaves it 0 when a PR names no required
-// reviewers and no minimum-reviewers policy was found (src/ado.ts voteSummary +
+// reviewers and no minimum-reviewers policy was found (src/providers/azureDevOps/index.ts voteSummary +
 // the enrichment pass), and GitHub leaves it 0 whenever `reviewDecision` is
 // absent — which is every PR in a repo without branch protection, approvals or
 // not. So "2/0" prints "2 of 0 required", a claim the data never makes, for the

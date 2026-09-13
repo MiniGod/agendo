@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef } from "react";
-import { loadActivity } from "../../sessions.ts";
-import { sameActivity } from "../equality.ts";
-import type { Activity } from "../format.ts";
-import { sessionId, type Row } from "../rows.ts";
-import type { AgentSession } from "../../types.ts";
+import { loadActivity } from "../../sessions/index.ts";
+import { sameActivity } from "../models/equality.ts";
+import type { Activity } from "../format/index.ts";
+import { sessionId, type Row } from "../models/rows.ts";
+import type { AgentSession } from "../../shared/types.ts";
 
 const POLL_MS = 1000;
 

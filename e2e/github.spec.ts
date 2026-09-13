@@ -106,7 +106,7 @@ test("GitHub identity + settings reflect the authenticated gh user", async ({ la
 // each have an issue #16. The items view keyed rows (and the expand state) by
 // the bare number, so the two rows collided — React printed "Encountered two
 // children with the same key, `i16`" above the UI, and expanding one #16
-// expanded both. Keys are now scoped by repo (itemKey/prKey in src/model.ts).
+// expanded both. Keys are now scoped by repo (itemKey/prKey in src/app/model/index.ts).
 test("issues sharing a number across repos: no duplicate React keys, independent rows", async ({ launch, mock }) => {
   await mock.setProvider("github");
   const issue = (slug: string, title: string) => ({

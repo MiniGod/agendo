@@ -1,6 +1,6 @@
 import type { Key } from "ink";
-import { freeWorktreeBranch } from "../../worktree.ts";
-import { ORCHESTRATOR_SLUG } from "../../orchestrator.ts";
+import { freeWorktreeBranch } from "../../repositories/worktree/index.ts";
+import { ORCHESTRATOR_SLUG } from "../../orchestration/index.ts";
 import type { KeyContext, Mode } from "./context.ts";
 import { listStep } from "./nav.ts";
 

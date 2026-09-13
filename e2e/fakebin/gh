@@ -8,7 +8,7 @@
 // ── UNRECOGNISED INPUT FAILS, AND THAT IS THE POINT ──────────────────────────
 // This file used to end with a bare `process.exit(0)` for anything it did not
 // implement. That is the most dangerous shape a fake can have, because it is
-// indistinguishable from success: `gh()` in src/github.ts resolves empty stdout
+// indistinguishable from success: `gh()` in src/providers/github/index.ts resolves empty stdout
 // to `null` rather than throwing, so an unimplemented call returned "no data"
 // and the backend carried on. A GraphQL query the fake had never seen would
 // have left the whole suite green while the code under test received nothing.
@@ -22,7 +22,7 @@
 // the original bug moved down one level rather than fixed.
 //
 // LIMIT, stated because a green suite must not imply more than it proves:
-// `ghSafe()` (src/github.ts) catches every rejection and returns `[]`, and the
+// `ghSafe()` (src/providers/github/index.ts) catches every rejection and returns `[]`, and the
 // `issue list` / `pr list` calls all go through it. For those, a rejection here
 // still reaches the app as "succeeded, nothing there" — the strictness is
 // visible to the TEST (which can assert on the call log and on stderr) but not
@@ -68,7 +68,7 @@
 // FAKE_GH_STATE: each call takes a ticket by `mkdir`ing `<op>.<n>` for the
 // lowest n that does not exist yet. `mkdir` both claims and reports in ONE
 // syscall — it either creates the directory or fails with EEXIST — so the index
-// a process gets is its own. That matters because src/github.ts fans out with
+// a process gets is its own. That matters because src/providers/github/index.ts fans out with
 // `Promise.all`, so the same operation can genuinely be in flight twice at once,
 // and anything that increments and then reads back (a shared JSON counter, or an
 // atomic append followed by a `stat`) hands both callers the same index: the
@@ -95,7 +95,7 @@ function state() {
 // exactly what a spawned `gh` gets. `process.exit()` does not drain it, so a
 // body larger than what the reader has already taken is TRUNCATED — silently,
 // and only for large payloads, which is the worst possible size dependence:
-// `JSON.parse` in src/github.ts throws on the fragment, `ghSafe` swallows the
+// `JSON.parse` in src/providers/github/index.ts throws on the fragment, `ghSafe` swallows the
 // throw, and the app sees `[]`. That is the silent-empty failure this whole file
 // exists to remove, reintroduced by payload size. A GraphQL page of 100 project
 // items is well past the threshold (measured: 8192 bytes delivered, whatever the
@@ -141,7 +141,7 @@ const VALUE_FLAGS = new Set([
 const ALLOWED_FLAGS = {
   "api graphql": new Set(["-f", "-F", "--field", "--raw-field", "-H", "--header", "--hostname"]),
   "api user": new Set(["-H", "--header", "--hostname"]),
-  // No `--search` here on purpose: src/github.ts never passes one to `issue
+  // No `--search` here on purpose: src/providers/github/index.ts never passes one to `issue
   // list`, and whitelisting a flag the fake does not READ is how a fixture ends
   // up silently ignored. Adding it means adding its bucketing at the same time.
   "issue list": new Set(["--repo", "--author", "--state", "--json", "--limit"]),

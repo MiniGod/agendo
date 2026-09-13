@@ -20,7 +20,7 @@
   // `src/**` block below is the real budget, set at the worst value anywhere in
   // src/ that the exemption blocks do not already cover. The files this refactor
   // effort is dismantling carried named, temporary exemptions, and each shrank or
-  // disappeared as its PR landed. `src/tmux.ts` was the first to go; `src/index.tsx`
+  // disappeared as its PR landed. `src/runtime/tmux/index.ts` was the first to go; `src/index.tsx`
   // was the last, and with it every whole-file exemption in this config. What is
   // left below are one per-FUNCTION block (src/ui/App.tsx) and one max-params
   // block — no file in src/ is exempt from
@@ -75,7 +75,7 @@
     //
     //   exhaustive-deps    src/ui/hooks/useAuthProbe.ts        probe-on-open
     //   exhaustive-deps    src/ui/hooks/useActivityWatchers.ts id-set digest
-    //   no-array-index-key src/ui/components.tsx               column layout
+    //   no-array-index-key src/ui/components/index.tsx               column layout
     //   no-array-index-key src/ui/screens/CloneScreen.tsx      error lines
     //
     // The two index-key ones are deliberate: in both the index IS the identity
@@ -101,7 +101,7 @@
       // block below FOR THAT RULE, named with the file and function that sets it.
       // The per-rule part is the whole point: an exemption block replaces only the
       // rules it names and lets every other rule fall through to this budget. The
-      // standing illustrations were src/tmux.ts (which named only max-lines and
+      // standing illustrations were src/runtime/tmux/index.ts (which named only max-lines and
       // answered to every other size rule) and src/index.tsx (which named all four).
       // Both are now facades or directories, and neither has a block any more.
       // Verified against the installed oxlint rather than assumed from eslint's
@@ -112,7 +112,7 @@
       "rules": {
         // DROPPED 515 -> 486. model.ts set this and is now 230: the shapes, the
         // live-tmux read and the repo-scope filters are separate modules under
-        // src/model/.
+        // src/app/model/.
         //
         // This is the end of the run that started at 1036. NOTHING in src/ is over
         // 500 lines any more — src/index.tsx, the last one, is now 109 — and the
@@ -120,55 +120,55 @@
         // at the round number, because a cap with slack in it is a cap every
         // other file can grow into.
         //
-        // DROPPED 486 -> 461. src/activity.ts set 486 and is now a 31-line
-        // dispatch over src/activity/ (one reader per agent, the largest 217).
+        // DROPPED 486 -> 461. src/sessions/activity/index.ts set 486 and is now a 31-line
+        // dispatch over src/sessions/activity/ (one reader per agent, the largest 217).
         //
-        // LOWERED 461 -> 453. src/github.ts set 461; its CI rollup is now
-        // src/github/ci.ts and the file is 431. The holder is src/tmux/windows.ts.
-        "max-lines": ["error", { "max": 453, "skipBlankLines": false, "skipComments": false }], // src/tmux/windows.ts
+        // LOWERED 461 -> 453. src/providers/github/index.ts set 461; its CI rollup is now
+        // src/providers/github/ci.ts and the file is 431. The holder is src/runtime/tmux/windows.ts.
+        "max-lines": ["error", { "max": 453, "skipBlankLines": false, "skipComments": false }], // src/runtime/tmux/windows.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
-        // It is now four functions in src/cli/status.ts, the largest well under
-        // this cap. LOWERED 198 -> 197: src/cli/send.ts `runSend` set 198 and is
+        // It is now four functions in src/cli/commands/status.ts, the largest well under
+        // this cap. LOWERED 198 -> 197: src/cli/commands/send.ts `runSend` set 198 and is
         // now a ten-line dispatch, the longest step under it 40 lines. LOWERED
-        // 197 -> 195: src/cli/list.ts `runList` set 197 and is now load, select,
+        // 197 -> 195: src/cli/list/index.ts `runList` set 197 and is now load, select,
         // sort, map, print, each step named, `runList` itself 38 lines. The
-        // holder is src/model.ts `loadModel`.
-        "max-lines-per-function": ["error", { "max": 195, "skipBlankLines": false, "skipComments": false }], // src/model.ts loadModel
-        // Was also src/wait.ts at 34; `runWait` is now complexity 3. So were
-        // `claudeAction` and `loadCodexActivity` in src/activity.ts; both are now
-        // walks over small per-record handlers under src/activity/, the worst of
-        // them 7. That leaves 34 a tie between src/ui/components.tsx `SessionRow`
-        // and src/cli/launchCmd.ts `parseLaunchArgs`.
-        // LOWERED 34 -> 33. src/ui/components.tsx `SessionRow` set 34; what the
-        // row says is now decided in src/ui/sessionRow.ts, the component paints
+        // holder is src/app/model/index.ts `loadModel`.
+        "max-lines-per-function": ["error", { "max": 195, "skipBlankLines": false, "skipComments": false }], // src/app/model/index.ts loadModel
+        // Was also src/cli/wait/index.ts at 34; `runWait` is now complexity 3. So were
+        // `claudeAction` and `loadCodexActivity` in src/sessions/activity/index.ts; both are now
+        // walks over small per-record handlers under src/sessions/activity/, the worst of
+        // them 7. That leaves 34 a tie between src/ui/components/index.tsx `SessionRow`
+        // and src/cli/commands/launch.ts `parseLaunchArgs`.
+        // LOWERED 34 -> 33. src/ui/components/index.tsx `SessionRow` set 34; what the
+        // row says is now decided in src/ui/models/sessionRow.ts, the component paints
         // it, and the worst of the two is 6. The holder is src/cli/dispatch.ts
-        // `listCommand`, with src/cli/status.ts `runStatus` and src/cli/list.ts
+        // `listCommand`, with src/cli/commands/status.ts `runStatus` and src/cli/list/index.ts
         // `runList` at 32 behind it.
         // LOWERED 33 -> 32. `listCommand` set 33; each listing now parses its
-        // own argv in src/cli/listArgs.ts and dispatch.ts only routes, the worst
-        // of it 7. The holders were src/cli/status.ts `runStatus` and
-        // src/cli/list.ts `runList`, tied at 32; `runList` is now 10, so
+        // own argv in src/cli/list/args.ts and dispatch.ts only routes, the worst
+        // of it 7. The holders were src/cli/commands/status.ts `runStatus` and
+        // src/cli/list/index.ts `runList`, tied at 32; `runList` is now 10, so
         // `runStatus` holds it alone.
         // LOWERED 32 -> 31. `runStatus` set 32 and is now the same report with
         // each part named, the worst of them 7. The holder is
-        // src/cli/launchCmd.ts `parseLaunchArgs`.
+        // src/cli/commands/launch.ts `parseLaunchArgs`.
         // LOWERED 31 -> 29. `parseLaunchArgs` set 31 and now walks its argv one
-        // token at a time, the worst of it 7. The holders are src/workflows.ts
-        // `record` and src/tmux/inputBox.ts `inputRealText`, tied at 29;
+        // token at a time, the worst of it 7. The holders are src/orchestration/workflows.ts
+        // `record` and src/runtime/tmux/inputBox.ts `inputRealText`, tied at 29;
         // `record` is now 4, so `inputRealText` holds it alone.
-        "complexity": ["error", 29], // src/tmux/inputBox.ts inputRealText
+        "complexity": ["error", 29], // src/runtime/tmux/inputBox.ts inputRealText
         // DROPPED 61 -> 56. Still `handleListViewKeys`, but the sessions view's
         // three session-starting keys (`n`, `O` and the new `G`) moved out into
         // `handleSessionStartKeys`; adding the global orchestrator's key inline
         // would have pushed it the other way.
         "max-statements": ["error", 56], // src/ui/keys/list.ts handleListViewKeys
-        "max-params": ["error", 6], // src/usageLimit.ts
+        "max-params": ["error", 6], // src/sessions/usageLimit/index.ts
         // DROPPED 6 -> 5. `loadClaudeActivity` set 6 and is now a walk over
         // per-record handlers two levels deep at most; 5 was a four-way tie, and
         // is a three-way one since src/ui/hooks/useReadinessPoll.ts's poll became
         // a loop over samplePane.
-        "max-depth": ["error", 5], // src/workflows.ts, src/tmux/inputBox.ts, src/ui/hooks/useModelLoader.ts
-        "max-nested-callbacks": ["error", 4] // src/sessions.ts:212
+        "max-depth": ["error", 5], // src/orchestration/workflows.ts, src/runtime/tmux/inputBox.ts, src/ui/hooks/useModelLoader.ts
+        "max-nested-callbacks": ["error", 4] // src/sessions/index.ts:212
       }
     },
 
@@ -185,8 +185,8 @@
         //
         // `App` itself: the mode screens are in src/ui/screens/, the key handlers
         // in src/ui/keys/, ten hooks in src/ui/hooks/, and the action closures in
-        // src/ui/cloneActions.ts, src/ui/convertAgent.ts, src/ui/sessionFlow.ts
-        // and src/ui/profileActions.ts. The render itself is now two modules:
+        // src/ui/actions/clone.ts, src/ui/actions/convertAgent.ts, src/ui/actions/sessionFlow.ts
+        // and src/ui/actions/profile.ts. The render itself is now two modules:
         // src/ui/screens/ModeScreens.tsx (every overlay) and
         // src/ui/screens/ListScreen.tsx (the list). What is left in `App` is the
         // state, the hook calls and the wiring between them — which is why the
@@ -198,7 +198,7 @@
         // hook's call, so effect order is unchanged), which paid for wiring the
         // new-local-repo actions in and left a little over.
         // LOWERED 390 -> 365: the provider switch moved to
-        // src/ui/providerActions.ts (same factory shape as the clone and
+        // src/ui/actions/provider.ts (same factory shape as the clone and
         // profile actions), leaving one wiring call where the closure sat.
         "max-lines-per-function": ["error", { "max": 365, "skipBlankLines": false, "skipComments": false }],
         "max-statements": ["error", 68]
@@ -210,14 +210,14 @@
     },
 
     {
-      // ── temporary exemption: src/ui/rows.ts ──────────────────────────────
+      // ── temporary exemption: src/ui/models/rows.ts ──────────────────────────────
       // The row builders take long positional argument lists — pushSession and
       // pushPrsByRepo both sit at 10. They came out of App.tsx unchanged; the
       // signatures are a separate cleanup from the extraction that moved them.
       // One named block here, deliberately, rather than six disable comments
       // scattered through the file: a threshold you can see is a threshold you
       // can ratchet.
-      "files": ["src/ui/rows.ts"],
+      "files": ["src/ui/models/rows.ts"],
       "rules": {
         "max-params": ["error", 10]
       }
@@ -228,11 +228,11 @@
       // This is a terminal tool: matching ESC/CSI/control bytes in pane output
       // is the actual job. Scoped to the files that genuinely do it, so a stray
       // control byte in an unrelated regex still gets caught.
-      // Narrowed from `src/tmux.ts` when it was split: of the twelve modules the
+      // Narrowed from `src/runtime/tmux/index.ts` when it was split: of the twelve modules the
       // file became, exactly two match control bytes, so the other ten are now
       // covered by the rule again rather than riding on their old neighbour's
       // exemption.
-      "files": ["src/tmux/pane.ts", "src/tmux/inputBox.ts", "src/ui/keys/clone.ts", "e2e/detection.spec.ts"],
+      "files": ["src/runtime/tmux/pane.ts", "src/runtime/tmux/inputBox.ts", "src/ui/keys/clone.ts", "e2e/detection.spec.ts"],
       "rules": {
         "no-control-regex": "off"
       }

@@ -5,7 +5,7 @@
 // orchestrator, and never with the clone row withheld.
 import { describe, expect, test } from "bun:test";
 import { noCheckoutNote, repoHeading, repoHint } from "../src/ui/screens/RepoScreen.tsx";
-import type { FreshTarget } from "../src/ui/targets.ts";
+import type { FreshTarget } from "../src/ui/models/targets.ts";
 
 const free: FreshTarget = { tmuxName: "t", title: "t", kind: "free", defaultBranch: "main", orchestrator: false };
 const orch: FreshTarget = { ...free, orchestrator: true };

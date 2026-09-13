@@ -1,11 +1,11 @@
-// `agendo open` (src/cli/open.ts): which link to open, and the refusals. The
+// `agendo open` (src/cli/commands/open.ts): which link to open, and the refusals. The
 // e2e suite opens a fixture session's PR through the real command; what it
 // never asks for is the entity the session does not have, a session with an
 // item and no PR, or a backend that could not be asked. Those are here, with
 // `process.exit` stubbed to throw so a refusal is an assertion.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chooseTarget, linksToOpen, refuseMissing } from "../src/cli/open.ts";
-import { linkVocab } from "../src/output.ts";
+import { chooseTarget, linksToOpen, refuseMissing } from "../src/cli/commands/open.ts";
+import { linkVocab } from "../src/cli/output.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

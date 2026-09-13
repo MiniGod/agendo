@@ -5,10 +5,10 @@
 // roster or a cursor past the end of one.
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
-import type { LoadedModel } from "../src/model.ts";
+import type { LoadedModel } from "../src/app/model/index.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
 import { handleIdentityKeys, identityBack, pickIdentity, stepIdentity } from "../src/ui/keys/identity.ts";
-import type { Identity } from "../src/types.ts";
+import type { Identity } from "../src/shared/types.ts";
 
 const NONE: Key = {
   upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, pageDown: false, pageUp: false,

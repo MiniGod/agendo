@@ -6,7 +6,7 @@
 // between reloads, never re-parses after a missed reset line, and never
 // compares two snapshots that differ only in the compaction percent.
 import { describe, expect, test } from "bun:test";
-import type { PaneState } from "../src/ui/format.ts";
+import type { PaneState } from "../src/ui/format/index.ts";
 import { forgetLimit, frozenResetAt, type LimitBooks, pruneVanished, samePanes } from "../src/ui/hooks/useReadinessPoll.ts";
 
 const books = (init: Partial<LimitBooks> = {}): LimitBooks => ({

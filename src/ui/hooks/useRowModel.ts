@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { filterModelByRepos, type LoadedModel } from "../../model.ts";
-import type { TeamMember } from "../../types.ts";
-import type { Activity } from "../format.ts";
+import { filterModelByRepos, type LoadedModel } from "../../app/model/index.ts";
+import type { TeamMember } from "../../shared/types.ts";
+import type { Activity } from "../format/index.ts";
 import {
   buildItemsRows,
   buildPrsRows,
@@ -9,7 +9,7 @@ import {
   SELECTABLE,
   type PrSort,
   type SessionSort,
-} from "../rows.ts";
+} from "../models/rows.ts";
 import type { View } from "../keys/context.ts";
 
 /**

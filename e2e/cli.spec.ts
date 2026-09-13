@@ -8,11 +8,11 @@ import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { stripAnsi, exactTarget, windowTarget } from "../src/tmux.ts";
+import { stripAnsi, exactTarget, windowTarget } from "../src/runtime/tmux/index.ts";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
 import { BUSY_PANE, SUBAGENT_PANE, CODEX_SESSION_ID, COMPACTING_PANE, COPILOT_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, tmuxState, sessionName } from "./harness/fixtures.ts";
-import { stripAnsi as stripAnsiText } from "../src/tmux.ts";
+import { stripAnsi as stripAnsiText } from "../src/runtime/tmux/index.ts";
 
 // The tmux target agendo addresses the fixture's running pane by (#39). The
 // fixture session is a tmux SESSION of its own (an agent launched outside tmux),
@@ -1694,10 +1694,10 @@ test("the rescan path never reaches the git-ref reader at all", async ({ mock })
   // timer across the whole session corpus, which is the CPU regression the parse
   // cache exists to prevent. A static import check is what actually pins that.
   //
-  // Checked in the REVERSE direction — "who imports gitrefs" rather than "does
-  // sessions.ts mention it". Whitelisting the importers is the only form of this
-  // that holds: spot-checking sessions.ts/model.ts passes happily while the
-  // reader sits one hop away in repos.ts or restore.ts, which those two DO import,
+  // Checked in the REVERSE direction — "who imports gitRefs" rather than "does
+  // sessions/index.ts mention it". Whitelisting the importers is the only form of this
+  // that holds: spot-checking sessions/index.ts and app/model/index.ts passes happily while the
+  // reader sits one hop away in repositories/index.ts or runtime/restore/index.ts, which those two DO import,
   // putting it back on the 2s timer with the guard still green.
   const ALLOWED = new Set(["index.tsx"]);
   const srcDir = join(REPO_ROOT, "src");
@@ -1705,12 +1705,12 @@ test("the rescan path never reaches the git-ref reader at all", async ({ mock })
   for (const rel of await readdir(srcDir, { recursive: true })) {
     if (!/\.tsx?$/.test(rel)) continue;
     const src = await readFile(join(srcDir, rel), "utf-8");
-    if (/from\s+"[^"]*gitrefs\.ts"/.test(src)) importers.push(rel);
+    if (/from\s+"[^"]*gitRefs\.ts"/.test(src)) importers.push(rel);
   }
   expect(importers.length).toBeGreaterThan(0); // the reader is wired up at all
   expect(
     importers.filter((f) => !ALLOWED.has(f)),
-    "only the one-shot CLI entrypoint may import src/gitrefs.ts — anything reachable from the rescan timer puts per-session ref reads back on it",
+    "only the one-shot CLI entrypoint may import src/repositories/gitRefs.ts — anything reachable from the rescan timer puts per-session ref reads back on it",
   ).toEqual([]);
 });
 
@@ -1778,7 +1778,7 @@ test("a session outside any repo stays silent, even when $HOME itself is a check
   // chezmoi / yadm / a bare dotfiles repo all make $HOME a checkout, and then an
   // unbounded walk-up resolves EVERY cwd that isn't in a repo to $HOME. The
   // answer wouldn't be "unknown", it would be a confident line about the user's
-  // dotfiles — reported as this session's unpushed work. repos.ts stops at $HOME
+  // dotfiles — reported as this session's unpushed work. repositories/index.ts stops at $HOME
   // for the same reason; the ref reader has to as well.
   await mkdir(join(mock.home, ".git", "refs", "heads"), { recursive: true });
   await writeFile(join(mock.home, ".git", "HEAD"), "ref: refs/heads/dotfiles\n");
@@ -4174,7 +4174,7 @@ test("agendo open on an unknown id / with no id fails cleanly", async ({ mock })
   // No id → one actionable usage line. The program prefix is SELF_CMD, which
   // deliberately adapts to how agendo was invoked (the bare name when it's
   // installed on PATH, `bunx`/`npx agendo` under a package runner, else the
-  // literal argv — see src/launch.ts), so pinning a literal "agendo" here only
+  // literal argv — see src/launch/index.ts), so pinning a literal "agendo" here only
   // holds on machines that happen to have it installed. What IS the contract:
   // a single `usage:` line, behind a genuinely re-invokable prefix, naming the
   // subcommand form and every flag it takes.

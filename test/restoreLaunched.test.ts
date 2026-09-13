@@ -1,12 +1,12 @@
-// Recording a just-launched session as a restore tab (src/restore.ts). The e2e
+// Recording a just-launched session as a restore tab (src/runtime/restore/index.ts). The e2e
 // suite launches through the real CLI, but its launched windows never land in
 // the launcher's own tmux session, so the function always returned at its
 // first line there. The rest is here, on a host of maps: the tab's shape, the
 // title squashed and falling back to the canonical name, the dedup by that
 // name, and the no-op for a window that is not the launcher's.
 import { describe, expect, test } from "bun:test";
-import { launchedTab, recordLaunchedSession, type RestoreHost } from "../src/restore.ts";
-import type { RestoreTab } from "../src/restore/store.ts";
+import { launchedTab, recordLaunchedSession, type RestoreHost } from "../src/runtime/restore/index.ts";
+import type { RestoreTab } from "../src/runtime/restore/store.ts";
 
 const id = "abcdef12-3456-7890-abcd-ef1234567890";
 

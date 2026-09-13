@@ -4,8 +4,8 @@
 // Its own module purely so `sessions.ts` can import the three providers without
 // them having to import `sessions.ts` back for the interface — which would be a
 // cycle, and `import/no-cycle` is an error here.
-import type { AgentSession, AgentSource } from "../types.ts";
-import { dedupeProfiles, discoverProfiles } from "../profiles.ts";
+import type { AgentSession, AgentSource } from "../shared/types.ts";
+import { dedupeProfiles, discoverProfiles } from "./profiles/index.ts";
 
 // Claude config dirs to scan. The user may run multiple subscriptions/profiles,
 // each with its own ~/.claude* dir (e.g. ~/.claude and ~/.claude-work); we

@@ -8,12 +8,12 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Key } from "ink";
-import { ORCHESTRATOR_SLUG } from "../src/orchestrator.ts";
-import type { RepoInfo } from "../src/repos.ts";
+import { ORCHESTRATOR_SLUG } from "../src/orchestration/index.ts";
+import type { RepoInfo } from "../src/repositories/index.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
 import { branchPrompt, branchSeed, chooseWorktree, handleWtchoiceKeys } from "../src/ui/keys/wtchoice.ts";
-import type { FreshTarget } from "../src/ui/targets.ts";
-import { worktreePath } from "../src/worktree.ts";
+import type { FreshTarget } from "../src/ui/models/targets.ts";
+import { worktreePath } from "../src/repositories/worktree/index.ts";
 
 const NONE: Key = {
   upArrow: false, downArrow: false, leftArrow: false, rightArrow: false, pageDown: false, pageUp: false,

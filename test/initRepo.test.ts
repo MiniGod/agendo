@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inspectInitDest, rankParentDirs, repoNameError, resolveParentInput } from "../src/initRepo.ts";
+import { inspectInitDest, rankParentDirs, repoNameError, resolveParentInput } from "../src/repositories/init.ts";
 
 // The pure half of the new-local-repo flow (docs/new-local-repo.md). The e2e
 // suite drives the screens, but every fixture repo it has lives in ONE parent

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 //
-// The entrypoint, and the only module in src/ allowed to import src/gitrefs.ts.
+// The entrypoint, and the only module in src/ allowed to import src/repositories/gitRefs.ts.
 //
 // Reading a checkout's refs is cheap once and ruinous on the TUI's 2s rescan
 // timer, so the reader stays pinned to the one-shot CLI path: `branchSync` is
@@ -8,11 +8,11 @@
 // imported by them. e2e/cli.spec.ts whitelists the importers by filename;
 // test/gitrefsReach.test.ts pins the invariant that whitelist stands for.
 import { spawnSync } from "child_process";
-import { enterLauncherSession, sessionRoot } from "./tmux.ts";
-import { withSelfCmdEnv } from "./launch.ts";
-import { restoreTabs } from "./restore.ts";
-import { branchSync } from "./gitrefs.ts";
-import { resolveContext } from "./context.ts";
+import { enterLauncherSession, sessionRoot } from "./runtime/tmux/index.ts";
+import { withSelfCmdEnv } from "./launch/index.ts";
+import { restoreTabs } from "./runtime/restore/index.ts";
+import { branchSync } from "./repositories/gitRefs.ts";
+import { resolveContext } from "./app/context.ts";
 import { runSubcommand } from "./cli/dispatch.ts";
 import { runMenu } from "./cli/menu.tsx";
 

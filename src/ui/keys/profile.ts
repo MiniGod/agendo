@@ -1,5 +1,5 @@
 import type { Key } from "ink";
-import type { ProfileChoice } from "../../profiles.ts";
+import type { ProfileChoice } from "../../sessions/profiles/index.ts";
 import type { KeyContext, Mode } from "./context.ts";
 import { listStep } from "./nav.ts";
 

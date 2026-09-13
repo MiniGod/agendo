@@ -1,23 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Text, useApp, useInput } from "ink";
-import { type LoadedModel } from "../model.ts";
-import { loadActivity } from "../sessions.ts";
-import { type OpenPlan } from "../launch.ts";
-import { loadState, saveState } from "../config.ts";
-import { discoverGitReposUnder, type RepoInfo } from "../repos.ts";
-import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../provider.ts";
-import { type Activity } from "./format.ts";
-import { makeCloneActions } from "./cloneActions.ts";
-import { makeInitActions } from "./initActions.ts";
-import { makeSessionFlow } from "./sessionFlow.ts";
-import { makeProfileActions } from "./profileActions.ts";
-import { makeProviderActions } from "./providerActions.ts";
-import { makeContinueInOtherAgent } from "./convertAgent.ts";
+import { type LoadedModel } from "../app/model/index.ts";
+import { loadActivity } from "../sessions/index.ts";
+import { type OpenPlan } from "../launch/index.ts";
+import { loadState, saveState } from "../app/config.ts";
+import { discoverGitReposUnder, type RepoInfo } from "../repositories/index.ts";
+import { detectProviders, resolveInitialProvider, detectScopeProvider, PROVIDER_INFO } from "../providers/index.ts";
+import { type Activity } from "./format/index.ts";
+import { makeCloneActions } from "./actions/clone.ts";
+import { makeInitActions } from "./actions/init.ts";
+import { makeSessionFlow } from "./actions/sessionFlow.ts";
+import { makeProfileActions } from "./actions/profile.ts";
+import { makeProviderActions } from "./actions/provider.ts";
+import { makeContinueInOtherAgent } from "./actions/convertAgent.ts";
 import {
   sessionId,
   type PrSort,
   type SessionSort,
-} from "./rows.ts";
+} from "./models/rows.ts";
 import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
 import { useAuthProbe } from "./hooks/useAuthProbe.ts";
 import { useCloneFlow } from "./hooks/useCloneFlow.ts";
@@ -32,7 +32,7 @@ import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { dispatchKey } from "./keys/chain.ts";
 import { ListScreen } from "./screens/ListScreen.tsx";
 import { renderLoadState, renderMode } from "./screens/ModeScreens.tsx";
-import type { AgentSession, Identity, ProviderName } from "../types.ts";
+import type { AgentSession, Identity, ProviderName } from "../shared/types.ts";
 
 
 // ── main app ──────────────────────────────────────────────────────────────────

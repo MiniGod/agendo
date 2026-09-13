@@ -1,0 +1,450 @@
+// GitHub access layer. Mirrors the surface of ado.ts but talks to GitHub
+// through the `gh` CLI (so it reuses the user's existing `gh auth login` — no
+// token handling here). Active when the GitHub backend is selected in the UI.
+//
+// GitHub has no "team current iteration", so the two item buckets are by
+// authorship instead: issues you created vs. other open issues in repos you own
+// (see fetchWorkItems). Scope is the set of repos discovered from your local
+// agent sessions (see repos.ts), each resolved to an `owner/repo` slug via its
+// `origin` remote; repos whose origin isn't a github.com remote are skipped.
+// Issue↔PR links come from closing references, "#N" mentions, or the issue id
+// embedded in the PR branch (see linkedIssues).
+import { spawn, spawnSync } from "child_process";
+import { messageOf, snippetOf, tag } from "../../shared/errors.ts";
+import { rollupCI } from "./ci.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
+import type { EntityUrls, FetchContext } from "../index.ts";
+import type {
+  Identity,
+  PullRequest,
+  ReviewPR,
+  TeamMember,
+  WorkItem,
+} from "../../shared/types.ts";
+
+// ── gh invocation ─────────────────────────────────────────────────────────────
+/**
+ * Whether a failed `gh` run looks worth retrying. `gh` collapses every failure
+ * into a non-zero exit, so the only signal is stderr: a 5xx, a rate limit, or a
+ * transport-level error can clear on its own, while a 401/403/404 or a bad
+ * argument is the same answer every time. Anything unrecognised counts as
+ * permanent — see isRetryable on why that's the safe default.
+ */
+function transientGhFailure(stderr: string): boolean {
+  return /HTTP 5\d\d|\brate limit\b|connection (reset|refused)|timed? ?out|temporary failure|no such host|network is unreachable|EOF\b/i.test(
+    stderr,
+  );
+}
+
+/** Run `gh` and parse its stdout as JSON (null on empty output). */
+function gh(args: string[]): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("gh", args);
+    const cmd = `gh ${args.join(" ")}`;
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", reject); // couldn't spawn (gh not installed) — never transient
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(tag(new Error(`${cmd} -> exit ${code}: ${err.trim()}`), { retryable: transientGhFailure(err) }));
+        return;
+      }
+      try {
+        resolve(out.trim() ? JSON.parse(out) : null);
+      } catch (cause) {
+        // Name the command AND quote what came back, so `gh` printing an
+        // interstitial ("A new release of gh is available…") or an HTML error
+        // page is recognisable rather than a bare parse failure.
+        reject(
+          new Error(`Failed to parse JSON from \`${cmd}\` (${snippetOf(out)}): ${messageOf(cause)}`, { cause }),
+        );
+      }
+    });
+  });
+}
+
+/** Like gh(), but swallows failures (e.g. a repo with issues disabled) → []. */
+async function ghSafe(args: string[]): Promise<any[]> {
+  try {
+    return (await gh(args)) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ── Repo scope: local repo roots → owner/repo slugs ───────────────────────────
+export interface RepoRef {
+  owner: string;
+  repo: string;
+  /** Local checkout root the slug was derived from. */
+  root: string;
+}
+
+const refCache = new Map<string, RepoRef | null>();
+
+/**
+ * Parse a git `origin` URL into a github.com `owner/repo`, or null when it isn't
+ * a GitHub remote. The github.com host (or GitHub's `ssh.github.com` SSH-over-
+ * HTTPS host) must sit right after the scheme `//`, an SSH `user@`, or the string
+ * start, so a look-alike host is rejected: `mygithub.com` (no anchor before
+ * `github.com`) and `github.com.evil.org` (github.com not delimited by a port,
+ * `:`, or `/`) both yield null. Port-aware, so `ssh://git@ssh.github.com:443/
+ * owner/repo` yields owner=`owner` (not `443`), and case-insensitive so
+ * `GitHub.com` parses. Handles the SSH (`git@github.com:owner/repo(.git)`),
+ * HTTPS (`https://github.com/owner/repo(.git)`), and `ssh://` forms.
+ *
+ * Parsing stops at the repo segment, so anything trailing it is ignored: a
+ * remote never has a trailing path, but a *web* URL pasted by a user does
+ * (`…/owner/repo/tree/main/src`, `…/owner/repo/pull/12`), and clone.ts feeds
+ * those through here to get the same host anchoring rather than a second,
+ * looser regex.
+ */
+export function parseGithubRemote(url: string): { owner: string; repo: string } | null {
+  const m = url
+    .trim()
+    .match(/(?:^|@|\/\/)(?:ssh\.)?github\.com(?::\d+)?[:/]([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/i);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+/** Resolve a checkout's `origin` remote to a github.com owner/repo, or null. */
+function repoRef(root: string): RepoRef | null {
+  if (refCache.has(root)) return refCache.get(root)!;
+  let ref: RepoRef | null = null;
+  const r = spawnSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf-8" });
+  if (r.status === 0) {
+    const parsed = parseGithubRemote(r.stdout);
+    if (parsed) ref = { ...parsed, root };
+  }
+  refCache.set(root, ref);
+  return ref;
+}
+
+/** Distinct github.com slugs across the discovered repos (deduped, owner/repo). */
+function reposToRefs(repos: RepoInfo[]): RepoRef[] {
+  const seen = new Set<string>();
+  const refs: RepoRef[] = [];
+  for (const r of repos) {
+    const ref = repoRef(r.root);
+    if (!ref) continue;
+    const key = `${ref.owner}/${ref.repo}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push(ref);
+  }
+  return refs;
+}
+
+const slugOf = (ref: RepoRef) => `${ref.owner}/${ref.repo}`;
+
+// ── Canonical web URLs ────────────────────────────────────────────────────────
+// The one place GitHub entity links are built. Scope is github.com by
+// construction: `parseGithubRemote` only ever yields github.com slugs, so a repo
+// on another host never reaches these. Pure, so the exact strings can be pinned
+// in tests.
+
+/** Percent-encode each segment of an `owner/repo` slug (the separator stays). */
+const encodeSlug = (slug: string) => slug.split("/").map(encodeURIComponent).join("/");
+
+/** Web URL of a pull request in `owner/repo`. */
+export function githubPullRequestUrl(slug: string, id: number): string {
+  return `https://github.com/${encodeSlug(slug)}/pull/${id}`;
+}
+
+/** Web URL of an issue in `owner/repo` (GitHub's work-item equivalent). */
+export function githubIssueUrl(slug: string, id: number): string {
+  return `https://github.com/${encodeSlug(slug)}/issues/${id}`;
+}
+
+/** Entity URLs for this backend (see Provider.urls). GitHub numbers issues and
+ *  PRs per repo, so both need the owning slug — without one there is no URL to
+ *  build, and null is returned rather than a plausible-looking wrong link. */
+export const urls: EntityUrls = {
+  // `repositoryId` IS the `owner/repo` slug on this backend (see mapPR).
+  pullRequest: (ref) => (ref.repositoryId ? githubPullRequestUrl(ref.repositoryId, ref.id) : null),
+  // …and a WorkItem's `project` is the slug of the repo the issue lives in.
+  workItem: (ref) => (ref.project ? githubIssueUrl(ref.project, ref.id) : null),
+};
+
+// ── PR mapping ────────────────────────────────────────────────────────────────
+// The --json fields we request for every PR. `reviews` and `statusCheckRollup`
+// give us votes and CI without a second round-trip (so enrichPrCI is a no-op).
+const PR_FIELDS =
+  "number,title,url,headRefName,isDraft,reviewDecision,reviews," +
+  "statusCheckRollup,mergeStateStatus,createdAt,updatedAt,author,closingIssuesReferences";
+
+// For the linking query we additionally pull `body`, so "#N" mentions in the PR
+// description count as links (see linkedIssues).
+const LINK_PR_FIELDS = PR_FIELDS + ",body";
+
+/**
+ * Which of `issueNums` a PR is linked to. GitHub's own "closing references" only
+ * exist once someone writes `Closes #N`, which is too strict to be the only
+ * signal — so we also link on a bare `#N` mention anywhere in the title/body and
+ * on the issue id embedded in the PR's branch (the launcher names work branches
+ * `worktree-…-<id>`, the same convention sessions are matched by). The result is
+ * that a PR shows under its issue while both are open, no closing keyword needed.
+ */
+function linkedIssues(raw: any, issueNums: Set<number>): Set<number> {
+  const out = new Set<number>();
+  for (const r of raw.closingIssuesReferences ?? []) {
+    if (issueNums.has(r.number)) out.add(r.number);
+  }
+  const text = `${raw.title ?? ""}\n${raw.body ?? ""}`;
+  for (const m of text.matchAll(/#(\d+)/g)) {
+    const n = Number(m[1]);
+    if (issueNums.has(n)) out.add(n);
+  }
+  const branch = raw.headRefName ?? "";
+  for (const n of issueNums) {
+    // Same id-in-branch test sessions use (id delimited by non-digits).
+    if (new RegExp(`(^|[^0-9])${n}([^0-9]|$)`).test(branch)) out.add(n);
+  }
+  return out;
+}
+
+// Aggregate a PR's check rollup into a single gate status. CheckRuns carry
+// status+conclusion; legacy StatusContexts carry a single `state`. A merge
+// conflict (mergeStateStatus "DIRTY") outranks any individual check.
+// Net review votes: the latest non-comment review per author. GitHub doesn't
+// expose the branch-protection required count cheaply, so we approximate the
+// gate from reviewDecision (any decision ⇒ at least one approval is required).
+/** Review states that are not votes. */
+const NON_VOTES = new Set(["COMMENTED", "PENDING", "DISMISSED"]);
+
+/** Net review votes: the latest non-comment review per author. Reviews are chronological, so the last meaningful vote wins. */
+export function latestVotes(reviews: any[] | undefined): Map<string, string> {
+  const latest = new Map<string, string>(); // login → latest meaningful state
+  for (const r of reviews ?? []) {
+    const login = r.author?.login;
+    if (!login || NON_VOTES.has(r.state)) continue;
+    latest.set(login, r.state);
+  }
+  return latest;
+}
+
+function countVotes(latest: Map<string, string>): { approvals: number; rejections: number } {
+  let approvals = 0, rejections = 0;
+  for (const s of latest.values()) {
+    if (s === "APPROVED") approvals++;
+    else if (s === "CHANGES_REQUESTED") rejections++;
+  }
+  return { approvals, rejections };
+}
+
+/**
+ * `requiredCount` here is a LOWER BOUND, not a measurement. GitHub reports
+ * `reviewDecision` (non-null ⇔ the base branch requires review) but not how
+ * many approvals that takes — the number lives in branch protection /
+ * rulesets, behind a second per-branch call agendo deliberately doesn't make.
+ * 1 is the smallest gate that can produce a decision, so "0/1" and "1/1" read
+ * correctly at the boundary that matters, and it is what the X/Y column shows.
+ *
+ * What must NOT rest on it is the verdict. Comparing 2 approvals against a
+ * floor of 1 would call a two-approval gate satisfied at one; `gateMet`
+ * carries GitHub's own answer so nothing has to guess.
+ *
+ * The `Math.max(1, …)` is load-bearing, not defensive tidying. A decision of
+ * APPROVED with `approvals` counted as 0 is a real shape — the approving
+ * review can be older than the page of reviews `gh` returned, or dismissed
+ * and re-approved outside it — and it would render a GREEN "✓ 0/1": gate met,
+ * nobody approved. Flooring the count at 1 is the only thing that makes that
+ * cell unreachable. Don't remove it without giving the renderers another way
+ * to reconcile the two (src/ui/format/index.ts approvalProgress).
+ */
+export function reviewGate(reviewDecision: string | undefined, approvals: number): { approvedCount: number; requiredCount: number; gateMet: boolean | undefined } {
+  const requiredCount = reviewDecision ? 1 : 0;
+  const gateMet = reviewDecision ? reviewDecision === "APPROVED" : undefined;
+  const approvedCount = reviewDecision === "APPROVED" ? Math.max(1, approvals) : approvals;
+  return { approvedCount, requiredCount, gateMet };
+}
+
+/** Exported for the unit suite. */
+export function voteSummary(reviews: any[] | undefined, reviewDecision: string | undefined) {
+  const { approvals, rejections } = countVotes(latestVotes(reviews));
+  return { approvals, rejections, waiting: 0, ...reviewGate(reviewDecision, approvals) };
+}
+
+function mapPR(raw: any, ref: RepoRef): PullRequest {
+  const slug = slugOf(ref);
+  const createdDate = raw.createdAt ? new Date(raw.createdAt).getTime() : 0;
+  const updatedDate = raw.updatedAt ? new Date(raw.updatedAt).getTime() : createdDate;
+  return {
+    id: raw.number,
+    title: raw.title ?? "",
+    status: "active", // only open PRs are fetched
+    branch: raw.headRefName ?? "",
+    repositoryId: slug,
+    repositoryName: ref.repo,
+    isDraft: !!raw.isDraft,
+    ci: rollupCI(raw.statusCheckRollup, raw.mergeStateStatus),
+    createdDate,
+    updatedDate,
+    // Built through `urls`, not taken from `raw.url`, so every PR link in the
+    // app comes out of the one provider-level entry point (gh returns the
+    // identical string for github.com). A slug is always present here.
+    url: urls.pullRequest({ id: raw.number, repositoryId: slug }) ?? "",
+    ...voteSummary(raw.reviews, raw.reviewDecision),
+  };
+}
+
+/** Whether `gh` is authenticated (`gh auth status` exits 0 when logged in) —
+ *  the auth probe for the Settings page. Never throws; false on any failure. */
+export function checkAuth(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("gh", ["auth", "status"], { stdio: "ignore" });
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+}
+
+// ── Identities ────────────────────────────────────────────────────────────────
+let cachedMe: Identity | null = null;
+
+/** The authenticated `gh` user. login doubles as the id/uniqueName. */
+export async function getMe(): Promise<Identity> {
+  if (cachedMe) return cachedMe;
+  const u = await gh(["api", "user"]);
+  cachedMe = {
+    id: u.login,
+    displayName: u.name || u.login,
+    uniqueName: u.login,
+  };
+  return cachedMe;
+}
+
+/**
+ * GitHub has no "configured team" roster equivalent, so the identity switcher
+ * just offers the authenticated user. (model.ts always includes `me` anyway.)
+ */
+export async function getTeamMembers(): Promise<TeamMember[]> {
+  return [await getMe()];
+}
+
+// ── Work items (GitHub issues) ────────────────────────────────────────────────
+// GitHub has no sprint, and solo OSS work rarely uses issue assignment, so the
+// two item buckets are by authorship instead: issues you opened (inCurrentSprint
+// = true → the primary "Created by me" section) vs. other open issues in repos
+// you own (the collapsible "In your repos" section). For repos you *don't* own
+// we only surface issues you opened, to avoid dumping a foreign tracker.
+export async function fetchWorkItems(ctx: FetchContext): Promise<{
+  items: Omit<WorkItem, "sessions">[];
+  currentIterationPath: string | null;
+}> {
+  const refs = reposToRefs(ctx.repos);
+  const login = ctx.identity.id;
+  const isMe = (l: string | undefined) => !!l && l.toLowerCase() === login.toLowerCase();
+
+  const perRepo = await Promise.all(
+    refs.map(async (ref) => {
+      const slug = slugOf(ref);
+      const owned = ref.owner.toLowerCase() === login.toLowerCase();
+      const issueArgs = owned
+        // Repos you own: every open issue (split into created-by-you vs. the rest).
+        ? ["issue", "list", "--repo", slug, "--state", "open",
+           "--json", "number,title,state,url,labels,author", "--limit", "200"]
+        // Repos you don't own: only the issues you filed.
+        : ["issue", "list", "--repo", slug, "--author", login, "--state", "open",
+           "--json", "number,title,state,url,labels,author", "--limit", "200"];
+      const [issues, prsRaw] = await Promise.all([
+        ghSafe(issueArgs),
+        // Open PRs involving the user, scanned for links to the repo's issues.
+        ghSafe([
+          "pr", "list", "--repo", slug, "--search", `state:open involves:${login}`,
+          "--json", LINK_PR_FIELDS, "--limit", "200",
+        ]),
+      ]);
+      // Map issue number → PRs linked to it (closing ref, #N mention, or branch).
+      const issueNums = new Set<number>((issues as any[]).map((i) => i.number));
+      const prsByIssue = new Map<number, PullRequest[]>();
+      for (const raw of prsRaw) {
+        const pr = mapPR(raw, ref);
+        for (const n of linkedIssues(raw, issueNums)) {
+          const arr = prsByIssue.get(n) ?? [];
+          arr.push(pr);
+          prsByIssue.set(n, arr);
+        }
+      }
+      return { ref, issues, prsByIssue };
+    }),
+  );
+
+  const items: Omit<WorkItem, "sessions">[] = [];
+  for (const { ref, issues, prsByIssue } of perRepo) {
+    const slug = slugOf(ref);
+    for (const iss of issues) {
+      items.push({
+        id: iss.number,
+        type: "Issue",
+        title: iss.title ?? "",
+        state: iss.state ?? "OPEN",
+        boardColumn: undefined,
+        iterationPath: "",
+        project: slug,
+        // Authorship drives the two buckets (see header comment).
+        inCurrentSprint: isMe(iss.author?.login),
+        prs: prsByIssue.get(iss.number) ?? [],
+        url: urls.workItem({ id: iss.number, project: slug }) ?? "",
+      });
+    }
+  }
+
+  // GitHub has no iteration path; the primary section header stays unlabeled.
+  return { items, currentIterationPath: null };
+}
+
+// ── PRs you created ───────────────────────────────────────────────────────────
+export async function fetchActivePRs(ctx: FetchContext): Promise<PullRequest[]> {
+  const refs = reposToRefs(ctx.repos);
+  const login = ctx.identity.id;
+  const lists = await Promise.all(
+    refs.map(async (ref) => {
+      const raw = await ghSafe([
+        "pr", "list", "--repo", slugOf(ref), "--search", `state:open author:${login}`,
+        "--json", PR_FIELDS, "--limit", "200",
+      ]);
+      return raw.map((p) => mapPR(p, ref));
+    }),
+  );
+  return lists.flat();
+}
+
+// ── PRs awaiting your review ──────────────────────────────────────────────────
+export async function fetchReviewPRs(ctx: FetchContext): Promise<ReviewPR[]> {
+  const refs = reposToRefs(ctx.repos);
+  const login = ctx.identity.id;
+  const lists = await Promise.all(
+    refs.map(async (ref) => {
+      const raw = await ghSafe([
+        "pr", "list", "--repo", slugOf(ref), "--search", `state:open review-requested:${login}`,
+        "--json", PR_FIELDS, "--limit", "200",
+      ]);
+      return raw
+        // Don't surface your own PRs in your review queue.
+        .filter((p) => p.author?.login !== login)
+        .map((p): ReviewPR => ({ ...mapPR(p, ref), reviewReason: "you" }));
+    }),
+  );
+  return lists.flat();
+}
+
+/**
+ * No-op for GitHub: CI status, votes, and last-update time are already filled in
+ * at fetch time (from statusCheckRollup / reviews / updatedAt). Kept to satisfy
+ * the Provider interface.
+ */
+export async function enrichPrCI(_prs: PullRequest[]): Promise<void> {}
+
+/**
+ * No-op for GitHub. GitHub has no PR→work-item artifact link to resolve issues
+ * *from* a PR; issue↔PR links are computed the other way (in fetchWorkItems via
+ * closing references / "#N" mentions / branch ids), so orphan PRs simply stay
+ * orphans. Kept to satisfy the Provider interface.
+ */
+export async function fetchWorkItemsForPRs(
+  _prs: PullRequest[],
+  _opts: { excludeWorkItemIds: Set<number>; currentIterationPath: string | null },
+): Promise<{ items: Omit<WorkItem, "sessions">[]; surfacedPrIds: Set<number> }> {
+  return { items: [], surfacedPrIds: new Set() };
+}

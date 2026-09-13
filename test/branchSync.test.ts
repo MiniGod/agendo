@@ -1,4 +1,4 @@
-// A checkout's branch against its remote (src/gitrefs.ts `branchSync`), on
+// A checkout's branch against its remote (src/repositories/gitRefs.ts `branchSync`), on
 // scratch git dirs. The e2e fixtures are real clones: every branch there has
 // its own tracking ref, loose, at the local tip. They never show a worktree
 // branch whose configured upstream is the base branch while `origin/<branch>`
@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { branchSync, remoteCandidates } from "../src/gitrefs.ts";
+import { branchSync, remoteCandidates } from "../src/repositories/gitRefs.ts";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);

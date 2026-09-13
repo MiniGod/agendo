@@ -1,10 +1,10 @@
-// Workflow refs collected from a transcript (src/workflows.ts). The e2e
+// Workflow refs collected from a transcript (src/orchestration/workflows.ts). The e2e
 // fixtures carry one launch and one finish per workflow session; what they
 // never carry is a relaunch of the same run, a notification for a task that
 // was not a workflow, a transcript that merely quotes a notification, or a
 // launch record with its fields missing or of the wrong type.
 import { describe, expect, test } from "bun:test";
-import { notificationOf, WorkflowScan } from "../src/workflows.ts";
+import { notificationOf, WorkflowScan } from "../src/orchestration/workflows.ts";
 
 const launch = (runId: string, taskId: string, over: Record<string, unknown> = {}) => ({
   timestamp: "2026-09-01T10:00:00Z",

@@ -1,8 +1,8 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
-import { parseJsonLine } from "../errors.ts";
-import { rebaseWorkflowPaths, WorkflowScan } from "../workflows.ts";
-import type { AgentSession, WorkflowRef } from "../types.ts";
+import { parseJsonLine } from "../shared/errors.ts";
+import { rebaseWorkflowPaths, WorkflowScan } from "../orchestration/workflows.ts";
+import type { AgentSession, WorkflowRef } from "../shared/types.ts";
 import { TranscriptCache } from "./cache.ts";
 import { claudeBaseDirs, type SessionProvider } from "./provider.ts";
 

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { messageOf, parseJsonLine, resetTranscriptWarnings, takeWarnings } from "../src/errors.ts";
+import { messageOf, parseJsonLine, resetTranscriptWarnings, takeWarnings } from "../src/shared/errors.ts";
 
 // Torn-append recovery is a pure helper on a string, and the e2e suite cannot
 // reach it: driving it there would mean a fixture transcript that is corrupt in
@@ -29,7 +29,7 @@ const TORN_HEAD_UUID = "a82013e1-9845-1c4e-9a1e-0a30b5ba446a";
 // drains, and the set of already-warned paths, which by design does not. A test
 // that inherited either would assert nothing rather than fail — so both are
 // cleared here, and the suite stays honest under `bun test --rerun-each`, where
-// this file is re-imported but src/errors.ts is not.
+// this file is re-imported but src/shared/errors.ts is not.
 beforeEach(() => {
   takeWarnings();
   resetTranscriptWarnings();

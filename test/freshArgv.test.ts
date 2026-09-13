@@ -1,10 +1,10 @@
-// `freshArgv` (src/launchArgv.ts): the command line a brand-new agent window
+// `freshArgv` (src/launch/argv.ts): the command line a brand-new agent window
 // runs. The e2e suite launches each agent through it, but only in the shapes
 // the fixtures use; the ORDER the flags come in is the contract here — a codex
 // prompt after every flag, a forwarded `--model` after the autonomy flags — and
 // order is exactly what a green launch cannot vouch for.
 import { describe, expect, test } from "bun:test";
-import { freshArgv } from "../src/launchArgv.ts";
+import { freshArgv } from "../src/launch/argv.ts";
 
 /** The argv after the `env` prefix `withSelfCmdEnv` puts on. */
 function command(argv: string[]): string[] {

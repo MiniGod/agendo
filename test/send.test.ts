@@ -1,4 +1,4 @@
-// `agendo send` (src/cli/send.ts): the steps of the dispatch, each on its own.
+// `agendo send` (src/cli/commands/send.ts): the steps of the dispatch, each on its own.
 // The e2e suite drives the command end to end over both routes; what it never
 // reaches is the call with no id, the socket that fails on a session with no
 // window, the "socket disabled by" suffix, and a dialog whose option is
@@ -8,8 +8,8 @@ import {
   ensureReachable, noInputBoxMessage, pasteWhy, queuedLine, refuseDialog, refuseLimited, refuseMenuSuspect,
   refusePaneNotReady, refuseUnreachable, runSend, sendContext, sendPayload, socketFailed, socketState,
   usageExit, type PaneRead, type SendContext,
-} from "../src/cli/send.ts";
-import type { PeerSession } from "../src/peer.ts";
+} from "../src/cli/commands/send.ts";
+import type { PeerSession } from "../src/orchestration/peer.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

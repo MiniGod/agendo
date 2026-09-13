@@ -6,10 +6,10 @@
 // navigation; nothing here knows about focus or the view.
 
 import type { Key } from "ink";
-import type { AgentSession } from "../../types.ts";
-import type { Row } from "../rows.ts";
-import type { OpenTargets } from "../targets.ts";
-import { V } from "../vocabState.ts";
+import type { AgentSession } from "../../shared/types.ts";
+import type { Row } from "../models/rows.ts";
+import type { OpenTargets } from "../models/targets.ts";
+import { V } from "../models/vocabState.ts";
 import type { KeyContext } from "./context.ts";
 
 export type RowActionCtx = Pick<

@@ -1,13 +1,13 @@
 import { Box, Text } from "ink";
-import type { LoadedModel } from "../../model.ts";
-import type { PaneState } from "../format.ts";
-import { V } from "../vocabState.ts";
+import type { LoadedModel } from "../../app/model/index.ts";
+import type { PaneState } from "../format/index.ts";
+import { V } from "../models/vocabState.ts";
 import {
   columnHeader, edgeLine, hintLine, identityLine, noticeLine, scopeLine, searchLine, viewTab, type SearchFocus,
 } from "./listLines.tsx";
 import { renderRow } from "./listRows.tsx";
-import type { Row, PrSort, SessionSort } from "../rows.ts";
-import type { RepoInfo } from "../../repos.ts";
+import type { Row, PrSort, SessionSort } from "../models/rows.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
 import type { View } from "../keys/context.ts";
 
 /**

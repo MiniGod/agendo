@@ -5,7 +5,7 @@ import {
   findMatchingCheckout,
   freeCloneDest,
   type CloneRun,
-} from "../../clone.ts";
+} from "../../repositories/clone/index.ts";
 import type { Mode } from "../keys/context.ts";
 
 /**

@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
-import { homeShort, padCell } from "../format.ts";
-import type { ProfileChoice } from "../../profiles.ts";
+import { homeShort, padCell } from "../format/index.ts";
+import type { ProfileChoice } from "../../sessions/profiles/index.ts";
 
 /**
  * "Move this session to another Claude profile". `choices` is every discovered

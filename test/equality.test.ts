@@ -1,10 +1,10 @@
-// The re-render gate on a session's activity (src/ui/equality.ts
+// The re-render gate on a session's activity (src/ui/models/equality.ts
 // `sameActivity`). The e2e suite expands rows whose activity only ever grows
 // at the tail; it never sees the head shift under a full window, a task change
 // its status with the actions unchanged, or a prompt change alone.
 import { describe, expect, test } from "bun:test";
-import type { ActionLine, SessionActivity, TaskItem } from "../src/types.ts";
-import { sameActivity } from "../src/ui/equality.ts";
+import type { ActionLine, SessionActivity, TaskItem } from "../src/shared/types.ts";
+import { sameActivity } from "../src/ui/models/equality.ts";
 
 const at = (t: number, verb = "Read", detail = "a.ts"): ActionLine => ({ timestamp: new Date(t), verb, detail }) as ActionLine;
 const task = (label: string, status: TaskItem["status"] = "pending"): TaskItem => ({ label, status });

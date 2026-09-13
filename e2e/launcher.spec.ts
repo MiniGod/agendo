@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
 import { COMPACTING_PANE, RUNNING_TARGET, tmuxState } from "./harness/fixtures.ts";
-import { windowTarget } from "../src/tmux.ts";
+import { windowTarget } from "../src/runtime/tmux/index.ts";
 
 // The tmux target the menu addresses the fixture's running pane by (#39). The
 // readiness poll reads the window reconciliation attributed the session to, and a
@@ -1157,7 +1157,7 @@ test("(c) the fast rescan spawns NO `git` process — the unpushed-work signal s
 
   // A new session mid-run in a repo root the initial load has NEVER seen. That
   // matters: a naive per-repo `git` call memoized by root (the pattern already
-  // in src/sessions.ts) would spawn nothing for an already-indexed root, so the
+  // in src/sessions/index.ts) would spawn nothing for an already-indexed root, so the
   // regression would slip past a probe pointed at appweb.
   const SID = "55556666-7777-8888-9999-aaaabbbbcccc";
   const win = `cl-claude-${shortIdOf(SID)}`;

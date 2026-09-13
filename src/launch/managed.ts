@@ -2,10 +2,10 @@
 // agent argv, and the orchestrator marker that lets a cold resume find its way
 // back to the right instructions.
 import { randomUUID } from "node:crypto";
-import type { AgentSource } from "../types.ts";
-import { kindName } from "../tmux.ts";
-import { markOrchestratorSession, type OrchestratorRole } from "../orchestrator.ts";
-import { freshArgv, preassignsSessionId } from "../launchArgv.ts";
+import type { AgentSource } from "../shared/types.ts";
+import { kindName } from "../runtime/tmux/index.ts";
+import { markOrchestratorSession, type OrchestratorRole } from "../orchestration/index.ts";
+import { freshArgv, preassignsSessionId } from "./argv.ts";
 import { openTarget, type OpenPlan } from "./open.ts";
 
 /**

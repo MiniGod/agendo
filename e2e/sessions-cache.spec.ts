@@ -1,4 +1,4 @@
-// The transcript-parse cache in src/sessions.ts. The background rescan rebuilds
+// The transcript-parse cache in src/sessions/index.ts. The background rescan rebuilds
 // the session index every ~2s; without this cache each build re-reads + JSON-
 // parses every transcript on disk (the user's corpus is ~500 MB), pegging a CPU
 // core. The cache mtime+size-gates the per-file parse so a rebuild only re-reads

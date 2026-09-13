@@ -1,14 +1,14 @@
 import { useCallback, useMemo } from "react";
-import type { LoadedModel } from "../../model.ts";
+import type { LoadedModel } from "../../app/model/index.ts";
 import {
   repoRootForCwd,
   bootstrapRepoRoot,
   ensureRepoAtTop,
   isGitCheckout,
   type RepoInfo,
-} from "../../repos.ts";
-import { isUnderRoot, normalizeCwd } from "../../context.ts";
-import type { FreshTarget } from "../targets.ts";
+} from "../../repositories/index.ts";
+import { isUnderRoot, normalizeCwd } from "../../app/context.ts";
+import type { FreshTarget } from "../models/targets.ts";
 
 /**
  * Path- and repo-scoping for the list views and the fresh-session pickers.

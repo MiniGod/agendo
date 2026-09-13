@@ -3,8 +3,8 @@
 // row. Pure functions over `Row[]`, so the arrow-key handler in list.ts is
 // dispatch and nothing else.
 
-import { itemKey, prKey } from "../../model.ts";
-import { SELECTABLE, sessionExpandKey, type Row } from "../rows.ts";
+import { itemKey, prKey } from "../../app/model/index.ts";
+import { SELECTABLE, sessionExpandKey, type Row } from "../models/rows.ts";
 
 /** Rows that →/← can open and close. */
 export function isExpandable(row: Row): boolean {

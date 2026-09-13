@@ -1,11 +1,11 @@
-// The pure halves of `list repos` (src/cli/listRepos.ts): how a session counts
+// The pure halves of `list repos` (src/cli/list/repositories.ts): how a session counts
 // into its repo's row, the order rows are printed in, the empty-case message
 // and the table line. The e2e suite runs the real command over fixture sessions
 // and reads the table; it never sees an empty survey (both empty messages were
 // the lines no spec reached), never sorts two repos that differ only in idle
 // orchestrators, and never prints an idle orchestrator's row.
 import { describe, expect, test } from "bun:test";
-import { addSession, byNeed, emptyMessage, formatRepoRow, REPO_HEADER, type RepoRow } from "../src/cli/listRepos.ts";
+import { addSession, byNeed, emptyMessage, formatRepoRow, REPO_HEADER, type RepoRow } from "../src/cli/list/repositories.ts";
 
 const row = (p: Partial<RepoRow> = {}): RepoRow => ({
   root: "/r/a", name: "a", sessions: 0, running: 0, orchestrators: [], hasOrchestrator: false, hasRunningOrchestrator: false, ...p,

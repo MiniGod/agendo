@@ -1,7 +1,7 @@
 import type { Key } from "ink";
-import { openSession } from "../../launch.ts";
-import { sessionName } from "../../tmux.ts";
-import type { Row } from "../rows.ts";
+import { openSession } from "../../launch/index.ts";
+import { sessionName } from "../../runtime/tmux/index.ts";
+import type { Row } from "../models/rows.ts";
 import type { KeyContext, View } from "./context.ts";
 import { handleListRowActionKeys, type RowActionCtx } from "./rowActions.ts";
 import { ancestorIndex, expandKeyOf, firstChildIndex, isExpandable, isOpen } from "./rowTree.ts";

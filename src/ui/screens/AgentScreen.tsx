@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 import { AGENT_CHOICES } from "../keys/agent.ts";
-import type { FreshTarget } from "../targets.ts";
-import { padCell } from "../format.ts";
+import type { FreshTarget } from "../models/targets.ts";
+import { padCell } from "../format/index.ts";
 
 /**
  * The agent picker for a fresh session: which CLI should run it. `target` is the

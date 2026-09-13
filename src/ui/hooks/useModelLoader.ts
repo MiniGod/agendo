@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from "react";
-import { loadModel, type LoadedModel } from "../../model.ts";
-import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../../errors.ts";
-import type { RepoInfo } from "../../repos.ts";
-import type { Identity, ProviderName } from "../../types.ts";
-import { vocab } from "../../vocab.ts";
-import { setVocab } from "../vocabState.ts";
+import { loadModel, type LoadedModel } from "../../app/model/index.ts";
+import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../../shared/errors.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
+import type { Identity, ProviderName } from "../../shared/types.ts";
+import { vocab } from "../models/vocab.ts";
+import { setVocab } from "../models/vocabState.ts";
 
 /**
  * The data load and its automatic-retry loop, plus the ticker that keeps the

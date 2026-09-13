@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { __setForceCrossDevice, moveSessionToProfile, type ClaudeProfile } from "../src/profiles.ts";
-import type { AgentSession } from "../src/types.ts";
+import { __setForceCrossDevice, moveSessionToProfile, type ClaudeProfile } from "../src/sessions/profiles/index.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 
 const ID = "0f0e0d0c-1111-2222-3333-444455556666";
 const ENC = "-home-me-proj";

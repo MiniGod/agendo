@@ -1,6 +1,6 @@
 // Per-transcript parse cache, shared by the Claude and Codex providers — one
 // instance each, so a provider's prune can only ever touch its own transcripts.
-import type { AgentSession } from "../types.ts";
+import type { AgentSession } from "../shared/types.ts";
 
 // Per-transcript parse cache, keyed by absolute .jsonl path. Parsing a
 // transcript means reading + JSON-parsing a possibly huge file; with the index

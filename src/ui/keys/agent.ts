@@ -1,5 +1,5 @@
 import type { Key } from "ink";
-import type { AgentSource } from "../../types.ts";
+import type { AgentSource } from "../../shared/types.ts";
 import type { KeyContext } from "./context.ts";
 
 type Ctx = Pick<KeyContext, "mode" | "setMode" | "setCloneNote" | "cloneNoteRef" | "proceedFresh">;

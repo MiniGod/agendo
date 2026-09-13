@@ -1,9 +1,9 @@
-// A workflow script's `export const meta = {…}` literal (src/workflows.ts
+// A workflow script's `export const meta = {…}` literal (src/orchestration/workflows.ts
 // `parseWorkflowMeta`). The e2e fixtures' scripts carry a well-formed meta with
 // titled phases; they never carry a meta with no phases, a phase entry without
 // a title, a brace inside a string, an unbalanced literal, or no meta at all.
 import { describe, expect, test } from "bun:test";
-import { parseWorkflowMeta } from "../src/workflows.ts";
+import { parseWorkflowMeta } from "../src/orchestration/workflows.ts";
 
 describe("parseWorkflowMeta", () => {
   test("description and titled phases, with detail and model when given", () => {

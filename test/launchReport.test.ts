@@ -1,11 +1,11 @@
-// The launch report (src/cli/launchReport.ts): which kind of session a flag set
+// The launch report (src/cli/commands/launchReport.ts): which kind of session a flag set
 // names, and the next-steps lines printed for it. The e2e suite reads the real
 // report for a background launch with an id and for a global orchestrator; it
 // never sees the codex shape (no id yet) beside a layout note, and never asks
 // for the kind on its own.
 import { describe, expect, test } from "bun:test";
-import { SELF_CMD } from "../src/launch.ts";
-import { launchSummary, sessionKind } from "../src/cli/launchReport.ts";
+import { SELF_CMD } from "../src/launch/index.ts";
+import { launchSummary, sessionKind } from "../src/cli/commands/launchReport.ts";
 
 const kind = (global: boolean, orchestrator: boolean, agent: "claude" | "codex" = "claude") => ({ global, orchestrator, agent });
 

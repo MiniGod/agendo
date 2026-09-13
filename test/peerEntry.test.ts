@@ -1,10 +1,10 @@
-// A peer registry entry (src/peer.ts). The e2e suite writes one well-formed
+// A peer registry entry (src/orchestration/peer.ts). The e2e suite writes one well-formed
 // registry file per fixture peer, so the live path is reached there; what it
 // never writes is a truncated file, a scalar, a stale protocol, a non-interactive
 // kind or a dead pid. Each of those sits here beside the entry that passes,
 // with the pid check a parameter so no process has to stand behind a number.
 import { describe, expect, test } from "bun:test";
-import { PEER_PROTOCOL, parsePeerEntry } from "../src/peer.ts";
+import { PEER_PROTOCOL, parsePeerEntry } from "../src/orchestration/peer.ts";
 
 const entry = {
   pid: 4242,

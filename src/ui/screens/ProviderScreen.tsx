@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
-import { PROVIDER_INFO } from "../../provider.ts";
-import type { ProviderName } from "../../types.ts";
-import { padCell } from "../format.ts";
+import { PROVIDER_INFO } from "../../providers/index.ts";
+import type { ProviderName } from "../../shared/types.ts";
+import { padCell } from "../format/index.ts";
 
 /**
  * The backend picker. `provider` is the one in force (marked ●) and `available`

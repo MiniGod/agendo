@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
-import { CaretText } from "../components.tsx";
-import { repoUrlLabel, type RepoUrl } from "../../clone.ts";
-import { homeShort } from "../format.ts";
+import { CaretText } from "../components/index.tsx";
+import { repoUrlLabel, type RepoUrl } from "../../repositories/clone/index.ts";
+import { homeShort } from "../format/index.ts";
 
 /**
  * The clone-URL prompt. `cloneUrl` is what the typed text parses to and

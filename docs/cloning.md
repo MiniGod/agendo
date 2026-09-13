@@ -89,11 +89,11 @@ and enter is inert — you never start a clone you can't predict.
 
 ## What is accepted
 
-`parseRepoUrl` in `src/clone.ts`. Query strings and fragments are dropped first
+`parseRepoUrl` in `src/repositories/clone/index.ts`. Query strings and fragments are dropped first
 (ADO web URLs carry `?path=/x&version=GBmain`), as are surrounding quotes and
 angle brackets, so a URL pasted out of a chat client works.
 
-**GitHub** — reuses `parseGithubRemote` from `src/github.ts`, which is
+**GitHub** — reuses `parseGithubRemote` from `src/providers/github/index.ts`, which is
 host-anchored (`github.com` must sit right after the scheme `//`, an SSH `@`, or
 the string start) and port-aware. That function is extended here to stop at the
 repo segment, so a *web* URL with trailing path works; a look-alike host is
@@ -331,7 +331,7 @@ someone about to work offline.
 The clone becomes a zero-session `RepoInfo` and is fed into **the exact same**
 `chooseRepo` the picker's enter key calls — `wtchoice` for a free session,
 `branch` for a work item, `startCheckout` for a PR. There is no second
-session-creation path, and `src/clone.ts` knows nothing about sessions,
+session-creation path, and `src/repositories/clone/index.ts` knows nothing about sessions,
 worktrees, or tmux.
 
 Until the next reload discovers it through a session's cwd, the fresh clone is
@@ -354,7 +354,7 @@ a single keystroke — folds it into the launch notice.
 - **No clone from the work-item / PR views.** A PR row already knows its repo;
   cloning the repo a PR lives in is a reasonable follow-up but a separate flow.
 - **No ADO remote parser unification.** PR #13 adds an ADO branch to
-  `repoScopeKeys()` in `src/repos.ts` for a different purpose (repo *identity*
+  `repoScopeKeys()` in `src/repositories/index.ts` for a different purpose (repo *identity*
   for filtering). `parseRepoUrl` here is the more complete parser and exports
   its canonical key; whichever lands second should collapse into it rather than
   leaving the repo with two.

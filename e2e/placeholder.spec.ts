@@ -1,5 +1,5 @@
 // End-to-end tests for the PAUSED (placeholder) window's own lifecycle — the
-// little bash loop `placeholderArgv` bakes into every restored tab (src/restore.ts).
+// little bash loop `placeholderArgv` bakes into every restored tab (src/runtime/restore/index.ts).
 //
 // Unlike the rest of the suite these don't render the launcher: the script IS the
 // unit under test, so it's spawned straight into the wterm PTY (a real tty, which
@@ -20,8 +20,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { test as base, expect, KEY } from "./harness/test.ts";
 import { WebTerminal } from "./harness/wterm.ts";
 import { REPO_ROOT } from "./harness/mockEnv.ts";
-import { placeholderArgv } from "../src/restore.ts";
-import type { RestoreTab } from "../src/restore.ts";
+import { placeholderArgv } from "../src/runtime/restore/index.ts";
+import type { RestoreTab } from "../src/runtime/restore/index.ts";
 import type { Page } from "@playwright/test";
 
 const TITLE = "Fix the login screen";
@@ -29,7 +29,7 @@ const HINT = "Press any key to resume · q or Esc to close this window";
 // A fake agent that ANNOUNCES itself and then blocks, so a test can see the pane
 // is running the agent and choose when it exits (a keypress ends the `read`).
 // Stands in for the tab's real `claude --resume <id>`, which nothing here needs
-// to actually run — src/launch.ts owns that argv, this owns what wraps it.
+// to actually run — src/launch/index.ts owns that argv, this owns what wraps it.
 const AGENT_UP = "AGENT-IS-UP";
 const FAKE_AGENT = ["bash", "-c", `printf '%s\\n' ${AGENT_UP}; read -rsn1 _`];
 

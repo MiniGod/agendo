@@ -4,8 +4,8 @@
 // opens the picker on a session with nowhere to go.
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
-import type { ClaudeProfile, ProfileChoice } from "../src/profiles.ts";
-import type { AgentSession } from "../src/types.ts";
+import type { ClaudeProfile, ProfileChoice } from "../src/sessions/profiles/index.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
 import { handleProfileKeys, nextProfileCursor, profileTargets } from "../src/ui/keys/profile.ts";
 

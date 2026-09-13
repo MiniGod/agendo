@@ -1,5 +1,5 @@
 import type { Key } from "ink";
-import type { RepoInfo } from "../../repos.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
 import type { Mode, KeyContext } from "./context.ts";
 
 type Ctx = Pick<

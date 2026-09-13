@@ -1,10 +1,10 @@
-// The sub-rows under an expanded session (src/ui/rows.ts `activityRows`). The
+// The sub-rows under an expanded session (src/ui/models/rows.ts `activityRows`). The
 // e2e suite expands sessions whose fixture logs carry a prompt, tasks and
 // actions; it never expands one that is still loading, one whose log could not
 // be read, one with tasks but no actions, or one with a prompt and nothing else.
 import { describe, expect, test } from "bun:test";
-import type { ActionLine, SessionActivity } from "../src/types.ts";
-import { activityRows } from "../src/ui/rows.ts";
+import type { ActionLine, SessionActivity } from "../src/shared/types.ts";
+import { activityRows } from "../src/ui/models/rows.ts";
 
 const action = (verb: string): ActionLine => ({ timestamp: new Date(0), verb, detail: "d" }) as ActionLine;
 const kinds = (act: SessionActivity | "loading" | "error" | undefined) => activityRows("k", act).map((r) => `${r.kind}:${(r as { key?: string }).key}`);

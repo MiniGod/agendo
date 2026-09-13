@@ -412,7 +412,7 @@ currently running — exit it first.
 
 Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `project`,
 `team`, `tenant`. There are no baked-in defaults and nothing is auto-discovered, so
-set them for your own setup (see `src/config.ts` for the shape); the token is fetched
+set them for your own setup (see `src/app/config.ts` for the shape); the token is fetched
 via `az`, no PAT needed. `closedStates` lists the work-item states treated as done and
 hidden unless expanded (`Closed`, `Done`, `Removed`, `Resolved`) — override it if your
 process names them differently. GitHub needs no config — it scopes to the github.com
@@ -483,7 +483,7 @@ them for its own reason:
   that through the UI would mean a fixture corrupt in one exact way, read at one
   exact moment, to prove a record the screen then draws no differently.
 - **What imports what.** Nothing the TUI's rescan timer can reach may pull in
-  `src/gitrefs.ts`. That has no rendered output to assert on in the first place.
+  `src/repositories/gitRefs.ts`. That has no rendered output to assert on in the first place.
 
 ```bash
 bun run test

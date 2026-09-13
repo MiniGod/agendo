@@ -1,11 +1,11 @@
-// The string half of the clone flow (src/clone/url.ts): every shape of Azure
+// The string half of the clone flow (src/repositories/clone/url.ts): every shape of Azure
 // DevOps and GitHub URL reduced to the remote to clone and its identity key.
 // The e2e clone spec pastes the common forms into the real screen; what it
 // never pastes is the legacy `{org}.visualstudio.com` host, a dev.azure.com
 // URL with no repo in it, a segment that does not percent-decode, a `:token@`
 // with an empty username, and GitHub's SSH-over-443 host.
 import { describe, expect, test } from "bun:test";
-import { parseRepoUrl, redactUrl } from "../src/clone/url.ts";
+import { parseRepoUrl, redactUrl } from "../src/repositories/clone/url.ts";
 
 const remoteOf = (s: string) => parseRepoUrl(s)?.remote ?? null;
 const keyOf = (s: string) => parseRepoUrl(s)?.key ?? null;

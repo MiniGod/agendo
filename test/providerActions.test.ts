@@ -1,10 +1,10 @@
-// Switching backend from the provider picker (src/ui/providerActions.ts): the
+// Switching backend from the provider picker (src/ui/actions/provider.ts): the
 // pure decision and the closures that apply it. The e2e suite runs with one
 // backend's CLI stubbed at a time and never opens the picker to switch, so
 // the whole of the old inline closure scored at cc 7 with one statement seen.
 import { describe, expect, mock, test } from "bun:test";
 import type { Mode } from "../src/ui/keys/context.ts";
-import { makeProviderActions, providerSwitch, unavailableNotice } from "../src/ui/providerActions.ts";
+import { makeProviderActions, providerSwitch, unavailableNotice } from "../src/ui/actions/provider.ts";
 
 const both = new Set(["github", "ado"] as const);
 const settings: Mode = { kind: "settings", cursor: 0 } as Mode;

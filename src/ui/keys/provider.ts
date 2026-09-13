@@ -1,5 +1,5 @@
 import type { Key } from "ink";
-import { PROVIDER_INFO } from "../../provider.ts";
+import { PROVIDER_INFO } from "../../providers/index.ts";
 import type { KeyContext, Mode } from "./context.ts";
 
 type Ctx = Pick<KeyContext, "mode" | "setMode" | "applyProvider">;

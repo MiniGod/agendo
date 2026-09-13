@@ -1,4 +1,4 @@
-import { takeWarnings } from "../errors.ts";
+import { takeWarnings } from "../shared/errors.ts";
 
 /**
  * Print (and clear) anything the load reported-and-ignored. The TUI surfaces

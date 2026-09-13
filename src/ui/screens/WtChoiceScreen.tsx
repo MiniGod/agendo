@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
-import type { RepoInfo } from "../../repos.ts";
-import type { FreshTarget } from "../targets.ts";
-import { padCell } from "../format.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
+import type { FreshTarget } from "../models/targets.ts";
+import { padCell } from "../format/index.ts";
 
 /**
  * Where a fresh session should run in the chosen repo: a new worktree, or the

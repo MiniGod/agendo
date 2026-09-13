@@ -1,10 +1,10 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import type { LoadedModel } from "../../model.ts";
-import { homeShort } from "../format.ts";
-import { CaretText, ColumnHeader, HEADERS_ITEMS, ITEM_WIDTHS, PR_WIDTHS, prHeaders } from "../components.tsx";
-import type { PrSort, SessionSort } from "../rows.ts";
-import type { RepoInfo } from "../../repos.ts";
+import type { LoadedModel } from "../../app/model/index.ts";
+import { homeShort } from "../format/index.ts";
+import { CaretText, ColumnHeader, HEADERS_ITEMS, ITEM_WIDTHS, PR_WIDTHS, prHeaders } from "../components/index.tsx";
+import type { PrSort, SessionSort } from "../models/rows.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
 import type { View } from "../keys/context.ts";
 
 /**

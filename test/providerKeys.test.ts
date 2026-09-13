@@ -5,7 +5,7 @@
 // settings keys' test, because the picker is the same shape as that page.
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
-import { PROVIDER_INFO } from "../src/provider.ts";
+import { PROVIDER_INFO } from "../src/providers/index.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
 import { handleProviderKeys, moveProviderCursor, providerAction, providerBack } from "../src/ui/keys/provider.ts";
 

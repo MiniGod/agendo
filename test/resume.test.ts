@@ -1,13 +1,13 @@
-// `agendo resume` (src/cli/resume.ts): the resolution and the refusals, each on
+// `agendo resume` (src/cli/commands/resume.ts): the resolution and the refusals, each on
 // its own. The e2e suite resumes real idle and running sessions against a
 // fixture tmux; what it never does is call the command with no id, name a
 // session that does not exist, or find the session already live outside agendo
 // (a second claude on the same transcript). Those arms are here, with
 // `process.exit` stubbed to throw so a refusal is an assertion.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { findSession, refuseRunningElsewhere, requireSession, requireToken } from "../src/cli/resume.ts";
-import type { PeerSession } from "../src/peer.ts";
-import type { AgentSession } from "../src/types.ts";
+import { findSession, refuseRunningElsewhere, requireSession, requireToken } from "../src/cli/commands/resume.ts";
+import type { PeerSession } from "../src/orchestration/peer.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 
 class Exit extends Error {
   constructor(readonly code: number | undefined) {

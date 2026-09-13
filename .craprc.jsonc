@@ -30,15 +30,15 @@
   // `handleListNavKeys` (cc 29, 51%) and src/ui/keys/search.ts
   // `handleSearchInputKeys` (cc 27, 49%) set 127.82; both are now dispatch
   // over pure helpers (rowTree.ts, searchEdit.ts) with a unit suite, the worst
-  // of them at 7. Then src/clone/run.ts `cancel` (cc 8, never entered) set 72
-  // with src/profiles.ts `moveSessionToProfile` (cc 25, 59%) behind it; the
+  // of them at 7. Then src/repositories/clone/run.ts `cancel` (cc 8, never entered) set 72
+  // with src/sessions/profiles/index.ts `moveSessionToProfile` (cc 25, 59%) behind it; the
   // first is two named helpers under a stand-in git, the second is the three
-  // phases of src/profiles/move.ts, both with a unit suite, the worst at 7.
+  // phases of src/sessions/profiles/move.ts, both with a unit suite, the worst at 7.
   // Then src/ui/keys/lineEdit.ts `editLine` (cc 18, 47%) set 64.57 with
   // src/ui/keys/clone.ts `handleCloneKeys` (cc 21, 54%) behind it; both now
   // dispatch over the search prompt's edits (searchEdit.ts) through
   // lineEdit.ts, with a unit suite, the worst of them at 6. Then
-  // src/tmux/codex.ts `codexReadiness` (cc 7, never entered) set 56 with
+  // src/runtime/tmux/codex.ts `codexReadiness` (cc 7, never entered) set 56 with
   // src/ui/keys/list.ts `handleListRowActionKeys` (cc 21, 57%) behind it;
   // the first is walked over the real captures under bun (its e2e assertions
   // ran outside the measured process), the second is the table in
@@ -48,28 +48,28 @@
   // the worst of it at 6. Then src/ui/App.tsx `(anonymous L296)` (cc 7, 7%)
   // — `applyProvider`, an arrow the report could not name — set 46.84; it is
   // now src/ui/providerActions.ts, a pure decision plus two closures with a
-  // unit suite, the worst of it at 5. Then src/github.ts `rollupCI` (cc 20,
-  // 59%) set 46.65; it is now src/github/ci.ts, one verdict per check and a
+  // unit suite, the worst of it at 5. Then src/providers/github/index.ts `rollupCI` (cc 20,
+  // 59%) set 46.65; it is now src/providers/github/ci.ts, one verdict per check and a
   // precedence, with a unit suite, the worst of it at 5. Then src/cli/close.ts
   // `runClose` (cc 45, 93%) set 45.78; it is now a dispatch over one function
   // per guard and per report, the arms e2e never trips unit tested, the worst
-  // of it at 7. Then src/ado/policy.ts `fetchBuildResult` (cc 6, never
-  // entered) set 42; its verdict is src/ado/build.ts `buildResult` beside
+  // of it at 7. Then src/providers/azureDevOps/policy.ts `fetchBuildResult` (cc 6, never
+  // entered) set 42; its verdict is src/providers/azureDevOps/build.ts `buildResult` beside
   // `aggregateBuild` and `worstExpired`, all three with a unit suite, and the
   // fetch itself entered through a fake request, the worst of it at 14. The
   // Then src/cli/send.ts `runSend` (cc 40, 91%) set 41.35; it is now a
   // ten-line dispatch over one function per step, the arms e2e never trips
-  // unit tested, the worst of it at 6. Then src/ui/components.tsx
+  // unit tested, the worst of it at 6. Then src/ui/components/index.tsx
   // `SessionRow` (cc 34, fully covered) set 34; what the row says is now
-  // decided in src/ui/sessionRow.ts, one small function per part with a unit
+  // decided in src/ui/models/sessionRow.ts, one small function per part with a unit
   // suite, and the component only paints it, the worst of it at 6. Then
   // src/cli/dispatch.ts `listCommand` (cc 33, 92%) set 33.66; each listing
   // now parses its own argv in src/cli/listArgs.ts with a unit suite, and
-  // dispatch.ts routes, the worst of it at 7. Then src/usageLimit.ts
+  // dispatch.ts routes, the worst of it at 7. Then src/sessions/usageLimit/index.ts
   // `parseResetTime` (cc 19, 66%: its spec cases run in-process under
   // Playwright, which the instrumented bun never sees) set 33.10; it is now a
   // chain over one helper per part of the notice, each arm unit tested on the
-  // bun side, the worst of it at 6. Then src/selfCmd.ts `derivedSelfCmd`
+  // bun side, the worst of it at 6. Then src/launch/selfCommand.ts `derivedSelfCmd`
   // (cc 9, 33%: decided once at module load from the real environment, so one
   // arm ran) set 33.00; `deriveSelfCmd` now takes its inputs, every arm unit
   // tested, the worst of it at 5. Then src/ui/keys/settings.ts
@@ -86,9 +86,9 @@
   // unit suite, the worst of them at 7. Then src/cli/launchCmd.ts
   // `parseLaunchArgs` (cc 31, 98%) set 31.00; it now walks its argv one
   // token at a time over three small questions, with a unit suite, the worst
-  // of it at 7. Then src/workflows.ts `record` (cc 29, 91%) set 29.55; it is
+  // of it at 7. Then src/orchestration/workflows.ts `record` (cc 29, 91%) set 29.55; it is
   // now four lines over a launch reader and a notification reader, each with
-  // a unit suite, the worst of them at 6. Then src/worktree.ts
+  // a unit suite, the worst of them at 6. Then src/repositories/worktree/index.ts
   // `checkoutWorktree` (cc 11, 47%) set 29.36; it now tries the three
   // `git worktree add` shapes as one list, with a unit suite over a scripted
   // git, and scores 7. Then src/cli/open.ts `runOpen` (cc 28, 89%) set
@@ -96,21 +96,21 @@
   // worst of them at 5. Then src/ui/screens/ListScreen.tsx `ListScreen`
   // (cc 28, fully covered) set 28.00; its header lines are now one function
   // each in listLines.tsx, the worst of them at 6, and it scores 1. Then
-  // src/restore.ts `recordLaunchedSession` (cc 7, 25%) set 27.67; the e2e
+  // src/runtime/restore/index.ts `recordLaunchedSession` (cc 7, 25%) set 27.67; the e2e
   // suite never got past its first line, so it now takes its tmux listing
   // and restore file as a host and is unit tested on one of maps, at 4. Then
   // src/ui/screens/ListScreen.tsx `renderRow` (cc 27, fully covered) set
   // 27.00; each row kind is now its own function in listRows.tsx, the worst
   // of them at 7, behind a table the dispatcher reads at 2. Then
-  // src/wait/args.ts `parseWaitArgs` (cc 25, 92%) set 25.30; each flag is now
+  // src/cli/wait/args.ts `parseWaitArgs` (cc 25, 92%) set 25.30; each flag is now
   // a row in a table read one token at a time, every function in the file
   // unit tested and the worst of them at 6. Then src/ui/keys/list.ts
   // `handleListViewKeys` (cc 23, 84%) set 25.08; it now asks five key groups
-  // in turn, each unit tested, and scores 7. Then src/peer.ts `livePeers`'s
+  // in turn, each unit tested, and scores 7. Then src/orchestration/peer.ts `livePeers`'s
   // file reader (cc 20, 77%, anonymous) set 24.70; it is now
   // `parsePeerEntry` over three named checks, unit tested, the worst of them
-  // at 6. Then src/ado.ts `fetchWorkItemsForPRs` (cc 12, 57%) set 23.84; its
-  // pure middle is three unit-tested functions in src/ado/prWorkItems.ts, the
+  // at 6. Then src/providers/azureDevOps/index.ts `fetchWorkItemsForPRs` (cc 12, 57%) set 23.84; its
+  // pure middle is three unit-tested functions in src/providers/azureDevOps/prWorkItems.ts, the
   // worst at 6, and the fetch itself scores 3. Then src/ui/keys/provider.ts
   // `handleProviderKeys` (cc 9, 44%) set 22.89; it is now a switch over a
   // named action, unit tested, and scores 6. Then src/sessions/claude.ts
@@ -125,7 +125,7 @@
   // the --attach handover. Then src/cli/listRepos.ts `runListRepos` (cc 21,
   // 93%) set 21.12; it is now sessionRows, addWalkedCheckouts, a sort by
   // byNeed and the printing, unit tested, the worst at 5. Then
-  // src/clone/url.ts `parseAdo` (cc 16, 74%) set 20.54; each Azure DevOps URL
+  // src/repositories/clone/url.ts `parseAdo` (cc 16, 74%) set 20.54; each Azure DevOps URL
   // shape now parses in a function of its own, unit tested, the worst at 7.
   // Then src/ui/keys/repo.ts `handleRepoKeys` (cc 20, 89%) set 20.47;
   // repoAction now names the key and a table runs it, unit tested, the worst
@@ -135,48 +135,48 @@
   // src/ui/keys/open.ts `handleOpenKeys` (cc 10, 53%) set 20.16; openTargetOf
   // now names the link a letter opens, and every key is unit tested, the
   // worst at 7. Then nine holders came down in one PR: src/cli/launchCmd.ts
-  // `validateLaunchArgs` (cc 20, fully covered) and src/sessions.ts
+  // `validateLaunchArgs` (cc 20, fully covered) and src/sessions/index.ts
   // `preferredDuplicate` (cc 4, never entered) at 20, src/cli/dispatch.ts
-  // `runSubcommand` at 19.07, src/model.ts `loadModel` and src/launchArgv.ts
+  // `runSubcommand` at 19.07, src/app/model/index.ts `loadModel` and src/launch/argv.ts
   // `freshArgv` at 19, src/cli/resume.ts `runResume` at 18.80,
   // src/ui/keys/init.ts `handleInitKeys` at 18, src/ui/keys/profile.ts
-  // `handleProfileKeys` at 17.69 and src/gitrefs.ts `gitDirs` at 17.47; each
+  // `handleProfileKeys` at 17.69 and src/repositories/gitRefs.ts `gitDirs` at 17.47; each
   // is now named pieces in the order they always ran, unit tested where the
   // e2e fixtures never reached, the worst of them at 7. Then eight more in one
   // PR: src/ui/screens/RepoScreen.tsx `RepoScreen` (cc 17, fully covered) at
-  // 17, src/ui/equality.ts `sameActivity` at 16.55, src/repos.ts
-  // `discoverGitReposUnder` at 16.01, src/github.ts `voteSummary` at 15.57,
-  // src/gitrefs.ts `configuredUpstream` at 15.35, src/workflows.ts
-  // `parseWorkflowMeta` at 15.34, src/ui/rows.ts `pushSession` at 15.17 and
+  // 17, src/ui/models/equality.ts `sameActivity` at 16.55, src/repositories/index.ts
+  // `discoverGitReposUnder` at 16.01, src/providers/github/index.ts `voteSummary` at 15.57,
+  // src/repositories/gitRefs.ts `configuredUpstream` at 15.35, src/orchestration/workflows.ts
+  // `parseWorkflowMeta` at 15.34, src/ui/models/rows.ts `pushSession` at 15.17 and
   // src/cli/list.ts `runPlainList` at 15.15; the same treatment, the worst of
   // them at 7. Then eleven more in one PR: src/cli/dispatch.ts `openCommand`
   // at 15.10, src/ui/keys/identity.ts `handleIdentityKeys` at 15.08,
-  // src/ui/App.tsx's anonymous `useInput` callback at 15.01, src/errors.ts
-  // `messageOf` at 14.11, src/gitrefs.ts `branchSync` at 14.06,
-  // src/worktree.ts `createWorktree` at 14.01, src/usageLimit.ts `envLocale`
+  // src/ui/App.tsx's anonymous `useInput` callback at 15.01, src/shared/errors.ts
+  // `messageOf` at 14.11, src/repositories/gitRefs.ts `branchSync` at 14.06,
+  // src/repositories/worktree/index.ts `createWorktree` at 14.01, src/sessions/usageLimit/index.ts `envLocale`
   // at 13.70, src/ui/keys/wtchoice.ts `handleWtchoiceKeys` at 13.49,
-  // src/ui/screens/ModeScreens.tsx `renderMode` at 15.00, src/ado/build.ts
-  // `aggregateBuild` at 14.00 and src/ui/format.ts `fmtDelta` at 12.72; every
+  // src/ui/screens/ModeScreens.tsx `renderMode` at 15.00, src/providers/azureDevOps/build.ts
+  // `aggregateBuild` at 14.00 and src/ui/format/index.ts `fmtDelta` at 12.72; every
   // function they were split into is at 7 or below and fully covered. The
   // holder is src/ui/format/columns.ts `clusterWidth` (cc 13, 90%) at 13.17,
-  // with src/ado/pr.ts `mapPr`, src/clone/url.ts `githubRemote` and
-  // src/worktreeAdopt.ts `inspectWorktree` at 13.00 behind it.
+  // with src/providers/azureDevOps/pr.ts `mapPr`, src/repositories/clone/url.ts `githubRemote` and
+  // src/repositories/worktree/adopt.ts `inspectWorktree` at 13.00 behind it.
   "max": 13.17,
 
   "overrides": [
-    // REMOVED: the four src/activity.ts pins (loadCodexActivity 1190,
+    // REMOVED: the four src/sessions/activity/index.ts pins (loadCodexActivity 1190,
     // copilotAction 702, codexAction 702, loadCopilotActivity 506). The codex
-    // and copilot readers are now src/activity/codex.ts and copilot.ts, walks
+    // and copilot readers are now src/sessions/activity/codex.ts and copilot.ts, walks
     // over small per-record handlers with a unit suite over every tool they
     // render; the worst function in either file is 7.
     //
-    // The input-box scan, cc 29. In the orchestrator port's area (src/tmux/),
+    // The input-box scan, cc 29. In the orchestrator port's area (src/runtime/tmux/),
     // so measured here and left alone. LOWERED 365.45 -> 62.67: a quarter of
     // it was exercised until the codex classifier's bun-side suite
     // (test/codexReadiness.test.ts) started driving it over the real codex
     // captures; two thirds now are. The number rides exactly at the observed
     // value — if it crosses on e2e noise, the fix is a unit suite over the
     // scan itself, not a raised pin.
-    { "file": "src/tmux/inputBox.ts", "function": "inputRealText", "max": 62.67 }
+    { "file": "src/runtime/tmux/inputBox.ts", "function": "inputRealText", "max": 62.67 }
   ]
 }

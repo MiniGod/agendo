@@ -1,4 +1,4 @@
-// The pure parts of `agendo status` (src/cli/status.ts). The e2e suite drives
+// The pure parts of `agendo status` (src/cli/commands/status.ts). The e2e suite drives
 // the command against fixture sessions and reaches every line it prints; what
 // it never varies is the shape of what those lines are built from — a workflow
 // with no launch time, one that is running but has done nothing yet, a model
@@ -6,8 +6,8 @@
 // no upstream at all. Those are here, one arm beside the next.
 import { describe, expect, test } from "bun:test";
 import { usableLinks } from "../src/cli/links.ts";
-import { describeSync, paneFacts, workflowAgents, workflowBits, workflowDescription, workflowPhases } from "../src/cli/status.ts";
-import type { BranchSync, WorkflowDetails, WorkflowRef } from "../src/types.ts";
+import { describeSync, paneFacts, workflowAgents, workflowBits, workflowDescription, workflowPhases } from "../src/cli/commands/status.ts";
+import type { BranchSync, WorkflowDetails, WorkflowRef } from "../src/shared/types.ts";
 
 const ref = (over: Partial<WorkflowRef> = {}): WorkflowRef => ({ runId: "wf_1", name: "review", ...over });
 const details = (over: Partial<WorkflowDetails> = {}): WorkflowDetails => ({ agentsStarted: 3, agentsDone: 1, ...over }) as WorkflowDetails;

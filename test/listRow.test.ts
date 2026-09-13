@@ -1,16 +1,16 @@
-// One row of the enriched `agendo list` (src/cli/listRow.ts) and the query
-// behind `--pr` / `--issue` (src/cli/list.ts). The e2e suite lists real
+// One row of the enriched `agendo list` (src/cli/list/rows.ts) and the query
+// behind `--pr` / `--issue` (src/cli/list/index.ts). The e2e suite lists real
 // fixture sessions through a real tmux; what it never shows is a link whose
 // URL could not be built, the global orchestrator's absent repo, a session
 // on a PR linked to two items, or a running session whose window tmux can no
 // longer place. Those arms are here, on a context of maps.
 import { describe, expect, test } from "bun:test";
-import { querySessions } from "../src/cli/list.ts";
+import { querySessions } from "../src/cli/list/index.ts";
 import {
   linkFields, listRow, liveFields, paneFields, repoFields, rowWorkflows, usableLink, type ListRowContext,
-} from "../src/cli/listRow.ts";
-import type { LoadedModel } from "../src/model.ts";
-import type { AgentSession } from "../src/types.ts";
+} from "../src/cli/list/rows.ts";
+import type { LoadedModel } from "../src/app/model/index.ts";
+import type { AgentSession } from "../src/shared/types.ts";
 
 const session = (id: string, over: Partial<AgentSession> = {}): AgentSession =>
   ({ source: "claude", id, cwd: "/w/repo", title: "  Fix   the thing ", lastUsed: new Date("2026-09-02T09:00:00Z"), ...over }) as AgentSession;

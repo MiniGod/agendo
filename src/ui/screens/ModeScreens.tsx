@@ -1,10 +1,10 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import type { LoadedModel } from "../../model.ts";
-import type { Identity, ProviderName } from "../../types.ts";
-import type { RepoInfo } from "../../repos.ts";
-import type { RepoUrl } from "../../clone.ts";
-import type { FreshTarget } from "../targets.ts";
+import type { LoadedModel } from "../../app/model/index.ts";
+import type { Identity, ProviderName } from "../../shared/types.ts";
+import type { RepoInfo } from "../../repositories/index.ts";
+import type { RepoUrl } from "../../repositories/clone/index.ts";
+import type { FreshTarget } from "../models/targets.ts";
 import type { Mode } from "../keys/context.ts";
 import { AgentScreen } from "./AgentScreen.tsx";
 import { BranchScreen } from "./BranchScreen.tsx";
