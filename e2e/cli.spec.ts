@@ -133,6 +133,32 @@ test("agendo --help prints usage under the new name", async ({ mock }) => {
   expect(r.stdout).not.toContain("claunch"); // the old name is fully gone
 });
 
+test("agendo --version, -v and version all print the bare version", async ({ mock }) => {
+  // Bare on purpose — no "agendo" prefix and no "v" — so a caller reading it
+  // needs no parsing. The unit suite covers what the number is; this covers that
+  // all three spellings reach the same place and exit clean.
+  const expected = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version;
+  for (const spelling of ["--version", "-v", "version"]) {
+    const r = agendo(mock.env, spelling);
+    expect(r.status, spelling).toBe(0);
+    expect(r.stdout.trim(), spelling).toBe(expected);
+  }
+});
+
+test("--version is honoured only in the verb slot, so a prompt keeps its -v", async ({ mock }) => {
+  // `--help` is recognized anywhere on the line; `-v` deliberately is not. A
+  // send whose message ends in `-v` must still be a send — printing a version
+  // instead would silently drop the message, and the caller would have no way
+  // to tell the difference from a delivered one.
+  const r = agendo(mock.env, "send", SHORT_ID, "--", "run", "the", "thing", "-v");
+  expect(r.status).toBe(0);
+  expect(r.stdout.trim()).not.toMatch(/^\d+\.\d+\.\d+$/);
+  // It was delivered, by the same route the plain send test pins.
+  expect(r.stdout).toContain(`pasted into pane ${RUNNING_TARGET}`);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((argv) => argv[0] === "paste-buffer")).toBe(true);
+});
+
 test("agendo --llm prints the background-session guide", async ({ mock }) => {
   const r = agendo(mock.env, "--llm");
   expect(r.status).toBe(0);
