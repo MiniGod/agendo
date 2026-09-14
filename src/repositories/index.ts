@@ -10,6 +10,7 @@ import { join, dirname, basename } from "path";
 import { isUnderRoot, normalizeCwd } from "../app/context.ts";
 import { parseGithubRemote } from "../providers/github/index.ts";
 import { orchestratorRoles } from "../orchestration/index.ts";
+import { orchestratorCwdRoles } from "../orchestration/cwdMarks.ts";
 import type { AgentSession } from "../shared/types.ts";
 
 export interface RepoInfo {
@@ -162,12 +163,17 @@ function outsideCheckout(dir: string, repoRoots: string[]): string | null {
  * `globalOrchestratorCwd` sees its own predecessor's vantage point among the
  * "repo roots", treats it as a checkout to step out of, and lands one directory
  * higher — every relaunch walking further from the repos it coordinates.
+ *
+ * The check is by id AND by cwd: a Codex global orchestrator is marked only by
+ * cwd (it has no preassigned id — see `markOrchestratorCwd`), so an id-only
+ * check would stop excluding it the moment its real session id is discovered.
  */
 export function discoverRepos(sessions: AgentSession[]): RepoInfo[] {
   const byRoot = new Map<string, RepoInfo>();
   const roles = orchestratorRoles();
+  const cwdRoles = orchestratorCwdRoles();
   for (const s of sessions) {
-    if (roles.get(s.id) === "global") continue;
+    if (roles.get(s.id) === "global" || cwdRoles.get(s.cwd) === "global") continue;
     const root = repoRootForCwd(s.cwd);
     let info = byRoot.get(root);
     if (!info) {

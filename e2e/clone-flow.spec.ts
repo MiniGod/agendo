@@ -544,11 +544,13 @@ test("an orchestrator can be started in a repo it just cloned", async ({ launch,
   const wt = await launch({ args: [parent], cols: 140, rows: 40 });
   await wt.waitForText("Current sprint", 20000);
 
-  // Sessions view → O, which enters the repo picker directly (Claude-only mode,
-  // so there is no agent step) — and the clone row is offered there too.
+  // Sessions view → O, through the agent picker (Claude, the default) — and the
+  // clone row is offered on the repo picker that follows.
   await wt.press("3");
   await wt.waitForStable();
   await wt.press("O");
+  await wt.waitForText("Orchestrator session — pick an agent");
+  await wt.press(KEY.enter);
   const picker = await wt.waitForText("Orchestrator session — pick a repo");
   expect(picker).toContain("Clone from URL…");
 

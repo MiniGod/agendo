@@ -15,7 +15,7 @@ import { orchestratorSystemPrompt } from "../src/orchestration/index.ts";
 
 // A distinctive stand-in for SELF_CMD — see the note in orchestrator.spec.ts.
 const SELF = "npx agendo@test";
-const prompt = globalOrchestratorSystemPrompt(SELF);
+const prompt = globalOrchestratorSystemPrompt(SELF, "claude");
 /** The prompt with runs of whitespace collapsed, so hard wraps aren't pinned. */
 const flat = prompt.replace(/\s+/g, " ");
 
@@ -46,10 +46,18 @@ test("the prompt discovers repos and unmanaged ones through the CLI", async () =
 });
 
 test("the prompt starts a repo orchestrator in the repo that lacks one", async () => {
-  expect(prompt).toContain(`(cd <repoRoot> && ${SELF} launch --orchestrator "<that repo's goal>")`);
+  expect(prompt).toContain(`(cd <repoRoot> && ${SELF} launch --orchestrator --agent claude "<that repo's goal>")`);
   expect(flat).toContain("One repo = one orchestrator");
   // It briefs, it does not decompose — decomposition is the repo level's call.
   expect(flat).toContain("do NOT hand it a list of worktree sessions to launch, that is its call");
+});
+
+test("a repo orchestrator it starts inherits its OWN agent by default", async () => {
+  // Same reasoning as the repo level's own children (see orchestrator.spec.ts):
+  // the CLI's `--agent` default stays claude, so the prompt has to spell out the
+  // global orchestrator's own agent in every delegation command it teaches.
+  const codexPrompt = globalOrchestratorSystemPrompt(SELF, "codex");
+  expect(codexPrompt).toContain(`(cd <repoRoot> && ${SELF} launch --orchestrator --agent codex "<that repo's goal>")`);
 });
 
 test("the prompt forbids reaching past a level in EITHER direction", async () => {
@@ -83,7 +91,7 @@ test("the prompt escalates only decisions that genuinely span repos", async () =
 test("systemPromptForRole picks the level's own prompt", async () => {
   // The selector is what fresh launch AND cold resume both go through. Getting it
   // backwards would resume a global orchestrator with merge instructions.
-  expect(systemPromptForRole("global", SELF)).toBe(prompt);
-  expect(systemPromptForRole("repo", SELF)).toBe(orchestratorSystemPrompt(SELF));
-  expect(systemPromptForRole("repo", SELF)).not.toContain("GLOBAL ORCHESTRATOR MODE");
+  expect(systemPromptForRole("global", SELF, "claude")).toBe(prompt);
+  expect(systemPromptForRole("repo", SELF, "claude")).toBe(orchestratorSystemPrompt(SELF, "claude"));
+  expect(systemPromptForRole("repo", SELF, "claude")).not.toContain("GLOBAL ORCHESTRATOR MODE");
 });

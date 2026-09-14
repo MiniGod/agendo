@@ -4377,6 +4377,20 @@ function appendedPrompt(argv: string[]): string {
 }
 
 /**
+ * The decoded `-c developer_instructions=…` value from a spawned codex argv.
+ * Takes the CODEX argv only (e.g. `spawnedAgentArgv(...)`), never a raw
+ * `new-session` call — tmux has its own `-c <cwd>` flag before the `--`, and
+ * `indexOf` would silently resolve to that one instead.
+ */
+function developerInstructions(argv: string[]): string {
+  const at = argv.indexOf("-c");
+  expect(at).toBeGreaterThanOrEqual(0);
+  const raw = argv[at + 1] ?? "";
+  expect(raw.startsWith("developer_instructions=")).toBe(true);
+  return JSON.parse(raw.slice("developer_instructions=".length)) as string;
+}
+
+/**
  * The `git` invocations from the shared call log, as parsed argv arrays. The fake
  * git logs each call as `git <JSON argv>` (e2e/fakebin/git), so this decodes back
  * to exact arguments — letting a test distinguish `worktree-orchestrator` from
@@ -4800,9 +4814,41 @@ test("agendo launch --orchestrator --copilot is refused, not silently downgraded
   // would run with none of the instructions. Fail loudly instead.
   const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--copilot", "Coordinate this");
   expect(r.status).not.toBe(0);
-  expect(r.stderr).toContain("--orchestrator is Claude-only");
+  expect(r.stderr).toContain("--orchestrator isn't available with --agent copilot");
   // Nothing was spawned.
   expect((await mock.tmuxLog()).some((argv) => argv[0] === "new-session" && argv.includes("copilot"))).toBe(false);
+});
+
+test("agendo launch --orchestrator --codex injects the instructions via developer_instructions", async ({ mock }) => {
+  // Codex has no --append-system-prompt, but codex-cli 0.154.0 accepts
+  // `-c developer_instructions=` and lands it as a developer-role input at the
+  // head of the prompt — the functional equivalent claude gets, so codex is
+  // orchestrator-eligible too (only Copilot has no such flag).
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--orchestrator", "--codex", "Build the reporting module");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("launched orchestrator session");
+
+  // `spawnedAgentArgv` strips tmux's OWN `-c <cwd>` flag (before `--`), leaving
+  // just the codex argv — otherwise `-c` resolves to the wrong flag entirely.
+  const spawned = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(spawned)).toBe("codex");
+  const instructions = developerInstructions(spawned);
+  expect(instructions).toContain("You are running inside agendo");
+  expect(instructions).toContain("ORCHESTRATOR MODE");
+  expect(instructions).toContain("Never write project code yourself");
+  // Codex's prompt is a bare positional and must stay last, after `-c …`.
+  expect(spawned.at(-1)).toBe("Build the reporting module");
+
+  // It runs in the repo's MAIN checkout, same as the claude case above.
+  expect(r.stdout).toContain(`(in ${mockRepo(mock.home)})`);
+});
+
+test("agendo launch --global-orchestrator --codex injects the GLOBAL prompt via developer_instructions", async ({ mock }) => {
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "--codex", "Coordinate the fleet");
+  expect(r.status).toBe(0);
+  const spawned = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(spawned)).toBe("codex");
+  expect(developerInstructions(spawned)).toContain("GLOBAL ORCHESTRATOR MODE");
 });
 
 test("orchestrator mode survives a cold resume; an ordinary session isn't given it", async ({ mock }) => {
@@ -4833,6 +4879,79 @@ test("orchestrator mode survives a cold resume; an ordinary session isn't given 
   );
   expect(other).toBeTruthy();
   expect(appendedPrompt(other!)).not.toContain("ORCHESTRATOR MODE");
+});
+
+test("a codex orchestrator survives a cold resume — marked by cwd, not by id", async ({ mock }) => {
+  // Codex assigns its own session id only after the fact (see `preassignsSessionId`),
+  // so there is no id to mark at launch time the way claude's `orchestrators.json`
+  // does. It is marked by working directory instead (`markOrchestratorCwd`), and
+  // `resumeArgv`'s codex branch has to fall back to that same cwd lookup
+  // (`orchestratorRoleOf(s.id, s.cwd)`) or a resumed codex orchestrator comes back
+  // as a plain session and starts writing code.
+  const codexCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "codex-tidy");
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorCwds.json"),
+    JSON.stringify({ cwds: { [codexCwd]: "repo" } }),
+  );
+
+  const r = agendo(mock.env, "resume", CODEX_SESSION_ID);
+  expect(r.status).toBe(0);
+  const resumed = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(resumed)).toBe("codex");
+  expect(developerInstructions(resumed)).toContain("ORCHESTRATOR MODE");
+  expect(developerInstructions(resumed)).not.toContain("GLOBAL ORCHESTRATOR MODE");
+});
+
+test("an ordinary Codex launch clears a stale orchestrator mark left in the same cwd", async ({ mock }) => {
+  // Unlike an id-keyed mark (an id is never reused, so a stale one is dead
+  // weight), a cwd-keyed mark IS a live hazard: a repo's main checkout can host
+  // an orchestrator today and an ordinary `--no-worktree` Codex session
+  // tomorrow. Seed the marker as if a past orchestrator had run in this repo's
+  // main checkout, then launch an ORDINARY Codex session there.
+  const repo = mockRepo(mock.home);
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  const marksPath = join(mock.home, ".agendo", "orchestratorCwds.json");
+  await writeFile(marksPath, JSON.stringify({ cwds: { [repo]: "repo" } }));
+
+  const r = agendoIn(repo, mock.env, "launch", "--no-worktree", "--codex", "spike it");
+  expect(r.status).toBe(0);
+  const spawned = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(spawned)).toBe("codex");
+  expect(developerInstructions(spawned)).not.toContain("ORCHESTRATOR MODE");
+
+  // The stale mark for this cwd is gone, not just unused this once — a LATER
+  // cold resume of some other session sharing this cwd won't inherit it either.
+  const marks = JSON.parse(await readFile(marksPath, "utf-8"));
+  expect(marks.cwds).not.toHaveProperty(repo);
+});
+
+test("an ordinary Codex launch does not clear a LIVE orchestrator's mark in the same cwd", async ({ mock }) => {
+  // The mark is only "stale" once nothing is running at that cwd. A repo
+  // orchestrator's cwd is its repo's own main checkout — a directory a user can
+  // `cd` into and launch an ordinary session in WHILE the orchestrator is still
+  // up. Clearing unconditionally would wipe a LIVE orchestrator's only record of
+  // itself, silent until its next cold resume comes back as a plain session.
+  const repo = mockRepo(mock.home);
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  const marksPath = join(mock.home, ".agendo", "orchestratorCwds.json");
+  await writeFile(marksPath, JSON.stringify({ cwds: { [repo]: "repo" } }));
+  // The orchestrator itself, still running as a live pane in the repo's cwd.
+  await mock.setTmuxState({
+    ...tmuxState,
+    sessions: ["cl-bg-codex-orch"],
+    panes: [{ session: "cl-bg-codex-orch", window: "cl-bg-codex-orch", cwd: repo, placeholder: false }],
+  });
+
+  const r = agendoIn(repo, mock.env, "launch", "--no-worktree", "--codex", "spike it");
+  expect(r.status).toBe(0);
+  const spawned = spawnedAgentArgv(await mock.tmuxLog())!;
+  expect(agentBin(spawned)).toBe("codex");
+  expect(developerInstructions(spawned)).not.toContain("ORCHESTRATOR MODE");
+
+  // The orchestrator's own mark survives — it's still running.
+  const marks = JSON.parse(await readFile(marksPath, "utf-8"));
+  expect(marks.cwds).toHaveProperty(repo, "repo");
 });
 
 // ── seeing the hierarchy from `list` ──────────────────────────────────────────
@@ -5197,6 +5316,43 @@ test("agendo launch --global-orchestrator injects the GLOBAL prompt and records 
   expect(roles.roles[id!]).toBe("global");
 });
 
+test("a second global orchestrator doesn't step further out because a codex one's own session looked like a repo", async ({ mock }) => {
+  // A codex global orchestrator is marked only by cwd (`markOrchestratorCwd`),
+  // not by id — so once its own rollout file lands on disk and its session
+  // becomes visible to the index, an id-only exclusion (the bug this guards
+  // against) would stop recognizing it as "global" and `discoverRepos` would
+  // report its vantage point as an ordinary repo root. `globalOrchestratorCwd`
+  // then sees its OWN predecessor among the "repo roots", treats it as a
+  // checkout to step out of, and the next global orchestrator lands one
+  // directory further away — repeating on every relaunch.
+  const vantage = join(mock.home, "repos");
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "orchestratorCwds.json"),
+    JSON.stringify({ cwds: { [vantage]: "global" } }),
+  );
+  const codexDay = join(mock.home, ".codex", "sessions", "2026", "07", "01");
+  await mkdir(codexDay, { recursive: true });
+  const globalId = "019cde00-4444-7000-8000-00000000cde3";
+  await writeFile(
+    join(codexDay, `rollout-2026-07-01T00-00-00-${globalId}.jsonl`),
+    JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-07-01T00:00:00.000Z",
+      payload: {
+        id: globalId, timestamp: "2026-07-01T00:00:00.000Z", cwd: vantage,
+        originator: "codex-tui", source: "cli", thread_source: "user",
+      },
+    }) + "\n",
+  );
+
+  const r = agendoIn(mockRepo(mock.home), mock.env, "launch", "--global-orchestrator", "Coordinate again");
+  expect(r.status).toBe(0);
+  // Still the SAME vantage point — not stepped out to its parent because the
+  // earlier global orchestrator's own session was mistaken for a repo.
+  expect(r.stdout).toContain(`(in ${vantage})`);
+});
+
 test("outside tmux the global orchestrator gets its own session, and says so", async ({ mock }) => {
   // There is no launcher pane to split when nobody is in tmux, so the pane default
   // has to degrade to something that still runs — and report which it got, or the
@@ -5417,7 +5573,7 @@ test("the global orchestrator refuses the flags that belong to a repo", async ({
   // Copilot has no --append-system-prompt equivalent, so the prompt IS the mode.
   const copilot = agendoIn(repo, mock.env, "launch", "-G", "--copilot", "Go");
   expect(copilot.status).not.toBe(0);
-  expect(copilot.stderr).toContain("--global-orchestrator is Claude-only");
+  expect(copilot.stderr).toContain("--global-orchestrator isn't available with --agent copilot");
 
   // And the layout flags mean nothing anywhere else.
   const stray = agendoIn(repo, mock.env, "launch", "--window", "Go");
@@ -5895,10 +6051,12 @@ test("a copilot launch and a resume propagate it too", async ({ mock }) => {
 test("a codex launch and a codex resume propagate it too", async ({ mock }) => {
   const env = { ...mock.env, AGENDO_SELF_CMD: SELF_SENTINEL };
 
-  // Like copilot, codex has no --append-system-prompt, so the env var is the
-  // ONLY route the invocation takes into a codex session. Without it a codex
-  // session cannot self-manage at all: every list/send/wait/close it runs would
-  // go through whatever `agendo` happens to be on PATH.
+  // Unlike copilot, codex CAN carry the launcher pointer (via
+  // `-c developer_instructions=`, see withCodexDeveloperInstructions) — but the
+  // env var is still the route for anything the session runs BY HAND, since a
+  // shell command has no access to the developer-instructions text. Without it
+  // every list/send/wait/close the session runs would go through whatever
+  // `agendo` happens to be on PATH.
   const fresh = agendo(env, "launch", "--no-worktree", "--codex", "spike it");
   expect(fresh.status).toBe(0);
   const freshArgv = spawnedAgentArgv(await mock.tmuxLog())!;
@@ -5917,8 +6075,13 @@ test("a codex launch and a codex resume propagate it too", async ({ mock }) => {
   expect(propagatedSelfCmd(codexArgv)).toBe(SELF_SENTINEL);
   expect(codexArgv.filter((t) => t === "env")).toHaveLength(1);
   // Resume is `codex resume <uuid>` — never `--resume=`, and never the bare
-  // `codex resume` that would open codex's interactive picker.
-  expect(codexArgv.slice(codexArgv.indexOf("codex"))).toEqual(["codex", "resume", CODEX_SESSION_ID]);
+  // `codex resume` that would open codex's interactive picker. The uuid is still
+  // the LAST token — `-c developer_instructions=…` rides in between.
+  const codexCmd = codexArgv.slice(codexArgv.indexOf("codex"));
+  expect(codexCmd[0]).toBe("codex");
+  expect(codexCmd[1]).toBe("resume");
+  expect(codexCmd.at(-1)).toBe(CODEX_SESSION_ID);
+  expect(codexCmd).toContain("-c");
 });
 // ── #39: a session hosted in ANOTHER launcher session ────────────────────────
 // tmux resolves a bare window-name target only inside the caller's own session,

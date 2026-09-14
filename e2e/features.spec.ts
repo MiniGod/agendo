@@ -250,14 +250,15 @@ test("resuming a Codex session launches `codex resume <id>`", async ({ launch, m
   const codexTarget = sessionName("codex", CODEX_SESSION_ID);
   await waitUntil(async () => {
     const log = await mock.tmuxLog();
-    return log.some(
-      (argv) =>
-        argv[0] === "new-session" &&
-        argv.includes(codexTarget) &&
-        // `resume` is a subcommand and the id a positional — not `--resume=<id>`,
-        // and not the bare `codex resume` that opens codex's own picker.
-        spawnedAgent(argv).join(" ") === `codex resume ${CODEX_SESSION_ID}`,
-    );
+    return log.some((argv) => {
+      if (argv[0] !== "new-session" || !argv.includes(codexTarget)) return false;
+      const cmd = spawnedAgent(argv);
+      // `resume` is a subcommand and the id the LAST positional — not `--resume=<id>`,
+      // and not the bare `codex resume` that opens codex's own picker. The launcher
+      // pointer rides in between as `-c developer_instructions=…` (see
+      // withCodexDeveloperInstructions), so the id is no longer directly adjacent.
+      return cmd[0] === "codex" && cmd[1] === "resume" && cmd.at(-1) === CODEX_SESSION_ID;
+    });
   });
 });
 

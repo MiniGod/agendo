@@ -20,6 +20,7 @@
 // worktree sessions is racing the repo orchestrator that owns them, and the
 // agent on the other end gets two voices. That prohibition is therefore stated
 // loudly, in both directions, and repeated.
+import type { AgentSource } from "../shared/types.ts";
 import { orchestratorSystemPrompt, type OrchestratorRole } from "./index.ts";
 
 /**
@@ -27,9 +28,11 @@ import { orchestratorSystemPrompt, type OrchestratorRole } from "./index.ts";
  *
  * `selfCmd` is how to re-invoke the launcher from a shell (see `SELF_CMD` in
  * selfCmd.ts) — passed in rather than imported so this module stays free of the
- * spawn-time environment sniffing and is directly unit-testable.
+ * spawn-time environment sniffing and is directly unit-testable. `agent` is the
+ * global orchestrator's OWN agent (Claude or Codex), so the repo orchestrators it
+ * starts inherit it too — the same reasoning as `orchestratorSystemPrompt`'s.
  */
-export function globalOrchestratorSystemPrompt(selfCmd: string): string {
+export function globalOrchestratorSystemPrompt(selfCmd: string, agent: AgentSource): string {
   return [
     "# You are running in GLOBAL ORCHESTRATOR MODE",
     "",
@@ -80,9 +83,11 @@ export function globalOrchestratorSystemPrompt(selfCmd: string): string {
     "",
     "When a repo has work to coordinate and no orchestrator of its own, start one IN",
     "THAT REPO — the launcher runs it in the repo's main checkout, which is where its",
-    "merges have to land:",
+    `merges have to land. It defaults to your own agent (${agent}); override with`,
+    "--agent <claude|codex> only when that repo specifically needs the other one",
+    "(Copilot can't run orchestrator mode at all):",
     "",
-    `    (cd <repoRoot> && ${selfCmd} launch --orchestrator "<that repo's goal>")`,
+    `    (cd <repoRoot> && ${selfCmd} launch --orchestrator --agent ${agent} "<that repo's goal>")`,
     "",
     "Give it the whole goal for that repository, self-contained: what to build, the",
     "acceptance criteria, and any cross-repo decision already made. It will do its own",
@@ -163,6 +168,6 @@ export function globalOrchestratorSystemPrompt(selfCmd: string): string {
  * cosmetic mismatch: a global orchestrator resumed with the repo prompt would
  * start merging branches in whatever checkout it happens to sit in.
  */
-export function systemPromptForRole(role: OrchestratorRole, selfCmd: string): string {
-  return role === "global" ? globalOrchestratorSystemPrompt(selfCmd) : orchestratorSystemPrompt(selfCmd);
+export function systemPromptForRole(role: OrchestratorRole, selfCmd: string, agent: AgentSource): string {
+  return role === "global" ? globalOrchestratorSystemPrompt(selfCmd, agent) : orchestratorSystemPrompt(selfCmd, agent);
 }

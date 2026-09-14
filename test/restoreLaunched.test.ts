@@ -32,7 +32,11 @@ describe("launchedTab", () => {
     const tab = launchedTab({ id, cwd: "/w", source: "codex" });
     expect(tab.name).toBe("cl-codex-abcdef123456");
     expect(tab.title).toBe("cl-codex-abcdef123456");
-    expect(tab.argv.join(" ")).toContain(`codex resume ${id}`);
+    // `resumeArgv`'s codex branch injects `-c developer_instructions=…` between
+    // "resume" and the id (see withCodexDeveloperInstructions), so those two are
+    // no longer adjacent — assert the pieces rather than one contiguous string.
+    expect(tab.argv.join(" ")).toContain("codex resume -c developer_instructions=");
+    expect(tab.argv.at(-1)).toBe(id);
   });
 });
 

@@ -23,6 +23,11 @@
 import { join } from "path";
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "fs";
 import { STATE_DIR } from "../app/config.ts";
+import type { AgentSource } from "../shared/types.ts";
+import { orchestratorRoleOfCwd } from "./cwdMarks.ts";
+import type { OrchestratorRole } from "./role.ts";
+
+export type { OrchestratorRole } from "./role.ts";
 
 /**
  * Base worktree/branch slug for an orchestrator launched without a name — it
@@ -35,26 +40,17 @@ import { STATE_DIR } from "../app/config.ts";
 export const ORCHESTRATOR_SLUG = "orchestrator";
 
 /**
- * Which level of the coordination hierarchy a session sits at:
- *
- *     global orchestrator  →  per-repo orchestrators  →  per-worktree sessions
- *
- * `"repo"` coordinates the sessions of ONE repository and integrates their
- * branches; `"global"` coordinates the repo orchestrators themselves and touches
- * no repository at all (see src/orchestration/global.ts). The two get different
- * instructions, so the ROLE — not merely "is an orchestrator" — is what the
- * marker file below has to remember for a cold resume.
- */
-export type OrchestratorRole = "repo" | "global";
-
-/**
  * The orchestrator instructions, appended to the session's system prompt.
  *
  * `selfCmd` is how to re-invoke the launcher from a shell (see `SELF_CMD` in
  * launch.ts) — passed in rather than imported so this module stays free of the
- * spawn-time environment sniffing and is directly unit-testable.
+ * spawn-time environment sniffing and is directly unit-testable. `agent` is the
+ * orchestrator's OWN agent (Claude or Codex — Copilot can't run orchestrator
+ * mode at all), so the delegation command it teaches inherits it by default: a
+ * Codex orchestrator that blindly told every child `agendo launch` would get
+ * Claude children, since that's the CLI's own default with no `--agent` given.
  */
-export function orchestratorSystemPrompt(selfCmd: string): string {
+export function orchestratorSystemPrompt(selfCmd: string, agent: AgentSource): string {
   return [
     "# You are running in ORCHESTRATOR MODE",
     "",
@@ -78,9 +74,11 @@ export function orchestratorSystemPrompt(selfCmd: string): string {
     "## Delegate every unit of work to a background session",
     "",
     "Split the goal into self-contained units, then launch one background session per",
-    "unit — each gets its own isolated worktree and branch:",
+    "unit — each gets its own isolated worktree and branch. Each launch defaults to",
+    `your own agent (${agent}); override it with --agent <claude|copilot|codex> only`,
+    "when a specific unit genuinely needs a different one:",
     "",
-    `    ${selfCmd} launch --name <slug> "<the full task prompt for that unit>"`,
+    `    ${selfCmd} launch --name <slug> --agent ${agent} "<the full task prompt for that unit>"`,
     "",
     "The task prompt must be self-contained: the goal, the acceptance criteria, the",
     `files/areas in scope, and any decision already made. Run \`${selfCmd} --llm\` for the`,
@@ -207,6 +205,10 @@ export function orchestratorSystemPrompt(selfCmd: string): string {
 // session state, so a resumed orchestrator would come back as a plain session
 // that happily starts writing code. We keep the ids of sessions launched in
 // orchestrator mode in a small file of our own and consult it from `resumeArgv`.
+// Codex has no resumable id to record at launch time at all (it assigns its own
+// after the fact — see `preassignsSessionId`), so a Codex orchestrator is marked
+// by working directory instead, in cwdMarks.ts; `orchestratorRoleOf` below falls
+// back to it when the id lookup misses.
 
 const ORCHESTRATORS_PATH = join(STATE_DIR, "orchestrators.json");
 const ROLES_PATH = join(STATE_DIR, "orchestratorRoles.json");
@@ -342,11 +344,16 @@ export function isOrchestratorSession(id: string): boolean {
  * Which level `id` was launched at, or null if it isn't an orchestrator at all.
  * An id remembered without a role predates the global level (or was appended by
  * an older agendo), so it reads back as the repo-level orchestrator it was.
+ *
+ * `cwd`, when given, is consulted only if the id lookup misses — the route a
+ * Codex session takes, since its id is never recorded at launch time (see
+ * cwdMarks.ts). `resumeArgv`'s Codex branch passes its `AgentSession`'s own
+ * `cwd`; every other caller has no cwd-marked orchestrators to find and omits it.
  */
-export function orchestratorRoleOf(id: string): OrchestratorRole | null {
+export function orchestratorRoleOf(id: string, cwd?: string): OrchestratorRole | null {
   const { ids, roles } = loadOrchestratorMarks();
-  if (!ids.includes(id)) return null;
-  return roles[id] ?? "repo";
+  if (ids.includes(id)) return roles[id] ?? "repo";
+  return cwd !== undefined ? orchestratorRoleOfCwd(cwd) : null;
 }
 
 /**

@@ -1,21 +1,28 @@
 import { Box, Text } from "ink";
-import { AGENT_CHOICES } from "../keys/agent.ts";
+import { agentChoicesFor } from "../keys/agent.ts";
 import type { FreshTarget } from "../models/targets.ts";
 import { padCell } from "../format/index.ts";
+
+/** The title line: which flow this picker serves — mirrors `repoHeading`. */
+function agentHeading(target: FreshTarget): string {
+  if (target.orchestrator) return "Orchestrator session — pick an agent";
+  return target.kind === "free" ? "New session — pick an agent" : `Fresh session — ${target.title.slice(0, 54)}`;
+}
 
 /**
  * The agent picker for a fresh session: which CLI should run it. `target` is the
  * work item / PR / free target the session is being started for, `cursor` the
- * highlighted row in AGENT_CHOICES (the same array the key handler walks).
+ * highlighted row in `agentChoicesFor(target)` (the same array the key handler walks;
+ * an orchestrator target excludes Copilot, which can't carry the instructions).
  */
 export function AgentScreen({ target, cursor }: { target: FreshTarget; cursor: number }) {
-  const isFree = target.kind === "free";
+  const choices = agentChoicesFor(target);
   return (
     <Box flexDirection="column">
-      <Text bold>{isFree ? `New session — pick an agent` : `Fresh session — ${target.title.slice(0, 54)}`}</Text>
+      <Text bold>{agentHeading(target)}</Text>
       <Text dimColor>{`Which agent should run this session?  ·  ↑/↓ move · enter select · esc back`}</Text>
       <Box marginTop={1} flexDirection="column">
-        {AGENT_CHOICES.map((a, i) => {
+        {choices.map((a, i) => {
           const sel = i === cursor;
           return (
             <Text key={a.source} color={sel ? "black" : undefined} backgroundColor={sel ? "cyan" : undefined}>

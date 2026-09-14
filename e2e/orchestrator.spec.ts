@@ -23,7 +23,7 @@ import { freeWorktreeBranch, worktreePath } from "../src/repositories/worktree/i
 // at the launcher's own CLI is provably reading the injected value (and not a
 // hard-coded `bunx agendo` that would break for a globally-installed binary).
 const SELF = "npx agendo@test";
-const prompt = orchestratorSystemPrompt(SELF);
+const prompt = orchestratorSystemPrompt(SELF, "claude");
 /**
  * The prompt with all runs of whitespace collapsed. Used for assertions on
  * phrases that span a hard-wrapped line: the wrap position is formatting, not
@@ -45,6 +45,16 @@ test("the prompt delegates each unit of work to a background agendo session", as
   expect(prompt).toContain(`${SELF} launch --name <slug>`);
   expect(prompt).toContain("One unit of work = one session = one worktree.");
   expect(prompt).toContain(`${SELF} --llm`); // where the full launch usage lives
+});
+
+test("children inherit the orchestrator's own agent by default", async () => {
+  // A Codex orchestrator must not silently delegate to Claude children — the
+  // CLI's own `--agent` default stays claude for ordinary launches, so the
+  // delegation command the orchestrator is TAUGHT to type has to spell out its
+  // own agent explicitly, every time, rather than relying on that default.
+  expect(prompt).toContain(`${SELF} launch --name <slug> --agent claude`);
+  const codexPrompt = orchestratorSystemPrompt(SELF, "codex");
+  expect(codexPrompt).toContain(`${SELF} launch --name <slug> --agent codex`);
 });
 
 test("the prompt mandates a sub-agent dev→review loop in every session", async () => {

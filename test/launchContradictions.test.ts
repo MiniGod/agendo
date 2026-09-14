@@ -27,11 +27,18 @@ describe("launchContradiction", () => {
     expect(launchContradiction(args({ worktreePath: "/w", worktree: false }))).toContain("with --no-worktree");
   });
 
-  test("an orchestrator is Claude-only, and the message names the flag that asked", () => {
+  test("an orchestrator refuses copilot, and the message names the flag that asked", () => {
     expect(launchContradiction(args({ orchestrator: true, agent: "copilot" }))).toBe(
-      "--orchestrator is Claude-only (no --append-system-prompt equivalent in --agent copilot)",
+      "--orchestrator isn't available with --agent copilot (no --append-system-prompt equivalent)",
     );
-    expect(launchContradiction(args({ global: true, agent: "codex" }))).toStartWith("--global-orchestrator is Claude-only");
+    expect(launchContradiction(args({ global: true, agent: "copilot" }))).toBe(
+      "--global-orchestrator isn't available with --agent copilot (no --append-system-prompt equivalent)",
+    );
+  });
+
+  test("codex is orchestrator-eligible — no clash", () => {
+    expect(launchContradiction(args({ orchestrator: true, agent: "codex" }))).toBeNull();
+    expect(launchContradiction(args({ global: true, agent: "codex" }))).toBeNull();
   });
 
   test("the global orchestrator refuses the repo-shaped flags", () => {
@@ -50,6 +57,8 @@ describe("launchContradiction", () => {
     // Both the worktree-path and the agent check fail; the path one was always first.
     expect(launchContradiction(args({ worktreePath: "/w", name: "x", orchestrator: true, agent: "codex" }))).toContain("--worktree=<path>");
     // Global + copilot + name: the agent check precedes the global-name one.
-    expect(launchContradiction(args({ global: true, agent: "copilot", name: "x" }))).toContain("Claude-only");
+    expect(launchContradiction(args({ global: true, agent: "copilot", name: "x" }))).toContain(
+      "isn't available with --agent copilot",
+    );
   });
 });
