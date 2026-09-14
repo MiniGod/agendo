@@ -149,6 +149,19 @@ export function managedKind(name: string): SessionKind | null {
 export interface LiveTarget {
   name: string;
   target: string;
+  /**
+   * Host tmux session name (`#{session_name}`) of the pane this target was read
+   * from. Populated by `liveManagedPaths`; a `LiveTarget` built elsewhere (e.g.
+   * `liveTargetForShortId`'s non-pane branch) leaves it undefined.
+   */
+  session?: string;
+  /**
+   * `#{window_index}` of the window backing this target, or null when the
+   * target is pane-hosted — that index would name the pane's HOST window (the
+   * launcher menu, typically), not a window of this session's own, so it is
+   * dropped rather than shown as this session's.
+   */
+  windowIndex?: string | null;
 }
 
 /** A `LiveTarget` paired with the working directory of the pane running in it. */

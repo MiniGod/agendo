@@ -30,9 +30,12 @@ export {
 export async function loadLocalSessions(): Promise<LocalSessions> {
   const index = await SessionIndex.build();
   const repos = discoverRepos(index.all);
-  const { live, liveKinds, liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  const { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations } =
+    refreshLiveTmux(index.all);
   const sessionGroups = groupSessionsByRepo(index.all);
-  return { index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders };
+  return {
+    index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations,
+  };
 }
 
 /**
@@ -83,7 +86,7 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
       provider.fetchReviewPRs(ctx),
       provider.getTeamMembers(),
     ]);
-  const { live, liveKinds, liveWindows, livePlaceholders } = local;
+  const { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations } = local;
 
   // Snapshot the host session's open agent tabs so a future startup can lazily
   // restore them (browser-style). Cheap, idempotent, and no-op when that host
@@ -135,6 +138,8 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     liveKinds,
     liveWindows,
     livePlaceholders,
+    placeholderWindows,
+    liveWindowLocations,
     repos,
     repoScope,
     sessionGroups,

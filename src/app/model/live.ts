@@ -35,6 +35,8 @@ export function refreshLiveTmux(allSessions: AgentSession[]): {
   liveKinds: Map<string, SessionKind>;
   liveWindows: Map<string, LiveTarget>;
   livePlaceholders: Set<string>;
+  placeholderWindows: Map<string, LiveTarget>;
+  liveWindowLocations: Map<string, string[]>;
 } {
   // `base` is membership only — the names tmux currently lists. The addressable
   // targets ride along on `liveManagedPaths`, which is where reconciliation picks
@@ -64,23 +66,42 @@ export function refreshLiveTmux(allSessions: AgentSession[]): {
  * tmux's pane iteration order decide the winner): pass 1 attributes every real
  * window (recording its kind/window keyed by canonical name); pass 2 drops only
  * the placeholders no real window vouched for (`liveKinds.has(name)`).
+ *
+ * Also returns, for the UI's tmux-identity display rather than for attribution:
+ * `placeholderWindows` — the `LiveTarget` of a pure placeholder (one no real
+ * window vouched for), so a paused session can still show where its window
+ * lives; and `liveWindowLocations` — every `session:window_index` a RUNNING
+ * session's window name was found at, so a name live in more than one host
+ * session (the same duplicate `windowLocations` in windows.ts exists to guard
+ * against) shows up as more than one entry instead of silently picking one.
  */
 export function reconcileLive(
   base: Set<string>,
   managed: ManagedTarget[],
   sessions: AgentSession[],
-): { live: Set<string>; liveKinds: Map<string, SessionKind>; liveWindows: Map<string, LiveTarget>; livePlaceholders: Set<string> } {
+): {
+  live: Set<string>;
+  liveKinds: Map<string, SessionKind>;
+  liveWindows: Map<string, LiveTarget>;
+  livePlaceholders: Set<string>;
+  placeholderWindows: Map<string, LiveTarget>;
+  liveWindowLocations: Map<string, string[]>;
+} {
   const live = base;
   const liveKinds = new Map<string, SessionKind>();
   const liveWindows = new Map<string, LiveTarget>();
+  const liveWindowLocations = new Map<string, string[]>();
   const placeholders = new Set<string>();
-  for (const { name, target, cwd, placeholder } of managed) {
+  const placeholderTargets = new Map<string, LiveTarget>();
+  for (const { name, target, cwd, placeholder, session, windowIndex } of managed) {
     const kind = managedKind(name);
     if (!kind) continue;
     // An idle placeholder must not vouch for "running": record its window name
-    // and skip it; pass 2 drops it unless a real window vouches for that name.
+    // (and its LiveTarget, for a possible pure-placeholder display) and skip
+    // it; pass 2 drops it unless a real window vouches for that name.
     if (placeholder) {
       placeholders.add(name);
+      placeholderTargets.set(name, { name, target, session, windowIndex });
       continue;
     }
     // Shared with restore.ts so the two attribution paths can't drift: id-bearing
@@ -90,19 +111,37 @@ export function reconcileLive(
     const canon = sessionName(best);
     live.add(canon);
     liveKinds.set(canon, kind);
-    liveWindows.set(canon, { name, target });
+    liveWindows.set(canon, { name, target, session, windowIndex });
+    // Pane-hosted entries carry no windowIndex (see liveManagedPaths) and are
+    // never a "duplicate window name" the way two real windows can be. A pane
+    // whose window AND session name both happen to equal the managed name (an
+    // agent running as its own tmux session, whose window inherited the same
+    // name) contributes this same location TWICE — once as the session, once
+    // as the window — so de-dupe by exact match rather than report a session
+    // as living in two places when it's really the one window addressed two
+    // ways.
+    if (windowIndex != null && session) {
+      const loc = `${session}:${windowIndex}`;
+      const locs = liveWindowLocations.get(canon) ?? [];
+      if (!locs.includes(loc)) locs.push(loc);
+      liveWindowLocations.set(canon, locs);
+    }
   }
   // A placeholder's window name IS its canonical name, so a real window vouching
   // for the same session shows up as a `liveKinds` entry under that name. Any
   // placeholder no real window vouched for is a dormant restored tab: drop it
   // from `live` (it's not running) but record it in `livePlaceholders` so the UI
-  // can badge the session as restored-but-unopened.
+  // can badge the session as restored-but-unopened, and in `placeholderWindows`
+  // so it can still show a tmux identity line.
   const livePlaceholders = new Set<string>();
+  const placeholderWindows = new Map<string, LiveTarget>();
   for (const p of placeholders) {
     if (!liveKinds.has(p)) {
       live.delete(p);
       livePlaceholders.add(p);
+      const t = placeholderTargets.get(p);
+      if (t) placeholderWindows.set(p, t);
     }
   }
-  return { live, liveKinds, liveWindows, livePlaceholders };
+  return { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations };
 }

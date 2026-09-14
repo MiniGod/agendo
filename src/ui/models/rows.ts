@@ -5,6 +5,7 @@ import { convertTarget } from "./convert.ts";
 import { homeShort, sessionRepo, timeAgo, type Activity, type Cell } from "../format/index.ts";
 import { prTarget, prOpen, wiTarget, wiOpen, type FreshTarget, type OpenTargets } from "./targets.ts";
 import { itemMatches, prMatches, sessionMatches } from "./search.ts";
+import { liveInfoOf, tmuxLine, type LiveInfo } from "./tmuxMeta.ts";
 import { V } from "./vocabState.ts";
 import type {
   ActionLine,
@@ -50,7 +51,7 @@ export const SELECTABLE = new Set(["item", "pr", "session", "fresh", "toggle", "
 // them double as action hints: the profile line advertises the move action
 // (press `m`, Claude only — Copilot has no profile), and the final line the
 // cross-agent "continue" action (press `c`).
-export function sessionMeta(s: AgentSession): Array<[string, string]> {
+export function sessionMeta(s: AgentSession, live: LiveInfo): Array<[string, string]> {
   const out: Array<[string, string]> = [
     ["dir", homeShort(s.cwd)],
     ["repo", sessionRepo(s)],
@@ -58,6 +59,8 @@ export function sessionMeta(s: AgentSession): Array<[string, string]> {
   if (s.branch) out.push(["branch", s.branch]);
   if (s.source === "claude" && s.configDir)
     out.push(["profile", `${basename(s.configDir)}  ·  press m → move to another profile`]);
+  const tmux = tmuxLine(live, sessionName(s));
+  if (tmux) out.push(["tmux", tmux]);
   const dest = convertTarget(s.source);
   if (dest) out.push(["continue", `press c → convert & resume in ${dest}`]);
   return out;
@@ -96,7 +99,7 @@ function pushSession(
   rows: Row[],
   s: AgentSession,
   key: string,
-  live: Set<string>,
+  live: LiveInfo,
   expanded: Set<string>,
   activity: Map<string, Activity>,
   open?: OpenTargets,
@@ -105,11 +108,11 @@ function pushSession(
   placeholder = false,
 ) {
   const isOpen = expanded.has(sessionExpandKey(key));
-  rows.push({ kind: "session", key, session: s, running: isRunning(s, live), expanded: isOpen, open, timeField, showLink, placeholder });
+  rows.push({ kind: "session", key, session: s, running: isRunning(s, live.names), expanded: isOpen, open, timeField, showLink, placeholder });
   if (!isOpen) return;
-  // Structural context (dir / repo / branch / profile), one labeled line each —
-  // known synchronously, so it shows immediately even while activity loads.
-  for (const [label, value] of sessionMeta(s))
+  // Structural context (dir / repo / branch / profile / tmux), one labeled line
+  // each — known synchronously, so it shows immediately even while activity loads.
+  for (const [label, value] of sessionMeta(s, live))
     rows.push({ kind: "sessmeta", key: `${key}:meta:${label}`, label, value });
   rows.push(...activityRows(key, activity.get(sessionId(s))));
 }
@@ -117,7 +120,7 @@ function pushSession(
 function pushSessions(
   rows: Row[],
   sessions: AgentSession[],
-  live: Set<string>,
+  live: LiveInfo,
   target: FreshTarget,
   prefix: string,
   expanded: Set<string>,
@@ -132,7 +135,7 @@ function pushItem(
   rows: Row[],
   item: WorkItem,
   expanded: Set<string>,
-  live: Set<string>,
+  live: LiveInfo,
   activity: Map<string, Activity>,
   inScope: (cwd: string) => boolean,
 ) {
@@ -140,7 +143,7 @@ function pushItem(
   // Path scoping filters the session LIST (and its running count), but keeps the
   // work-item row — items are backend-scoped and may have no in-scope sessions.
   const sessions = item.sessions.filter((s) => inScope(s.cwd));
-  const running = sessions.filter((s) => isRunning(s, live)).length;
+  const running = sessions.filter((s) => isRunning(s, live.names)).length;
   const open = wiOpen(item);
   rows.push({ kind: "item", item, expanded: isOpen, running, open });
   if (isOpen) pushSessions(rows, sessions, live, wiTarget(item), `wi${itemKey(item)}`, expanded, activity, open);
@@ -150,14 +153,14 @@ function pushPr(
   rows: Row[],
   pr: PRWithSessions,
   expanded: Set<string>,
-  live: Set<string>,
+  live: LiveInfo,
   activity: Map<string, Activity>,
   inScope: (cwd: string) => boolean,
   contextCell?: Cell,
 ) {
   const isOpen = expanded.has(`pr:${prKey(pr)}`);
   const sessions = pr.sessions.filter((s) => inScope(s.cwd));
-  const running = sessions.filter((s) => isRunning(s, live)).length;
+  const running = sessions.filter((s) => isRunning(s, live.names)).length;
   const open = prOpen(pr);
   rows.push({ kind: "pr", pr, expanded: isOpen, running, contextCell, open });
   if (isOpen) pushSessions(rows, sessions, live, prTarget(pr), `pr${prKey(pr)}`, expanded, activity, open);
@@ -175,7 +178,7 @@ export function buildItemsRows(
   inScope: (cwd: string) => boolean,
 ): Row[] {
   const rows: Row[] = [];
-  const live = model.liveTmux;
+  const live = liveInfoOf(model);
 
   // Search mode: a single flat, fuzzy-filtered list across all sections (primary
   // / secondary / linked via PRs), de-duped by work item id.
@@ -247,7 +250,7 @@ function pushPrsByRepo<T extends PRWithSessions>(
   prs: T[],
   expanded: Set<string>,
   toggles: Set<string>,
-  live: Set<string>,
+  live: LiveInfo,
   activity: Map<string, Activity>,
   sectionKey: string,
   sort: PrSort,
@@ -285,7 +288,7 @@ export function buildPrsRows(
   inScope: (cwd: string) => boolean,
 ): Row[] {
   const rows: Row[] = [];
-  const live = model.liveTmux;
+  const live = liveInfoOf(model);
   const linkedCtx = (pr: LinkedPR): Cell => ({ text: `#${pr.workItemId} ${pr.workItemType}`, color: "gray" });
   const reviewCtx = (pr: ReviewPRWithSessions): Cell => ({ text: pr.reviewReason, color: "cyan" });
 
@@ -364,7 +367,7 @@ export function buildSessionsRows(
   inScope: (cwd: string) => boolean,
 ): Row[] {
   const rows: Row[] = [];
-  const live = model.liveTmux;
+  const live = liveInfoOf(model);
   const timeField = sort === "created" ? "created" : "lastUsed";
   // The PR / work item this session links back to (Sessions view shows it and
   // `o` opens it). Other views nest sessions under their parent, so they don't.
@@ -411,7 +414,7 @@ export function buildSessionsRows(
   // "running now" semantically; they're badged ⏸ so they read as open-but-not-
   // yet-resumed. Additive — these also appear in the grouped/flat lists below.
   const openWindows = sortSessions(
-    groups.flatMap((g) => g.sessions).filter((s) => isRunning(s, live) || isPlaceholder(s)),
+    groups.flatMap((g) => g.sessions).filter((s) => isRunning(s, live.names) || isPlaceholder(s)),
     sort,
   );
   if (openWindows.length > 0) {

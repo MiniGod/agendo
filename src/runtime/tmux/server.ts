@@ -153,16 +153,19 @@ export function liveManagedPaths(): ManagedTarget[] {
     "list-panes",
     "-a",
     "-F",
-    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}`,
+    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}\t#{window_index}`,
   ])) {
-    const [session, window, cwd, placeholder, paneId, paneTarget] = line.split("\t");
+    const [session, window, cwd, placeholder, paneId, paneTarget, windowIndex] = line.split("\t");
     if (!cwd) continue;
     // A pane-hosted session: its managed name is on the PANE, and the pane id is
     // how everything downstream (capture, send-keys, navigate) reaches it — no
     // `exactTarget` pin needed, since `%N` cannot be a prefix of another target.
-    // Never a placeholder: restore recreates windows, never panes.
+    // Never a placeholder: restore recreates windows, never panes. `windowIndex`
+    // is left null on purpose: it would name the pane's HOST window (the menu),
+    // not a window of this session's own, so a caller displaying it must not
+    // treat it as this session's window number.
     if (paneTarget?.startsWith("cl-") && paneId) {
-      out.push({ name: paneTarget, target: paneId, cwd, placeholder: false });
+      out.push({ name: paneTarget, target: paneId, cwd, placeholder: false, session, windowIndex: null });
     }
     // The marker is a *window* option, so it only attributes to the window name
     // (a restored placeholder is always a window); a managed session name is
@@ -180,7 +183,7 @@ export function liveManagedPaths(): ManagedTarget[] {
       // last was rather than fail.
       if (!name?.startsWith("cl-")) continue;
       const target = isWindow && session ? windowTarget(session, name) : exactTarget(name);
-      out.push({ name, target, cwd, placeholder: isPlaceholder });
+      out.push({ name, target, cwd, placeholder: isPlaceholder, session, windowIndex });
     }
   }
   return out;
