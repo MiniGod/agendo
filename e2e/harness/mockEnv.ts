@@ -69,6 +69,13 @@ export async function createMockEnv(): Promise<MockEnv> {
   trackDir(tmpDir); // reaped on abnormal exit if cleanup() never runs
   const home = join(tmpDir, "home");
   await materializeHome(home);
+  // Belt-and-suspenders on top of the fakebin PATH shim below: if any code path
+  // ever resolves the REAL `tmux` binary despite the shim — an absolute path, a
+  // PATH-mutating dependency, a future regression — TMUX_TMPDIR redirects its
+  // socket directory away from the developer's default `/tmp/tmux-<uid>`, so an
+  // escaped call still can't reach their real tmux server. tmux creates this
+  // directory itself; the fake `tmux` (a JS shim with no socket at all) ignores it.
+  const tmuxTmpDir = join(tmpDir, "tmux-tmpdir");
 
   const tmuxStatePath = join(tmpDir, "tmux-state.json");
   const tmuxLogPath = join(tmpDir, "tmux-log.txt");
@@ -102,6 +109,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     FAKE_CALL_LOG: callLogPath,
     FAKE_GH_STATE: ghStatePath,
     FAKE_GIT_STATE: gitStatePath,
+    TMUX_TMPDIR: tmuxTmpDir,
     // Force interactive color so Ink emits ANSI even though stdout is a PTY pipe.
     FORCE_COLOR: "3",
   };
