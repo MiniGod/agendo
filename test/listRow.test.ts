@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { querySessions } from "../src/cli/list/index.ts";
 import {
-  linkFields, listRow, liveFields, paneFields, repoFields, rowWorkflows, usableLink, type ListRowContext,
+  linkFields, listRow, liveFields, paneFields, repoFields, rowWorkflows, sessionState, usableLink, type ListRowContext,
 } from "../src/cli/list/rows.ts";
 import type { LoadedModel } from "../src/app/model/index.ts";
 import type { AgentSession } from "../src/shared/types.ts";
@@ -19,6 +19,7 @@ const ctxIn = (over: Partial<ListRowContext> = {}): ListRowContext => ({
   live: new Set(),
   liveKinds: new Map(),
   liveWindows: new Map(),
+  livePlaceholders: new Set(),
   roles: new Map(),
   linkOf: () => undefined,
   thresholdMs: 1_500,
@@ -56,6 +57,16 @@ describe("the parts", () => {
     expect(liveFields(s, ctxIn({ live: new Set([canon]), liveKinds: new Map([[canon, "background"]]) })).kind).toBe("background");
   });
 
+  test("state: running beats paused, a lone placeholder is paused, neither is idle", () => {
+    const canon = "cl-claude-abcdef123456";
+    expect(sessionState(false, canon, new Set())).toBe("idle");
+    expect(sessionState(false, canon, new Set([canon]))).toBe("paused");
+    // A real window vouches for the name too (see reconcileLive): running wins,
+    // even though the placeholder set still names it — sessionState never has
+    // to reconcile that itself, `running` already has.
+    expect(sessionState(true, canon, new Set([canon]))).toBe("running");
+  });
+
   test("workflows carry their effective status and a summary or null", () => {
     const s = session("a", { workflows: [{ runId: "r1", name: "n", notifiedStatus: "completed" }, { runId: "r2", name: "m", summary: "two" }] });
     expect(rowWorkflows(session("b"), true)).toEqual([]);
@@ -84,6 +95,16 @@ describe("listRow", () => {
     const s = session("g");
     const row = listRow(s, ctxIn({ roles: new Map([["g", "global"]]) }));
     expect(row).toMatchObject({ orchestrator: true, role: "global", repoRoot: null, repoName: null });
+  });
+
+  test("a paused row carries state alongside the unchanged running flag", () => {
+    const s = session("abcdef123456-0000-0000-0000-000000000000");
+    const canon = "cl-claude-abcdef123456";
+    expect(listRow(s, ctxIn())).toMatchObject({ running: false, state: "idle" });
+    expect(listRow(s, ctxIn({ livePlaceholders: new Set([canon]) }))).toMatchObject({ running: false, state: "paused" });
+    expect(listRow(s, ctxIn({ live: new Set([canon]), livePlaceholders: new Set([canon]) }))).toMatchObject({
+      running: true, state: "running",
+    });
   });
 });
 

@@ -87,23 +87,33 @@ Usage:
                                 says when it resets — waiting on a quota, so
                                 never ⚠stalled. With a dir, only sessions whose
                                 cwd is under it are shown.
+                                A session parked as a restore-tab placeholder (an
+                                unopened tab, or one whose agent exited and fell
+                                back to it) is listed too, marked ⏸ paused — id,
+                                dir, title and age, but no readiness (no pane to
+                                read one from). "resume <id>" wakes it; "send"
+                                refuses it and says so.
                                 The kind column marks coordinators: "orch" is a repo
                                 orchestrator, "global" the global one; everything else
                                 is an ordinary session. Under the table, one line per
-                                repo names its orchestrator or says it has none.
+                                repo names its orchestrator or says it has none — a
+                                paused orchestrator reads ○ there, same as a closed one.
       --json                    Emit machine-readable JSON (with branch + linked
                                 PR + work-item/issue + idleSeconds/stalled +
                                 ISO limitResetAt + unpushed-work state per session,
                                 each link carrying a full prUrl / workItemUrl).
                                 Also per session: orchestrator (boolean), role
-                                ("repo" | "global" | null) and repoRoot/repoName.
+                                ("repo" | "global" | null), repoRoot/repoName, and
+                                state ("running" | "paused" | "idle") alongside the
+                                pre-existing running boolean (true only when running).
+                                Without --all this stays running-only, as before.
       --stalled-after <dur>     Idle time after which a live, non-busy session is
                                 flagged stalled (default 4h; persist your own via
                                 "stalledAfterMinutes" in ~/.agendo/config.json).
                                 ⚠stalled only means "nothing has happened for
                                 that long" — agendo cannot know if work finished.
-      --all, --include-idle     Also list idle (not-running) sessions, each marked
-                                running vs idle.
+      --all, --include-idle     Also list idle sessions: neither running nor
+                                paused, each row's state marked accordingly.
       --pr <n>                  Only sessions linked to PR #n (resolved via the
                                 backend, so gh/az data is fetched).
       --issue, --work-item <n>  Only sessions linked to that issue / work item.
@@ -192,6 +202,11 @@ Usage:
                                 recent activity + full final response, and input
                                 readiness. <id> is the session id or a tmux
                                 name (cl-bg-…, cl-claude-…, cl-codex-…).
+                                A session parked as a restore-tab placeholder
+                                reports "⏸ paused", distinct from "● running"
+                                and "○ idle" — no readiness (no pane behind it),
+                                and its resume line notes a keypress there also
+                                wakes it (as for list).
       --full, -F                Don't truncate the prompt / activity details
       --stalled-after <dur>     Idle time after which a live, non-busy session is
                                 reported stalled (as for list)
@@ -222,6 +237,9 @@ Usage:
                                 Always names the route it took: "queued via socket"
                                 (may be mid-turn) vs "pasted into pane" (had to be
                                 idle). The two differ, so never assume which.
+                                Refuses (never auto-resumes) a session parked as a
+                                restore-tab placeholder ("list" shows it ⏸ paused) —
+                                "resume <id>" first, then send.
       --force, -f               Send even if the input doesn't look ready (but
                                 never into claude's resume menu, see above)
       --json                    Emit the outcome as JSON: ok, route ("socket" |

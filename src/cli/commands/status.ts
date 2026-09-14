@@ -186,6 +186,8 @@ interface LiveFacts {
   peer: Peer;
   external: boolean;
   running: boolean;
+  /** Parked as a restore-tab placeholder — see `livePlaceholders` in `reconcileLive`. */
+  paused: boolean;
 }
 
 /** What one capture of the session's pane says. All null/false/0 without a window. */
@@ -211,12 +213,25 @@ interface PaneFacts {
 // a live session disappear from `status` — and make `resume` stop refusing to
 // put a second claude on a transcript that already has one — which is the
 // opposite of the caution the switch is for.
+//
+// A restore-tab placeholder is checked BEFORE the `liveTargetForShortId`
+// fallback, and short-circuits it: that helper (like the raw `liveTargets()`
+// read below) doesn't distinguish a placeholder from a real window, so without
+// this a paused session would resolve onto its own placeholder and read as
+// "● running" — wrong, and the same class of bug `send` guards against with
+// `livePlaceholderForShortId`. `reconcileLive`'s `livePlaceholders` is the
+// authoritative source (see `list`), so it is read here rather than duplicating
+// the check.
 async function liveFacts(s: AgentSession, index: SessionIndex): Promise<LiveFacts> {
-  const target = refreshLiveTmux(index.all).liveWindows.get(sessionName(s)) ?? liveTargetForShortId(shortId(s.id));
-  const peer = !target && s.source === "claude" ? await findPeer((id) => id === s.id) : null;
+  const canon = sessionName(s);
+  const reconciled = refreshLiveTmux(index.all);
+  const real = reconciled.liveWindows.get(canon);
+  const paused = !real && reconciled.livePlaceholders.has(canon);
+  const target = real ?? (paused ? null : liveTargetForShortId(shortId(s.id)));
+  const peer = !target && !paused && s.source === "claude" ? await findPeer((id) => id === s.id) : null;
   const external = !!peer;
-  const running = !!target || liveTargets().has(sessionName(s)) || external;
-  return { target, peer, external, running };
+  const running = !paused && (!!target || liveTargets().has(canon) || external);
+  return { target, peer, external, running, paused };
 }
 
 // The pane is captured up front (rather than where it prints) because the
@@ -241,7 +256,8 @@ export function paneFacts(target: LiveTarget | null | undefined): PaneFacts {
 
 // The first block: what the session is, and whether it is live.
 function printHeader(s: AgentSession, live: LiveFacts): void {
-  console.log(`${live.external ? "◆ running" : live.running ? "● running" : "○ idle"}  [${s.source}] ${s.title}`);
+  const state = live.external ? "◆ running" : live.running ? "● running" : live.paused ? "⏸ paused" : "○ idle";
+  console.log(`${state}  [${s.source}] ${s.title}`);
   console.log(`  id:     ${s.id}`);
   console.log(`  dir:    ${s.cwd}`);
   if (s.branch) console.log(`  branch: ${s.branch}`);
@@ -344,7 +360,11 @@ export async function runStatus(
   // `○ idle` says the tmux window is gone, not that the session is. Say what to do
   // about it here, where the caller is already looking — the `resume:` slot is free
   // in exactly this case (the running form of the line reports the resume DIALOG).
-  if (!running) {
+  // `⏸ paused` already has a live window (the placeholder itself), so say so —
+  // it's one keypress there, not just `resume`, and `send` refuses it either way.
+  if (live.paused) {
+    console.log(`  resume: parked as a restore-tab placeholder — ${SELF_CMD} resume ${shortId(s.id)} wakes it (a keypress in its window does too); worktree, branch and commits are intact`);
+  } else if (!running) {
     console.log(`  resume: ${SELF_CMD} resume ${shortId(s.id)}   (brings it back; worktree, branch and commits are intact)`);
   }
   if (withUrls) await printLinks(s);

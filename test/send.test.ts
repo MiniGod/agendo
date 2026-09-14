@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   ensureReachable, noInputBoxMessage, pasteWhy, queuedLine, refuseDialog, refuseLimited, refuseMenuSuspect,
-  refusePaneNotReady, refuseUnreachable, runSend, sendContext, sendPayload, socketFailed, socketState,
+  refuseParked, refusePaneNotReady, refuseUnreachable, runSend, sendContext, sendPayload, socketFailed, socketState,
   usageExit, type PaneRead, type SendContext,
 } from "../src/cli/commands/send.ts";
 import type { PeerSession } from "../src/orchestration/peer.ts";
@@ -68,7 +68,7 @@ const peer: PeerSession = { pid: 42, sessionId: "abcdef12-3456-7890-abcd-ef12345
 const on = { enabled: true, source: "env" as const };
 const off = { enabled: false, source: "config" as const };
 const ctxWith = (o: Partial<Omit<SendContext, "say" | "finish">> = {}): SendContext =>
-  sendContext({ token: "ab", sid: "ab", target, socket: on, peer: null, json: false, ...o });
+  sendContext({ token: "ab", sid: "ab", target, socket: on, peer: null, json: false, parked: false, ...o });
 const pane = (readiness: PaneRead["readiness"], raw = "", dialogAnswered = false): PaneRead => ({ raw, cursor: null, readiness, dialogAnswered });
 
 describe("the two voices", () => {
@@ -135,6 +135,38 @@ describe("reaching the session", () => {
     errors = [];
     await exitCode(() => refuseUnreachable(ctxWith({ target: null, socket: { enabled: false, source: "env" } }), peer));
     expect(errors[0]).toMatch(/disabled \(AGENDO_PEER_SOCKET\)\.$/);
+  });
+
+  test("three different absences get three different refusals, pinned apart", async () => {
+    // 1. Nothing live at all: told to resume, phrased as a dead end that isn't one.
+    expect(await exitCode(() => ensureReachable(ctxWith({ target: null, parked: false })))).toBe(1);
+    expect(errors[0]).toBe("Session ab is not running (no live tmux window and no messaging socket).");
+    expect(errors[1]).toMatch(/resume/);
+    errors = [];
+
+    // 2. Parked: a placeholder answers to the id, but it holds no agent — also
+    // told to resume, but NOT the same message as #1 (it IS something, just not
+    // an agent yet), and never auto-resumed.
+    expect(await exitCode(() => ensureReachable(ctxWith({ target: null, parked: true })))).toBe(1);
+    expect(errors[0]).toBe("Session ab is parked as a restore tab — not running yet.");
+    expect(errors[1]).toMatch(/resume ab`/);
+    errors = [];
+    expect(await exitCode(() => refuseParked(ctxWith()))).toBe(1);
+    errors = [];
+
+    // 3. Running but unreachable (socket off, no window): the OPPOSITE advice —
+    // explicitly told NOT to resume, since it is already alive.
+    expect(await exitCode(() => refuseUnreachable(ctxWith({ target: null, socket: off }), peer))).toBe(1);
+    expect(errors[0]).toMatch(/IS running/);
+    expect(errors[1]).toMatch(/Do NOT resume it/);
+
+    // The three `reason`s a --json caller keys on are distinct too.
+    captureStdout();
+    await exitCode(() => ctxWith({ json: true, target: null, parked: false }).finish({ ok: false, route: null, reason: "not-running" }, 1));
+    await exitCode(() => ctxWith({ json: true, target: null, parked: true }).finish({ ok: false, route: null, reason: "parked" }, 1));
+    await exitCode(() => ctxWith({ json: true, target: null, socket: off }).finish({ ok: false, route: null, reason: "socket-disabled" }, 1));
+    const reasons = out.map((l) => JSON.parse(l).reason);
+    expect(reasons).toEqual(["not-running", "parked", "socket-disabled"]);
   });
 });
 

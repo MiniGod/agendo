@@ -30,6 +30,44 @@ export function launcherSystemPrompt(): string {
  * It says how the levels relate and which way instructions may flow. It does NOT
  * say how to create a coordinator — see the note in `llmGuide`.
  */
+/**
+ * The `list` section of the guide. Its own function for the same reason as
+ * `hierarchyGuide`: `llmGuide` is a single array literal against a
+ * `max-lines-per-function` budget, and this section — running, paused and
+ * idle sessions, the `state` field, and the orchestrator summary's paused-reads-○
+ * honesty — is one cohesive, separable topic.
+ */
+function listGuide(): string[] {
+  return [
+    `List yours:   ${SELF_CMD} list`,
+    "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
+    "  A session parked as a restore-tab placeholder — an unopened tab, or one whose",
+    "  agent exited and fell back to it — is listed too, marked ⏸ paused rather than",
+    "  folded into the running rows: still id/dir/title/age, but no readiness (there",
+    "  is no pane behind it to read). `resume <id>` wakes it; `send` refuses it and",
+    "  says so rather than typing into it.",
+    "  The kind column marks COORDINATORS: `orch` is a repo orchestrator, `global` the",
+    "  global one; everything else is an ordinary worktree session. A per-repo summary",
+    "  under the table names each repo's orchestrator, or says it has none — a paused",
+    "  orchestrator reads ○ there, same as a closed one, never ●.",
+    "  --all additionally lists idle ones: neither running nor paused, but still on",
+    "  disk and revivable with `resume` (below). A session missing even from that is",
+    "  a session you have never launched, not a lost one.",
+    "  Plain `--json` (no --all) stays running-only, as before; add --all to also see",
+    '  paused/idle sessions there. Every row carries `state`: "running" | "paused" |',
+    '  "idle", alongside the pre-existing `running` boolean (true only for "running")',
+    "  — an orchestrator restarting reads this to see its paused fleet and resume it.",
+    "  One at its usage limit reads \"limited <time>\" — when it comes back. Same instant",
+    `  as an ISO 8601 limitResetAt field in ${SELF_CMD} list --json.`,
+    "  It lists EVERY session on the machine, so when you only care about one project",
+    "  scope it rather than filtering the output yourself: --path <dir> (sessions whose",
+    "  cwd is under dir) or --repo <name> (sessions in that repo — a bare name or an",
+    "  owner/repo slug; a worktree counts as the repo it belongs to). Both also work on",
+    `  ${SELF_CMD} status, ${SELF_CMD} open and ${SELF_CMD} wait, and with --json.`,
+    "",
+  ];
+}
+
 function hierarchyGuide(): string[] {
   return [
     `Repo survey:  ${SELF_CMD} list repos [--json]`,
@@ -114,27 +152,16 @@ export function llmGuide(): string {
     // because a coordinator has to know them — and stops short of saying how to
     // CREATE a coordinator. One is told that by its own injected prompt, which
     // exists only because a human asked for it.
-    `List yours:   ${SELF_CMD} list`,
-    "  Lists the sessions running now (readiness, kind, id, dir, title) — to find ids.",
-    "  The kind column marks COORDINATORS: `orch` is a repo orchestrator, `global` the",
-    "  global one; everything else is an ordinary worktree session. A per-repo summary",
-    "  under the table names each repo's orchestrator, or says it has none.",
-    "  --all additionally lists idle ones: not running, but still on disk and revivable",
-    "  with `resume` (below). A session missing from a plain `list` is not a lost session.",
-    "  One at its usage limit reads \"limited <time>\" — when it comes back. Same instant",
-    `  as an ISO 8601 limitResetAt field in ${SELF_CMD} list --json.`,
-    "  It lists EVERY session on the machine, so when you only care about one project",
-    "  scope it rather than filtering the output yourself: --path <dir> (sessions whose",
-    "  cwd is under dir) or --repo <name> (sessions in that repo — a bare name or an",
-    "  owner/repo slug; a worktree counts as the repo it belongs to). Both also work on",
-    `  ${SELF_CMD} status, ${SELF_CMD} open and ${SELF_CMD} wait, and with --json.`,
-    "",
+    ...listGuide(),
     ...hierarchyGuide(),
     `Check on it:  ${SELF_CMD} status <id>`,
     "  Prints its state, task checklist, Workflow-tool runs (with agent progress),",
     "  recent activity, and whether its input is ready for a prompt. A session parked on",
     "  claude's own resume dialog reports ready (and a `resume:` line saying so) — the",
     "  activity you see there is the PREVIOUS run's, until your next send resumes it.",
+    "  A session parked as a restore-tab placeholder reads \"⏸ paused\", distinct from",
+    "  \"● running\" and \"○ idle\" — same third state `list` shows, no readiness (no pane",
+    "  behind it), and its `resume:` line notes a keypress in its window wakes it too.",
     "",
     "Finished, or stalled?  Both look like `ready`. So list/status also report how long",
     "  since the session last did anything, and mark a live, non-busy one that has been",
@@ -173,7 +200,10 @@ export function llmGuide(): string {
     "  dialog step, so the retry advice under `resume` below applies exactly as written.",
     "  \"Session <id> is not running\" is not a dead end either: `resume` it (below), then send.",
     "  (A session that IS running but has the socket switched off says so instead, and names",
-    "  the switch — don't `resume` that one, it is already alive.)",
+    "  the switch — don't `resume` that one, it is already alive.) \"Parked as a restore",
+    "  tab\" is a third case: `list` already showed it ⏸ paused, and this is the same",
+    "  thing said again at send time — `resume` it, same as the plain not-running case,",
+    "  but never with --force (there is no pane there to force a paste into).",
     "  It always NAMES the route: \"queued via socket\" means the message is sitting in that",
     "  session's queue and may not be read for a while; \"pasted into pane\" means it is on",
     "  screen now, and the pane had to be idle to accept it. Do not assume which you got —",

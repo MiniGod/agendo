@@ -20,6 +20,15 @@ export interface ListRow {
   shortId: string;
   source: AgentSource;
   running: boolean;
+  /**
+   * The session's live state as one word: `"running"` (a real agent pane),
+   * `"paused"` (parked as an unopened-or-fallen-back-to restore-tab
+   * placeholder — one keypress or `resume` wakes it, and `send` refuses it
+   * rather than type into it), or `"idle"` (nothing live at all, not even a
+   * placeholder). First-class alongside `running` so a JSON consumer doesn't
+   * have to re-derive "paused" from a raw tmux scan of its own.
+   */
+  state: "running" | "paused" | "idle";
   /** Input readiness from the live pane, or null when idle (no pane to read). */
   readiness: Readiness | null;
   /**
@@ -118,6 +127,8 @@ export interface ListRowContext {
   live: Set<string>;
   liveKinds: Map<string, SessionKind>;
   liveWindows: Map<string, LiveTarget>;
+  /** Canonical names of sessions parked as a paused restore-tab placeholder. */
+  livePlaceholders: ReadonlySet<string>;
   /** One read of the marker file for the whole listing, not one per row. */
   roles: Map<string, OrchestratorRole>;
   linkOf: (s: AgentSession) => SessionLink | undefined;
@@ -213,6 +224,12 @@ export function rowWorkflows(s: AgentSession, running: boolean): ListRow["workfl
   }));
 }
 
+/** `running` wins over a paused placeholder for the same session (see `reconcileLive`). */
+export function sessionState(running: boolean, canon: string, livePlaceholders: ReadonlySet<string>): ListRow["state"] {
+  if (running) return "running";
+  return livePlaceholders.has(canon) ? "paused" : "idle";
+}
+
 export function listRow(s: AgentSession, ctx: ListRowContext): ListRow {
   const { running, kind, pane } = liveFields(s, ctx);
   const role = ctx.roles.get(s.id) ?? null;
@@ -222,6 +239,7 @@ export function listRow(s: AgentSession, ctx: ListRowContext): ListRow {
     shortId: shortId(s.id),
     source: s.source,
     running,
+    state: sessionState(running, sessionName(s), ctx.livePlaceholders),
     readiness: pane.readiness,
     resumeDialog: pane.resumeDialog,
     limitResetAt: pane.resetAt === null ? null : new Date(pane.resetAt).toISOString(),

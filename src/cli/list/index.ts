@@ -8,7 +8,7 @@ import { basename } from "path";
 import {
   capturePaneState, liveManagedPaths, managedKind,
   paneBackgroundAgents, paneReadiness, paneResumeDialogActive, paneShells, sessionName,
-  shortId, type SessionKind,
+  shortId, type ManagedTarget, type SessionKind,
 } from "../../runtime/tmux/index.ts";
 import { SessionIndex } from "../../sessions/index.ts";
 import { idleSeconds, isStalled, resolveStalledAfterMs } from "../../sessions/idle.ts";
@@ -92,11 +92,16 @@ function selectSessions(opts: ListOptions, index: SessionIndex, live: Set<string
   return index.all.filter((s) => live.has(sessionName(s)));
 }
 
+// Same third-state glyph the plain list's `pausedRow` uses, so `--all` in text
+// form doesn't collapse a paused session back down to the same `○` an idle one
+// gets — `r.state` already carries the distinction, `tableLine` just has to read it.
+const STATE_GLYPH: Record<ListRow["state"], string> = { running: "●", paused: "⏸", idle: "○" };
+
 /** One line of the enriched table. */
 function tableLine(r: ListRow, ready: string): string {
   const wfRunning = r.workflows.filter((w) => w.status === "running").length;
   return [
-    r.running ? "●" : "○",
+    STATE_GLYPH[r.state],
     ready,
     roleLabel(r.role, r.kind).padEnd(KIND_COL),
     r.shortId.padEnd(12),
@@ -171,9 +176,9 @@ export async function runList(opts: ListOptions): Promise<void> {
   const model = await loadListModel(isQuery);
   flushWarnings("list");
 
-  const { live, liveKinds, liveWindows } = refreshLiveTmux(index.all);
+  const { live, liveKinds, liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
   const ctx: ListRowContext = {
-    live, liveKinds, liveWindows,
+    live, liveKinds, liveWindows, livePlaceholders,
     roles: orchestratorRoles(),
     linkOf: (s) => model?.sessionLinks.get(`${s.source}:${s.id}`),
     thresholdMs,
@@ -217,14 +222,17 @@ interface ListedSession {
  * attribution the TUI uses (id-bearing → exact session; id-less cl-wi-/cl-pr-
  * → MRU session in the pane's cwd, matched on a normalized path), shared so the
  * CLI list can't drift from the menu's running state. Restored-but-unopened
- * placeholder windows are skipped — they're idle bash waiting for a keypress,
- * not running agents, so listing them would mislead — and so are sessions the
- * requested path / repo filter doesn't select.
+ * placeholder windows are skipped here — they're idle bash waiting for a
+ * keypress, not running agents, so counting them as RUNNING would mislead
+ * (`pausedSessions` below lists them as their own state instead) — and so are
+ * sessions the requested path / repo filter doesn't select. `managed` is read
+ * once by the caller and shared with `pausedSessions`, rather than each
+ * re-querying tmux.
  */
-function listedSessions(index: SessionIndex, inScope: (s: AgentSession) => boolean): ListedSession[] {
+function listedSessions(managed: ManagedTarget[], index: SessionIndex, inScope: (s: AgentSession) => boolean): ListedSession[] {
   const seen = new Set<string>();
   const out: ListedSession[] = [];
-  for (const { name, target, cwd, placeholder } of liveManagedPaths()) {
+  for (const { name, target, cwd, placeholder } of managed) {
     const kind = managedKind(name);
     if (!kind || placeholder) continue;
     const s = resolveWindowSession(index.all, name, cwd);
@@ -233,6 +241,29 @@ function listedSessions(index: SessionIndex, inScope: (s: AgentSession) => boole
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ s, kind, target });
+  }
+  return out;
+}
+
+/**
+ * Sessions parked as a paused restore-tab placeholder: an unopened tab, or one
+ * that fell back to it when its agent exited. A placeholder's window name IS
+ * the session's canonical name (see `sessionName`), so this is a name match
+ * rather than the cwd-based resolution `listedSessions` needs for id-less
+ * windows — but a name a REAL managed window ALSO answers to is running, not
+ * paused (the two-pass logic `reconcileLive` uses), so those are dropped.
+ */
+function pausedSessions(managed: ManagedTarget[], index: SessionIndex, inScope: (s: AgentSession) => boolean): AgentSession[] {
+  const paused = new Set(managed.filter((m) => m.placeholder).map((m) => m.name));
+  for (const m of managed) if (!m.placeholder) paused.delete(m.name);
+  const seen = new Set<string>();
+  const out: AgentSession[] = [];
+  for (const s of index.all) {
+    if (!inScope(s) || !paused.has(sessionName(s))) continue;
+    const key = `${s.source}:${s.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
   }
   return out;
 }
@@ -272,6 +303,26 @@ function plainRow({ s, kind, target }: ListedSession, role: OrchestratorRole | n
   ];
 }
 
+/**
+ * One line's cells for a PAUSED session: no pane to read (a placeholder holds
+ * no agent), so no readiness, shells or stall marker — just what a restored
+ * tab can say about itself: title, dir, id, and how long since it last did
+ * anything. `⏸` in the lead column (the placeholder screen's own glyph) marks
+ * it as a third state, never folded into the `●` running rows above it.
+ */
+function pausedRow(s: AgentSession, role: OrchestratorRole | null): string[] {
+  return [
+    "⏸",
+    "paused",
+    roleLabel(role, "resumed").padEnd(KIND_COL),
+    shortId(s.id).padEnd(12),
+    timeAgo(s.lastUsed).padEnd(8),
+    padCell(basename(s.cwd) || s.cwd, 24),
+    s.title.replace(/\s+/g, " ").slice(0, 44),
+    "",
+  ];
+}
+
 function runPlainList(
   index: SessionIndex,
   inScope: (s: AgentSession) => boolean,
@@ -279,14 +330,26 @@ function runPlainList(
 ): void {
   // One read of the marker file for the whole listing, not one per row.
   const roles = orchestratorRoles();
+  // One read of the managed panes, shared by both buckets below — a paused
+  // session and a running one are two disjoint views of the same tmux scan.
+  const managed = liveManagedPaths();
   // Cells, not finished lines: the readiness column's width isn't known until
-  // every row is in (a `limited <time>` cell is wider than the state words).
+  // every row is in (a `limited <time>` cell is wider than the state words,
+  // and "paused" has to line up with both).
   const rows: string[][] = [];
   const summary: OrchestratorSummaryRow[] = [];
-  for (const listed of listedSessions(index, inScope)) {
+  for (const listed of listedSessions(managed, index, inScope)) {
     const role = roles.get(listed.s.id) ?? null;
     summary.push({ shortId: shortId(listed.s.id), cwd: listed.s.cwd, role, running: true });
     rows.push(plainRow(listed, role, thresholdMs));
+  }
+  for (const s of pausedSessions(managed, index, inScope)) {
+    const role = roles.get(s.id) ?? null;
+    // Honest ●/○ vocabulary downstream: a paused orchestrator is reported
+    // `running: false`, same as a closed one — `printOrchestratorSummary`
+    // never learns a third glyph exists.
+    summary.push({ shortId: shortId(s.id), cwd: s.cwd, role, running: false });
+    rows.push(pausedRow(s, role));
   }
   if (rows.length === 0) {
     console.log("No running sessions.");
