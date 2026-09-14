@@ -147,11 +147,21 @@ export function captureRestore(index: SessionIndex, hostSession: string = LAUNCH
  * on-disk log when the menu's next reload runs, so `resolveWindowSession` finds
  * nothing. Rather than drop it, we keep the saved tab matched by the short id in
  * the window name — so a freshly-spawned session survives until its log appears.
+ *
+ * That preservation is bounded by `UNATTRIBUTED_GRACE_MS`, not indefinite: a
+ * session whose log never appears (it crashed before flushing, its worktree was
+ * pruned, or the tab was never a real session at all) would otherwise be kept
+ * forever, since nothing else ever drops it — killing its placeholder window
+ * only kills the tmux window (see placeholderArgv), not the snapshot entry, and
+ * an unattributed window never surfaces as a row the user could `agendo close`.
+ * Past the grace period we stop preserving it, which — since restore only ever
+ * respawns a tab that's still in the snapshot — is what stops it coming back.
  */
 export function buildTabs(
   windows: { name: string; cwd: string }[],
   sessions: AgentSession[],
   existing: RestoreTab[] = [],
+  now: number = Date.now(),
 ): RestoreTab[] {
   // Saved tabs keyed by the short id embedded in their canonical name.
   const savedByShortId = new Map<string, RestoreTab>();
@@ -171,13 +181,26 @@ export function buildTabs(
       continue;
     }
     // No on-disk session yet — preserve a previously-saved tab for this window's
-    // session id (id-bearing names only; cl-wi-/cl-pr- carry no recoverable id).
+    // session id (id-bearing names only; cl-wi-/cl-pr- carry no recoverable id),
+    // but only within the grace window — see the doc comment above.
     const m = name.match(ID_BEARING);
     const prior = m ? savedByShortId.get(m[1]) : undefined;
-    if (prior && !byName.has(prior.name)) byName.set(prior.name, prior);
+    if (!prior || byName.has(prior.name)) continue;
+    const since = prior.unattributedSince ?? now;
+    if (now - since >= UNATTRIBUTED_GRACE_MS) continue;
+    byName.set(prior.name, prior.unattributedSince === since ? prior : { ...prior, unattributedSince: since });
   }
   return [...byName.values()];
 }
+
+/**
+ * How long an id-bearing window may go unattributed to an on-disk session
+ * before `buildTabs` stops preserving its tab. Comfortably past any log-flush
+ * delay a real `agendo launch` could hit, short enough that a tab which will
+ * never attribute (see the doc comment above) is eventually forgotten instead
+ * of respawning on every fresh host session indefinitely.
+ */
+const UNATTRIBUTED_GRACE_MS = 5 * 60 * 1000;
 
 /** The launched session's own record and the resume tab that stands in for it. */
 export function launchedTab(info: LaunchedInfo): RestoreTab {
