@@ -22,8 +22,8 @@ export interface FreshTarget {
   /**
    * Launch this session in orchestrator mode — it coordinates and delegates
    * instead of implementing (see src/orchestration/index.ts). Only set on "free"
-   * targets, and it forces Claude (Copilot can't carry the instructions), so the
-   * flow skips the agent picker.
+   * targets. The agent picker still runs, but offers only Claude and Codex —
+   * Copilot can't carry the instructions (see `agentChoicesFor`).
    */
   orchestrator?: boolean;
 }

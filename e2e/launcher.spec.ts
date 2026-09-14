@@ -809,8 +809,8 @@ test("fresh-session flow creates a worktree and launches claude in tmux", async 
 
 // ── orchestrator mode from the TUI (`O` in the Sessions view) ─────────────────
 // The one-keypress entry point. It must be advertised, reuse the existing
-// repo → worktree → name flow (including the scoped-repo behaviour), and end up
-// spawning a claude that actually carries the orchestrator instructions.
+// agent → repo → worktree → name flow (including the scoped-repo behaviour), and
+// end up spawning a claude that actually carries the orchestrator instructions.
 test("O in the Sessions view launches an orchestrator through the normal worktree flow", async ({ launch, mock }) => {
   mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
   const wt = await launch();
@@ -825,10 +825,17 @@ test("O in the Sessions view launches an orchestrator through the normal worktre
   expect(screen).toContain("G global");
 
   wt.write("O");
-  // Straight to the repo picker — no agent step, since the mode is Claude-only.
+  // The agent picker runs — orchestrator mode is no longer Claude-only — but
+  // offers Claude and Codex only, never Copilot (it can't carry the instructions).
+  screen = await wt.waitForText("Orchestrator session — pick an agent");
+  expect(screen).toContain("Which agent should run this session?");
+  expect(screen).toContain("Claude");
+  expect(screen).toContain("Codex");
+  expect(screen).not.toContain("Copilot");
+
+  await wt.press(KEY.enter); // Claude (the default cursor) → repo picker
   screen = await wt.waitForText("Orchestrator session — pick a repo");
   expect(screen).toContain("writes no code itself");
-  expect(screen).not.toContain("Which agent should run this session?");
   // Same repo list the plain new-session flow offers (scoped-repo behaviour reused).
   expect(screen).toContain("appweb");
 
@@ -864,6 +871,41 @@ test("O in the Sessions view launches an orchestrator through the normal worktre
   });
   // No worktree was created for it.
   expect((await mock.callLog()).some((l) => l.startsWith("git ") && l.includes("worktree"))).toBe(false);
+});
+
+test("O in the Sessions view can pick Codex, carrying instructions via developer_instructions", async ({ launch, mock }) => {
+  // The Claude branch above proves the picker's default choice; this proves the
+  // picker's non-default one actually reaches `launchNewSession` with "codex" —
+  // the wiring the picker's cursor movement drives, not just the CLI's own.
+  mock.env.FAKE_GIT_ORIGIN_HOST = "ado";
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3"); // Sessions view
+  await wt.waitForText("Running now");
+
+  wt.write("O");
+  await wt.waitForText("Orchestrator session — pick an agent");
+  await wt.press(KEY.down); // off Claude, onto Codex
+  await wt.press(KEY.enter);
+  await wt.waitForText("Orchestrator session — pick a repo");
+
+  await wt.press(KEY.enter); // top repo (appweb) → worktree-vs-main choice
+  await wt.waitForText("choose where to run");
+  await wt.press(KEY.enter); // Main repo checkout → launches immediately
+
+  const expectedCwd = join(mock.home, "repos", "appweb");
+  await waitUntil(async () => {
+    const spawned = (await mock.tmuxLog()).find(
+      (argv) => argv[0] === "new-session" && argv.includes(expectedCwd) && argv.includes("codex"),
+    );
+    if (!spawned) return false;
+    const at = spawned.lastIndexOf("-c");
+    const raw = spawned[at + 1] ?? "";
+    if (at < 0 || !raw.startsWith("developer_instructions=")) return false;
+    const instructions = JSON.parse(raw.slice("developer_instructions=".length)) as string;
+    return instructions.includes("ORCHESTRATOR MODE") && instructions.includes("You are running inside agendo");
+  });
 });
 
 // ── the GLOBAL orchestrator from the TUI (`G` in the Sessions view) ───────────
@@ -911,6 +953,8 @@ test("the orchestrator flow can still opt into its own worktree", async ({ launc
   wt.write("3");
   await wt.waitForText("Running now");
   wt.write("O");
+  await wt.waitForText("Orchestrator session — pick an agent");
+  await wt.press(KEY.enter); // Claude (first in the list) → the repo picker
   await wt.waitForText("Orchestrator session — pick a repo");
   await wt.press(KEY.enter); // appweb → wtchoice (cursor on "Main repo checkout")
   await wt.waitForText("choose where to run");

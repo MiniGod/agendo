@@ -264,11 +264,16 @@ export function parseLaunchArgs(rest: string[]): LaunchArgs {
  * it lives in one (see `globalOrchestratorCwd`). Falls back to the caller's cwd
  * when there are no known repos at all.
  */
-async function launchGlobal(prompt: string, layout: "pane" | "window" | undefined, unattended: boolean) {
+async function launchGlobal(
+  prompt: string,
+  layout: "pane" | "window" | undefined,
+  unattended: boolean,
+  agent: AgentSource,
+) {
   const index = await SessionIndex.build();
   const roots = discoverRepos(index.all).map((r) => r.root);
   const cwd = globalOrchestratorCwd(roots, process.cwd());
-  return launchGlobalOrchestrator(cwd, { prompt, layout, unattended });
+  return launchGlobalOrchestrator(cwd, { prompt, layout, unattended, agent });
 }
 
 /**
@@ -288,15 +293,17 @@ function worktreePathClash(a: LaunchArgs): string | null {
   return `--worktree=<path> can't be combined with ${other} (it already says where to run)`;
 }
 
-/** Orchestrator mode rides on `--append-system-prompt`, which Copilot has no
- * equivalent for, so a Copilot orchestrator would run with none of the
- * coordinate-don't-implement instructions. Refuse loudly rather than degrade.
- * `agent` defaults to claude, so "copilot" here can only mean a flag asked for
- * it — no need to track explicitness separately. */
+/** Orchestrator mode needs a way to inject the coordinate-don't-implement
+ * instructions into the session's system prompt. Claude has
+ * `--append-system-prompt` and Codex has the equivalent `-c
+ * developer_instructions=` (see `withCodexDeveloperInstructions`); Copilot has
+ * neither, so a Copilot orchestrator would run with none of them. Refuse loudly
+ * rather than degrade. `agent` defaults to claude, so "copilot" here can only
+ * mean a flag asked for it — no need to track explicitness separately. */
 function orchestratorAgentClash(a: LaunchArgs): string | null {
-  if (!(a.orchestrator || a.global) || a.agent === "claude") return null;
+  if (!(a.orchestrator || a.global) || a.agent !== "copilot") return null;
   const flag = a.global ? "--global-orchestrator" : "--orchestrator";
-  return `${flag} is Claude-only (no --append-system-prompt equivalent in --agent ${a.agent})`;
+  return `${flag} isn't available with --agent copilot (no --append-system-prompt equivalent)`;
 }
 
 /** A global orchestrator belongs to no repository — it coordinates the per-repo
@@ -380,7 +387,7 @@ export async function runLaunch(): Promise<void> {
   const prompt = args.positionals.join(" ").trim();
   // Resolved once so the layout report below can read it off the same value the
   // launch produced — `"layout" in result` would widen the union and lose it.
-  const globalRes = args.global ? await launchGlobal(prompt, args.layout, args.unattended) : null;
+  const globalRes = args.global ? await launchGlobal(prompt, args.layout, args.unattended, args.agent) : null;
   const { plan, id, cwd, adopted, error } = launchFrom(args, prompt, globalRes);
   if (error || !plan) {
     console.error(`launch failed: ${error ?? "unknown error"}`);

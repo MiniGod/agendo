@@ -12,12 +12,15 @@ import {
   insideTmux,
   launcherWindowLive,
   launcherWindowTarget,
+  liveManagedPaths,
   liveTargetForShortId,
   shortId,
   splitPaneIn,
   splitTargetWidth,
 } from "../runtime/tmux/index.ts";
 import { orchestratorRoles } from "../orchestration/index.ts";
+import { orchestratorCwdRoles } from "../orchestration/cwdMarks.ts";
+import type { AgentSource } from "../shared/types.ts";
 import { SELF_CMD } from "./selfCommand.ts";
 import { freshPanePlan, openTarget, type OpenPlan } from "./open.ts";
 import { launchManaged } from "./managed.ts";
@@ -45,6 +48,9 @@ export interface GlobalLaunchOptions {
    * is a larger unreviewed surface than one repo's merges.
    */
   unattended?: boolean;
+  /** Which agent runs the orchestrator — Claude or Codex (Copilot can't carry
+   *  the orchestrator instructions at all). Defaults to Claude. */
+  agent?: AgentSource;
 }
 
 export interface GlobalLaunchResult extends LaunchResult {
@@ -55,19 +61,35 @@ export interface GlobalLaunchResult extends LaunchResult {
 }
 
 /**
- * The short id of a global orchestrator that is running right now, or null.
+ * A running global orchestrator, found and how it can be referenced.
  *
- * There is one fleet, so there is one coordinator of it: a second would be
- * starting repo orchestrators in the same repos as the first, each unaware of
- * the other's briefings, and both splitting the same launcher window. A marker
- * alone doesn't mean running — they outlive the session — so liveness is what is
- * actually asked.
+ * `token`, when present, is the short id `send`/`close` take — always known for
+ * Claude (a caller-chosen id, preassigned at launch); never known for Codex,
+ * which assigns its own id only after the fact, so its orchestrators are found
+ * by working directory instead (see cwdMarks.ts) and there is no id yet to hand
+ * back.
  */
-export function liveGlobalOrchestrator(): string | null {
+export interface LiveGlobalOrchestrator {
+  token?: string;
+}
+
+/**
+ * A running global orchestrator, or null. There is one fleet, so there is one
+ * coordinator of it: a second would be starting repo orchestrators in the same
+ * repos as the first, each unaware of the other's briefings, and both splitting
+ * the same launcher window. A marker alone doesn't mean running — they outlive
+ * the session — so liveness is what is actually asked, by id for Claude and by
+ * cwd for Codex.
+ */
+export function liveGlobalOrchestrator(): LiveGlobalOrchestrator | null {
   for (const [id, role] of orchestratorRoles()) {
     if (role !== "global") continue;
     const sid = shortId(id);
-    if (liveTargetForShortId(sid)) return sid;
+    if (liveTargetForShortId(sid)) return { token: sid };
+  }
+  for (const [cwd, role] of orchestratorCwdRoles()) {
+    if (role !== "global") continue;
+    if (liveManagedPaths().some((t) => t.cwd === cwd)) return {};
   }
   return null;
 }
@@ -114,14 +136,16 @@ export function launchGlobalOrchestrator(cwd: string, opts: GlobalLaunchOptions 
   // re-brief every repo orchestrator from scratch.
   const running = liveGlobalOrchestrator();
   if (running) {
+    const reach = running.token
+      ? `Talk to it with \`${SELF_CMD} send ${running.token} "…"\`, or end it with \`${SELF_CMD} close ${running.token}\``
+      : `Find it with \`${SELF_CMD} list\` — it's a Codex session, so it assigned its own id after launch`;
     return {
       cwd,
       layout: "window",
       layoutNote: null,
       error:
-        `a global orchestrator is already running (${running}) — there is one fleet, so there is one ` +
-        `coordinator of it. Talk to it with \`${SELF_CMD} send ${running} "…"\`, or end it with ` +
-        `\`${SELF_CMD} close ${running}\` before starting another.`,
+        `a global orchestrator is already running — there is one fleet, so there is one coordinator of ` +
+        `it. ${reach} before starting another.`,
     };
   }
   const wantPane = (opts.layout ?? "pane") === "pane";
@@ -143,7 +167,7 @@ export function launchGlobalOrchestrator(cwd: string, opts: GlobalLaunchOptions 
     return openTarget(name, runCwd, argv);
   };
 
-  const { plan, id } = launchManaged(cwd, "background", "claude", opts.prompt, {
+  const { plan, id } = launchManaged(cwd, "background", opts.agent ?? "claude", opts.prompt, {
     orchestrator: "global",
     unattended: opts.unattended,
     open,

@@ -41,28 +41,30 @@ Usage:
                                 launches one background session per unit (each with a
                                 sub-agent dev→review loop), monitors them via
                                 list/status/send, and squash-merges each finished
-                                branch into the main branch. Claude only. Runs in the
-                                repo's MAIN checkout (not a worktree) — git allows the
-                                main branch in only one working tree, which is where
-                                the merges have to happen. --worktree overrides, and
-                                then names the branch "orchestrator" (-2, -3, … if
-                                taken) unless --name says otherwise. Unlike other
-                                background launches it keeps its approval prompts,
-                                since it acts on your main checkout; --unattended
-                                waives them.
+                                branch into the main branch. Claude or Codex (Copilot
+                                has no --append-system-prompt equivalent). Runs in
+                                the repo's MAIN checkout (not a worktree) — git
+                                allows the main branch in only one working tree,
+                                which is where the merges have to happen. --worktree
+                                overrides, and then names the branch "orchestrator"
+                                (-2, -3, … if taken) unless --name says otherwise.
+                                Unlike other background launches it keeps its
+                                approval prompts, since it acts on your main
+                                checkout; --unattended waives them.
       --global-orchestrator, -G Run the GLOBAL orchestrator — one level above
                                 --orchestrator. It writes no code and operates on no
-                                repository at all (not even a merge; that is each repo
-                                orchestrator's job). It surveys repos with
+                                repository at all (not even a merge; that is each
+                                repo orchestrator's job). It surveys repos with
                                 "agendo list repos", starts a repo orchestrator where
-                                one is missing, and coordinates ONLY with those — never
-                                with an individual worktree session. Claude only, and
-                                tied to no repo, so it takes no worktree, no branch and
-                                no --name. By default it opens as a tmux pane BESIDE
-                                the agendo TUI so both are visible at once; --window
-                                gives it its own tab instead (for narrow terminals),
-                                and outside tmux it gets its own session. Also
-                                spellable as --orchestrator --global.
+                                one is missing, and coordinates ONLY with those —
+                                never with an individual worktree session. Claude or
+                                Codex (not Copilot), and tied to no repo, so it takes
+                                no worktree, no branch and no --name. By default it
+                                opens as a tmux pane BESIDE the agendo TUI so both
+                                are visible at once; --window gives it its own tab
+                                instead (for narrow terminals), and outside tmux it
+                                gets its own session. Also spellable as
+                                --orchestrator --global.
       --window / --pane         Only with --global-orchestrator: open it as its own
                                 tmux window, or ask for the split pane (the default).
                                 Neither --pane nor the default can force it: a pane

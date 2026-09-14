@@ -253,17 +253,17 @@ export function makeSessionFlow({
   };
 
   /**
-   * Open the orchestrator flow: the same repo → worktree → name steps as a plain
-   * new session, but the agent picker is skipped (orchestrator mode is Claude-only,
-   * so there's nothing to choose) and the session launches with the orchestrator
-   * instructions injected.
+   * Open the orchestrator flow: the same agent → repo → worktree → name steps as
+   * a plain new session, launching with the orchestrator instructions injected.
+   * The agent picker offers Claude and Codex — not Copilot, which can't carry
+   * them (see `agentChoicesFor`).
    */
   const enterOrchestrator = () => {
     setNotice(null);
     setCloneNote(null);
     cloneNoteRef.current = null;
     if (!haveRepos()) return;
-    setMode({ kind: "repo", target: orchestratorTarget(), agent: "claude", cursor: 0 });
+    setMode({ kind: "agent", target: orchestratorTarget(), cursor: 0 });
   };
 
   /**
@@ -271,10 +271,17 @@ export function makeSessionFlow({
    * and talks only to the per-repo orchestrators (see src/orchestration/global.ts).
    *
    * Unlike every other entry point here it opens no picker at all — there is no
-   * repo, worktree, branch or agent left to choose, so a wizard would be four
-   * screens of nothing. It launches on the keystroke and reports where it landed,
-   * because the default layout (a pane beside this menu) falls back to a window
-   * on a narrow terminal and the user has to be told which one they got.
+   * repo, worktree or branch to choose, so a wizard would be three screens of
+   * nothing. It launches on the keystroke and reports where it landed, because
+   * the default layout (a pane beside this menu) falls back to a window on a
+   * narrow terminal and the user has to be told which one they got.
+   *
+   * Agent is Claude only from this entry point — Codex is orchestrator-eligible
+   * (see `orchestratorAgentClash`) but reaching it here would need the same
+   * "four screens of nothing" wizard this function exists to avoid, for a mode
+   * launched far less often than the per-repo one. A Codex global orchestrator
+   * is reachable via the CLI (`agendo launch --global-orchestrator --codex`) —
+   * a known, deliberate gap, not an oversight.
    */
   const enterGlobalOrchestrator = () => {
     setNotice(null);

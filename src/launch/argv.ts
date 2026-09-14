@@ -17,8 +17,29 @@ import { launcherSystemPrompt } from "./prompt.ts";
  */
 export function withLauncherPrompt(argv: string[], role?: OrchestratorRole): string[] {
   const parts = [launcherSystemPrompt()];
-  if (role) parts.push(systemPromptForRole(role, SELF_CMD));
+  if (role) parts.push(systemPromptForRole(role, SELF_CMD, "claude"));
   return [...argv, "--append-system-prompt", parts.join("\n\n")];
+}
+
+/**
+ * Codex equivalent of `withLauncherPrompt`: the same launcher pointer (plus the
+ * orchestrator prompt for `role`), delivered via `-c developer_instructions=`
+ * instead of `--append-system-prompt` — codex has no such flag, but codex-cli
+ * 0.154.0 accepts `-c developer_instructions=` and lands it as a developer-role
+ * input at the HEAD of the prompt, additive rather than replacing (verified with
+ * `codex debug prompt-input -c developer_instructions=… "…"`). `codex resume`
+ * takes the same flag, which is what lets this drive the resume path too — codex
+ * remembers no state of its own to re-derive it from, exactly like claude.
+ *
+ * The value must be a quoted TOML string (`-c key=value` parses the RHS as TOML,
+ * falling back to the literal string only when that fails to parse); TOML basic
+ * strings escape quotes, backslashes and control characters the same way JSON
+ * strings do, so `JSON.stringify` doubles as the TOML literal here.
+ */
+export function withCodexDeveloperInstructions(argv: string[], role?: OrchestratorRole): string[] {
+  const parts = [launcherSystemPrompt()];
+  if (role) parts.push(systemPromptForRole(role, SELF_CMD, "codex"));
+  return [...argv, "-c", `developer_instructions=${JSON.stringify(parts.join("\n\n"))}`];
 }
 
 /**
@@ -126,15 +147,21 @@ export function resumeArgv(s: AgentSession): string[] {
       // self-command still propagates, so any agendo the session runs by hand is
       // the build that spawned it.
       return withSelfCmdEnv(["copilot", `--resume=${s.id}`]);
-    case "codex":
+    case "codex": {
       // `codex resume <SESSION_ID>` takes the thread UUID as a positional; the
       // bare `codex resume` would open its interactive picker instead. Codex
       // keeps all state under $CODEX_HOME (default ~/.codex) and we scan exactly
-      // that home, so the child inherits the right one with no dir wiring. Like
-      // Copilot, codex has no `--append-system-prompt`, so the launcher system
-      // prompt is intentionally omitted — and, like Copilot, the self-command
-      // still propagates so the resumed session drives the build that spawned it.
-      return withSelfCmdEnv(["codex", "resume", s.id]);
+      // that home, so the child inherits the right one with no dir wiring.
+      // Codex remembers neither the developer-instructions flag nor which role it
+      // was launched at, so — exactly like claude above — a cold resume re-injects
+      // from our own marker file. Unlike claude's marker, a codex orchestrator was
+      // never recorded under a session id (codex assigns its own only after the
+      // fact — see `preassignsSessionId`), so the lookup falls back to `s.cwd`,
+      // which is where it was marked instead (see `markOrchestratorCwd`).
+      const cmd = withCodexDeveloperInstructions(["codex", "resume"], orchestratorRoleOf(s.id, s.cwd) ?? undefined);
+      cmd.push(s.id);
+      return withSelfCmdEnv(cmd);
+    }
   }
 }
 
@@ -162,16 +189,21 @@ export interface FreshArgvOptions {
  * Build the argv to start a BRAND-NEW session for `agent` in a tmux window, each
  * with its initial interactive prompt and unattended-autonomy flags:
  *  - Claude: `--session-id <id>`, positional prompt, `AUTONOMY_ARGV`, plus the
- *    launcher system prompt appended so background-session coordination works.
+ *    launcher system prompt appended (`--append-system-prompt`, see
+ *    `withLauncherPrompt`) so background-session coordination works, and the
+ *    orchestrator prompt too when this is one.
  *  - Copilot: `--session-id <id>`, `--interactive <prompt>`,
- *    `COPILOT_AUTONOMY_ARGV`. Copilot has no `--append-system-prompt`, so the
- *    launcher prompt is omitted (background coordination is Claude-only today) —
- *    which is also why orchestrator mode is Claude-only, rejected at the entry
+ *    `COPILOT_AUTONOMY_ARGV`. Copilot has no `--append-system-prompt` equivalent,
+ *    so the launcher prompt is omitted (it has no way to receive it) — which is
+ *    also why orchestrator mode stays Copilot-ineligible, rejected at the entry
  *    points rather than silently degraded here.
- *  - Codex: positional prompt, `CODEX_AUTONOMY_ARGV`. Codex has no
- *    `--session-id` (see `preassignsSessionId`) — `opts.sessionId` is ignored
- *    rather than forced in — and no `--append-system-prompt`, so it is
- *    orchestrator-ineligible for the same reason copilot is.
+ *  - Codex: positional prompt, `CODEX_AUTONOMY_ARGV`, plus the same launcher (and
+ *    orchestrator) prompt injected via `-c developer_instructions=` — codex's
+ *    closest equivalent to `--append-system-prompt` (see
+ *    `withCodexDeveloperInstructions`). Codex has no `--session-id` (see
+ *    `preassignsSessionId`) — `opts.sessionId` is ignored rather than forced in —
+ *    but that only affects how the window is attributed to its session, not
+ *    whether it can be an orchestrator.
  * Any `forwardArgv` (allowlisted flags from `agendo launch`) goes last among the
  * flags, so an explicit `--model` wins over anything the defaults might set.
  * Either way the argv is prefixed with our `env` block, so the new session
@@ -193,11 +225,11 @@ function copilotArgv(opts: FreshArgvOptions): string[] {
 }
 
 function codexArgv(opts: FreshArgvOptions): string[] {
-  const argv = commonArgv(["codex"], opts, CODEX_AUTONOMY_ARGV);
-  // Codex's prompt is a bare positional, so it must come after every flag
-  // (a `[PROMPT]` before one would be read as that flag's value). The `env`
-  // prefix goes on afterwards and takes the whole thing as its command, so
-  // it doesn't disturb that ordering.
+  const argv = withCodexDeveloperInstructions(commonArgv(["codex"], opts, CODEX_AUTONOMY_ARGV), opts.orchestrator);
+  // Codex's prompt is a bare positional, so it must come after every flag —
+  // including `-c developer_instructions=…` above — or a `[PROMPT]` before one
+  // would be read as that flag's value. The `env` prefix goes on afterwards and
+  // takes the whole thing as its command, so it doesn't disturb that ordering.
   if (opts.prompt) argv.push(opts.prompt);
   return withSelfCmdEnv(argv);
 }

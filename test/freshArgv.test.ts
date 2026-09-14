@@ -13,6 +13,15 @@ function command(argv: string[]): string[] {
   return argv.slice(at);
 }
 
+/** The `-c developer_instructions=…` value from a spawned codex argv. */
+function devInstructions(argv: string[]): string {
+  const at = argv.indexOf("-c");
+  expect(at).toBeGreaterThanOrEqual(0);
+  const raw = argv[at + 1] ?? "";
+  expect(raw.startsWith("developer_instructions=")).toBe(true);
+  return JSON.parse(raw.slice("developer_instructions=".length)) as string;
+}
+
 describe("freshArgv", () => {
   test("copilot: session id, autonomy, forwarded flags, then an interactive prompt", () => {
     expect(command(freshArgv("copilot"))).toEqual(["copilot"]);
@@ -21,11 +30,25 @@ describe("freshArgv", () => {
     ]);
   });
 
-  test("codex: no session id, and the prompt is the last positional", () => {
-    expect(command(freshArgv("codex", { sessionId: "ignored" }))).toEqual(["codex"]);
-    expect(command(freshArgv("codex", { autonomy: true, forwardArgv: ["--model", "o3"], prompt: "task" }))).toEqual([
-      "codex", "--approve-for-me", "--model", "o3", "task",
-    ]);
+  test("codex: no session id, developer_instructions after autonomy/forwarded flags, prompt last", () => {
+    const bare = command(freshArgv("codex", { sessionId: "ignored" }));
+    expect(bare.slice(0, 3)).toEqual(["codex", "-c", bare[2]]);
+    expect(bare).toHaveLength(3);
+
+    const argv = command(freshArgv("codex", { autonomy: true, forwardArgv: ["--model", "o3"], prompt: "task" }));
+    expect(argv).toEqual(["codex", "--approve-for-me", "--model", "o3", "-c", argv[5], "task"]);
+  });
+
+  test("codex carries the launcher prompt even without an orchestrator role", () => {
+    expect(devInstructions(command(freshArgv("codex")))).toContain("--llm");
+  });
+
+  test("an orchestrator's role prompt rides in codex's developer_instructions too", () => {
+    const plain = devInstructions(command(freshArgv("codex")));
+    const repo = devInstructions(command(freshArgv("codex", { orchestrator: "repo" })));
+    expect(repo.startsWith(plain)).toBe(true);
+    expect(repo.length).toBeGreaterThan(plain.length);
+    expect(repo).toContain("ORCHESTRATOR MODE");
   });
 
   test("claude: session id, autonomy, forwarded flags, prompt, then the launcher system prompt", () => {
@@ -46,6 +69,7 @@ describe("freshArgv", () => {
   });
 
   test("an empty forwardArgv adds nothing", () => {
-    expect(command(freshArgv("codex", { forwardArgv: [] }))).toEqual(["codex"]);
+    const argv = command(freshArgv("codex", { forwardArgv: [] }));
+    expect(argv).toEqual(["codex", "-c", argv[2]]);
   });
 });

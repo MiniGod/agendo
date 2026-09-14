@@ -68,8 +68,9 @@ export interface LaunchOptions {
   /**
    * Run the new session in orchestrator mode: it delegates every unit of work to
    * further background sessions instead of implementing anything itself (see
-   * src/orchestration/index.ts). Claude only. This is the REPO level by construction —
-   * a global orchestrator belongs to no repo, so it takes no worktree and has its
+   * src/orchestration/index.ts). Claude or Codex — Copilot has no equivalent and
+   * is refused before this point. This is the REPO level by construction — a
+   * global orchestrator belongs to no repo, so it takes no worktree and has its
    * own entry point (`launchGlobalOrchestrator`) rather than a repo-shaped one.
    */
   orchestrator?: boolean;
@@ -159,12 +160,13 @@ function resolveLaunchCwd(cwd: string, root: string, slug: string, named: boolea
  * spin up a background session (see `launcherSystemPrompt`).
  *
  * Creates an isolated worktree (unless disabled), then opens a `cl-bg-<id>` tmux
- * target running the chosen agent with the task prompt and (for Claude) the
- * launcher system prompt injected, so the convention propagates to whatever that
- * session spawns next. Defaults to Claude. Copilot and Codex are supported too,
- * but neither has an `--append-system-prompt` equivalent, so their background
- * sessions won't carry the launcher prompt — they run the task unattended but
- * won't autonomously spawn their own nested background sessions.
+ * target running the chosen agent with the task prompt and the launcher system
+ * prompt injected (Claude via `--append-system-prompt`, Codex via
+ * `-c developer_instructions=`, see `withLauncherPrompt` / `withCodexDeveloperInstructions`
+ * in argv.ts), so the convention propagates to whatever that session spawns
+ * next. Defaults to Claude. Copilot is supported too but has no equivalent flag,
+ * so its background sessions won't carry the launcher prompt — they run the task
+ * unattended but won't autonomously spawn their own nested background sessions.
  *
  * `id` is absent for Codex, which assigns its own session id (see
  * `launchManaged`); the session still appears in `agendo list` once its rollout
