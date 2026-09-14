@@ -46,11 +46,33 @@ export function sameLiveTmux(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
-// Map equality on BOTH halves of each live target — a window that moved host keeps
-// its name and changes only the target addressing it. Gates the rescan's setModel.
+// Map equality on every half of each live target — a window that moved host
+// keeps its name and changes only the target addressing it (and a renumber
+// changes only windowIndex, leaving name/target alone). `session` is compared
+// explicitly too: for a normal window `target` embeds it (windowTarget), so a
+// rename would already trip the `target` check, but a PANE-hosted target's
+// `target` is just the pane id (`%N`) and never encodes its host session, so
+// only `session` itself would catch that host being renamed. Gates the
+// rescan's setModel; also used for `placeholderWindows`, the same shape. Both
+// `a` and `b` use the same key set check via size + one-directional lookup,
+// safe because a Map key never repeats.
 export function sameLiveWindows(a: Map<string, LiveTarget>, b: Map<string, LiveTarget>): boolean {
   if (a.size !== b.size) return false;
-  for (const [k, v] of a) if (b.get(k)?.name !== v.name || b.get(k)?.target !== v.target) return false;
+  for (const [k, v] of a) {
+    const w = b.get(k);
+    if (!w || w.name !== v.name || w.target !== v.target || w.windowIndex !== v.windowIndex || w.session !== v.session)
+      return false;
+  }
+  return true;
+}
+
+// Array-valued map equality (order-sensitive), for `liveWindowLocations`.
+export function sameLocations(a: Map<string, string[]>, b: Map<string, string[]>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) {
+    const w = b.get(k);
+    if (!w || w.length !== v.length || !v.every((loc, i) => loc === w[i])) return false;
+  }
   return true;
 }
 

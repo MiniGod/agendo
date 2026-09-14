@@ -10,6 +10,7 @@ as ⟨magenta⟩Ada Lovelace (you)⟨bold⟩
       repo    ⟨gray,dim⟩appweb⟨dim⟩
       branch  ⟨gray,dim⟩feature/login⟨dim⟩
       profile ⟨gray,dim⟩.claude  ·  press m → move to another profile⟨dim⟩
+      tmux    ⟨gray,dim⟩cl-claude-loginsession:0  "cl-claude-loginsession"⟨dim⟩
       continue⟨gray,dim⟩press c → convert & resume in copilot⟨dim⟩
       ↳ "Add a login form with validation"⟨dim⟩
       ✔ ⟨green⟩Write the login form⟨dim⟩

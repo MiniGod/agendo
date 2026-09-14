@@ -3407,3 +3407,83 @@ test.describe("pane-hosted targets", () => {
     expect(r.liveWindows.get(canon)?.target).toBe("%9");
   });
 });
+
+// ── tmux identity: window index, host session, and duplicate locations ───────
+// Backs the expanded-session "tmux" meta line (src/ui/models/tmuxMeta.ts): the
+// SESSION NAME and WINDOW NUMBER a session's window actually lives at, plus
+// enough to detect the duplicate-window-name case `windowLocations` in
+// windows.ts already guards `close` against, and to show a paused restore
+// placeholder's window too (not just a running one).
+test.describe("reconcileLive: window index, host session, duplicate locations, placeholder windows", () => {
+  test("a resolved window carries its host session and window index through to liveWindows", () => {
+    const s = sess("idx0001", "/x", 1_000);
+    const canon = sessionName(s);
+    const r = reconcileLive(
+      new Set([canon]),
+      [{ name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: false, session: "agendo", windowIndex: "3" }],
+      [s],
+    );
+    expect(r.liveWindows.get(canon)?.session).toBe("agendo");
+    expect(r.liveWindows.get(canon)?.windowIndex).toBe("3");
+    expect(r.liveWindowLocations.get(canon)).toEqual(["agendo:3"]);
+  });
+
+  test("the same window name live in two host sessions is a duplicate — both locations are kept, not just the first", () => {
+    // The scenario windowLocations() exists for: two host sessions each hold a
+    // tab for the same session. reconcileLive must not silently pick one.
+    const s = sess("dup0002", "/x", 1_000);
+    const canon = sessionName(s);
+    const r = reconcileLive(
+      new Set([canon]),
+      [
+        { name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: false, session: "agendo", windowIndex: "2" },
+        { name: canon, target: `=work:=${canon}`, cwd: "/x", placeholder: false, session: "work", windowIndex: "0" },
+      ],
+      [s],
+    );
+    expect(r.liveWindowLocations.get(canon)).toEqual(["agendo:2", "work:0"]);
+  });
+
+  test("a pane-hosted target's null windowIndex is never counted as a location", () => {
+    // Its window belongs to whatever it shares a pane with (the launcher menu),
+    // not to this session — see liveManagedPaths. Showing it as a location would
+    // wrongly suggest this session owns a window there.
+    const s = sess("panehostidx", "/x", 1_000);
+    const r = reconcileLive(
+      new Set(),
+      [{ name: "cl-bg-panehostidx", target: "%4", cwd: "/x", placeholder: false, session: "agendo", windowIndex: null }],
+      [s],
+    );
+    const canon = sessionName(s);
+    expect(r.liveWindowLocations.has(canon)).toBe(false);
+  });
+
+  test("a pure restore placeholder (no real window vouching for it) is exposed via placeholderWindows, not liveWindows", () => {
+    const s = sess("pauseonly", "/x", 1_000);
+    const canon = sessionName(s);
+    const r = reconcileLive(
+      new Set([canon]),
+      [{ name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: true, session: "agendo", windowIndex: "1" }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(false);
+    expect(r.livePlaceholders.has(canon)).toBe(true);
+    expect(r.liveWindows.has(canon)).toBe(false);
+    expect(r.placeholderWindows.get(canon)).toMatchObject({ session: "agendo", windowIndex: "1" });
+  });
+
+  test("a placeholder a real window vouches for never lands in placeholderWindows either", () => {
+    const s = sess("claimed0003", "/x", 1_000);
+    const canon = sessionName(s);
+    const r = reconcileLive(
+      new Set([canon]),
+      [
+        { name: canon, target: `=agendo:=${canon}`, cwd: "/x", placeholder: true, session: "agendo", windowIndex: "1" },
+        { name: canon, target: `=work:=${canon}`, cwd: "/x", placeholder: false, session: "work", windowIndex: "4" },
+      ],
+      [s],
+    );
+    expect(r.placeholderWindows.has(canon)).toBe(false);
+    expect(r.liveWindows.get(canon)?.session).toBe("work");
+  });
+});

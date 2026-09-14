@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { loadLocalSessions, type LoadedModel } from "../../app/model/index.ts";
 import { mergeRepos, type RepoInfo } from "../../repositories/index.ts";
-import { sameLiveTmux, sameLiveWindows, sameRepos, sessionGroupsSig } from "../models/equality.ts";
+import { sameLiveTmux, sameLiveWindows, sameLocations, sameRepos, sessionGroupsSig } from "../models/equality.ts";
 
 const LIVE_POLL_MS = 2000; // background tmux-liveness refresh (no network)
 
@@ -63,6 +63,8 @@ export function useLocalRescan({
             sameLiveTmux(prev.liveTmux, local.live) &&
             sameLiveTmux(prev.livePlaceholders, local.livePlaceholders) &&
             sameLiveWindows(prev.liveWindows, local.liveWindows) &&
+            sameLiveWindows(prev.placeholderWindows, local.placeholderWindows) &&
+            sameLocations(prev.liveWindowLocations, local.liveWindowLocations) &&
             sameRepos(prev.repos, repos);
           if (unchanged) return prev;
           // Merge the fresh LOCAL half; keep the NETWORK half from the last full
@@ -80,6 +82,8 @@ export function useLocalRescan({
             liveKinds: local.liveKinds,
             liveWindows: local.liveWindows,
             livePlaceholders: local.livePlaceholders,
+            placeholderWindows: local.placeholderWindows,
+            liveWindowLocations: local.liveWindowLocations,
           };
         });
       } catch {

@@ -319,6 +319,125 @@ test("a session under a legacy tmux window attaches to it without duplicating", 
   expect(log.some((argv) => argv[0] === "new-session" && argv.includes(canonical))).toBe(false);
 });
 
+test("expanding a running session shows its tmux identity: session, window number, window name", async ({ launch }) => {
+  // Default fixture state: the login session runs as its own tmux session (no
+  // separate host), so the tmux SESSION NAME is the canonical name itself and
+  // its one window is index 0 — proves the real #{window_index} round trip
+  // through the fake tmux binary and into the expanded row, not just the pure
+  // reconcileLive/sessionMeta logic those already cover.
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  await wt.press("/");
+  await wt.press("login", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press(KEY.right); // expand
+  const screen = await wt.waitForText("tmux");
+  expect(screen).toContain(`${RUNNING_TARGET}:0`);
+  expect(screen).toContain(`"${RUNNING_TARGET}"`);
+});
+
+test("a session attributed to a legacy tmux window shows that window's real host session and index", async ({ launch, mock }) => {
+  // Same legacy cl-wi-101 attribution as the test above, but expanded rather
+  // than resumed: the HOST session ("claude-launcher") and the real window
+  // index (1) must show, not the canonical session id — this session owns no
+  // window of that name, only the legacy tab it was attributed to by cwd.
+  const loginCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "login");
+  await mock.setTmuxState({
+    sessions: [],
+    windows: [{ session: "claude-launcher", index: 1, name: "cl-wi-101" }],
+    panes: [{ session: "claude-launcher", window: "cl-wi-101", cwd: loginCwd, placeholder: false, index: 1 }],
+    captures: {},
+  });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  await wt.press("/");
+  await wt.press("login", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press(KEY.right); // expand
+  const screen = await wt.waitForText("tmux");
+  expect(screen).toContain("claude-launcher:1");
+  expect(screen).toContain('"cl-wi-101"');
+});
+
+test("a pane-hosted session shows its host session and never a misleading window index", async ({ launch, mock }) => {
+  // Mirrors how the global orchestrator actually lives — no window or session of
+  // its own, just a pane inside the menu's own window, addressed by pane id and
+  // named via the @cl_pane_target pane option (see cli.spec.ts's `paneHosted`
+  // fixture for the CLI-side precedent). Real fake-tmux round trip through
+  // list-panes' `#{@cl_pane_target}` field, not just the pure tmuxLine logic.
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", id: "%0" },
+      { session: "agendo", window: "launcher", cwd: "/run/login", id: "%4", paneTarget: RUNNING_TARGET },
+    ],
+    captures: {},
+  });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  await wt.press("/");
+  await wt.press("login", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press(KEY.right); // expand
+  const screen = await wt.waitForText("tmux");
+  expect(screen).toContain("agendo");
+  expect(screen).toContain("pane (no window of its own)");
+  // Never a "session:index" pair — a pane-hosted session owns no window of that kind.
+  expect(screen.slice(screen.indexOf("tmux"), screen.indexOf("tmux") + 60)).not.toMatch(/:\d/);
+});
+
+test("a window name live in two host sessions shows every location, never silently the first", async ({ launch, mock }) => {
+  // The exact duplicate `windowLocations()` in runtime/tmux/windows.ts exists to
+  // guard `close` against: the same managed window name live under two host
+  // tmux sessions at once. Real fake-tmux round trip (two list-panes rows), not
+  // just the pure reconcileLive/tmuxLine logic those already cover.
+  await mock.setTmuxState({
+    sessions: [],
+    windows: [
+      { session: "agendo", index: 2, name: RUNNING_TARGET },
+      { session: "work", index: 0, name: RUNNING_TARGET },
+    ],
+    panes: [
+      { session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false, index: 2 },
+      { session: "work", window: RUNNING_TARGET, cwd: "/run/login", placeholder: false, index: 0 },
+    ],
+    captures: {},
+  });
+
+  const wt = await launch();
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  await wt.press("3");
+  await wt.waitForText("Running now");
+
+  await wt.press("/");
+  await wt.press("login", 300);
+  await wt.waitForText("Search results");
+  await wt.press(KEY.down);
+  await wt.press(KEY.right); // expand
+  const screen = await wt.waitForText("tmux");
+  expect(screen).toContain("agendo:2, work:0");
+  expect(screen).toContain(`"${RUNNING_TARGET}"`);
+});
+
 test("move a session to another Claude profile — picker + move, and a refusal while it runs", async ({ launch, mock }) => {
   const wt = await launch();
   await wt.waitForText("Current sprint", 20000);

@@ -56,6 +56,15 @@ export interface LoadedModel {
    * lets the Sessions view badge them as restored-but-unopened.
    */
   livePlaceholders: Set<string>;
+  /** The `LiveTarget` of a session's dormant restore-placeholder window, by
+   *  canonical name — set only for names in `livePlaceholders`, so a paused
+   *  session can still show a tmux identity line (see `sessionMeta`). */
+  placeholderWindows: Map<string, LiveTarget>;
+  /** Every `session:window_index` a running session's window name was found at
+   *  (see `windowLocations` in runtime/tmux/windows.ts) — more than one entry
+   *  means the name is live in more than one host session, the ambiguity the UI
+   *  must show rather than silently pick a location for. */
+  liveWindowLocations: Map<string, string[]>;
   /** Repos ranked by session count, for the fresh-session repo picker. Includes
    *  the repos found under the launcher's path context, so a freshly-cloned repo
    *  that never hosted a session is still offered. */
@@ -121,4 +130,6 @@ export interface LocalSessions {
   liveKinds: Map<string, SessionKind>;
   liveWindows: Map<string, LiveTarget>;
   livePlaceholders: Set<string>;
+  placeholderWindows: Map<string, LiveTarget>;
+  liveWindowLocations: Map<string, string[]>;
 }
