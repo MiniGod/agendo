@@ -103,6 +103,7 @@ export {
 
 export {
   liveTargetForShortId,
+  livePlaceholderForShortId,
   liveSessions,
   liveWindows,
   liveTargets,

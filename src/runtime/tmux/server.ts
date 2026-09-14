@@ -9,6 +9,27 @@ import {
 } from "./names.ts";
 
 /**
+ * The live PLACEHOLDER window for this session short id — a paused,
+ * unopened-or-fallen-back-to restore tab — or null when there is none, or
+ * when a REAL window already vouches for the same canonical name (in which
+ * case the session is running, not paused; see `reconcileLive`).
+ *
+ * Deliberately NOT folded into `liveTargetForShortId`: that function answers
+ * "where do I read/write this session's pane", and a placeholder is neither —
+ * it holds no agent, and `send`/`unblock` must refuse it rather than type
+ * into it (a keystroke there resumes the tab or, for Esc, closes it outright).
+ * Callers that need to tell "genuinely not running" apart from "parked, one
+ * keypress from resuming" read this FIRST.
+ */
+export function livePlaceholderForShortId(sid: string): LiveTarget | null {
+  const managed = liveManagedPaths();
+  const hit = managed.find((m) => m.placeholder && ID_BEARING_NAME.exec(m.name)?.[1] === sid);
+  if (!hit) return null;
+  const vouched = managed.some((m) => !m.placeholder && m.name === hit.name);
+  return vouched ? null : { name: hit.name, target: hit.target };
+}
+
+/**
  * A live managed target whose name embeds this session short id under any
  * id-bearing kind prefix (`cl-claude-`, `cl-copilot-`, `cl-codex-`, `cl-bg-`,
  * `cl-new-`) — so attach can navigate to the *actual* window a session runs in,

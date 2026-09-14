@@ -676,6 +676,40 @@ test("with the socket off, a session that is genuinely gone still gets the resum
   expect(r.stderr).not.toContain("socket is disabled");
 });
 
+// A THIRD absence, distinct from both of the above: the session's only live
+// tmux window is a paused restore-tab placeholder — not "genuinely gone"
+// (something does answer to the id) and not "running but unreachable" (there
+// is no agent to reach at all). Pasting into it would wake it on a stray
+// keystroke, or close it outright on a leading Escape, so `send` must refuse
+// without ever touching its pane.
+test("agendo send refuses a parked placeholder, names resume, and touches its pane not at all", async ({ mock }) => {
+  const crashTarget = `cl-claude-${CRASH_SHORT_ID}`;
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 2, name: crashTarget },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+      { session: "agendo", window: crashTarget, cwd: "/run/crash", placeholder: true },
+    ],
+    captures: { [crashTarget]: BUSY_PANE },
+  });
+
+  const r = agendo(mock.env, "send", CRASH_SHORT_ID, "carry on");
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain("parked as a restore tab");
+  expect(r.stderr).toContain(`resume ${CRASH_SHORT_ID}`);
+  // Pinned apart from the other two refusals above: neither of their exact
+  // wordings leaked in here.
+  expect(r.stderr).not.toContain("no live tmux window and no messaging socket");
+  expect(r.stderr).not.toContain("IS running");
+  // Nothing was read from or written to the placeholder's pane at all.
+  const log = await mock.tmuxLog();
+  expect(log.some((argv) => ["capture-pane", "paste-buffer", "send-keys"].includes(argv[0]))).toBe(false);
+});
+
 test("agendo status still sees a peer with the socket switched off", async ({ mock }) => {
   // The switch turns off SPEAKING an undocumented protocol; it does not turn off
   // reading a registry file. Gating discovery everywhere would make a live
@@ -2582,6 +2616,99 @@ test("agendo close refuses an id-less window when two sessions share its directo
   const forced = agendo(mock.env, "close", "-f", shortIdOf("second-session"));
   expect(forced.status).toBe(0);
   expect(killsIn(await mock.tmuxLog())).toEqual([["kill-session", "-t", "=cl-wi-101"]]);
+});
+
+// A lone placeholder for the crash session, layered onto the default fixture
+// (which already has the login session live as its own tmux SESSION) so both
+// a running and a paused session are visible in the same listing.
+const crashPlaceholderTarget = `cl-claude-${CRASH_SHORT_ID}`;
+const withCrashPlaceholder = {
+  sessions: [...tmuxState.sessions, "agendo"],
+  windows: [
+    { session: "agendo", index: 0, name: "launcher" },
+    { session: "agendo", index: 2, name: crashPlaceholderTarget },
+  ],
+  panes: [
+    ...tmuxState.panes,
+    { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+    { session: "agendo", window: crashPlaceholderTarget, cwd: "/run/crash", placeholder: true },
+  ],
+  captures: { ...tmuxState.captures, [crashPlaceholderTarget]: BUSY_PANE },
+};
+
+test("agendo list shows a paused session as a third state, not folded into running", async ({ mock }) => {
+  await mock.setTmuxState(withCrashPlaceholder);
+  const r = agendo(mock.env, "list");
+  expect(r.status).toBe(0);
+  // The running login row is unaffected: still a real readiness word.
+  expect(r.stdout).toContain(SHORT_ID);
+  expect(r.stdout).toContain("ready");
+  // The paused row: its own glyph and its own word — not ● and not a
+  // readiness word, so it can't be mistaken for a running or idle row.
+  const pausedLine = r.stdout.split("\n").find((l) => l.includes(CRASH_SHORT_ID));
+  expect(pausedLine).toBeTruthy();
+  expect(pausedLine).toContain("⏸");
+  expect(pausedLine).toContain("paused");
+  // What was being worked on, and how long ago — the same read a running row
+  // carries, short of anything that needs a live pane.
+  expect(pausedLine).toMatch(/\d+[smhd] ago/);
+});
+
+test("agendo list --all --json carries the paused state as a first-class field", async ({ mock }) => {
+  await mock.setTmuxState(withCrashPlaceholder);
+  const r = await agendoAsync(mock.env, "list", "--all", "--json").done;
+  expect(r.code).toBe(0);
+  const rows = JSON.parse(r.stdout) as Array<Record<string, unknown>>;
+  const crash = rows.find((x) => x.id === CRASH_SESSION_ID)!;
+  expect(crash.state).toBe("paused");
+  expect(crash.running).toBe(false); // `running` keeps its old, narrower meaning
+  const login = rows.find((x) => x.id === LOGIN_SESSION_ID)!;
+  expect(login.state).toBe("running");
+  expect(login.running).toBe(true);
+});
+
+test("agendo list --all (text) marks a paused row distinctly from an idle one, not the same ○", async ({ mock }) => {
+  // `--all` (with or without --json) always resolves the enriched, model-backed
+  // path (see selectSessions/runList), which reaches out to the mock backend —
+  // so this needs agendoAsync like every other `--all` test, never the
+  // synchronous `agendo()` helper: that blocks this very process's event loop
+  // for the whole child run, and the mock ADO server that child needs to reach
+  // lives in this process too, so a sync call here deadlocks until its timeout.
+  //
+  // Default fixture: the crash session has no live window at all — idle.
+  const idle = await agendoAsync(mock.env, "list", "--all").done;
+  expect(idle.code).toBe(0);
+  const idleLine = idle.stdout.split("\n").find((l) => l.includes(CRASH_SHORT_ID));
+  expect(idleLine).toBeTruthy();
+  expect(idleLine).toContain("○");
+  expect(idleLine).not.toContain("⏸");
+
+  // Layer the placeholder on: same session, now parked — the enriched table
+  // (which --all without --json goes through) must not collapse it back down
+  // to the same glyph as the idle case above.
+  await mock.setTmuxState(withCrashPlaceholder);
+  const paused = await agendoAsync(mock.env, "list", "--all").done;
+  expect(paused.code).toBe(0);
+  const pausedLine = paused.stdout.split("\n").find((l) => l.includes(CRASH_SHORT_ID));
+  expect(pausedLine).toBeTruthy();
+  expect(pausedLine).toContain("⏸");
+});
+
+test("agendo status reports a paused placeholder as its own state, with no readiness", async ({ mock }) => {
+  await mock.setTmuxState(withCrashPlaceholder);
+  const r = agendo(mock.env, "status", CRASH_SHORT_ID);
+  expect(r.status).toBe(0);
+  // Its own glyph and word — never "● running" (the placeholder's pane, deliberately
+  // fixtured BUSY above, must not leak through as though an agent were live there).
+  expect(r.stdout).toContain("⏸ paused");
+  expect(r.stdout).not.toContain("● running");
+  expect(r.stdout).not.toContain("○ idle");
+  // No pane behind a placeholder to read: no readiness line at all.
+  expect(r.stdout).not.toContain("ready:");
+  // The resume hint names the placeholder explicitly, distinct from the plain
+  // not-running wording `status` uses for a session with no window at all.
+  expect(r.stdout).toContain("resume: parked as a restore-tab placeholder");
+  expect(r.stdout).toContain(`resume ${CRASH_SHORT_ID}`);
 });
 
 test("agendo close removes a dormant restore placeholder without reading its pane", async ({ mock }) => {
@@ -4770,6 +4897,23 @@ test("the plain list says ○, not none, for a repo whose orchestrator is closed
   // And no repo is invented for the marker's sake: this block describes the repos
   // of the sessions listed above it, and applib has nothing running here.
   expect(summary).not.toContain("applib");
+});
+
+test("a PAUSED orchestrator also reads ○ in the summary — not a third glyph", async ({ mock }) => {
+  // Same honesty the closed case above pins, for the state this listing newly
+  // shows: a paused orchestrator is parked, not coordinating anything right now,
+  // so the summary block must not promote it to ● just because its tab exists.
+  await markOrchestrators(mock.home, { [CRASH_SESSION_ID]: "repo" });
+  await mock.setTmuxState(withCrashPlaceholder);
+  const r = await agendoAsync(mock.env, "list").done;
+  expect(r.code).toBe(0);
+  // The table row itself is the ⏸ third state…
+  const pausedLine = r.stdout.split("\n").find((l) => l.includes(CRASH_SHORT_ID));
+  expect(pausedLine).toContain("⏸");
+  // …but the summary block underneath keeps the plain ●/○ vocabulary.
+  const summary = r.stdout.slice(r.stdout.indexOf("orchestrators:"));
+  expect(summary).toMatch(new RegExp(`appweb\\s+○ ${CRASH_SHORT_ID}`));
+  expect(summary).not.toContain("⏸");
 });
 
 test("agendo list --json carries orchestrator, role and the repo each session is in", async ({ mock }) => {

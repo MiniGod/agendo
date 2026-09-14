@@ -3,9 +3,9 @@ import { SELF_CMD, notRunningHint } from "../../launch/index.ts";
 import { printJson } from "../output.ts";
 import { findPeer, type PeerSession, sendPeerMessage } from "../../orchestration/peer.ts";
 import {
-  answerResumeDialog, capturePane, capturePaneState, liveTargetForShortId, paneAcceptsPaste, paneReadiness,
-  paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, sendToPane, shortId, stripAnsi,
-  RESUME_DIALOG_POLL_MS, type LiveTarget, type PaneSnapshot, type Readiness,
+  answerResumeDialog, capturePane, capturePaneState, liveTargetForShortId, livePlaceholderForShortId,
+  paneAcceptsPaste, paneReadiness, paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, sendToPane,
+  shortId, stripAnsi, RESUME_DIALOG_POLL_MS, type LiveTarget, type PaneSnapshot, type Readiness,
 } from "../../runtime/tmux/index.ts";
 import { flushWarnings } from "../warnings.ts";
 
@@ -117,6 +117,13 @@ export interface SendContext {
   peer: PeerSession | null;
   json: boolean;
   /**
+   * The session's only live tmux window is a paused restore-tab placeholder —
+   * not an agent, so `target` above is null even though something answers to
+   * this short id in tmux. A THIRD case alongside "not running at all" and "IS
+   * running but unreachable" (see `refuseParked` vs `refuseUnreachable`).
+   */
+  parked: boolean;
+  /**
    * A human progress line. Goes to stdout, which under --json is the payload's
    * alone — so suppressed there and carried in the payload's own fields instead.
    * Errors already go to stderr and are left there: a machine reader gets `ok`
@@ -141,7 +148,12 @@ export function usageExit(): never {
 
 async function resolveSend(token: string, json: boolean): Promise<SendContext> {
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
-  const target = liveTargetForShortId(sid);
+  // A lone placeholder is checked BEFORE `liveTargetForShortId`, and short-
+  // circuits `target` to null rather than let that lookup resolve onto it:
+  // it matches the same `cl-<source>-<id>` name, and treating that as a live
+  // target would let a forced paste wake it with a garbled keystroke.
+  const parked = !!livePlaceholderForShortId(sid);
+  const target = parked ? null : liveTargetForShortId(sid);
   // The kill switch. Deliberately gating DISCOVERY and not just the write: with
   // it off, `send` must behave exactly as it did before the socket existed, and
   // a resolved-but-unused peer would still change the outcome — a windowless
@@ -149,7 +161,7 @@ async function resolveSend(token: string, json: boolean): Promise<SendContext> {
   const socket = peerSocketEnabled();
   if (socket.note) console.error(`▸ ${socket.note}.`);
   const peer = socket.enabled ? await findPeer((id) => shortId(id) === sid) : null;
-  return sendContext({ token, sid, target, socket, peer, json });
+  return sendContext({ token, sid, target, socket, peer, json, parked });
 }
 
 /** Attach the two voices to a resolved session. */
@@ -203,10 +215,17 @@ export function sendPayload(base: Pick<SendContext, "sid" | "peer" | "target" | 
  * diagnostically. That is consistent with the switch's scope rather than a
  * hole in it — it stops us SPEAKING an undocumented protocol, not reading a
  * registry file, which is the same reason `status` keeps its peer lines.
+ *
+ * A THIRD absence lives here too, checked before either of the above: `parked`
+ * means the token's only live tmux window is a paused restore-tab placeholder.
+ * Unlike `refuseUnreachable` (already running — never resume it) this one
+ * NAMES `resume` as the fix, same as the generic not-running case — but it is
+ * not that case either, so it gets its own message and its own `reason`.
  */
 export async function ensureReachable(ctx: SendContext): Promise<void> {
-  const { target, peer, socket, token, sid } = ctx;
+  const { target, peer, socket, token, sid, parked } = ctx;
   if (target || peer) return;
+  if (parked) return refuseParked(ctx);
   const unreachable = socket.enabled ? null : await findPeer((id) => shortId(id) === sid);
   if (unreachable) return refuseUnreachable(ctx, unreachable);
   // Genuinely gone — by either route, whatever the switch says. Describing this
@@ -215,6 +234,17 @@ export async function ensureReachable(ctx: SendContext): Promise<void> {
   console.error(`Session ${token} is not running (no live tmux window and no messaging socket).`);
   console.error(notRunningHint(token, "then send again"));
   return ctx.finish({ ok: false, route: null, reason: "not-running" }, 1);
+}
+
+/**
+ * The parked case: nothing to type into (a placeholder holds no agent) and
+ * deliberately not auto-resumed — waking it here would race whatever the
+ * caller does next against an agent that hasn't finished starting.
+ */
+export function refuseParked(ctx: SendContext): Promise<never> {
+  console.error(`Session ${ctx.token} is parked as a restore tab — not running yet.`);
+  console.error(`  Run \`${SELF_CMD} resume ${ctx.token}\` to wake it, then send again.`);
+  return ctx.finish({ ok: false, route: null, reason: "parked" }, 1);
 }
 
 export function refuseUnreachable(ctx: SendContext, peer: PeerSession): Promise<never> {
