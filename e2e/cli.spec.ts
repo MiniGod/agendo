@@ -5629,6 +5629,53 @@ test("a DEAD orchestrator pane does not protect the launcher window from a rebui
   const tmux = await mock.tmuxLog();
   expect(tmux.some((a) => a[0] === "kill-window")).toBe(true);
   expect(tmux.some((a) => a[0] === "split-window")).toBe(false);
+  // The rebuilt window is moved to index 0 the same way a fresh session's is (see
+  // the fresh-session test below) — `new-window` on an existing session lands
+  // wherever tmux next picks, which under a `base-index 1` config is 1, not 0.
+  const move = tmux.find((a) => a[0] === "move-window");
+  expect(move).toBeTruthy();
+  expect(move![move!.indexOf("-s") + 1]).toBe(windowTarget("agendo", "launcher"));
+  expect(move![move!.indexOf("-t") + 1]).toBe(`${exactTarget("agendo")}:0`);
+});
+
+test("a fresh --tmux session always puts the menu at window index 0, ahead of restored tabs", async ({ mock }) => {
+  // `tmux new-session` has no flag to pick a window index, and a user's
+  // `base-index` tmux setting (commonly 1) decides where the FIRST window of a
+  // brand-new session lands — so the menu is moved to index 0 right after
+  // creation rather than trusted to land there. The fake tmux doesn't model
+  // `base-index` or track index at all (`move-window` is an unmodelled no-op), so
+  // this pins the tmux CALLS agendo issues rather than the resulting state — the
+  // same argv-assertion pattern `close` and the split tests above rely on where
+  // the stub can't reproduce the real server's behaviour.
+  //
+  // A restore tab is planted so the ordering assertion below is real: with no
+  // saved tab, `onFreshCreate` issues no `new-window` at all and "the move
+  // happens before any restored tab" would hold vacuously whichever order the
+  // code actually calls them in.
+  const restoreFile = join(mock.home, ".agendo", "restore", "agendo.json");
+  await mkdir(join(mock.home, ".agendo", "restore"), { recursive: true });
+  await writeFile(
+    restoreFile,
+    JSON.stringify({ tabs: [{ name: "cl-claude-abc123", cwd: mock.home, title: "old tab", argv: ["claude"] }] }, null, 2),
+  );
+  await mock.setTmuxState({ sessions: [], windows: [], panes: [], captures: {} });
+  const r = agendo(mock.env, "--tmux");
+  expect(r.status).toBe(0);
+  const tmux = await mock.tmuxLog();
+  expect(tmux.some((a) => a[0] === "new-session" && a.includes("agendo"))).toBe(true);
+  const move = tmux.find((a) => a[0] === "move-window");
+  expect(move).toBeTruthy();
+  expect(move![move!.indexOf("-s") + 1]).toBe(windowTarget("agendo", "launcher"));
+  expect(move![move!.indexOf("-t") + 1]).toBe(`${exactTarget("agendo")}:0`);
+  // The move happens before the restored tab's window is created, so the tab
+  // fills in ABOVE the menu rather than the menu landing wherever base-index
+  // put it and the restored tab taking index 0 instead.
+  const newSessionAt = tmux.findIndex((a) => a[0] === "new-session");
+  const moveAt = tmux.findIndex((a) => a[0] === "move-window");
+  const restoredWindowAt = tmux.findIndex((a) => a[0] === "new-window" && a.includes("cl-claude-abc123"));
+  expect(restoredWindowAt).toBeGreaterThan(-1);
+  expect(newSessionAt).toBeLessThan(moveAt);
+  expect(moveAt).toBeLessThan(restoredWindowAt);
 });
 
 test("a launcher window that will not split is rebuilt rather than left menu-less", async ({ mock }) => {

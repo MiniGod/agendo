@@ -35,7 +35,8 @@
 //   codex.ts         the codex TUI, which shares no structure with claude's
 //   paneReadiness.ts the classifier that composes all of the above
 //   server.ts        read the live server: sessions, windows, managed targets
-//   windows.ts       change it: kill, create, bootstrap the launcher session
+//   windows.ts       change it: kill windows/sessions, create them
+//   launcherSession.ts  bootstrap the launcher host session and its menu window
 // ─────────────────────────────────────────────────────────────────────────────
 
 export { tmuxQuiet } from "./exec.ts";
@@ -132,7 +133,6 @@ export {
   newWindowIn,
   killPane,
   splitPaneIn,
-  launcherWindowLive,
-  launcherWindowTarget,
-  enterLauncherSession,
 } from "./windows.ts";
+
+export { launcherWindowLive, launcherWindowTarget, enterLauncherSession } from "./launcherSession.ts";
