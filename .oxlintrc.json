@@ -125,7 +125,12 @@
         //
         // LOWERED 461 -> 453. src/providers/github/index.ts set 461; its CI rollup is now
         // src/providers/github/ci.ts and the file is 431. The holder is src/runtime/tmux/windows.ts.
-        "max-lines": ["error", { "max": 453, "skipBlankLines": false, "skipComments": false }], // src/runtime/tmux/windows.ts
+        //
+        // LOWERED 453 -> 450. src/runtime/tmux/windows.ts set 453; the launcher-session
+        // bootstrap (moving the menu window to index 0, however the host session came to
+        // exist) is now src/runtime/tmux/launcherSession.ts, and windows.ts is 296. The
+        // holder is src/providers/github/index.ts.
+        "max-lines": ["error", { "max": 450, "skipBlankLines": false, "skipComments": false }], // src/providers/github/index.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
         // It is now four functions in src/cli/commands/status.ts, the largest well under
         // this cap. LOWERED 198 -> 197: src/cli/commands/send.ts `runSend` set 198 and is
