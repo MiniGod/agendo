@@ -71,11 +71,11 @@ export interface RestoreTab {
    * an on-disk session (see `buildTabs`'s preserve-by-short-id fallback).
    * Absent for a tab that IS currently attributed. Lets that fallback expire —
    * without it, a tab whose session never appears (a crash before the log
-   * flushed, a pruned worktree, a hand-edited snapshot) is preserved forever,
-   * because nothing else ever removes it: killing its tmux window doesn't touch
-   * the snapshot, only `agendo close` does (`forgetRestoreTab`), and a window
-   * that can't be attributed to a session doesn't surface as a row the user
-   * could `close` in the first place.
+   * flushed, a hand-edited or otherwise corrupted snapshot entry) is preserved
+   * forever, because nothing else ever removes it: killing its tmux window
+   * doesn't touch the snapshot, only `agendo close` does (`forgetRestoreTab`),
+   * and a window that can't be attributed to a session doesn't surface as a row
+   * the user could `close` in the first place.
    */
   unattributedSince?: number;
 }
