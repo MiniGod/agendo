@@ -66,6 +66,18 @@ export interface RestoreTab {
    * its session by id and carries no prompt, so it's idempotent.
    */
   argv: string[];
+  /**
+   * Epoch ms of the first `buildTabs` pass that could not attribute this tab to
+   * an on-disk session (see `buildTabs`'s preserve-by-short-id fallback).
+   * Absent for a tab that IS currently attributed. Lets that fallback expire —
+   * without it, a tab whose session never appears (a crash before the log
+   * flushed, a hand-edited or otherwise corrupted snapshot entry) is preserved
+   * forever, because nothing else ever removes it: killing its tmux window
+   * doesn't touch the snapshot, only `agendo close` does (`forgetRestoreTab`),
+   * and a window that can't be attributed to a session doesn't surface as a row
+   * the user could `close` in the first place.
+   */
+  unattributedSince?: number;
 }
 
 export function loadRestore(session: string = LAUNCHER_SESSION): RestoreTab[] {

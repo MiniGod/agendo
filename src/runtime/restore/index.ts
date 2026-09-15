@@ -147,11 +147,28 @@ export function captureRestore(index: SessionIndex, hostSession: string = LAUNCH
  * on-disk log when the menu's next reload runs, so `resolveWindowSession` finds
  * nothing. Rather than drop it, we keep the saved tab matched by the short id in
  * the window name — so a freshly-spawned session survives until its log appears.
+ *
+ * That preservation is bounded by `UNATTRIBUTED_GRACE_MS`, not indefinite: a
+ * window whose session record NEVER appears — its log was deleted after the
+ * window opened, or (the case this guards) the tab was never a real launched
+ * session at all, e.g. a hand-built or corrupted snapshot entry — would
+ * otherwise be kept forever, since nothing else ever drops it. Killing its
+ * placeholder window only kills the tmux window (see placeholderArgv), not the
+ * snapshot entry, and a window nothing can attribute never surfaces as a row
+ * the user could `agendo close`. (A tab whose CWD is gone, e.g. a pruned
+ * worktree, is a different case already handled elsewhere: `restoreTabs` skips
+ * spawning it, so no live window carries its id for this function to see, and
+ * it drops out of the snapshot on the very next capture — see the loop below,
+ * which only ever emits tabs backed by a currently-live window.) Past the
+ * grace period we stop preserving an unattributed tab, which — since restore
+ * only ever respawns a tab that's still in the snapshot — is what stops it
+ * coming back.
  */
 export function buildTabs(
   windows: { name: string; cwd: string }[],
   sessions: AgentSession[],
   existing: RestoreTab[] = [],
+  now: number = Date.now(),
 ): RestoreTab[] {
   // Saved tabs keyed by the short id embedded in their canonical name.
   const savedByShortId = new Map<string, RestoreTab>();
@@ -171,12 +188,42 @@ export function buildTabs(
       continue;
     }
     // No on-disk session yet — preserve a previously-saved tab for this window's
-    // session id (id-bearing names only; cl-wi-/cl-pr- carry no recoverable id).
+    // session id (id-bearing names only; cl-wi-/cl-pr- carry no recoverable id),
+    // but only within the grace window — see the doc comment above.
     const m = name.match(ID_BEARING);
     const prior = m ? savedByShortId.get(m[1]) : undefined;
-    if (prior && !byName.has(prior.name)) byName.set(prior.name, prior);
+    if (!prior || byName.has(prior.name)) continue;
+    const kept = preserveUnattributed(prior, now);
+    if (kept) byName.set(kept.name, kept);
   }
   return [...byName.values()];
+}
+
+/**
+ * How long an id-bearing window may go unattributed to an on-disk session
+ * before `buildTabs` stops preserving its tab. Comfortably past any log-flush
+ * delay a real `agendo launch` could hit, short enough that a tab which will
+ * never attribute (see the doc comment above) is eventually forgotten instead
+ * of respawning on every fresh host session indefinitely.
+ */
+const UNATTRIBUTED_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * `buildTabs`'s preserve-by-short-id fallback: whether `prior` survives this
+ * pass, stamped with when it FIRST went unattributed. Extracted so the grace
+ * arithmetic — and its own branching — stay out of buildTabs's cyclomatic
+ * complexity; exercised directly in test/restoreBuildTabs.test.ts.
+ *
+ * A stamp from the future (a clock moved back, a snapshot copied from another
+ * machine) is treated as "just now" rather than trusted, so it restarts the
+ * grace period instead of freezing it — a bogus stamp must not buy the tab
+ * indefinite preservation on top of the bug this whole mechanism exists to fix.
+ */
+function preserveUnattributed(prior: RestoreTab, now: number): RestoreTab | undefined {
+  const stamped = prior.unattributedSince;
+  const since = typeof stamped === "number" && stamped <= now ? stamped : now;
+  if (now - since >= UNATTRIBUTED_GRACE_MS) return undefined;
+  return since === stamped ? prior : { ...prior, unattributedSince: since };
 }
 
 /** The launched session's own record and the resume tab that stands in for it. */
