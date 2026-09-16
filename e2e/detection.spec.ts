@@ -26,7 +26,7 @@ import {
 } from "../src/repositories/index.ts";
 import { resolveWindowSession, bestSessionForCwd } from "../src/runtime/restore/index.ts";
 import { isStalled } from "../src/sessions/idle.ts";
-import { type ManagedTarget, isPaneTarget, isPaneHosted, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/runtime/tmux/index.ts";
+import { type ManagedTarget, type WindowTags, isPaneTarget, isPaneHosted, windowTarget, managedKind, sessionName, shortId, paneReadiness, paneResumeSafe, paneUsageLimited, paneLimitDialogActive, resumeKeystrokes, dialogRevealKeystrokes, stripAnsi, paneResumeDialogActive, paneAcceptsPaste, resumeDialogOption, resumeDialogStep, resumeDialogSelection, paneResumeMenuSuspect, paneCompactionPercent, paneBackgroundAgents, paneShells } from "../src/runtime/tmux/index.ts";
 import { resumeDialogChoice, DEFAULT_CONFIG } from "../src/app/config.ts";
 import { envLocale, formatResetTime, parseResetTime, paneResetAt, shouldAutoResume, shouldRevealDialog, isLimitDialog, isUsageLimited, RESET_GRACE_MS, RESET_LOOKBACK_MS } from "../src/sessions/usageLimit/index.ts";
 import { freshName, prFreshName } from "../src/launch/index.ts";
@@ -39,7 +39,7 @@ import type { AgentSession, PullRequest, WorkItem } from "../src/shared/types.ts
 function sess(id: string, cwd: string, lastUsedMs: number, source: AgentSession["source"] = "claude"): AgentSession {
   return { id, source, cwd, title: id, lastUsed: new Date(lastUsedMs) };
 }
-type Managed = { name: string; cwd: string; placeholder: boolean };
+type Managed = { name: string; cwd: string; placeholder: boolean; tags?: WindowTags };
 /**
  * Fixture shape → producer shape. `liveManagedPaths` now pairs every managed
  * name with the target that ADDRESSES it, because a bare window name resolves
@@ -104,6 +104,76 @@ test.describe("resolveWindowSession: window name → session", () => {
     // what lets a codex session (whose id codex assigns itself) be found at all.
     expect(resolveWindowSession(all, "cl-bg-codex-aaaolder", "/repo")).toBe(newer);
     expect(resolveWindowSession(all, "cl-new-codex-zzz", "/other")).toBe(elsewhere);
+  });
+
+  // ── the @cl_session_id WINDOW TAG, which outranks both tiers above ────────
+  // Everything above this line is attribution inferred from a window NAME or a
+  // working directory. The tag is the window saying which session it runs, so it
+  // is matched first and matched exactly. These cases are the contract for that.
+
+  test("a tagged window beats the cwd MRU heuristic, even under an id-less name", () => {
+    // THE CASE THIS MECHANISM EXISTS FOR. `cl-wi-101` carries a work-item id, so
+    // it has always resolved to whichever session in /repo was used most
+    // recently — `newer`, even when the window is actually running `older`. The
+    // tag says whose it is, and that must win.
+    expect(resolveWindowSession(all, "cl-wi-101", "/repo")).toBe(newer);
+    expect(resolveWindowSession(all, "cl-wi-101", "/repo", { sessionId: "aaaolder" })).toBe(older);
+  });
+
+  test("the tag matches on the FULL session id, not the 12-char short id", () => {
+    // A managed name can only carry `shortId`; the tag carries the real thing,
+    // which is why it is preferred even where a name would also have resolved.
+    const long = sess("019cde00-1111-7000-8000-00000000cde0", "/repo", 2_000, "codex");
+    const sessions = [...all, long];
+    expect(resolveWindowSession(sessions, "cl-bg-codex-9f8e7d6c", "/repo", { sessionId: long.id })).toBe(long);
+  });
+
+  test("a tag whose id differs only in punctuation still matches, via shortId", () => {
+    // The tag can never resolve WORSE than the window name beside it. A session
+    // id is written to disk by the agent's own CLI, not by agendo, so the id we
+    // preassigned and the id we read back are only guaranteed equal under the
+    // `shortId` equivalence managed names have always used. An exact-only match
+    // would resolve this to nothing while `cl-claude-a1b2c3d4e5f6` resolved it
+    // correctly — the tag making attribution worse for the agents it is for.
+    const s = sess("a1b2c3d4e5f6", "/repo", 2_000, "copilot");
+    expect(resolveWindowSession([s], "cl-wi-101", "/repo", { sessionId: "a1b2-c3d4-e5f6" })).toBe(s);
+    // Still authoritative, though: an id that matches under NEITHER comparison
+    // resolves to nothing rather than falling through to the cwd MRU.
+    expect(resolveWindowSession([s], "cl-wi-101", "/repo", { sessionId: "totally-other" })).toBeUndefined();
+  });
+
+  test("a tag outranks an id-bearing name when the two disagree", () => {
+    // They agree by construction today (both are stamped from the same launch),
+    // so this pins the PRECEDENCE rather than a real-world disagreement: the
+    // window's own statement about itself is the more specific of the two.
+    expect(resolveWindowSession(all, "cl-claude-aaaolder", "/repo", { sessionId: "bbbnewer" })).toBe(newer);
+  });
+
+  // The half that makes the tag AUTHORITATIVE rather than merely preferred. A
+  // window that has told us whose it is must never be credited to a different
+  // session that happens to share its directory — falling back to the heuristic
+  // here would silently reintroduce exactly the misattribution being fixed.
+  test("a tag naming an unknown session resolves to nothing, never to the cwd MRU", () => {
+    expect(resolveWindowSession(all, "cl-wi-101", "/repo", { sessionId: "not-on-disk" })).toBeUndefined();
+    expect(resolveWindowSession(all, "cl-claude-aaaolder", "/repo", { sessionId: "not-on-disk" })).toBeUndefined();
+  });
+
+  test("a tag with no session id changes nothing — the old tiers still decide", () => {
+    // Every id-less launch tags source/branch/PR but cannot tag a session id
+    // (the agent has not assigned one yet). Those windows must behave exactly as
+    // they did before tags existed.
+    const display: WindowTags = { source: "codex", acquired: "launched", branch: "feat/x", item: 101 };
+    expect(resolveWindowSession(all, "cl-wi-101", "/repo", display)).toBe(newer);
+    expect(resolveWindowSession(all, "cl-claude-aaaolder", "/repo", display)).toBe(older);
+    expect(resolveWindowSession(all, "cl-wi-101", "/nowhere", display)).toBeUndefined();
+  });
+
+  test("an untagged window is byte-for-byte the old behaviour (no migration)", () => {
+    // `undefined` is what every window opened before this shipped reports. The
+    // four-argument call with no tag must equal the three-argument one.
+    for (const name of ["cl-claude-aaaolder", "cl-wi-101", "cl-bg-codex-aaaolder"]) {
+      expect(resolveWindowSession(all, name, "/repo", undefined)).toBe(resolveWindowSession(all, name, "/repo"));
+    }
   });
 });
 
@@ -386,6 +456,31 @@ test.describe("reconcileLive: fold managed windows into running state", () => {
     const r = reconcileLive(new Set(), [{ name: sessionName(s), cwd: "/x", placeholder: false }].map(qualify), [s]);
     expect(r.live.has(sessionName(s))).toBe(true);
     expect(r.liveKinds.get(sessionName(s))).toBe("resumed");
+  });
+
+  test("a tagged window is folded in under the session its tag names", () => {
+    // The same precedence one level up: `cl-wi-9`'s cwd holds two sessions, so
+    // the heuristic would pick the most recent. The tag names the other one, and
+    // that is the session that must be reported running — under the tagged
+    // window, so the app attaches there instead of spawning a duplicate.
+    const older = sess("oldsess", "/repo", 1_000);
+    const newer = sess("newsess", "/repo", 9_000);
+    const managed: Managed[] = [{ name: "cl-wi-9", cwd: "/repo", placeholder: false, tags: { sessionId: "oldsess" } }];
+    const r = reconcileLive(new Set(["cl-wi-9"]), managed.map(qualify), [older, newer]);
+    expect(r.live.has(sessionName(older))).toBe(true);
+    expect(r.live.has(sessionName(newer))).toBe(false); // the MRU pick, correctly NOT chosen
+    expect(r.liveKinds.get(sessionName(older))).toBe("workitem"); // kind still comes from the NAME
+    expect(r.liveWindows.get(sessionName(older))?.name).toBe("cl-wi-9");
+  });
+
+  test("a tag naming a session that is not on disk leaves nothing running", () => {
+    // Not "fall back to the cwd session" — see resolveWindowSession. A window
+    // whose tagged session has been deleted reports as attributing to nobody.
+    const s = sess("present", "/repo", 1_000);
+    const managed: Managed[] = [{ name: "cl-wi-9", cwd: "/repo", placeholder: false, tags: { sessionId: "gone" } }];
+    const r = reconcileLive(new Set(["cl-wi-9"]), managed.map(qualify), [s]);
+    expect(r.live.has(sessionName(s))).toBe(false);
+    expect(r.liveWindows.size).toBe(0);
   });
 
   test("a fresh codex window attributes to the session codex created in its cwd", () => {

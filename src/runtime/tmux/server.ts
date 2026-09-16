@@ -7,6 +7,7 @@ import {
   ID_BEARING_NAME, PANE_TARGET_OPTION, PLACEHOLDER_OPTION, ROOT_OPTION,
   insideTmux, isPaneHosted, type LiveTarget, type ManagedTarget,
 } from "./names.ts";
+import { parseWindowTags, windowTagsFormat } from "./tags.ts";
 
 /**
  * The live PLACEHOLDER window for this session short id — a paused,
@@ -153,10 +154,14 @@ export function liveManagedPaths(): ManagedTarget[] {
     "list-panes",
     "-a",
     "-F",
-    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}\t#{window_index}`,
+    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}\t#{window_index}\t${windowTagsFormat("\t")}`,
   ])) {
-    const [session, window, cwd, placeholder, paneId, paneTarget, windowIndex] = line.split("\t");
+    const [session, window, cwd, placeholder, paneId, paneTarget, windowIndex, ...tagFields] = line.split("\t");
     if (!cwd) continue;
+    // The window tag rides along in the SAME read — a user option costs no extra
+    // tmux invocation, which is the whole reason this mechanism is affordable on
+    // a path the app polls (see `windowTagsFormat`).
+    const tags = parseWindowTags(tagFields);
     // A pane-hosted session: its managed name is on the PANE, and the pane id is
     // how everything downstream (capture, send-keys, navigate) reaches it — no
     // `exactTarget` pin needed, since `%N` cannot be a prefix of another target.
@@ -164,6 +169,11 @@ export function liveManagedPaths(): ManagedTarget[] {
     // is left null on purpose: it would name the pane's HOST window (the menu),
     // not a window of this session's own, so a caller displaying it must not
     // treat it as this session's window number.
+    //
+    // No `tags` on this entry, deliberately: the tag is a WINDOW option, and a
+    // pane-hosted session is a lodger in somebody else's window (the menu), so
+    // whatever tag that window carries describes its owner and not this session.
+    // `stampManagedWindow` refuses to write one here for the same reason.
     if (paneTarget?.startsWith("cl-") && paneId) {
       out.push({ name: paneTarget, target: paneId, cwd, placeholder: false, session, windowIndex: null });
     }
@@ -183,7 +193,7 @@ export function liveManagedPaths(): ManagedTarget[] {
       // last was rather than fail.
       if (!name?.startsWith("cl-")) continue;
       const target = isWindow && session ? windowTarget(session, name) : exactTarget(name);
-      out.push({ name, target, cwd, placeholder: isPlaceholder, session, windowIndex });
+      out.push({ name, target, cwd, placeholder: isPlaceholder, session, windowIndex, tags });
     }
   }
   return out;

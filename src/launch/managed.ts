@@ -3,7 +3,7 @@
 // back to the right instructions.
 import { randomUUID } from "node:crypto";
 import type { AgentSource } from "../shared/types.ts";
-import { kindName, liveManagedPaths } from "../runtime/tmux/index.ts";
+import { kindName, liveManagedPaths, type WindowTags } from "../runtime/tmux/index.ts";
 import { markOrchestratorSession, type OrchestratorRole } from "../orchestration/index.ts";
 import { markOrchestratorCwd, clearOrchestratorCwd } from "../orchestration/cwdMarks.ts";
 import { freshArgv, preassignsSessionId } from "./argv.ts";
@@ -56,8 +56,12 @@ export interface ManagedOptions {
    * which prefers a split pane beside the menu over a window of its own — and
    * which must not mint a session id for an attempt it then abandons, so the
    * layout decision is made before this function is called, not inside it.
+   *
+   * Takes the window tag it should stamp on a window it CREATES, and ignores it
+   * when it opens a pane instead — a pane-hosted session owns no window to tag
+   * (see `stampManagedWindow`).
    */
-  open?: (name: string, cwd: string, argv: string[]) => OpenPlan;
+  open?: (name: string, cwd: string, argv: string[], tags?: WindowTags) => OpenPlan;
 }
 
 // A single options object rather than trailing positionals: `orchestrator` and
@@ -108,7 +112,27 @@ export function launchManaged(
   } else if (!sessionId && !liveManagedPaths().some((t) => t.cwd === cwd)) {
     clearOrchestratorCwd(cwd);
   }
-  return { plan: open(tmuxName, cwd, argv), id: sessionId };
+  return { plan: open(tmuxName, cwd, argv, freshTags(agent, sessionId)), id: sessionId };
+}
+
+/**
+ * The window tag for a brand-new managed session — deliberately PARTIAL when the
+ * agent assigns its own id.
+ *
+ * `sessionId` is present exactly when the agent accepted a caller-chosen one
+ * (`preassignsSessionId`); for Codex it is undefined, because at this moment the
+ * real, resumable id does not exist anywhere yet — it appears later, in a
+ * rollout file on disk. Tagging the UNIQUIFIER instead would be worse than
+ * tagging nothing: it is not a session id, nothing on disk will ever match it,
+ * and `resolveWindowSession` treats a tagged session id as authoritative — so
+ * the window would resolve to no session at all, where today it at least
+ * resolves by cwd. Omitting the field leaves that fallback exactly as it was,
+ * and leaves the field free for whoever discovers the real id to fill in later
+ * (the standalone `stampManagedWindow`, which is why tagging is not welded to
+ * the creation path).
+ */
+function freshTags(agent: AgentSource, sessionId?: string): WindowTags {
+  return { sessionId, source: agent, acquired: "launched" };
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   liveTargetForShortId,
   shortId,
   splitPaneIn,
+  type WindowTags,
   splitTargetWidth,
 } from "../runtime/tmux/index.ts";
 import { orchestratorRoles } from "../orchestration/index.ts";
@@ -154,7 +155,11 @@ export function launchGlobalOrchestrator(cwd: string, opts: GlobalLaunchOptions 
   let layout: GlobalLayout = insideTmux() ? "window" : "session";
   let layoutNote = resolved && "note" in resolved ? resolved.note : null;
 
-  const open = (name: string, runCwd: string, argv: string[]): OpenPlan => {
+  // `tags` is forwarded only on the WINDOW fallback. A pane-hosted orchestrator
+  // owns no window of its own — it lodges in the launcher's menu window — so a
+  // window tag written for it would describe the menu instead (see
+  // `stampManagedWindow`, which refuses the same write for the same reason).
+  const open = (name: string, runCwd: string, argv: string[], tags?: WindowTags): OpenPlan => {
     if (splitTarget) {
       const pane = splitPaneIn(splitTarget, name, runCwd, argv);
       if (pane) {
@@ -164,7 +169,7 @@ export function launchGlobalOrchestrator(cwd: string, opts: GlobalLaunchOptions 
       // tmux refused (almost always "no space for new pane") — fall through.
       layoutNote = "tmux would not split the launcher window; opened a window instead";
     }
-    return openTarget(name, runCwd, argv);
+    return openTarget(name, runCwd, argv, tags);
   };
 
   const { plan, id } = launchManaged(cwd, "background", opts.agent ?? "claude", opts.prompt, {

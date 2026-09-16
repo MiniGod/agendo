@@ -5,6 +5,7 @@ import { openUrl } from "../../runtime/browser.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "../models/targets.ts";
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { AgentSource } from "../../shared/types.ts";
+import type { WindowTags } from "../../runtime/tmux/index.ts";
 import type { Mode } from "../keys/context.ts";
 
 
@@ -20,6 +21,16 @@ interface FlowDeps {
   setNotice: (n: string | null) => void;
   setBusy: (b: string | null) => void;
   setCloneNote: (n: string | null) => void;
+}
+
+/**
+ * The DISPLAY half of a fresh window's tag: the branch it was launched on and
+ * the work item / PR it was launched for. The session id half is absent by
+ * construction — `launchFresh` lets the agent assign its own id, so there is
+ * none yet to record (see `launchFresh`).
+ */
+function freshWindowTags(target: FreshTarget, branch?: string): WindowTags {
+  return { branch, item: target.itemId, pr: target.prId };
 }
 
 /**
@@ -63,13 +74,13 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
     // A manual "new session" assigns its own session id (so it gets a canonical,
     // attachable `cl-new-<id>` window); work-item / PR launches keep their
     // item-named target. Both run the chosen agent in the resolved directory.
-    const launch = (cwd: string) =>
+    const launch = (cwd: string, branch?: string) =>
       open(
         target.kind === "free"
           // Only REPO-level orchestrators come through this flow: the global one
           // picks no repo and no worktree, so it launches straight from its key.
           ? launchNewSession(cwd, agent, target.orchestrator ? "repo" : undefined)
-          : launchFresh(cwd, target.tmuxName, agent),
+          : launchFresh(cwd, target.tmuxName, agent, freshWindowTags(target, branch)),
       );
     if (worktree) {
       // Untouched orchestrator default → re-derive from the base slug at the last
@@ -91,8 +102,10 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
       }
       d.setBusy(null);
       d.setMode({ kind: "list" });
-      launch(res.path);
+      launch(res.path, branch);
     } else {
+      // The main checkout: whatever branch it is already on, which this flow
+      // never chose and does not read. Left off the tag rather than guessed.
       d.setMode({ kind: "list" });
       launch(repo.root);
     }
@@ -118,7 +131,7 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
     }
     d.setBusy(null);
     d.setMode({ kind: "list" });
-    open(launchFresh(res.path, target.tmuxName, agent));
+    open(launchFresh(res.path, target.tmuxName, agent, freshWindowTags(target, branch)));
   };
 
   // A repo has been chosen — from the picker, or as the result of a clone. Every

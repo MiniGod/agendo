@@ -6303,3 +6303,112 @@ test("a bare `agendo` records no root, and never collides with a scoped one", as
 
   expect(agendoIn(mock.home, mock.env, a).status).toBe(0);
 });
+
+// ── window tags (@cl_session_id & friends) ──────────────────────────────────
+// The read half and the write half of the same mechanism, driven through the
+// real CLI against the fake tmux — which now models a window option, so a stamp
+// written by one command is visible to the next one's `-F` read.
+
+/**
+ * A fixture session's recorded cwd, read back off the CLI rather than hard-coded
+ * so these keep meaning the same thing if the fixture home moves.
+ *
+ * `agendoAsync`, not `agendo`: `--json` takes the enriched path, which loads the
+ * model and therefore talks to the in-process mock ADO server — and a blocking
+ * spawnSync would freeze the event loop so that request is never served. Same
+ * hazard `fakePeer` above documents.
+ */
+async function sessionCwd(env: Record<string, string>, shortId: string): Promise<string> {
+  const { stdout } = await agendoAsync(env, "ls", "--json", "--all").done;
+  const cwd = (JSON.parse(stdout) as { shortId: string; cwd: string }[]).find((r) => r.shortId === shortId)?.cwd;
+  expect(cwd).toBeTruthy();
+  return cwd!;
+}
+
+test("a window tag attributes an id-less window to the session it names, over the cwd heuristic", async ({ mock }) => {
+  const loginCwd = await sessionCwd(mock.env, SHORT_ID);
+
+  // An id-less work-item window sitting in the LOGIN session's directory. By
+  // name it carries a work-item id, never a session id, so cwd + MRU is the only
+  // thing that can resolve it — and in that directory it can only ever mean the
+  // login session.
+  const wiPane = { session: "agendo", window: "cl-wi-101", cwd: loginCwd, placeholder: false };
+  const withWindow = {
+    ...tmuxState,
+    sessions: [...tmuxState.sessions, "agendo"],
+    panes: [...tmuxState.panes, wiPane],
+  };
+
+  await mock.setTmuxState(withWindow);
+  const untagged = stripAnsiText(agendo(mock.env, "ls").stdout);
+  expect(untagged).toContain(SHORT_ID);
+  expect(untagged).not.toContain(CRASH_SHORT_ID); // the crash session is not running
+
+  // The SAME window, now tagged with the CRASH session's id. Nothing else moved:
+  // the name still says work item 101 and the cwd still belongs to the login
+  // session. The tag has to win over both, or it isn't authoritative.
+  await mock.setTmuxState({
+    ...withWindow,
+    panes: [...tmuxState.panes, { ...wiPane, tags: { "@cl_session_id": CRASH_SESSION_ID } }],
+  });
+  const tagged = stripAnsiText(agendo(mock.env, "ls").stdout);
+  expect(tagged).toContain(CRASH_SHORT_ID);
+});
+
+test("a tag naming a session that is not on disk attributes to nobody, not to the cwd", async ({ mock }) => {
+  // The authoritative half stated as behaviour: a window that has said whose it
+  // is must not be credited to whoever else happens to share its directory.
+  const loginCwd = await sessionCwd(mock.env, SHORT_ID);
+  await mock.setTmuxState({
+    ...tmuxState,
+    sessions: [...tmuxState.sessions, "agendo"],
+    panes: [
+      // Only this window — the fixture's own running pane is dropped, so the
+      // login session has nothing else vouching for it.
+      { session: "agendo", window: "cl-wi-101", cwd: loginCwd, placeholder: false, tags: { "@cl_session_id": "deleted-session" } },
+    ],
+  });
+  const out = stripAnsiText(agendo(mock.env, "ls").stdout);
+  expect(out).toContain("No running sessions.");
+  expect(out).not.toContain(SHORT_ID);
+});
+
+test("agendo launch stamps the window it creates with the session's tag", async ({ mock }) => {
+  const r = agendo(mock.env, "launch", "--no-worktree", "tidy the helpers");
+  expect(r.status).toBe(0);
+
+  const log = await mock.tmuxLog();
+  const stamped = new Map(
+    log
+      .filter((a) => a[0] === "set-option" && a.includes("-w") && a[a.length - 2]?.startsWith("@cl_"))
+      .map((a) => [a[a.length - 2], a[a.length - 1]]),
+  );
+  expect(stamped.get("@cl_source")).toBe("claude");
+  expect(stamped.get("@cl_acquired")).toBe("launched");
+
+  // Claude accepts a caller-chosen id, so the tag carries the FULL one — and it
+  // is the same session the window NAME embeds a 12-char slice of. Asserting the
+  // relationship rather than the literal keeps this independent of the uuid.
+  const id = stamped.get("@cl_session_id")!;
+  expect(id).toBeTruthy();
+  const created = [...log].reverse().find((a) => a[0] === "new-session" || a[0] === "new-window")!;
+  expect(created.join(" ")).toContain(`cl-bg-${shortIdOf(id)}`);
+});
+
+test("agendo launch --codex tags the window but claims no session id", async ({ mock }) => {
+  // The case the whole schema is shaped around: codex refuses a caller-assigned
+  // id, so at stamp time there is nothing to put in `@cl_session_id`. The field
+  // is LEFT UNWRITTEN rather than filled with the window's uniquifier — which is
+  // not a session id and would make the window resolve to no session at all,
+  // where the cwd fallback still resolves it to the right one.
+  const r = agendo(mock.env, "launch", "--no-worktree", "--codex", "tidy the helpers");
+  expect(r.status).toBe(0);
+
+  const stamps = (await mock.tmuxLog()).filter(
+    (a) => a[0] === "set-option" && a.includes("-w") && a[a.length - 2]?.startsWith("@cl_"),
+  );
+  const stamped = new Map(stamps.map((a) => [a[a.length - 2], a[a.length - 1]]));
+  expect(stamped.get("@cl_source")).toBe("codex");
+  expect(stamped.get("@cl_acquired")).toBe("launched");
+  expect(stamped.has("@cl_session_id")).toBe(false);
+});

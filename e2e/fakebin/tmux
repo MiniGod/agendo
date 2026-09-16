@@ -56,6 +56,9 @@ function readState() {
       // no room left for another pane. Not expressible any other way: the whole
       // signal is the exit status.
       splitFails: s.splitFails ?? false,
+      // NB the `@cl_*` window tag is not a top-level key: it lives on each
+      // window/pane record as `tags: {"@cl_session_id": "…"}`, set either by a
+      // fixture directly or by `set-option -w` below.
     };
   } catch {
     // Also the mid-write case: setTmuxState rewrites the file non-atomically
@@ -172,7 +175,14 @@ function emit(fmt, record) {
     // somebody else's window (the global orchestrator, beside the menu) is found
     // at all: it owns no window, so its managed name lives on the pane.
     .replace(/#\{pane_id\}/g, record.id ?? "")
-    .replace(/#\{@cl_pane_target\}/g, record.paneTarget ?? "");
+    .replace(/#\{@cl_pane_target\}/g, record.paneTarget ?? "")
+    // The `@cl_*` WINDOW TAG, read back as a bare `#{@cl_…}` reference. Verified
+    // against tmux 3.4: a bare reference to an UNSET user option renders as the
+    // empty string and does not fail the command (unlike `show-options -v`,
+    // which exits 1 with "invalid option") — which is the whole reason one
+    // format can serve tagged and untagged windows alike. Stored per record by
+    // `set-option -w` below, and settable directly by a fixture.
+    .replace(/#\{(@cl_(?:session_id|source|acquired|branch|pr|item))\}/g, (_, opt) => (record.tags ?? {})[opt] ?? "");
 }
 
 log();
@@ -414,11 +424,48 @@ switch (cmd) {
   //   show-options -t work -v @cl_absent     → 1, "invalid option: @cl_absent"
   case "set-option":
   case "show-options": {
-    // Window options (-w) are a different namespace and are read back through
-    // `#{?@cl_placeholder,1,0}` in the list formats, never through show-options.
-    // Their `=session:=window` target already carries a colon, so it parses.
-    // Left as the silent success it has always been.
-    if (argv.includes("-w")) process.exit(0);
+    // Window options (-w) are a different namespace, read back through the list
+    // formats (`#{?@cl_placeholder,1,0}`, `#{@cl_session_id}`) and never through
+    // show-options. Their `=session:=window` target already carries a colon, so
+    // it parses.
+    //
+    // The `@cl_*` window TAG is stored on the matching window AND on its panes:
+    // one real window option is visible from both `list-windows` and
+    // `list-panes`, but this stub answers those from two separate record sets,
+    // so both have to carry it or the tag would be readable from only one of
+    // the two paths that read it. An empty window half (`=session:`) means that
+    // session's current window, which for a managed session is its only one.
+    //
+    // `@cl_placeholder` keeps the silent-success path it has always had: the
+    // fixtures set `placeholder` on the record directly, and `markPlaceholder`
+    // is asserted by argv. So is the exit status here — always 0, as before,
+    // rather than modelling tmux's "no such window" — because several callers
+    // target windows this stub does not model, and failing them would be a new
+    // behaviour rather than a more faithful one.
+    if (argv.includes("-w")) {
+      const target = flag("-t") ?? "";
+      const [opt, value] = argv.slice(argv.indexOf("-t") + 2).filter((a) => !a.startsWith("-"));
+      if (!opt || !/^@cl_(session_id|source|acquired|branch|pr|item)$/.test(opt)) process.exit(0);
+      const session = sessionOptionTarget(state, target);
+      const colon = target.indexOf(":");
+      const bare = colon === -1 ? "" : target.slice(colon + 1);
+      const window = bare === "" ? null : targetName(state, target);
+      const hits = (rec, recWindow) =>
+        (session === undefined || rec.session === session) && (window === null || recWindow === window);
+      let matched = false;
+      for (const w of state.windows) {
+        if (!hits(w, w.name ?? w.window)) continue;
+        w.tags = { ...(w.tags ?? {}), [opt]: value ?? "" };
+        matched = true;
+      }
+      for (const pane of state.panes) {
+        if (!hits(pane, pane.window)) continue;
+        pane.tags = { ...(pane.tags ?? {}), [opt]: value ?? "" };
+        matched = true;
+      }
+      if (matched) writeState(state);
+      process.exit(0);
+    }
     // Pane options (-p) take a target-PANE and the launcher only ever writes one:
     // `@cl_pane_target`, the managed name stamped on a pane so a session with no
     // window of its own is still discoverable. Stored on the pane record, where

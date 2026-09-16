@@ -5,8 +5,9 @@
 // composes this module's primitives.
 import { spawnSync } from "child_process";
 import { tmuxLines, tmuxQuiet } from "./exec.ts";
-import { LAUNCHER_SESSION, PANE_TARGET_OPTION, PLACEHOLDER_OPTION, isPaneTarget } from "./names.ts";
-import { exactTarget, hasSession, liveSessions, liveTargets, paneLocation } from "./server.ts";
+import { LAUNCHER_SESSION, PANE_TARGET_OPTION, PLACEHOLDER_OPTION, isPaneTarget, type WindowTags } from "./names.ts";
+import { parseWindowTags, windowTagArgs, windowTagsFormat } from "./tags.ts";
+import { exactTarget, hasSession, liveSessions, liveTargets, paneLocation, sessionOptionTarget } from "./server.ts";
 
 /**
  * Kill the window/target `name` (no-op if it doesn't exist). Used to clear a
@@ -25,12 +26,14 @@ import { exactTarget, hasSession, liveSessions, liveTargets, paneLocation } from
  * branch and commits are left on disk.
  */
 export function killWindow(target: string): void {
-  tmuxQuiet(["kill-window", "-t", exactKillTarget(target)]);
+  tmuxQuiet(["kill-window", "-t", exactLocationTarget(target)]);
 }
 
 /**
- * Pin a kill target to an exact match on BOTH halves of a `session:window` ref
- * (or on a bare name).
+ * Pin a target to an exact match on BOTH halves of a `session:window` ref (or
+ * on a bare name). Written for the kills below — hence the warning about what an
+ * unpinned half destroys — and since reused by `stampManagedWindow`, which
+ * addresses a window by the same resolved `session:index` location.
  *
  * The `=` prefix is PER-COMPONENT: `=host:name` pins only the session, and
  * blindly prefixing the whole string instead yields `==host:name` — a session
@@ -44,7 +47,7 @@ export function killWindow(target: string): void {
  * rather than window 3 — and `session:index` is exactly what `killManagedTarget`
  * resolves its target to.
  */
-function exactKillTarget(target: string): string {
+function exactLocationTarget(target: string): string {
   const colon = target.indexOf(":");
   const unpin = (s: string) => (s.startsWith("=") ? s.slice(1) : s);
   if (colon === -1) return exactTarget(unpin(target));
@@ -146,20 +149,28 @@ function windowNameAt(location: string): string | null {
  * skipped. Empty if the session isn't running. Used to snapshot the open agent
  * tabs for browser-style restore (see restore.ts).
  */
-export function launcherWindowPaths(session: string = LAUNCHER_SESSION): { name: string; cwd: string }[] {
-  const out: { name: string; cwd: string }[] = [];
+export function launcherWindowPaths(session: string = LAUNCHER_SESSION): LauncherWindow[] {
+  const out: LauncherWindow[] = [];
   for (const line of tmuxLines([
     "list-windows",
     "-t",
     exactTarget(session),
     "-F",
-    "#{window_name}\t#{pane_current_path}\t#{pane_dead}",
+    `#{window_name}\t#{pane_current_path}\t#{pane_dead}\t${windowTagsFormat("\t")}`,
   ])) {
-    const [name, cwd, dead] = line.split("\t");
+    const [name, cwd, dead, ...tagFields] = line.split("\t");
     if (dead === "1" || !cwd) continue;
-    out.push({ name, cwd });
+    out.push({ name, cwd, tags: parseWindowTags(tagFields) });
   }
   return out;
+}
+
+/** One live launcher window, as the restore snapshot needs to see it. */
+export interface LauncherWindow {
+  name: string;
+  cwd: string;
+  /** The window's tag, when it carries one — see `ManagedTarget.tags`. */
+  tags?: WindowTags;
 }
 
 /**
@@ -224,6 +235,63 @@ export function newDetached(name: string, cwd: string, argv: string[]): void {
  */
 export function markPlaceholder(target: string): void {
   tmuxQuiet(["set-option", "-w", "-t", target, PLACEHOLDER_OPTION, "1"]);
+}
+
+/**
+ * Stamp a window with a session-identity tag (see `WindowTags`). `target` is any
+ * tmux window ref — a `session:window` location, a bare name, or `=session:` for
+ * a session's current window. Reports whether tmux accepted every write.
+ *
+ * STANDALONE ON PURPOSE. Tagging is not folded into the window-creation calls
+ * above, even though today every caller stamps a window it just created. A tag
+ * whose only writer is the creation path could never describe a window agendo
+ * did NOT create, and adopting an externally-started agent — a window opened by
+ * hand with `claude` typed into it — is exactly what this mechanism is being
+ * built toward. The same property is what lets a partially-known tag be
+ * completed later: an agent that assigns its own session id can be stamped with
+ * its source now and its id when the id exists.
+ *
+ * Fields the record leaves undefined are not written (see `windowTagArgs`), so a
+ * later stamp ADDS to a tag rather than replacing it.
+ *
+ * Deliberately NOT routed through `tmuxQuiet`, for the reason `setSessionRoot`
+ * gives: this call exists only for its side effect, and a dropped write is
+ * invisible — the window silently keeps attributing by the cwd heuristic, which
+ * is the bug the tag exists to fix. A caller that depends on the stamp landing
+ * should be able to find out that it didn't. No caller currently fails a launch
+ * over it: a session that cannot be tagged is still a session, and it falls back
+ * to exactly the attribution it had before tags existed.
+ */
+export function stampWindowTags(target: string, tags: WindowTags): boolean {
+  let ok = true;
+  for (const [option, value] of windowTagArgs(tags)) {
+    if (spawnSync("tmux", ["set-option", "-w", "-t", target, option, value], { stdio: "ignore" }).status !== 0) {
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+/**
+ * Stamp the window carrying the managed target `name`, resolving the target the
+ * same way `killManagedTarget` does — the window's unambiguous `session:index`
+ * location, or the session itself when the name IS a session of its own (how an
+ * agent launched outside tmux runs, whose window tmux names after the command
+ * rather than after the target).
+ *
+ * Returns false when nothing carries the name, which covers the case that must
+ * NOT be stamped: a session the launcher parked in a PANE of somebody else's
+ * window (the global orchestrator, beside the menu). It owns no window, so the
+ * only window in reach is the launcher's own menu — and a window option written
+ * there would tag the MENU with the orchestrator's identity, making every
+ * attribution pass read the menu window as that session. The pane already
+ * carries its own `@cl_pane_target` stamp for discovery; there is nothing for a
+ * window tag to add and a great deal for it to break.
+ */
+export function stampManagedWindow(name: string, tags: WindowTags): boolean {
+  const location = windowLocation(name);
+  if (location) return stampWindowTags(exactLocationTarget(location), tags);
+  return hasSession(name) ? stampWindowTags(sessionOptionTarget(name), tags) : false;
 }
 
 /**
