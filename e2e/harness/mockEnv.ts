@@ -6,7 +6,7 @@
 //     post-hoc assertions on what the launcher tried to spawn
 // Nothing here touches the real machine: no real tmux server, no az login, no
 // git repos, no network. `cleanup()` tears it all down.
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,6 +69,17 @@ export async function createMockEnv(): Promise<MockEnv> {
   trackDir(tmpDir); // reaped on abnormal exit if cleanup() never runs
   const home = join(tmpDir, "home");
   await materializeHome(home);
+  // Belt-and-suspenders on top of the fakebin PATH shim below: if any code path
+  // ever resolves the REAL `tmux` binary despite the shim — an absolute path, a
+  // PATH-mutating dependency, a future regression — TMUX_TMPDIR redirects its
+  // socket directory away from the developer's default `/tmp/tmux-<uid>`, so an
+  // escaped call still can't reach their real tmux server. tmux silently falls
+  // BACK to that default when TMUX_TMPDIR doesn't exist, so — unlike a real
+  // tmux session, which creates its own socket dir — this one has to be made
+  // ahead of time; the fake `tmux` (a JS shim with no socket at all) ignores it
+  // either way.
+  const tmuxTmpDir = join(tmpDir, "tmux-tmpdir");
+  await mkdir(tmuxTmpDir, { recursive: true, mode: 0o700 });
 
   const tmuxStatePath = join(tmpDir, "tmux-state.json");
   const tmuxLogPath = join(tmpDir, "tmux-log.txt");
@@ -102,6 +113,7 @@ export async function createMockEnv(): Promise<MockEnv> {
     FAKE_CALL_LOG: callLogPath,
     FAKE_GH_STATE: ghStatePath,
     FAKE_GIT_STATE: gitStatePath,
+    TMUX_TMPDIR: tmuxTmpDir,
     // Force interactive color so Ink emits ANSI even though stdout is a PTY pipe.
     FORCE_COLOR: "3",
   };
