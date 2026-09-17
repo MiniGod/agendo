@@ -215,7 +215,7 @@ export default function App({
   useActivityWatchers({ rows, setActivity });
 
   // Background LOCAL rescan on a timer; see ./hooks/useLocalRescan.ts.
-  useLocalRescan({ modelRef, discoveredReposRef, setModel });
+  useLocalRescan({ modelRef, discoveredReposRef, setModel, hostSession });
 
   const panes = useReadinessPoll({ model, autoResume });
 

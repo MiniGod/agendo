@@ -6,6 +6,8 @@ import { captureRestore } from "../../runtime/restore/index.ts";
 import { discoverRepos, mergeRepos, repoScopeKeys } from "../../repositories/index.ts";
 import type { PRWithSessions, RepoSessions, WorkItem } from "../../shared/types.ts";
 import { refreshLiveTmux } from "./live.ts";
+import { adoptForeignPanes } from "./adopt.ts";
+import { livePanes } from "../../runtime/tmux/index.ts";
 import { groupSessionsByRepo } from "./scope.ts";
 import {
   iterationName, linkedPrKeys, linkedPrsOf, orphanPrsOf, reviewPrsOf, sessionLinksOf, withSessions,
@@ -23,15 +25,31 @@ import type { LoadedModel, LoadModelOptions, LocalSessions } from "./types.ts";
 // it had before.
 export type { LoadedModel, LoadModelOptions, LocalSessions, SessionLink } from "./types.ts";
 export { isRunning, reconcileLive, refreshLiveTmux } from "./live.ts";
+export { adoptionShape, hasAdoptionCandidate, planAdoptions, adoptedTags, type AdoptionPlan, type AdoptionInputs } from "./adopt.ts";
 export {
   filterModelByRepos, groupSessionsByRepo, itemInRepoScope, itemKey, prInRepoScope, prKey,
 } from "./scope.ts";
 
-export async function loadLocalSessions(): Promise<LocalSessions> {
+/**
+ * The cheap, network-free local scan: on-disk sessions, the repos they imply,
+ * and what tmux says is running.
+ *
+ * `adoptInto` names the launcher's own host session and turns on the adoption
+ * pass (see ./adopt.ts): a window the user opened by hand and typed `claude`
+ * into is identified, tagged and renamed here, and the tmux state is re-read
+ * once when that happened so this very scan already reports it running. Only
+ * the menu's background poll passes it — a one-shot CLI listing reads the
+ * server, it does not rename the user's windows.
+ */
+export async function loadLocalSessions(opts: { adoptInto?: string } = {}): Promise<LocalSessions> {
   const index = await SessionIndex.build();
   const repos = discoverRepos(index.all);
-  const { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations } =
-    refreshLiveTmux(index.all);
+  const panes = livePanes();
+  let tmux = refreshLiveTmux(index.all, panes);
+  if (opts.adoptInto && (await adoptForeignPanes(opts.adoptInto, panes, index.all, tmux.live)).length > 0) {
+    tmux = refreshLiveTmux(index.all);
+  }
+  const { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations } = tmux;
   const sessionGroups = groupSessionsByRepo(index.all);
   return {
     index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations,

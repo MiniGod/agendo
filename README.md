@@ -74,6 +74,24 @@ agent you open or resume becomes another tab in the same session. Re-running age
 attaches to it rather than spawning a second, so there's only ever one. (`--no-tmux`
 runs it outside tmux, where each agent is a detached session you attach to.)
 
+### Windows you open by hand are adopted
+
+You don't have to start every agent from the menu. Open a window in agendo's own tmux
+session yourself (`ctrl+b c`), type `claude`, and start working: within a couple of
+seconds the menu notices, works out which session it is, tags and renames the window to
+its canonical `cl-claude-<id>` name, and from then on treats it like one it launched —
+it shows up in `agendo ls` and the Sessions view, `agendo send` reaches it, `agendo
+close` ends it, and it comes back as a paused tab after a restart. A `claude` you split
+into a pane beside the menu or inside another window is picked up too, as a pane-hosted
+session, without the window it shares being renamed.
+
+Identity comes from Claude Code's own per-process record (`~/.claude/sessions/<pid>.json`),
+which names the session and the tmux pane it runs in — not from guessing among the
+transcripts in that directory. Anything that can't be identified with confidence is
+left exactly as it is: the menu, a plain shell, an editor, a `claude -p` one-shot, a
+pane two records disagree about. Only agendo's own host session is scanned, and only
+Claude is adopted for now.
+
 ### One launcher per project, or one for everything
 
 `agendo <path>` scopes a launcher to a directory: it lists only the sessions
