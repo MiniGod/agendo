@@ -5,7 +5,7 @@
 // Pure string work, plus the two environment probes. Nothing here talks to a
 // tmux server, which is what lets `server.ts` import it rather than the reverse.
 import { spawnSync } from "child_process";
-import type { AgentSession } from "../../shared/types.ts";
+import type { AgentSession, AgentSource } from "../../shared/types.ts";
 
 /**
  * The default host session the `--tmux` flag creates/attaches when the launcher
@@ -45,6 +45,88 @@ export const PLACEHOLDER_OPTION = "@cl_placeholder";
  * send-keys / navigate all work against it unchanged.
  */
 export const PANE_TARGET_OPTION = "@cl_pane_target";
+
+/**
+ * tmux *window* user-options carrying a managed window's SESSION IDENTITY — the
+ * window tag. `@cl_session_id` is the only one attribution reads; the rest
+ * describe the window for display and for the adoption flow that follows.
+ *
+ * WHY A TAG AT ALL. A managed window has historically been identified by its
+ * NAME, and a name can only say what was known when the window was created. For
+ * `cl-claude-…`/`cl-copilot-…` that is enough — the launcher chooses the session
+ * id up front (`--session-id`) and embeds it. For everything else it is not:
+ * `cl-wi-…`/`cl-pr-…` embed a work-item or PR id, and Codex refuses a
+ * caller-assigned id outright (`preassignsSessionId`), so its windows carry a
+ * uniquifier and nothing more. Those windows fall back to attribution by working
+ * directory + most-recently-used session — a heuristic this file's own
+ * `ID_BEARING_NAME` comment calls fine for reading a pane but not for killing
+ * one, and the reason `agendo close` refuses an id-less window.
+ *
+ * A window option is the fix because it can be written AFTER the window exists,
+ * which is exactly what the name cannot do. It costs no extra tmux round trip
+ * either: a user option is readable inline in the `-F` format string the live
+ * scan already runs (see `liveManagedPaths`), the same way `@cl_placeholder`
+ * above already is.
+ *
+ * ONLY `@cl_session_id` MAY BE A LOOKUP KEY. The others exist so a window can
+ * describe itself — to the expanded row's tmux line, and to a future `close`
+ * that wants to treat an ADOPTED window more carefully than one agendo started
+ * itself. Making any of them a lookup key would rebuild the ambiguity this
+ * replaces: a branch or a PR number identifies a piece of work, never a session,
+ * and two sessions on one branch are routine.
+ */
+export const SESSION_ID_OPTION = "@cl_session_id";
+/** Agent that runs in the window (`claude`/`copilot`/`codex`). Display only. */
+export const SOURCE_OPTION = "@cl_source";
+/**
+ * How agendo came to manage this window: `launched` (agendo created it) or
+ * `adopted` (it was already running and agendo took it over). Display today;
+ * the adoption flow will read it to be more conservative on `close`, since
+ * killing a window the user opened by hand is not the same act as killing one
+ * agendo opened for them.
+ */
+export const ACQUIRED_OPTION = "@cl_acquired";
+/** Git branch the window was launched on. Display only. */
+export const BRANCH_OPTION = "@cl_branch";
+/** PR number the window was launched for. Display only. */
+export const PR_OPTION = "@cl_pr";
+/** Work-item / issue number the window was launched for. Display only. */
+export const ITEM_OPTION = "@cl_item";
+
+/**
+ * How agendo came to manage a window (see `ACQUIRED_OPTION`). `launched` is
+ * every window agendo created itself; `adopted` is one that was already running
+ * when agendo took it over. Nothing mints `adopted` yet — the adoption flow is a
+ * later stage — but the vocabulary is fixed here so a window tagged today is
+ * still readable when it arrives.
+ */
+export type WindowAcquisition = "launched" | "adopted";
+
+/**
+ * A managed window's tag: what the window itself says about the session running
+ * in it, as read back from the `@cl_*` window options above.
+ *
+ * Every field is optional, and that is the point rather than laxity. A tag is
+ * written from whatever was known at the moment it was stamped, and for the
+ * cases this mechanism exists for that is LESS than everything: an agent which
+ * assigns its own session id (Codex) can be tagged with its source and its
+ * branch at launch and only later with the id itself, and a window agendo did
+ * not create can be tagged with nothing until it is identified. A schema that
+ * demanded the id up front could serve neither, which is precisely the
+ * limitation of encoding identity in the window NAME.
+ *
+ * Read `sessionId` as authoritative and the rest as description — see
+ * `SESSION_ID_OPTION` for why the distinction is load-bearing.
+ */
+export interface WindowTags {
+  /** FULL session id (not the 12-char `shortId` a managed name embeds). */
+  sessionId?: string;
+  source?: AgentSource;
+  acquired?: WindowAcquisition;
+  branch?: string;
+  pr?: number;
+  item?: number;
+}
 
 /**
  * Minimum width (columns) of the PANE a split would cut in two before doing it is
@@ -168,6 +250,15 @@ export interface LiveTarget {
 export interface ManagedTarget extends LiveTarget {
   cwd: string;
   placeholder: boolean;
+  /**
+   * The window's own tag, when it carries one (see `WindowTags`). Undefined for
+   * every window created before tagging shipped, and for a pane-hosted session
+   * — the tag is a WINDOW option, and a pane-hosted session's window belongs to
+   * somebody else (the launcher menu), so its tag would describe that window
+   * rather than this session. Attribution treats the absent case exactly as it
+   * did before there were tags at all.
+   */
+  tags?: WindowTags;
 }
 
 /**

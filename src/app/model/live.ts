@@ -23,11 +23,13 @@ export function isRunning(s: AgentSession, live: Set<string>): boolean {
  *
  * Attributes every live managed (`cl-…`) window to the session running in it and
  * registers that session's canonical name as live, across every prefix — old
- * (`cl-wi-`, `cl-pr-`, `cl-free-`) and new (`cl-bg-`, `cl-new-`). Id-bearing
- * names (`cl-claude-`/`cl-copilot-`/`cl-bg-`/`cl-new-`) embed the session's short
- * id, so we match that exact session; work-item / PR names (`cl-wi-…`/`cl-pr-…`)
- * embed an item id instead, so we attribute them to the most-recently-used
- * session in the same working directory. `allSessions` is the full local session
+ * (`cl-wi-`, `cl-pr-`, `cl-free-`) and new (`cl-bg-`, `cl-new-`). A window
+ * carrying a `@cl_session_id` tag names its session outright and is matched on
+ * that; otherwise id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-bg-`/
+ * `cl-new-`) embed the session's short id, so we match that exact session, and
+ * work-item / PR names (`cl-wi-…`/`cl-pr-…`) embed an item id instead, so we
+ * attribute them to the most-recently-used session in the same working
+ * directory. See `resolveWindowSession` for the full precedence. `allSessions` is the full local session
  * collection (loadModel passes index.all; the App poll passes the same set).
  */
 export function refreshLiveTmux(allSessions: AgentSession[]): {
@@ -51,7 +53,8 @@ export function refreshLiveTmux(allSessions: AgentSession[]): {
  * session, how it was launched (`liveKinds`, for the UI badge) and which window
  * it occupies (`liveWindows`, for pane reads).
  *
- * Id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-bg-`/`cl-new-`) embed the
+ * A window's own `@cl_session_id` tag wins where it has one. Failing that,
+ * id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-bg-`/`cl-new-`) embed the
  * session's short id, so we match that exact session; work-item / PR / legacy
  * names (`cl-wi-…`/`cl-pr-…`/`cl-free-…`) embed an item id instead, so we
  * attribute them to the most-recently-used session in the same working dir.
@@ -93,7 +96,7 @@ export function reconcileLive(
   const liveWindowLocations = new Map<string, string[]>();
   const placeholders = new Set<string>();
   const placeholderTargets = new Map<string, LiveTarget>();
-  for (const { name, target, cwd, placeholder, session, windowIndex } of managed) {
+  for (const { name, target, cwd, placeholder, session, windowIndex, tags } of managed) {
     const kind = managedKind(name);
     if (!kind) continue;
     // An idle placeholder must not vouch for "running": record its window name
@@ -104,9 +107,10 @@ export function reconcileLive(
       placeholderTargets.set(name, { name, target, session, windowIndex });
       continue;
     }
-    // Shared with restore.ts so the two attribution paths can't drift: id-bearing
-    // names match by short id, work-item / PR names by cwd+lastUsed.
-    const best = resolveWindowSession(sessions, name, cwd);
+    // Shared with restore.ts so the two attribution paths can't drift: the
+    // window's own tag first, then an id-bearing name by short id, then
+    // work-item / PR names by cwd+lastUsed.
+    const best = resolveWindowSession(sessions, name, cwd, tags);
     if (!best) continue;
     const canon = sessionName(best);
     live.add(canon);

@@ -99,3 +99,49 @@ describe("buildTabs: a window that DOES attribute to a session", () => {
     expect(tabs[0]!.unattributedSince).toBeUndefined();
   });
 });
+
+// A window TAG carries the full session id, where the window name carries at
+// most a 12-char slice of it and often nothing at all. Both tiers feed the same
+// preserve-by-short-id fallback above, so the tag has to reduce to the same key.
+describe("buildTabs: a window that carries a @cl_session_id tag", () => {
+  const TAGGED: RestoreTab = {
+    name: "cl-claude-019cde001111",
+    cwd: "/home/dev",
+    title: "tagged",
+    argv: ["claude", "--resume", "019cde00-1111-7000-8000-00000000cde0"],
+  };
+
+  test("an id-less window name is preserved via the tag's short id", () => {
+    // `cl-wi-101` embeds a work-item id, so before tags this window could never
+    // be matched to a saved tab and was simply dropped. The tag gives it the one
+    // thing that lookup needs.
+    const t0 = 1_000_000;
+    const window = {
+      name: "cl-wi-101",
+      cwd: TAGGED.cwd,
+      tags: { sessionId: "019cde00-1111-7000-8000-00000000cde0" },
+    };
+    const tabs = buildTabs([window], [], [TAGGED], t0);
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]).toMatchObject({ name: TAGGED.name, unattributedSince: t0 });
+  });
+
+  test("the same window without the tag is dropped, as it always was", () => {
+    // The control for the case above: nothing else about the window changed, so
+    // the tag is demonstrably what did it — and an untagged id-less window keeps
+    // exactly the behaviour it had before.
+    expect(buildTabs([{ name: "cl-wi-101", cwd: TAGGED.cwd }], [], [TAGGED], 1_000_000)).toEqual([]);
+  });
+
+  test("the tag's grace period expires on the same clock as a name's", () => {
+    const firstSeen = 1_000_000;
+    const window = {
+      name: "cl-wi-101",
+      cwd: TAGGED.cwd,
+      tags: { sessionId: "019cde00-1111-7000-8000-00000000cde0" },
+    };
+    const stamped: RestoreTab = { ...TAGGED, unattributedSince: firstSeen };
+    expect(buildTabs([window], [], [stamped], firstSeen + 5 * 60 * 1000 - 1)).toHaveLength(1);
+    expect(buildTabs([window], [], [stamped], firstSeen + 5 * 60 * 1000)).toEqual([]);
+  });
+});

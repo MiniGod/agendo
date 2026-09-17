@@ -26,12 +26,26 @@ export interface FreshTarget {
    * Copilot can't carry the instructions (see `agentChoicesFor`).
    */
   orchestrator?: boolean;
+  /**
+   * The work item / PR this target was derived from, for the launched window's
+   * own tag (`@cl_item` / `@cl_pr`). `tmuxName` already encodes the number, but
+   * only after `scopeTag` has folded a repo discriminator in and reduced the
+   * whole thing to `[a-z0-9-]` — so reading it back out of the name means
+   * parsing a lossy string. These are the number itself, carried alongside.
+   *
+   * Display only. They identify a piece of WORK, never a session — two sessions
+   * on one work item is the normal case — so nothing may attribute a window by
+   * them (see `SESSION_ID_OPTION`).
+   */
+  itemId?: number;
+  prId?: number;
 }
 export function wiTarget(item: WorkItem): FreshTarget {
   return {
     kind: "new",
     // Scope the tmux name by repo on GitHub (issue numbers collide across repos).
     tmuxName: freshName(item.id, V.repoScopedFresh ? item.project : undefined),
+    itemId: item.id,
     defaultBranch: defaultBranch(item.id, item.title),
     title: `#${item.id} — ${item.title}`,
   };
@@ -40,6 +54,7 @@ export function prTarget(pr: PRWithSessions): FreshTarget {
   return {
     kind: "pr",
     tmuxName: prFreshName(pr.id, V.repoScopedFresh ? pr.repositoryId : undefined),
+    prId: pr.id,
     defaultBranch: pr.branch,
     prBranch: pr.branch,
     title: `PR ${V.prPrefix}${pr.id} — ${pr.title}`,

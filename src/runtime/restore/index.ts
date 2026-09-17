@@ -18,7 +18,10 @@
 // fresh-launch window by the most-recently-used session in its pane's cwd — and
 // we persist *that* session's resume command + title. So restore needs nothing
 // but this file.
-import { ID_BEARING_NAME, LAUNCHER_SESSION, launcherWindowPaths, sessionName, shortId } from "../tmux/index.ts";
+import {
+  ID_BEARING_NAME, LAUNCHER_SESSION, launcherWindowPaths, sessionName, shortId,
+  type LauncherWindow, type WindowTags,
+} from "../tmux/index.ts";
 import { normalizeCwd } from "../../app/context.ts";
 import { resumeArgv } from "../../launch/index.ts";
 import type { SessionIndex } from "../../sessions/index.ts";
@@ -77,20 +80,56 @@ export function idBearingName(name: string): boolean {
 }
 
 /**
- * Resolve which on-disk session a live launcher window is running.
+ * Resolve which on-disk session a live launcher window is running, in three
+ * tiers — most specific first.
  *
- * Id-bearing names (`cl-claude-`/`cl-copilot-`/`cl-codex-`/`cl-bg-`/`cl-new-`)
- * embed the session's short id, so we match that exact session — unambiguous,
- * and right even when two sessions share a cwd. The id-less names (`cl-wi-…`,
- * `cl-pr-…`, `cl-free-…`, and the `cl-bg-codex-…` fresh launches of an agent
- * that assigns its own id) carry no session id, so for those we fall back to the
- * cwd+lastUsed heuristic. Mirrors the attribution in model.ts `reconcileLive`.
+ * 1. THE WINDOW'S OWN TAG (`@cl_session_id`, see `WindowTags`). The window says
+ *    which session it runs, in full, so this needs nothing inferred.
+ *    Authoritative when present: if the tag names a session that is not on disk,
+ *    the answer is "nothing", NOT a fall-through to the heuristic below — a
+ *    window that has told us whose it is must never be credited to a different
+ *    session that merely shares its directory, which is exactly the
+ *    misattribution the tag exists to end. That mirrors the id-bearing-name tier
+ *    beneath it, which has always resolved an unknown id to nothing.
+ *
+ *    The exact id is tried first and a `shortId` comparison second, both INSIDE
+ *    this tier — so an unmatched tag still answers "nothing" rather than falling
+ *    through. The second attempt exists so a tag can never resolve WORSE than
+ *    the name beside it: `shortId` is the equivalence managed names have always
+ *    been matched under (it strips punctuation and caps at 12), and the id a
+ *    session reports on disk is written by the agent's own CLI, not by us —
+ *    Copilot's comes back out of a `workspace.yaml` it wrote itself. Were the
+ *    agent ever to store the id we passed in a different spelling, an
+ *    exact-only tag would resolve to nothing while the window's name still
+ *    resolved correctly, and this tier would have made attribution worse for
+ *    the very agents it is meant to help.
+ * 2. AN ID-BEARING NAME (`cl-claude-`/`cl-copilot-`/`cl-codex-`/`cl-bg-`/
+ *    `cl-new-`) embeds the session's short id, so we match that exact session —
+ *    right even when two sessions share a cwd. Every such window predates
+ *    tagging or was stamped alongside it; the two agree by construction, and the
+ *    tag is preferred only because it carries the FULL id rather than a 12-char
+ *    slice of it.
+ * 3. THE CWD + MOST-RECENTLY-USED HEURISTIC, for id-less names (`cl-wi-…`,
+ *    `cl-pr-…`, `cl-free-…`, and the `cl-bg-codex-…` fresh launches of an agent
+ *    that assigns its own id). Kept as the fallback, and it stays load-bearing:
+ *    every window opened before tagging shipped is untagged, and there is no
+ *    migration — an untagged window resolves exactly as it always did.
+ *
+ * Mirrors the attribution in model.ts `reconcileLive`.
  */
 export function resolveWindowSession(
   sessions: AgentSession[],
   name: string,
   cwd: string,
+  tags?: WindowTags,
 ): AgentSession | undefined {
+  const tagged = tags?.sessionId;
+  if (tagged) {
+    return (
+      sessions.find((s) => s.id === tagged) ??
+      sessions.find((s) => shortId(s.id) === shortId(tagged))
+    );
+  }
   const idMatch = name.match(ID_BEARING);
   if (idMatch) return sessions.find((s) => shortId(s.id) === idMatch[1]);
   return bestSessionForCwd(sessions, cwd);
@@ -165,7 +204,7 @@ export function captureRestore(index: SessionIndex, hostSession: string = LAUNCH
  * coming back.
  */
 export function buildTabs(
-  windows: { name: string; cwd: string }[],
+  windows: LauncherWindow[],
   sessions: AgentSession[],
   existing: RestoreTab[] = [],
   now: number = Date.now(),
@@ -177,9 +216,9 @@ export function buildTabs(
     if (m) savedByShortId.set(m[1], t);
   }
   const byName = new Map<string, RestoreTab>();
-  for (const { name, cwd } of windows) {
+  for (const { name, cwd, tags } of windows) {
     if (!name.startsWith("cl-")) continue;
-    const best = resolveWindowSession(sessions, name, cwd);
+    const best = resolveWindowSession(sessions, name, cwd, tags);
     if (best) {
       const canonical = sessionName(best);
       if (!byName.has(canonical)) {
@@ -188,15 +227,34 @@ export function buildTabs(
       continue;
     }
     // No on-disk session yet — preserve a previously-saved tab for this window's
-    // session id (id-bearing names only; cl-wi-/cl-pr- carry no recoverable id),
-    // but only within the grace window — see the doc comment above.
-    const m = name.match(ID_BEARING);
-    const prior = m ? savedByShortId.get(m[1]) : undefined;
+    // session id, but only within the grace window — see the doc comment above.
+    const m = recoverableShortId(name, tags);
+    const prior = m ? savedByShortId.get(m) : undefined;
     if (!prior || byName.has(prior.name)) continue;
     const kept = preserveUnattributed(prior, now);
     if (kept) byName.set(kept.name, kept);
   }
   return [...byName.values()];
+}
+
+/**
+ * The short id by which a window that attributed to NO session can still be
+ * matched to a saved tab: the window TAG's session id when it has one, the
+ * id-bearing NAME otherwise — the same precedence `resolveWindowSession` just
+ * used, so the two can never disagree about which session a window is about.
+ *
+ * Reduced to the SHORT id because that is what saved tabs are keyed by: a
+ * canonical name embeds nothing longer, so a full tagged id has to be cut down
+ * to look one up. A window with neither — an untagged `cl-wi-…`/`cl-pr-…` —
+ * has no recoverable id and is not preserved, exactly as before tags existed.
+ *
+ * Extracted for the same reason `preserveUnattributed` below it was: the
+ * branching belongs to this decision, not to `buildTabs`'s complexity budget.
+ */
+function recoverableShortId(name: string, tags?: WindowTags): string | undefined {
+  const tagged = tags?.sessionId;
+  if (tagged) return shortId(tagged);
+  return name.match(ID_BEARING)?.[1];
 }
 
 /**

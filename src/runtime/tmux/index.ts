@@ -27,6 +27,7 @@
 //
 //   exec.ts          run a tmux command, read a list back, sleep between keys
 //   names.ts         the `cl-…` naming convention; no server contact at all
+//   tags.ts          the `@cl_*` window tag: its `-F` format, and parsing it back
 //   pane.ts          capture a pane's screen / send keystrokes to it
 //   readiness.ts     the readiness vocabulary — states, prompt glyphs, verdict
 //   inputBox.ts      find and read the claude input box + live status region
@@ -46,6 +47,12 @@ export {
   ROOT_OPTION,
   PLACEHOLDER_OPTION,
   PANE_TARGET_OPTION,
+  SESSION_ID_OPTION,
+  SOURCE_OPTION,
+  ACQUIRED_OPTION,
+  BRANCH_OPTION,
+  PR_OPTION,
+  ITEM_OPTION,
   MIN_SPLIT_COLS,
   ID_BEARING_NAME,
   tmuxAvailable,
@@ -59,7 +66,11 @@ export {
   type SessionKind,
   type LiveTarget,
   type ManagedTarget,
+  type WindowTags,
+  type WindowAcquisition,
 } from "./names.ts";
+
+export { WINDOW_TAG_FIELDS, windowTagsFormat, parseWindowTags, windowTagArgs } from "./tags.ts";
 
 export {
   capturePane,
@@ -129,6 +140,9 @@ export {
   windowLocation,
   newDetached,
   markPlaceholder,
+  stampWindowTags,
+  stampManagedWindow,
+  type LauncherWindow,
   newWindow,
   newWindowIn,
   killPane,

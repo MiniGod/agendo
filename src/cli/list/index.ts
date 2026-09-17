@@ -219,9 +219,10 @@ interface ListedSession {
 
 /**
  * The live `cl-…` windows resolved back to their sessions, once each. Same
- * attribution the TUI uses (id-bearing → exact session; id-less cl-wi-/cl-pr-
- * → MRU session in the pane's cwd, matched on a normalized path), shared so the
- * CLI list can't drift from the menu's running state. Restored-but-unopened
+ * attribution the TUI uses (a window's own `@cl_session_id` tag → that exact
+ * session; id-bearing name → exact session; id-less cl-wi-/cl-pr- → MRU session
+ * in the pane's cwd, matched on a normalized path), shared so the CLI list can't
+ * drift from the menu's running state. Restored-but-unopened
  * placeholder windows are skipped here — they're idle bash waiting for a
  * keypress, not running agents, so counting them as RUNNING would mislead
  * (`pausedSessions` below lists them as their own state instead) — and so are
@@ -232,10 +233,10 @@ interface ListedSession {
 function listedSessions(managed: ManagedTarget[], index: SessionIndex, inScope: (s: AgentSession) => boolean): ListedSession[] {
   const seen = new Set<string>();
   const out: ListedSession[] = [];
-  for (const { name, target, cwd, placeholder } of managed) {
+  for (const { name, target, cwd, placeholder, tags } of managed) {
     const kind = managedKind(name);
     if (!kind || placeholder) continue;
-    const s = resolveWindowSession(index.all, name, cwd);
+    const s = resolveWindowSession(index.all, name, cwd, tags);
     if (!s || !inScope(s)) continue;
     const key = `${s.source}:${s.id}`;
     if (seen.has(key)) continue;

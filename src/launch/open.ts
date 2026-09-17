@@ -16,6 +16,8 @@ import {
   windowLocation,
   insideTmux,
   tmuxQuiet,
+  stampManagedWindow,
+  type WindowTags,
 } from "../runtime/tmux/index.ts";
 import { resumeArgv } from "./argv.ts";
 
@@ -79,7 +81,7 @@ function panePlan(name: string, pane: string): OpenPlan {
  * own, so the name lookups above cannot see it — `paneLocation` is what stops us
  * starting a second copy of a session that is running perfectly well.
  */
-export function openTarget(name: string, cwd: string, argv: string[]): OpenPlan {
+export function openTarget(name: string, cwd: string, argv: string[], tags?: WindowTags): OpenPlan {
   if (insideTmux()) {
     const loc = windowLocation(name);
     if (loc) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", loc] };
@@ -88,13 +90,35 @@ export function openTarget(name: string, cwd: string, argv: string[]): OpenPlan 
     // A session by this name may exist from an earlier outside-tmux launch.
     if (hasSession(name)) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", name] };
     newWindow(name, cwd, argv);
+    stampNewTarget(name, tags);
     return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: ["tmux", "select-window", "-t", name] };
   }
   const pane = paneLocation(name);
   if (pane) return panePlan(name, pane);
   const alreadyRunning = hasSession(name);
-  if (!alreadyRunning) newDetached(name, cwd, argv);
+  if (!alreadyRunning) {
+    newDetached(name, cwd, argv);
+    stampNewTarget(name, tags);
+  }
   return { alreadyRunning, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name] };
+}
+
+/**
+ * Tag a target this call has just CREATED (see `stampManagedWindow`).
+ *
+ * Only on creation, never on the already-running branches above. Re-stamping a
+ * live window would overwrite whatever its tag says now with what this caller
+ * happens to believe — and the field that matters is `acquired`: a window agendo
+ * later adopts is stamped `adopted`, and navigating to it must not quietly
+ * demote it back to `launched`. Completing a partially-known tag is a deliberate
+ * second call to `stampManagedWindow`, not a side effect of opening something.
+ *
+ * Best-effort by design. A tag that fails to land costs this window the exact
+ * attribution and leaves it on the cwd heuristic it would have had anyway, which
+ * is not worth failing a launch the user asked for.
+ */
+function stampNewTarget(name: string, tags?: WindowTags): void {
+  if (tags) stampManagedWindow(name, tags);
 }
 
 /**
@@ -135,5 +159,16 @@ export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan 
   // `windowLocation`, then `paneLocation`), so it is already host-agnostic and
   // wants the name.
   const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
-  return openTarget(target, s.cwd, resumeArgv(s));
+  return openTarget(target, s.cwd, resumeArgv(s), sessionTags(s));
+}
+
+/**
+ * The window tag for a session we are resuming. This is the one launch path that
+ * knows the session's FULL id up front — it is resuming a session that already
+ * exists — so the tag it writes is complete, and the window it opens attributes
+ * exactly from its first live scan rather than through its name's 12-character
+ * short id.
+ */
+export function sessionTags(s: AgentSession): WindowTags {
+  return { sessionId: s.id, source: s.source, branch: s.branch, acquired: "launched" };
 }

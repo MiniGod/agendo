@@ -8,6 +8,7 @@ import { repoRootForCwd } from "../repositories/index.ts";
 import { ORCHESTRATOR_SLUG } from "../orchestration/index.ts";
 import { freshArgv } from "./argv.ts";
 import { openTarget, type OpenPlan } from "./open.ts";
+import type { WindowTags } from "../runtime/tmux/index.ts";
 import { launchManaged } from "./managed.ts";
 
 /**
@@ -34,9 +35,16 @@ export function prFreshName(prId: number, scope?: string): string {
  * under the managed target `name`. Used for work-item / PR launches, whose names
  * (`cl-wi-…` / `cl-pr-…`) are attributed back to their session by working
  * directory (see model.ts). Defaults to Claude for back-compat.
+ *
+ * `tags` describes the launch for the window's own tag — the branch it runs on
+ * and which work item or PR it was started for. It carries NO session id, and
+ * cannot: `freshArgv` passes none here, so the agent assigns its own and it does
+ * not exist yet. Attribution for these windows therefore stays on the cwd
+ * heuristic exactly as before; the tag is what lets the window describe itself
+ * (and what a later pass can complete once the id is discoverable).
  */
-export function launchFresh(cwd: string, name: string, agent: AgentSource = "claude"): OpenPlan {
-  return openTarget(name, cwd, freshArgv(agent));
+export function launchFresh(cwd: string, name: string, agent: AgentSource = "claude", tags?: WindowTags): OpenPlan {
+  return openTarget(name, cwd, freshArgv(agent), { ...tags, source: agent, acquired: "launched" });
 }
 
 export interface LaunchOptions {
