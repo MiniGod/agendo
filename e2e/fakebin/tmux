@@ -129,6 +129,13 @@ function sessionOptionTarget(state, target) {
   return resolveTarget(spec, state.sessions);
 }
 
+/** The `{session, window}` a pane-id target (`%N`) names, or undefined. */
+function paneWindow(state, target) {
+  if (!/^%\d+$/.test(target ?? "")) return undefined;
+  const pane = state.panes.find((p) => p.id === target);
+  return pane ? { session: pane.session, window: pane.window } : undefined;
+}
+
 /** Every window name in the state, however the fixture spelled it. */
 function windowNames(state) {
   return [
@@ -446,10 +453,14 @@ switch (cmd) {
       const target = flag("-t") ?? "";
       const [opt, value] = argv.slice(argv.indexOf("-t") + 2).filter((a) => !a.startsWith("-"));
       if (!opt || !/^@cl_(session_id|source|acquired|branch|pr|item)$/.test(opt)) process.exit(0);
-      const session = sessionOptionTarget(state, target);
+      // A pane id addresses its own window — how adoption stamps a window it
+      // reached through the pane listing, since `%N` is the one handle that
+      // cannot prefix-match a neighbour. Real tmux resolves it the same way.
+      const byPane = paneWindow(state, target);
+      const session = byPane ? byPane.session : sessionOptionTarget(state, target);
       const colon = target.indexOf(":");
       const bare = colon === -1 ? "" : target.slice(colon + 1);
-      const window = bare === "" ? null : targetName(state, target);
+      const window = byPane ? byPane.window : bare === "" ? null : targetName(state, target);
       const hits = (rec, recWindow) =>
         (session === undefined || rec.session === session) && (window === null || recWindow === window);
       let matched = false;
@@ -506,6 +517,35 @@ switch (cmd) {
       process.exit(1);
     }
     process.stdout.write(`${value}\n`);
+    process.exit(0);
+  }
+  case "rename-window": {
+    // Modelled because adoption is the first thing in the tree to rename a
+    // window, and what it renames is the USER's window: a rename that landed on
+    // the wrong one — the menu, a launched tab — has to show up as that entry's
+    // name changing. The target is a pane id (adoption) or a `session:window`
+    // ref; the new name is the last argument. Every pane record of the window
+    // follows, since this stub keys captures and kills by the pane's `window`.
+    const target = flag("-t") ?? "";
+    const name = argv[argv.length - 1];
+    const at = paneWindow(state, target);
+    const session = at ? at.session : sessionOptionTarget(state, target);
+    const window = at ? at.window : targetName(state, target);
+    const hit = state.windows.find((w) => (session === undefined || w.session === session) && (w.name ?? w.window) === window);
+    if (!hit && !at) {
+      process.stderr.write(`can't find window: ${target}\n`);
+      process.exit(1);
+    }
+    for (const w of state.windows) {
+      if ((session === undefined || w.session === session) && (w.name ?? w.window) === window) {
+        if (w.name !== undefined) w.name = name;
+        if (w.window !== undefined) w.window = name;
+      }
+    }
+    for (const pane of state.panes) {
+      if ((session === undefined || pane.session === session) && pane.window === window) pane.window = name;
+    }
+    writeState(state);
     process.exit(0);
   }
   // Navigation / config commands: nothing to do, just succeed.

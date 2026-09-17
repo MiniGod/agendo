@@ -14,10 +14,19 @@ export function useLocalRescan({
   modelRef,
   discoveredReposRef,
   setModel,
+  hostSession,
 }: {
   modelRef: React.MutableRefObject<LoadedModel | null>;
   discoveredReposRef: React.MutableRefObject<RepoInfo[]>;
   setModel: React.Dispatch<React.SetStateAction<LoadedModel | null>>;
+  /**
+   * The launcher's own tmux host session. Handed to the scan as `adoptInto`, so
+   * a window the user opened by hand in it and typed `claude` into is taken over
+   * on the next tick (see src/app/model/adopt.ts) — this poll is the one place
+   * adoption runs, which is what makes it feel automatic. A per-process constant
+   * (see `useModelLoader` on `hostSession`), so listing it below re-arms nothing.
+   */
+  hostSession: string | undefined;
 }) {
   // Background LOCAL rescan every LIVE_POLL_MS: re-run the cheap, network-free
   // session scan (loadLocalSessions → SessionIndex.build + discoverRepos +
@@ -45,7 +54,7 @@ export function useLocalRescan({
       if (inFlight || stopped || !modelRef.current) return; // no full model yet, or busy
       inFlight = true;
       try {
-        const local = await loadLocalSessions();
+        const local = await loadLocalSessions({ adoptInto: hostSession });
         if (stopped) return; // unmounted while the scan was running
         setModel((prev) => {
           if (!prev) return prev;
@@ -96,11 +105,12 @@ export function useLocalRescan({
       stopped = true;
       clearInterval(handle);
     };
-    // All three are stable identities — two `useRef` objects and a `useState`
-    // setter — so this array never changes and the interval is still armed
-    // exactly once, as it was when the effect lived in App with `[]`. They are
-    // listed rather than silenced because listing them is honest here: it costs
-    // nothing, and it means a future caller passing something unstable re-arms
-    // the timer instead of quietly reading a stale closure.
-  }, [modelRef, discoveredReposRef, setModel]);
+    // All four are stable identities — two `useRef` objects, a `useState`
+    // setter and a per-process constant — so this array never changes and the
+    // interval is still armed exactly once, as it was when the effect lived in
+    // App with `[]`. They are listed rather than silenced because listing them
+    // is honest here: it costs nothing, and it means a future caller passing
+    // something unstable re-arms the timer instead of quietly reading a stale
+    // closure.
+  }, [modelRef, discoveredReposRef, setModel, hostSession]);
 }

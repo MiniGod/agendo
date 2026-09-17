@@ -49,7 +49,7 @@ export const PANE_TARGET_OPTION = "@cl_pane_target";
 /**
  * tmux *window* user-options carrying a managed window's SESSION IDENTITY — the
  * window tag. `@cl_session_id` is the only one attribution reads; the rest
- * describe the window for display and for the adoption flow that follows.
+ * describe the window for display and for the adoption pass that stamps them.
  *
  * WHY A TAG AT ALL. A managed window has historically been identified by its
  * NAME, and a name can only say what was known when the window was created. For
@@ -80,10 +80,10 @@ export const SESSION_ID_OPTION = "@cl_session_id";
 export const SOURCE_OPTION = "@cl_source";
 /**
  * How agendo came to manage this window: `launched` (agendo created it) or
- * `adopted` (it was already running and agendo took it over). Display today;
- * the adoption flow will read it to be more conservative on `close`, since
- * killing a window the user opened by hand is not the same act as killing one
- * agendo opened for them.
+ * `adopted` (it was already running and agendo took it over — see
+ * src/app/model/adopt.ts). Display today; a later `close` may read it to be
+ * more conservative, since killing a window the user opened by hand is not the
+ * same act as killing one agendo opened for them.
  */
 export const ACQUIRED_OPTION = "@cl_acquired";
 /** Git branch the window was launched on. Display only. */
@@ -96,9 +96,9 @@ export const ITEM_OPTION = "@cl_item";
 /**
  * How agendo came to manage a window (see `ACQUIRED_OPTION`). `launched` is
  * every window agendo created itself; `adopted` is one that was already running
- * when agendo took it over. Nothing mints `adopted` yet — the adoption flow is a
- * later stage — but the vocabulary is fixed here so a window tagged today is
- * still readable when it arrives.
+ * when agendo took it over — a window the user opened by hand and typed
+ * `claude` into, identified and stamped by the adoption pass
+ * (src/app/model/adopt.ts).
  */
 export type WindowAcquisition = "launched" | "adopted";
 

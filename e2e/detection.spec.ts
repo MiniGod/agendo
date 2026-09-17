@@ -3582,3 +3582,69 @@ test.describe("reconcileLive: window index, host session, duplicate locations, p
     expect(r.liveWindows.get(canon)?.session).toBe("work");
   });
 });
+
+// ── window adoption ────────────────────────────────────────────────────────────
+// A window the user opened by hand (`ctrl+b c`, `claude`) is taken over by the
+// adoption pass (src/app/model/adopt.ts): tagged `@cl_session_id` + `adopted`
+// and renamed to the canonical name — or, when it shares its window with
+// something else, stamped `@cl_pane_target` on the pane alone. From then on it
+// must attribute EXACTLY like a launched window: through the tag first, the name
+// second. These pin that an adopted target lands in `liveWindows` under its
+// canonical name, since that map is what `send`, `close` and the menu act on.
+// The decision rules themselves (what is never adopted) are pure and live in
+// test/adopt.test.ts; this is the attribution half.
+import { planAdoptions, adoptedTags } from "../src/app/model/index.ts";
+import type { LivePane } from "../src/runtime/tmux/index.ts";
+
+test.describe("window adoption: an adopted window attributes like a launched one", () => {
+  const sid = "0e6e2941-73bb-4f49-ab40-c921bc6959f5";
+  const s = sess(sid, "/repo", 1_000);
+  const canon = sessionName(s);
+
+  test("a window-adopted target resolves through its tag, under the canonical name, as `resumed`", () => {
+    // After adoption the window is named canonically AND tagged. The tag is what
+    // it rests on: even with the name lost, the full id attributes it.
+    const r = reconcileLive(
+      new Set([canon]),
+      [{ name: canon, target: `=agendo:=${canon}`, cwd: "/repo", placeholder: false, session: "agendo", windowIndex: "3", tags: adoptedTags(s) }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveKinds.get(canon)).toBe("resumed");
+    expect(r.liveWindows.get(canon)?.target).toBe(`=agendo:=${canon}`);
+    expect(r.liveWindowLocations.get(canon)).toEqual(["agendo:3"]);
+  });
+
+  test("the tag alone carries it: a rename that did not land still attributes by the full id", () => {
+    const r = reconcileLive(
+      new Set(),
+      [{ name: "cl-wi-0", target: "=agendo:=cl-wi-0", cwd: "/repo", placeholder: false, session: "agendo", windowIndex: "3", tags: adoptedTags(s) }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+  });
+
+  test("a pane-adopted target attributes by its canonical pane name, addressed by pane id", () => {
+    // The same shape the global orchestrator has: no window of its own, the
+    // managed name on the pane, the `%N` id as the handle.
+    const r = reconcileLive(
+      new Set(),
+      [{ name: canon, target: "%7", cwd: "/repo", placeholder: false, session: "agendo", windowIndex: null }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveWindows.get(canon)?.target).toBe("%7");
+    expect(r.liveWindowLocations.has(canon)).toBe(false);
+  });
+
+  test("the plan names the pane the record points at and nothing else in the host", () => {
+    const panes: LivePane[] = [
+      { session: "agendo", window: "launcher", windowIndex: "0", paneId: "%1", cwd: "/home", dead: false, placeholder: false, paneTarget: "" },
+      { session: "agendo", window: "cl-claude-launched", windowIndex: "1", paneId: "%2", cwd: "/repo", dead: false, placeholder: false, paneTarget: "" },
+      { session: "agendo", window: "bash", windowIndex: "2", paneId: "%3", cwd: "/repo", dead: false, placeholder: false, paneTarget: "" },
+    ];
+    const rec = { pid: process.pid, sessionId: sid, cwd: "/repo", tmux: { session: "agendo", pane: "%3" }, configDir: "/home/.claude" };
+    const plans = planAdoptions({ host: "agendo", panes, records: [rec], sessions: [s], live: new Set(), selfPane: "%1" });
+    expect(plans.map((p) => [p.shape, p.paneId, p.name])).toEqual([["window", "%3", canon]]);
+  });
+});

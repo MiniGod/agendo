@@ -345,12 +345,60 @@ export function splitPaneIn(target: string, name: string, cwd: string, argv: str
   // starts a rival beside it. A pane we cannot name is worse than no pane, so the
   // status is checked (not thrown away by `tmuxQuiet`) and a failed stamp takes
   // the pane back down, leaving the caller to open a window instead.
-  const stamped = spawnSync("tmux", ["set-option", "-p", "-t", pane, PANE_TARGET_OPTION, name], { stdio: "ignore" });
-  if (stamped.status !== 0) {
+  if (!stampPaneTarget(pane, name)) {
     tmuxQuiet(["kill-pane", "-t", pane]);
     return null;
   }
   return pane;
+}
+
+/**
+ * Stamp a pane with the managed name it hosts (`@cl_pane_target`, see
+ * `PANE_TARGET_OPTION`) and report whether tmux accepted it. The status is
+ * load-bearing for both callers — `splitPaneIn` takes an unstampable pane back
+ * down, and adoption must not believe it manages a pane it cannot name — so
+ * this is not routed through `tmuxQuiet`.
+ */
+export function stampPaneTarget(pane: string, name: string): boolean {
+  return spawnSync("tmux", ["set-option", "-p", "-t", pane, PANE_TARGET_OPTION, name], { stdio: "ignore" }).status === 0;
+}
+
+/**
+ * Rename the window holding `target` (any tmux window ref; adoption passes a
+ * pane id, which tmux resolves to its window) and pin the new name so neither
+ * tmux's automatic-rename nor the program inside can change it back — a window
+ * the user opened by hand has automatic-rename ON, and without the pin tmux
+ * would rename it after its command again within the second. The only
+ * `rename-window` in the tree, kept here with every other command that changes
+ * the server.
+ *
+ * Not routed through `tmuxQuiet`: a rename that did not land leaves the window
+ * tagged but not id-bearing, which is worth knowing (see `adoptWindow`).
+ */
+export function renameWindow(target: string, name: string): boolean {
+  const ok = spawnSync("tmux", ["rename-window", "-t", target, name], { stdio: "ignore" }).status === 0;
+  if (ok) pinName(target);
+  return ok;
+}
+
+/**
+ * Take over a window agendo did not create: stamp it with the session it has
+ * been identified as running (see `stampWindowTags`) and rename it to the
+ * canonical managed name so it is id-bearing from here on. Backs window
+ * adoption (src/app/model/adopt.ts); the identification itself is that
+ * module's business, this only applies its verdict.
+ *
+ * The TAG goes first and is what adoption rests on: it is the authoritative
+ * attribution tier, and it is what marks the window `adopted` rather than
+ * `launched`. The rename is the fallback tier and the visible half — the name
+ * a user sees in the status bar. Either write can fail on a pane that exited
+ * between the listing and here; the caller learns which, and a window whose
+ * tag landed but whose rename did not still attributes correctly.
+ */
+export function adoptWindow(target: string, name: string, tags: WindowTags): { tagged: boolean; renamed: boolean } {
+  const tagged = stampWindowTags(target, tags);
+  const renamed = tagged && renameWindow(target, name);
+  return { tagged, renamed };
 }
 
 /**

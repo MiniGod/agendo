@@ -5,7 +5,7 @@ import { spawnSync } from "child_process";
 import { tmuxLines } from "./exec.ts";
 import {
   ID_BEARING_NAME, PANE_TARGET_OPTION, PLACEHOLDER_OPTION, ROOT_OPTION,
-  insideTmux, isPaneHosted, type LiveTarget, type ManagedTarget,
+  insideTmux, isPaneHosted, type LiveTarget, type ManagedTarget, type WindowTags,
 } from "./names.ts";
 import { parseWindowTags, windowTagsFormat } from "./tags.ts";
 
@@ -140,6 +140,58 @@ export function liveTargets(): Map<string, string> {
 }
 
 /**
+ * One pane as the live scan reads it: every field the scan's single
+ * `list-panes -a` asks for, before anything is decided about it. The raw
+ * material for both `managedFromPanes` (the managed targets, as always) and
+ * window adoption (src/app/model/adopt.ts), which needs to see the panes that
+ * are NOT managed yet — and which therefore could not be served by a listing
+ * that already filtered them out.
+ */
+export interface LivePane {
+  session: string;
+  window: string;
+  windowIndex: string;
+  paneId: string;
+  cwd: string;
+  /** A `remain-on-exit` corpse: the pane is listed but nothing runs in it. */
+  dead: boolean;
+  /** The window carries `@cl_placeholder` (see `PLACEHOLDER_OPTION`). */
+  placeholder: boolean;
+  /** The pane's own `@cl_pane_target`, or empty (see `PANE_TARGET_OPTION`). */
+  paneTarget: string;
+  /** The window's tag, when it carries one (see `ManagedTarget.tags`). */
+  tags?: WindowTags;
+}
+
+/**
+ * Every live pane across every session, in one `list-panes -a`. A pane with no
+ * `pane_current_path` (tmux reports none for some dead panes) is skipped, as it
+ * always was in `liveManagedPaths`.
+ *
+ * The window tag rides along in the SAME read — a user option costs no extra
+ * tmux invocation, which is the whole reason this mechanism is affordable on a
+ * path the app polls (see `windowTagsFormat`). `pane_dead` is read here for the
+ * adoption pass; nothing about a managed target's reading changes with it.
+ */
+export function livePanes(): LivePane[] {
+  const out: LivePane[] = [];
+  for (const line of tmuxLines([
+    "list-panes",
+    "-a",
+    "-F",
+    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}\t#{window_index}\t#{pane_dead}\t${windowTagsFormat("\t")}`,
+  ])) {
+    const [session, window, cwd, placeholder, paneId, paneTarget, windowIndex, dead, ...tagFields] = line.split("\t");
+    if (!cwd) continue;
+    out.push({
+      session, window, windowIndex, paneId, cwd,
+      dead: dead === "1", placeholder: placeholder === "1", paneTarget: paneTarget ?? "", tags: parseWindowTags(tagFields),
+    });
+  }
+  return out;
+}
+
+/**
  * Every live managed (`cl-…`) target paired with the working directory of its
  * pane. A pane contributes its session name and/or window name, whichever is a
  * managed target — plus, for a session the launcher parked in someone else's
@@ -149,19 +201,17 @@ export function liveTargets(): Map<string, string> {
  * them, so they register as running.
  */
 export function liveManagedPaths(): ManagedTarget[] {
+  return managedFromPanes(livePanes());
+}
+
+/**
+ * The managed targets among `panes` — the pure half of `liveManagedPaths`,
+ * split out so a caller that already holds the pane listing (the live scan,
+ * which also feeds it to adoption) does not run `list-panes` twice.
+ */
+export function managedFromPanes(panes: LivePane[]): ManagedTarget[] {
   const out: ManagedTarget[] = [];
-  for (const line of tmuxLines([
-    "list-panes",
-    "-a",
-    "-F",
-    `#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_id}\t#{${PANE_TARGET_OPTION}}\t#{window_index}\t${windowTagsFormat("\t")}`,
-  ])) {
-    const [session, window, cwd, placeholder, paneId, paneTarget, windowIndex, ...tagFields] = line.split("\t");
-    if (!cwd) continue;
-    // The window tag rides along in the SAME read — a user option costs no extra
-    // tmux invocation, which is the whole reason this mechanism is affordable on
-    // a path the app polls (see `windowTagsFormat`).
-    const tags = parseWindowTags(tagFields);
+  for (const { session, window, cwd, placeholder, paneId, paneTarget, windowIndex, tags } of panes) {
     // A pane-hosted session: its managed name is on the PANE, and the pane id is
     // how everything downstream (capture, send-keys, navigate) reaches it — no
     // `exactTarget` pin needed, since `%N` cannot be a prefix of another target.
@@ -174,7 +224,7 @@ export function liveManagedPaths(): ManagedTarget[] {
     // pane-hosted session is a lodger in somebody else's window (the menu), so
     // whatever tag that window carries describes its owner and not this session.
     // `stampManagedWindow` refuses to write one here for the same reason.
-    if (paneTarget?.startsWith("cl-") && paneId) {
+    if (paneTarget.startsWith("cl-") && paneId) {
       out.push({ name: paneTarget, target: paneId, cwd, placeholder: false, session, windowIndex: null });
     }
     // The marker is a *window* option, so it only attributes to the window name
@@ -186,7 +236,7 @@ export function liveManagedPaths(): ManagedTarget[] {
     // as qualifier or it is unreadable from anywhere else (#39).
     for (const [name, isWindow, isPlaceholder] of [
       [session, false, false],
-      [window, true, placeholder === "1"],
+      [window, true, placeholder],
     ] as const) {
       // Built only for a name we keep: `exactTarget("")` is `=`, which tmux reads
       // as the `{mouse}` target — it would silently address wherever the pointer
