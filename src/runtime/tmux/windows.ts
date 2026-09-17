@@ -72,8 +72,18 @@ export function killSession(name: string): void {
  * throws the exit status away, so "we asked" is not "it's gone".
  */
 export function killPane(pane: string, name: string): boolean {
-  tmuxQuiet(["kill-pane", "-t", pane]);
+  killPaneById(pane);
   return paneLocation(name) === null;
+}
+
+/**
+ * `kill-pane` on a pane id and nothing else — for a caller that is not killing
+ * a pane-HOSTED session (window adoption retiring a restore placeholder, which
+ * is a window and never carries `@cl_pane_target`), so `killPane`'s follow-up
+ * lookup would answer a question nobody asked.
+ */
+export function killPaneById(pane: string): void {
+  tmuxQuiet(["kill-pane", "-t", pane]);
 }
 
 /**
@@ -171,6 +181,23 @@ export interface LauncherWindow {
   cwd: string;
   /** The window's tag, when it carries one — see `ManagedTarget.tags`. */
   tags?: WindowTags;
+}
+
+/**
+ * Whether pane `paneId` still sits in a live placeholder window — the check
+ * window adoption makes right before killing a paused tab's pane, against the
+ * TARGET of the kill rather than against a window name. `@cl_placeholder` is a
+ * window option; tmux resolves it for each pane of the window the id names, so
+ * the line carrying this pane id answers for it. A pane that is gone, dead, or
+ * no longer under the flag (the user woke the tab into a real agent) is not a
+ * placeholder, and the kill must not happen.
+ */
+export function isPlaceholderPane(paneId: string): boolean {
+  for (const line of tmuxLines(["list-panes", "-t", paneId, "-F", `#{pane_id}\t#{?${PLACEHOLDER_OPTION},1,0}\t#{pane_dead}`])) {
+    const [id, placeholder, dead] = line.split("\t");
+    if (id === paneId) return placeholder === "1" && dead !== "1";
+  }
+  return false;
 }
 
 /**
@@ -345,12 +372,64 @@ export function splitPaneIn(target: string, name: string, cwd: string, argv: str
   // starts a rival beside it. A pane we cannot name is worse than no pane, so the
   // status is checked (not thrown away by `tmuxQuiet`) and a failed stamp takes
   // the pane back down, leaving the caller to open a window instead.
-  const stamped = spawnSync("tmux", ["set-option", "-p", "-t", pane, PANE_TARGET_OPTION, name], { stdio: "ignore" });
-  if (stamped.status !== 0) {
+  if (!stampPaneTarget(pane, name)) {
     tmuxQuiet(["kill-pane", "-t", pane]);
     return null;
   }
   return pane;
+}
+
+/**
+ * Stamp a pane with the managed name it hosts (`@cl_pane_target`, see
+ * `PANE_TARGET_OPTION`) and report whether tmux accepted it. The status is
+ * load-bearing for both callers — `splitPaneIn` takes an unstampable pane back
+ * down, and adoption must not believe it manages a pane it cannot name — so
+ * this is not routed through `tmuxQuiet`.
+ */
+export function stampPaneTarget(pane: string, name: string): boolean {
+  return spawnSync("tmux", ["set-option", "-p", "-t", pane, PANE_TARGET_OPTION, name], { stdio: "ignore" }).status === 0;
+}
+
+/**
+ * Rename the window holding `target` (any tmux window ref; adoption passes a
+ * pane id, which tmux resolves to its window) and pin the new name so neither
+ * tmux's automatic-rename nor the program inside can change it back — a window
+ * the user opened by hand has automatic-rename ON, and without the pin tmux
+ * would rename it after its command again within the second. The only
+ * `rename-window` in the tree, kept here with every other command that changes
+ * the server.
+ *
+ * Not routed through `tmuxQuiet`: a rename that did not land leaves the window
+ * tagged but not id-bearing, which is worth knowing (see `adoptWindow`).
+ */
+function renameWindow(target: string, name: string): boolean {
+  const ok = spawnSync("tmux", ["rename-window", "-t", target, name], { stdio: "ignore" }).status === 0;
+  if (ok) pinName(target);
+  return ok;
+}
+
+/**
+ * Take over a window agendo did not create: stamp it with the session it has
+ * been identified as running (see `stampWindowTags`) and rename it to the
+ * canonical managed name so it is id-bearing from here on. Backs window
+ * adoption (src/app/model/adopt.ts); the identification itself is that
+ * module's business, this only applies its verdict.
+ *
+ * The TAG goes first and is what adoption rests on: it is the authoritative
+ * attribution tier, and it is what marks the window `adopted` rather than
+ * `launched`. The rename is the visible half — the name a user sees in the
+ * status bar — and the half the live listing keys on: `managedFromPanes` and
+ * the restore capture read only `cl-*` windows, so a window whose tag landed
+ * but whose rename did not is still named after its command and stays
+ * INVISIBLE to both. That is not a stranded state: it is still shaped like an
+ * unmanaged window and still not live, so the next scan plans it again and
+ * retries both writes. Either write can fail on a pane that exited between the
+ * listing and here; the caller counts the adoption as taken only when both did.
+ */
+export function adoptWindow(target: string, name: string, tags: WindowTags): { tagged: boolean; renamed: boolean } {
+  const tagged = stampWindowTags(target, tags);
+  const renamed = tagged && renameWindow(target, name);
+  return { tagged, renamed };
 }
 
 /**

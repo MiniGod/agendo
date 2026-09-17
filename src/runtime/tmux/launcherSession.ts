@@ -5,7 +5,7 @@
 // this module composes windows.ts's `pinName` rather than duplicating it.
 import { spawnSync } from "child_process";
 import { tmuxLines, tmuxQuiet } from "./exec.ts";
-import { LAUNCHER_SESSION, PANE_TARGET_OPTION, insideTmux } from "./names.ts";
+import { LAUNCHER_SESSION, LAUNCHER_WINDOW, PANE_TARGET_OPTION, insideTmux } from "./names.ts";
 import { exactTarget, hasSession, setSessionRoot, windowTarget } from "./server.ts";
 import { pinName } from "./windows.ts";
 
@@ -18,7 +18,7 @@ import { pinName } from "./windows.ts";
  * the user happened to call "launcher-notes" could be split in place of the menu.
  */
 export function launcherWindowTarget(session: string): string {
-  return windowTarget(session, "launcher");
+  return windowTarget(session, LAUNCHER_WINDOW);
 }
 
 /**
@@ -113,10 +113,10 @@ function spawnLauncherWindow(session: string, cwd: string, launcherArgv: string[
   tmuxQuiet(["kill-window", "-t", launcherWindowTarget(session)]); // no-op if none exists
   spawnSync(
     "tmux",
-    ["new-window", "-d", "-t", exactTarget(session), "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+    ["new-window", "-d", "-t", exactTarget(session), "-n", LAUNCHER_WINDOW, "-c", cwd, "--", ...launcherArgv],
     { stdio: "ignore" },
   );
-  pinName(`${exactTarget(session)}:launcher`);
+  pinName(`${exactTarget(session)}:${LAUNCHER_WINDOW}`);
   moveWindowToFront(launcherWindowTarget(session), session);
 }
 
@@ -152,10 +152,10 @@ export function enterLauncherSession(
   if (!hasSession(session)) {
     spawnSync(
       "tmux",
-      ["new-session", "-d", "-s", session, "-n", "launcher", "-c", cwd, "--", ...launcherArgv],
+      ["new-session", "-d", "-s", session, "-n", LAUNCHER_WINDOW, "-c", cwd, "--", ...launcherArgv],
       { stdio: "inherit" },
     );
-    pinName(`${exactTarget(session)}:launcher`);
+    pinName(`${exactTarget(session)}:${LAUNCHER_WINDOW}`);
     // `base-index` (a common user tmux setting) puts a fresh session's first
     // window at index 1, not 0 — `new-session` has no flag to override that, so
     // the menu is moved to the front right after creation instead, and before
@@ -180,7 +180,7 @@ export function enterLauncherSession(
     spawnLauncherWindow(session, cwd, launcherArgv);
   }
   // Land on the menu window specifically, not whatever window was last active.
-  tmuxQuiet(["select-window", "-t", `${exactTarget(session)}:launcher`]);
+  tmuxQuiet(["select-window", "-t", `${exactTarget(session)}:${LAUNCHER_WINDOW}`]);
   const verb = insideTmux() ? ["switch-client"] : ["attach-session"];
   spawnSync("tmux", [...verb, "-t", exactTarget(session)], { stdio: "inherit" });
 }

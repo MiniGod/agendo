@@ -34,6 +34,8 @@ import { resolveContext, isUnderRoot, tmuxSafeName, normalizeCwd } from "../src/
 import { SessionIndex } from "../src/sessions/index.ts";
 import { resolveScopeRoots, makeSessionScope, describeScope, scopeFilter } from "../src/app/scope.ts";
 import type { AgentSession, PullRequest, WorkItem } from "../src/shared/types.ts";
+import { planAdoptions, adoptedTags } from "../src/app/model/index.ts";
+import type { LivePane } from "../src/runtime/tmux/index.ts";
 
 // Minimal session factory — only the fields the attribution logic reads.
 function sess(id: string, cwd: string, lastUsedMs: number, source: AgentSession["source"] = "claude"): AgentSession {
@@ -3580,5 +3582,77 @@ test.describe("reconcileLive: window index, host session, duplicate locations, p
     );
     expect(r.placeholderWindows.has(canon)).toBe(false);
     expect(r.liveWindows.get(canon)?.session).toBe("work");
+  });
+});
+
+// ── window adoption ────────────────────────────────────────────────────────────
+// A window the user opened by hand (`ctrl+b c`, `claude`) is taken over by the
+// adoption pass (src/app/model/adopt.ts): tagged `@cl_session_id` + `adopted`
+// and renamed to the canonical name — or, when it shares its window with
+// something else, stamped `@cl_pane_target` on the pane alone. From then on it
+// must attribute EXACTLY like a launched window: through the tag first, the name
+// second. These pin that an adopted target lands in `liveWindows` under its
+// canonical name, since that map is what `send`, `close` and the menu act on.
+// The decision rules themselves (what is never adopted) are pure and live in
+// test/adopt.test.ts; this is the attribution half.
+
+test.describe("window adoption: an adopted window attributes like a launched one", () => {
+  const sid = "0e6e2941-73bb-4f49-ab40-c921bc6959f5";
+  const s = sess(sid, "/repo", 1_000);
+  const canon = sessionName(s);
+
+  test("a window-adopted target attributes under its canonical name as `resumed`, shaped like a launched one", () => {
+    // After adoption the window is named canonically AND tagged, so this is the
+    // steady state; either tier would attribute it. That the TAG is what it
+    // rests on is the next test's job, where the name carries no id.
+    const r = reconcileLive(
+      new Set([canon]),
+      [{ name: canon, target: `=agendo:=${canon}`, cwd: "/repo", placeholder: false, session: "agendo", windowIndex: "3", tags: adoptedTags(s) }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveKinds.get(canon)).toBe("resumed");
+    expect(r.liveWindows.get(canon)?.target).toBe(`=agendo:=${canon}`);
+    expect(r.liveWindowLocations.get(canon)).toEqual(["agendo:3"]);
+  });
+
+  test("the tag beats an id-less `cl-*` name: the full id attributes it, not the name", () => {
+    // The listing only ever reads `cl-*` windows, so this is NOT the case of a
+    // rename that failed to land — such a window is still named after its
+    // command, invisible here, and re-planned by the next scan (see
+    // `adoptWindow`). It is the case the tag tier exists for: a managed name
+    // that carries no id, where without the tag the cwd heuristic would decide.
+    const r = reconcileLive(
+      new Set(),
+      [{ name: "cl-wi-0", target: "=agendo:=cl-wi-0", cwd: "/repo", placeholder: false, session: "agendo", windowIndex: "3", tags: adoptedTags(s) }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+  });
+
+  test("a pane-adopted target attributes by its canonical pane name, addressed by pane id", () => {
+    // The same shape the global orchestrator has: no window of its own, the
+    // managed name on the pane, the `%N` id as the handle.
+    const r = reconcileLive(
+      new Set(),
+      [{ name: canon, target: "%7", cwd: "/repo", placeholder: false, session: "agendo", windowIndex: null }],
+      [s],
+    );
+    expect(r.live.has(canon)).toBe(true);
+    expect(r.liveWindows.get(canon)?.target).toBe("%7");
+    expect(r.liveWindowLocations.has(canon)).toBe(false);
+  });
+
+  test("the plan names the pane the record points at and nothing else in the host", () => {
+    const panes: LivePane[] = [
+      { session: "agendo", window: "launcher", windowIndex: "0", paneId: "%1", cwd: "/home", dead: false, placeholder: false, paneTarget: "" },
+      { session: "agendo", window: "cl-claude-launched", windowIndex: "1", paneId: "%2", cwd: "/repo", dead: false, placeholder: false, paneTarget: "" },
+      { session: "agendo", window: "bash", windowIndex: "2", paneId: "%3", cwd: "/repo", dead: false, placeholder: false, paneTarget: "" },
+    ];
+    const rec = { sessionId: sid, cwd: "/repo", tmux: { session: "agendo", pane: "%3" } };
+    const plans = planAdoptions({
+      host: "agendo", panes, records: [rec], sessions: [s], live: new Set(), selfPane: "%1",
+    });
+    expect(plans.map((p) => [p.shape, p.paneId, p.name])).toEqual([["window", "%3", canon]]);
   });
 });
