@@ -53,6 +53,9 @@ export default function App({
 }) {
   const { exit } = useApp();
   const [model, setModel] = useState<LoadedModel | null>(null);
+  // Lets the mount-only local-rescan interval read the latest committed
+  // snapshot without re-arming its effect.
+  const modelRef = useRef<LoadedModel | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [toggles, setToggles] = useState<Set<string>>(new Set());
   const [view, setView] = useState<View>("items");
@@ -119,7 +122,7 @@ export default function App({
       : null;
   });
 
-  const { error, retrying, reload } = useModelLoader({
+  const { error, retrying, loadState: modelLoadState, reload } = useModelLoader({
     provider,
     identity,
     hostSession,
@@ -156,9 +159,6 @@ export default function App({
   // cache it (keyed by session identity). A ref dedupes in-flight requests so
   // it's safe to call on every expand/collapse — it fetches each session once.
   const requested = useRef<Set<string>>(new Set());
-  // Mirror `model` into a ref so the mount-only liveness interval reads the
-  // current sessions without a stale closure and without re-arming the timer.
-  const modelRef = useRef<LoadedModel | null>(null);
   // Same, for the path context's repos — an `r` rescan can replace them.
   const discoveredReposRef = useRef(discoveredRepos);
   useEffect(() => { discoveredReposRef.current = discoveredRepos; }, [discoveredRepos]);
@@ -340,9 +340,8 @@ export default function App({
   // Every overlay screen lives in ./screens/ModeScreens.tsx as a plain function
   // returning JSX rather than a component, so App's element tree — and with it
   // the reconciler's behaviour — is exactly what it was when this was inline.
-  const loadScreen = renderLoadState({ error, retrying });
-  if (loadScreen) return loadScreen;
-  if (!model) return <Text><Text color="cyan">⟳</Text> Loading work items, PRs & sessions…</Text>;
+  if (!model) return renderLoadState({ error, retrying })
+    ?? <Text><Text color="cyan">⟳</Text> Loading sessions…</Text>;
   if (busy) return <Text><Text color="cyan">⟳</Text> {busy}</Text>;
 
   const modal = renderMode({
@@ -377,6 +376,8 @@ export default function App({
       moreBelow={moreBelow}
       notice={notice}
       panes={panes}
+      loadState={modelLoadState}
+      retrying={retrying}
     />
   );
 }

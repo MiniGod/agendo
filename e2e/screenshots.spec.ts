@@ -22,6 +22,7 @@ function stable(grid: string, home: string): string {
   return grid
     .split(home).join("<HOME>") // random per-run temp dir → placeholder
     .replace(/\b\d+[smhd] ago\b/g, "<ago>")
+    .replace(/\b\d+[smhd] a…/g, "<ago>")
     .replace(/\+\d+[smhd]\b/g, "<+d>")
     .replace(/[ \t]+$/gm, "")
     .replace(/\n+$/g, "");

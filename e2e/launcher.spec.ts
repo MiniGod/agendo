@@ -632,7 +632,9 @@ async function waitUntil(fn: () => Promise<boolean>, timeoutMs = 8000): Promise<
 
 test("work items view: sprint grouping, PR badge, running count, backlog toggle", async ({ launch }) => {
   const wt = await launch();
-  const screen = await wt.waitForText("Current sprint", 20000);
+  // The items slice intentionally renders before the slower PR enrichment.
+  // Wait for the enriched badge before asserting the final combined row.
+  const screen = await wt.waitForText("!5001 1/1 ✓", 20000);
 
   // Current iteration name comes from the mocked ADO iterations endpoint.
   expect(screen).toContain("Sprint 42");
@@ -649,7 +651,9 @@ test("work items view: sprint grouping, PR badge, running count, backlog toggle"
 
 test("backlog toggle expands to reveal the older-sprint item", async ({ launch }) => {
   const wt = await launch();
-  await wt.waitForText("Everything else assigned (1)", 20000);
+  // The backlog is available at the items stage, but navigation should start
+  // only after the final PR enrichment can no longer replace rows mid-keypress.
+  await wt.waitForText("!5001 1/1 ✓", 20000);
   await wt.waitForStable();
   // Move to the toggle row (item101 → item102 → toggle) and open it.
   await wt.press(KEY.down);

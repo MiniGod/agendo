@@ -4,7 +4,7 @@ import { getProvider } from "../../providers/index.ts";
 import { SessionIndex } from "../../sessions/index.ts";
 import { captureRestore } from "../../runtime/restore/index.ts";
 import { discoverRepos, mergeRepos, repoScopeKeys } from "../../repositories/index.ts";
-import type { PRWithSessions, RepoSessions, WorkItem } from "../../shared/types.ts";
+import type { PRWithSessions, WorkItem } from "../../shared/types.ts";
 import { refreshLiveTmux } from "./live.ts";
 import { groupSessionsByRepo } from "./scope.ts";
 import {
@@ -27,6 +27,69 @@ export {
   filterModelByRepos, groupSessionsByRepo, itemInRepoScope, itemKey, prInRepoScope, prKey,
 } from "./scope.ts";
 
+/**
+ * One independently useful result from a model load. The TUI applies these as
+ * they arrive; CLI callers keep using `loadModel`, which awaits the same
+ * pipeline and receives only its final, internally consistent snapshot.
+ */
+export interface ModelStage {
+  kind: "local" | "identity" | "items" | "team" | "complete";
+  update(previous: LoadedModel | null): LoadedModel;
+}
+
+type StageListener = (stage: ModelStage) => void;
+
+const LOADING_IDENTITY = { id: "", displayName: "Loading identity…", uniqueName: "" };
+
+function localFields(local: LocalSessions) {
+  return {
+    liveTmux: local.live,
+    liveKinds: local.liveKinds,
+    liveWindows: local.liveWindows,
+    livePlaceholders: local.livePlaceholders,
+    placeholderWindows: local.placeholderWindows,
+    liveWindowLocations: local.liveWindowLocations,
+    sessionGroups: local.sessionGroups,
+  };
+}
+
+/** Build the session-usable shell published before any backend request finishes. */
+function modelFromLocal(opts: LoadModelOptions, local: LocalSessions, previous: LoadedModel | null): LoadedModel {
+  const scopeRepos = opts.scopeRepos ?? [];
+  const repos = mergeRepos(local.repos, scopeRepos);
+  const repoScope = scopeRepos.length > 0 ? repoScopeKeys(scopeRepos) : null;
+  if (previous?.provider === opts.provider) {
+    return { ...previous, ...localFields(local), repos, repoScope };
+  }
+  return {
+    provider: opts.provider,
+    current: [], other: [], linkedPrs: [], reviewPrs: [], orphanPrs: [], prLinked: [],
+    currentIterationName: null,
+    ...localFields(local),
+    repos,
+    repoScope,
+    sessionLinks: new Map(),
+    me: LOADING_IDENTITY,
+    identity: opts.identity ?? LOADING_IDENTITY,
+    teamMembers: [],
+  };
+}
+
+function completeWithFreshLocal(previous: LoadedModel | null, complete: LoadedModel): LoadedModel {
+  if (!previous || previous.provider !== complete.provider) return complete;
+  return {
+    ...complete,
+    liveTmux: previous.liveTmux,
+    liveKinds: previous.liveKinds,
+    liveWindows: previous.liveWindows,
+    livePlaceholders: previous.livePlaceholders,
+    placeholderWindows: previous.placeholderWindows,
+    liveWindowLocations: previous.liveWindowLocations,
+    repos: previous.repos,
+    sessionGroups: previous.sessionGroups,
+  };
+}
+
 export async function loadLocalSessions(): Promise<LocalSessions> {
   const index = await SessionIndex.build();
   const repos = discoverRepos(index.all);
@@ -35,6 +98,46 @@ export async function loadLocalSessions(): Promise<LocalSessions> {
   const sessionGroups = groupSessionsByRepo(index.all);
   return {
     index, repos, sessionGroups, live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations,
+  };
+}
+
+interface ItemStage {
+  current: WorkItem[];
+  other: WorkItem[];
+  linkedPrs: ReturnType<typeof linkedPrsOf>;
+  currentIterationName: string | null;
+}
+
+function joinItems(
+  index: SessionLookup,
+  scopeToRepo: boolean,
+  items: Array<Omit<WorkItem, "sessions">>,
+  currentIterationPath: string | null,
+): ItemStage {
+  const full = items.map((it) => withSessions(index, scopeToRepo, it));
+  return {
+    current: full.filter((i) => i.inCurrentSprint),
+    other: full.filter((i) => !i.inCurrentSprint),
+    linkedPrs: linkedPrsOf(index, full),
+    currentIterationName: iterationName(currentIterationPath),
+  };
+}
+
+function applyItems(
+  previous: LoadedModel | null,
+  base: LoadedModel,
+  data: ItemStage,
+  me: LoadedModel["me"],
+  identity: LoadedModel["identity"],
+): LoadedModel {
+  const model = previous ?? base;
+  const allItems = [...data.current, ...data.other, ...model.prLinked];
+  return {
+    ...model,
+    ...data,
+    me,
+    identity,
+    sessionLinks: sessionLinksOf(data.linkedPrs, allItems, [...model.orphanPrs, ...model.reviewPrs]),
   };
 }
 
@@ -59,18 +162,28 @@ async function resolveOrphans(
   return { prLinked, remainingOrphans: orphanPrs.filter((pr) => !surfacedPrIds.has(pr.id)) };
 }
 
-export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
+export async function loadModelProgressively(opts: LoadModelOptions, onStage: StageListener): Promise<LoadedModel> {
   const provider = getProvider(opts.provider);
   // Invalidate any per-load backend caches so a refresh re-reads mutable state
   // (ADO's PR cache in particular — see Provider.beginLoad / ado.clearPrCache).
   provider.beginLoad?.();
-  // The session index drives both the local views and (for backends that scope
-  // to where you work, like GitHub) the fetch set, so build it up front. This is
-  // the cheap, network-free local scan the App also polls on its own (see
-  // loadLocalSessions) — reused here so the local half is computed one way.
-  const [me, local] = await Promise.all([provider.getMe(), loadLocalSessions()]);
+
+  // Publish the cheap local half without waiting for identity or any tracker
+  // request. This makes the Sessions tab usable during cold boot.
+  const localPromise = loadLocalSessions().then((local) => {
+    captureRestore(local.index, opts.hostSession);
+    onStage({ kind: "local", update: (previous) => modelFromLocal(opts, local, previous) });
+    return local;
+  });
+  const [me, local] = await Promise.all([provider.getMe(), localPromise]);
   const { index } = local;
   const identity = opts.identity ?? me;
+  const base = { ...modelFromLocal(opts, local, null), me, identity };
+  onStage({
+    kind: "identity",
+    update: (previous) => ({ ...(previous ?? base), me, identity }),
+  });
+
   // Fetch scope: the session-derived repos plus any repo found under the path
   // context, so a backend that queries per repo (GitHub) also covers a repo
   // inside the target that has never hosted a session. Unconditional — the
@@ -79,27 +192,34 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
   const repos = mergeRepos(local.repos, scopeRepos);
   const repoScope = scopeRepos.length > 0 ? repoScopeKeys(scopeRepos) : null;
   const ctx = { identity, repos };
-  const [{ items, currentIterationPath }, activePRs, reviewPRs, teamMembers] =
-    await Promise.all([
-      provider.fetchWorkItems(ctx),
-      provider.fetchActivePRs(ctx),
-      provider.fetchReviewPRs(ctx),
-      provider.getTeamMembers(),
-    ]);
-  const { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations } = local;
 
-  // Snapshot the host session's open agent tabs so a future startup can lazily
-  // restore them (browser-style). Cheap, idempotent, and no-op when that host
-  // session isn't running — fine to run on every (re)load.
-  captureRestore(index, opts.hostSession);
+  // Every independent backend call starts together. Work items and the team
+  // roster publish as soon as their own request finishes; the PR view waits for
+  // the three data sets it genuinely needs to classify linked/review/orphan PRs.
+  const itemPromise = provider.fetchWorkItems(ctx).then((result) => {
+    const data = joinItems(index, opts.provider === "github", result.items, result.currentIterationPath);
+    onStage({ kind: "items", update: (previous) => applyItems(previous, base, data, me, identity) });
+    return { ...result, data };
+  });
+  const teamPromise = provider.getTeamMembers().then((teamMembers) => {
+    onStage({
+      kind: "team",
+      update: (previous) => ({ ...(previous ?? base), teamMembers }),
+    });
+    return teamMembers;
+  });
+  const [{ currentIterationPath, data }, activePRs, reviewPRs, teamMembers] = await Promise.all([
+    itemPromise,
+    provider.fetchActivePRs(ctx),
+    provider.fetchReviewPRs(ctx),
+    teamPromise,
+  ]);
+  const { live, liveKinds, liveWindows, livePlaceholders, placeholderWindows, liveWindowLocations } = local;
 
   // The joins live in ./model/join.ts; see withSessions for the repo scoping.
   const scopeToRepo = opts.provider === "github";
-  const full: WorkItem[] = items.map((it) => withSessions(index, scopeToRepo, it));
-  const current = full.filter((i) => i.inCurrentSprint);
-  const other = full.filter((i) => !i.inCurrentSprint);
-
-  const linkedPrs = linkedPrsOf(index, full);
+  const { current, other, linkedPrs, currentIterationName } = data;
+  const full = [...current, ...other];
   const linkedPrIds = linkedPrKeys(full);
   const orphanPrs = orphanPrsOf(index, activePRs, linkedPrIds);
   const { prLinked, remainingOrphans } = await resolveOrphans(
@@ -118,14 +238,9 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     ...prLinked.flatMap((i) => i.prs),
   ]);
 
-  const currentIterationName = iterationName(currentIterationPath);
-
-  // Group every local session by the main repo of its worktree (Sessions view) —
-  // reused from the local scan above so grouping is defined once.
-  const sessionGroups: RepoSessions[] = local.sessionGroups;
   const sessionLinks = sessionLinksOf(linkedPrs, [...current, ...other, ...prLinked], [...remainingOrphans, ...reviewPrs]);
 
-  return {
+  const complete: LoadedModel = {
     provider: opts.provider,
     current,
     other,
@@ -142,10 +257,20 @@ export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
     liveWindowLocations,
     repos,
     repoScope,
-    sessionGroups,
+    sessionGroups: local.sessionGroups,
     sessionLinks,
     me,
     identity,
     teamMembers,
   };
+  onStage({
+    kind: "complete",
+    update: (previous) => completeWithFreshLocal(previous, complete),
+  });
+  return complete;
+}
+
+/** Atomic facade for commands and other non-interactive callers. */
+export async function loadModel(opts: LoadModelOptions): Promise<LoadedModel> {
+  return loadModelProgressively(opts, () => {});
 }
