@@ -1,6 +1,6 @@
 {
   "name": "agendo",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Terminal UI to launch/resume Claude, Copilot and Codex agent sessions for Azure DevOps work items",
   "repository": {
     "type": "git",

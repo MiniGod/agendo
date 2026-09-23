@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.2.3](https://github.com/MiniGod/agendo/compare/v0.2.2...v0.2.3) (2026-09-23)
+
+
+### Features
+
+* **cli:** add --version / -v to print the version ([#120](https://github.com/MiniGod/agendo/issues/120)) ([fc116ef](https://github.com/MiniGod/agendo/commit/fc116efe524f38170796b1f4c483b38d14dc247f)), closes [#119](https://github.com/MiniGod/agendo/issues/119)
+* **cli:** show paused sessions as a third state in list, send, and status ([#122](https://github.com/MiniGod/agendo/issues/122)) ([016e79d](https://github.com/MiniGod/agendo/commit/016e79dd13e88cf7dbc7bd09bb741b3f6399cfb5))
+* **orchestrator:** allow Codex to run orchestrator mode ([#124](https://github.com/MiniGod/agendo/issues/124)) ([91e0f8c](https://github.com/MiniGod/agendo/commit/91e0f8c64aef57d2794a5aa351c187b59e193f35))
+* **tmux:** tag managed windows with session identity and attribute by it ([#126](https://github.com/MiniGod/agendo/issues/126)) ([8083946](https://github.com/MiniGod/agendo/commit/8083946983e3abb5eecacc24c0fa8493ae7f61de)), closes [#124](https://github.com/MiniGod/agendo/issues/124) [#121](https://github.com/MiniGod/agendo/issues/121) [#125](https://github.com/MiniGod/agendo/issues/125) [#125](https://github.com/MiniGod/agendo/issues/125)
+* **ui:** load sessions and tracker data incrementally ([9f54bc9](https://github.com/MiniGod/agendo/commit/9f54bc9cb632afc749a75157767f78c84334faaa))
+* **ui:** show tmux session/window identity on expanded rows ([#121](https://github.com/MiniGod/agendo/issues/121)) ([719200b](https://github.com/MiniGod/agendo/commit/719200b7f936d26fbe89f5c192ef51b994090c96))
+
+
+### Bug Fixes
+
+* **restore:** expire a restore tab that never attributes to a session ([#125](https://github.com/MiniGod/agendo/issues/125)) ([56af8a3](https://github.com/MiniGod/agendo/commit/56af8a3877525c4bee741b6f034a94ffa46238bd))
+* **tmux:** always land the launcher menu window at index 0 ([#123](https://github.com/MiniGod/agendo/issues/123)) ([7e60ac6](https://github.com/MiniGod/agendo/commit/7e60ac69255884d7d9abfc339c7252abfe133159))
+
+
+### Refactoring
+
+* reorganize source into feature folders ([#119](https://github.com/MiniGod/agendo/issues/119)) ([3d7fda5](https://github.com/MiniGod/agendo/commit/3d7fda534b62192a5738836969249beda3c565cc))
+
 ## [0.2.2](https://github.com/MiniGod/agendo/compare/v0.2.1...v0.2.2) (2026-09-13)
 
 
