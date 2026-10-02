@@ -14,6 +14,7 @@ import { measureComplexity } from "./cc.ts";
 import { loadCoverage, relativize } from "./coverage.ts";
 import { summary, verdict } from "./report.ts";
 import { scoreAll } from "./score.ts";
+import { isolateTmux } from "../hermetic.ts";
 
 const ROOT = resolve(import.meta.dir, "..", "..");
 const OUT = join(ROOT, "coverage", "crap");
@@ -60,6 +61,9 @@ function writeShim(dir: string): void {
 }
 
 async function measure(playwrightArgs: string[]): Promise<void> {
+  // Both suites inherit this process's environment; keep them off the tmux
+  // server it was started from (scripts/hermetic.ts).
+  isolateTmux(process.env);
   rmSync(OUT, { recursive: true, force: true });
   mkdirSync(OUT, { recursive: true });
   const env = { AGENDO_CRAP_COVERAGE_DIR: OUT };

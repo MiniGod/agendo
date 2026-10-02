@@ -1,9 +1,18 @@
 import { defineConfig, devices } from "@playwright/test";
+import { isolateTmux } from "./scripts/hermetic.ts";
 
 // e2e tests render the Ink TUI in a real browser via the wterm harness. Each
 // test spawns the launcher in a PTY against a fully mocked environment (see
 // e2e/harness), so the suite is hermetic: no Azure DevOps, no real tmux server,
 // no git repos, no network.
+//
+// The harness builds each launcher's environment from scratch, but specs that
+// spawn a driver with `...process.env`, and src helpers a spec calls in-process,
+// see this runner's own environment — which, run from a tmux pane, names the
+// developer's live server. Workers inherit process.env, so isolating here
+// covers all of them.
+isolateTmux(process.env);
+
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
