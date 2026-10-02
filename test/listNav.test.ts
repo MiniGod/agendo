@@ -4,8 +4,9 @@
 // past a non-selectable row, → on an open leaf row, enter on every kind, the
 // vi letters, and the no-row edge, which is where the untested half of the
 // old handler lived.
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import type { Key } from "ink";
+import * as launch from "../src/launch/index.ts";
 import { handleListNavKeys, navKeyOf } from "../src/ui/keys/list.ts";
 import { ancestorIndex, depthOf, expandKeyOf, firstChildIndex, isExpandable, isOpen } from "../src/ui/keys/rowTree.ts";
 import type { Row } from "../src/ui/models/rows.ts";
@@ -142,9 +143,19 @@ describe("handleListNavKeys", () => {
 
   test("enter resumes a session, starts a fresh or new one, toggles an expandable, and ignores the rest", () => {
     const rows = [sess(false), fresh, { kind: "newsess" } as Row, item(false), header];
-    const s = ctxOver(rows, 0);
-    handleListNavKeys("", key({ return: true }), s as any);
-    expect(s.open).toHaveBeenCalledTimes(1);
+    // Resuming is `openSession`, which really runs tmux: unstubbed, this line
+    // opened a `cl-claude-s1` window running the real `claude` in whatever
+    // tmux session the suite was started from.
+    const plan: launch.OpenPlan = { alreadyRunning: false, tmuxName: "cl-claude-s1", mode: "inline", handover: [] };
+    const resume = spyOn(launch, "openSession").mockReturnValue(plan);
+    try {
+      const s = ctxOver(rows, 0);
+      handleListNavKeys("", key({ return: true }), s as any);
+      expect(resume.mock.calls).toEqual([[session, undefined]]);
+      expect(s.open.mock.calls).toEqual([[plan]]);
+    } finally {
+      resume.mockRestore();
+    }
     const f = ctxOver(rows, 1);
     handleListNavKeys("", key({ return: true }), f as any);
     expect(f.enterFresh.mock.calls).toEqual([[{ kind: "item" }]]);

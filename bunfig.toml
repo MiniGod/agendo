@@ -1,0 +1,7 @@
+[test]
+# Fences every `bun test` off the developer's tmux server and agent CLIs, and
+# fails any test that tries to reach them. See test/preload.ts.
+# bun reads this file from the directory it is started in only: run the suite
+# from the repo root (`bun run test`), never from inside test/, or every file
+# but test/hermetic.test.ts runs unfenced.
+preload = ["./test/preload.ts"]
