@@ -3,7 +3,14 @@
 # launcher makes, so no real Azure login is required.
 if [ -n "$FAKE_CALL_LOG" ]; then echo "az $*" >> "$FAKE_CALL_LOG"; fi
 case "$*" in
-  *get-access-token*) echo "fake-ado-token" ;;
+  # FAKE_AZ_ROTATE: mint a different token on every call (numbered by the
+  # call log), the way a real `az` does once its cached token is refreshed.
+  *get-access-token*)
+    if [ -n "$FAKE_AZ_ROTATE" ] && [ -n "$FAKE_CALL_LOG" ]; then
+      echo "fake-ado-token-$(grep -c get-access-token "$FAKE_CALL_LOG")"
+    else
+      echo "fake-ado-token"
+    fi ;;
   *) : ;;
 esac
 exit 0

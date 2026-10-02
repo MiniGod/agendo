@@ -38,9 +38,10 @@ export interface AdoServer {
   setResponse(match: RegExp, response: { status?: number; body?: unknown }): void;
   /**
    * setResponse's lower level: the body is written VERBATIM, so it can be
-   * invalid JSON on purpose — an HTML sign-in page served with a 2xx is what an
-   * expired ADO auth actually looks like, and it's the shape that produces a
-   * bare "Failed to parse JSON".
+   * invalid JSON on purpose — a proxy's plain-text page, which must surface as
+   * a contextual "Failed to parse JSON", or the HTML sign-in page served as 203
+   * that is what a refused ADO token actually looks like (classified as an auth
+   * failure by src/providers/azureDevOps/http.ts before any parse).
    *
    * `times` bounds how many matching requests the fault applies to (default:
    * every one), which is how a test makes a load fail once and succeed on the

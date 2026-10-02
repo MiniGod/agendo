@@ -27,10 +27,9 @@ const ITERATIONS = /_apis\/work\/teamsettings\/iterations$/i;
 // The token the fake `az` mints (e2e/fakebin/az). It must never reach the screen.
 const TOKEN = "fake-ado-token";
 
-// An expired Azure DevOps auth doesn't 401 — it answers 2xx with a sign-in page,
-// which is precisely how you end up parsing HTML as JSON. The token is embedded
-// on purpose: it proves the scrubber runs on the echoed body, not just that we
-// happen never to log the Authorization header.
+// A 2xx whose body isn't JSON — a misbehaving proxy answering in plain text.
+// The token is embedded on purpose: it proves the scrubber runs on the echoed
+// body, not just that we happen never to log the Authorization header.
 //
 // And it is positioned to STRADDLE the 200-char body-snippet cut: padded so the
 // token starts at char 194, six characters before the truncation point. Scrub
@@ -39,9 +38,26 @@ const TOKEN = "fake-ado-token";
 // prefix would be ~200 characters of live credential on screen. Scrub before
 // truncate (what the code does) and nothing survives.
 const TOKEN_AT = 194;
-const PAGE_HEAD = `<!DOCTYPE html><html><head><title>Sign in to your account</title></head><body>auth=`;
-const LOGIN_PAGE =
-  PAGE_HEAD + "x".repeat(TOKEN_AT - PAGE_HEAD.length) + TOKEN + "</body></html>";
+const PROXY_HEAD = `upstream proxy intercepted this request; auth=`;
+const PROXY_PAGE = PROXY_HEAD + "x".repeat(TOKEN_AT - PROXY_HEAD.length) + TOKEN + " end";
+
+// What an expired Azure DevOps auth actually looks like: not a 401 but a
+// redirect to /_signin, which fetch follows to an HTML page served as 203.
+// Parsed as JSON it was the "Failed to parse JSON … 203" the TUI showed until a
+// restart. The auth error never echoes an HTML body at all (it is suppressed,
+// not scrubbed), so the token embedded here can only leak if that regresses.
+const SIGNIN_HEAD = `<!DOCTYPE html><html><head><title>Azure DevOps Services | Sign In</title></head><body>auth=`;
+const LOGIN_PAGE = SIGNIN_HEAD + "x".repeat(TOKEN_AT - SIGNIN_HEAD.length) + TOKEN + "</body></html>";
+const SIGNIN = { status: 203, contentType: "text/html; charset=utf-8", body: LOGIN_PAGE };
+
+// A plain 401 is echoed — its body is where ADO says why — so this one IS the
+// scrubber's test on the auth path, with the same straddle as above.
+const DENIED_HEAD = `{"message":"TF400813: The user is not authorized to access this resource. auth=`;
+const DENIED = {
+  status: 401,
+  contentType: "application/json; charset=utf-8",
+  body: DENIED_HEAD + "x".repeat(TOKEN_AT - DENIED_HEAD.length) + TOKEN + '"}',
+};
 
 // Wide terminal: the contextual message is a long single line, and a narrow
 // screen would wrap it mid-URL and defeat substring assertions.
@@ -73,7 +89,7 @@ test("a non-JSON HTTP response names the request, its status and the body — ne
   mock,
 }) => {
   fastRetries(mock.env);
-  mock.setAdoRaw(WIQL, { status: 203, contentType: "text/html", body: LOGIN_PAGE });
+  mock.setAdoRaw(WIQL, { status: 200, contentType: "text/plain", body: PROXY_PAGE });
 
   const wt = await launch(WIDE);
   const screen = await wt.waitForText(DEAD_END, 20000);
@@ -81,8 +97,8 @@ test("a non-JSON HTTP response names the request, its status and the body — ne
   // What failed to parse, from where, and what came back instead.
   expect(screen).toContain("Failed to parse JSON from POST");
   expect(screen).toContain("_apis/wit/wiql");
-  expect(screen).toContain("203");
-  expect(screen).toContain("<!DOCTYPE html>");
+  expect(screen).toContain("200");
+  expect(screen).toContain("upstream proxy intercepted");
   // The bare runtime message, with nothing else on the line, is the bug.
   expect(screen).not.toMatch(/Error: Failed to parse JSON\s*$/m);
 
@@ -96,6 +112,121 @@ test("a non-JSON HTTP response names the request, its status and the body — ne
   }
   expect(screen).not.toContain("Authorization");
   expect(screen).not.toContain("Bearer");
+});
+
+// ── Part 1b: a refused token is a login problem, not a parse error ──────────
+
+// Wider still: the auth message carries the URL AND the az login command.
+const WIDER = { cols: 300, rows: 30 };
+const TENANT = "contoso-tenant";
+// The fake az mints a NEW token on every call under FAKE_AZ_ROTATE, as a real
+// one does once its cache refreshes; without it, it re-serves the same one.
+// Either way every minted token starts with TOKEN, so the leak checks hold.
+const rotateTokens = (env: Record<string, string>) => (env.FAKE_AZ_ROTATE = "1");
+const tokenMints = async (mock: { callLog(): Promise<string[]> }) =>
+  (await mock.callLog()).filter((l) => l.startsWith("az ") && l.includes("get-access-token")).length;
+
+test("a sign-in page on refresh re-mints the token once, then asks for az login — never a JSON parse error", async ({
+  launch,
+  mock,
+}) => {
+  fastRetries(mock.env);
+  // ~/.agendo/config.json is read before the fixture's historical one, so this
+  // is how a test configures the tenant the message must name.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(
+    join(mock.home, ".agendo", "config.json"),
+    JSON.stringify({ org: "acme", project: "Widgets", team: "Team A", tenant: TENANT }),
+  );
+  rotateTokens(mock.env);
+
+  const wt = await launch(WIDER);
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  const wiqlBefore = countRequests(mock.ado.requests, "/_apis/wit/wiql");
+  const mintsBefore = await tokenMints(mock);
+
+  // The token goes stale mid-session: every request from here on is refused.
+  mock.setAdoRaw(WIQL, SIGNIN);
+  await wt.press("r");
+  const screen = await wt.waitForText("Refresh failed: Azure DevOps rejected the az token", 20000);
+  expect(screen).toContain(`az login --tenant ${TENANT}`);
+  expect(screen).toContain("_apis/wit/wiql");
+  expect(screen).toContain("203");
+  expect(screen).not.toContain("Failed to parse JSON");
+  expect(screen).not.toContain("<!DOCTYPE");
+  await wt.waitForStable();
+
+  // The refusal dropped the cached token: az was asked for a fresh one, and the
+  // request went out exactly once more on it — no more (the 401 is permanent,
+  // so the UI's own auto-retry never fires), no less. The fresh token was
+  // refused too, which is what turns it into the az login message.
+  expect(await tokenMints(mock)).toBeGreaterThan(mintsBefore);
+  expect(countRequests(mock.ado.requests, "/_apis/wit/wiql") - wiqlBefore).toBe(2);
+
+  for (const secret of [TOKEN, TOKEN.slice(0, 6)]) {
+    expect(wt.output()).not.toContain(secret);
+  }
+});
+
+test("a plain 401 with az re-serving the same token is not retried, and its body is echoed scrubbed", async ({
+  launch,
+  mock,
+}) => {
+  fastRetries(mock.env);
+  // No rotation: az hands back the token ADO just refused (a wrong tenant, a
+  // revoked session) — the case where retrying could only be refused again.
+  // One refusal only, so the manual retry at the end can succeed.
+  mock.setAdoRaw(WIQL, { ...DENIED, times: 1 });
+
+  const wt = await launch(WIDER);
+  const screen = await wt.waitForText(DEAD_END, 20000);
+  expect(screen).toContain("Azure DevOps rejected the az token");
+  expect(screen).toContain("401");
+  // ADO's own explanation reaches the user…
+  expect(screen).toContain("TF400813");
+  await wt.waitForStable();
+  // az was asked again, but the same token is never sent twice: one request,
+  // then a permanent failure with no UI retry loop either.
+  expect(countRequests(mock.ado.requests, "/_apis/wit/wiql")).toBe(1);
+  expect(await tokenMints(mock)).toBeGreaterThanOrEqual(2);
+
+  // …and the token it embeds, straddling the snippet cut, does not.
+  for (const secret of [TOKEN, TOKEN.slice(0, 6)]) {
+    expect(screen).not.toContain(secret);
+    expect(wt.output()).not.toContain(secret);
+  }
+
+  // A refused token az keeps serving is held briefly rather than re-minted per
+  // request: `r` goes out on it with no new az spawn, and ADO taking it this
+  // time (a 401 can be one resource, not the token) clears the refusal.
+  const mints = await tokenMints(mock);
+  await wt.press("r");
+  await wt.waitForText("Current sprint", 20000);
+  expect(await tokenMints(mock)).toBe(mints);
+});
+
+test("a sign-in page followed by success on the re-minted token loads with no error at all", async ({
+  launch,
+  mock,
+}) => {
+  fastRetries(mock.env);
+  // One refusal, then the real fixture — the shape of `az login` having been
+  // run in another terminal: the fresh token is accepted.
+  mock.setAdoRaw(WIQL, { ...SIGNIN, times: 1 });
+  rotateTokens(mock.env);
+
+  const wt = await launch(WIDE);
+  const loaded = await wt.waitForText("Current sprint", 20000);
+  expect(loaded).toMatch(/Everything else assigned/);
+  expect(loaded).not.toContain("rejected");
+  expect(loaded).not.toContain("retrying");
+  expect(wt.output()).not.toContain("Failed to parse JSON");
+
+  // Recovered inside one load: the refused request plus its retry, with a token
+  // minted for each — not the UI's backoff loop, which would show "retrying".
+  expect(countRequests(mock.ado.requests, "/_apis/wit/wiql")).toBe(2);
+  expect(await tokenMints(mock)).toBeGreaterThanOrEqual(2);
 });
 
 test("a corrupt state.json is reported by path and the launcher still starts", async ({
