@@ -13,7 +13,9 @@
 // Volatile text (relative times like "5m ago", inter-action gaps like "+8s",
 // and the random temp-home path) is normalized so baselines stay stable.
 import { join } from "node:path";
+import { readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { test, expect, KEY } from "./harness/test.ts";
+import { LOGIN_SESSION_ID } from "./harness/fixtures.ts";
 import type { WebTerminal } from "./harness/wterm.ts";
 
 const SHOTS = join(import.meta.dirname, "screenshots");
@@ -27,6 +29,32 @@ function stable(grid: string, home: string): string {
     .replace(/[ \t]+$/gm, "")
     .replace(/\n+$/g, "");
 }
+
+// The expanded session's activity rows right-align each action's age in a
+// fixed cell (ActionRow, src/ui/components/index.tsx: padStart(8)), so the
+// padding in front of it IS part of the layout under test — and with the
+// fixture's fixed June timestamps the age's own width drifted with the wall
+// clock: "99d ago" → "100d ago" moved every row a column in late September.
+// So place those actions at a fixed distance before now instead: the ages read
+// "30d ago" on every run (the half day keeps the floor clear of a boundary
+// for the length of the suite), the gaps between them are untouched, and the
+// baselines stay byte-exact with no normalising of the padding. The file's
+// mtime — the session's last-used time — is put back as the fixture set it.
+const AGE_MS = 30.5 * 86_400_000;
+async function pinActivityAges(home: string): Promise<void> {
+  const file = join(home, ".claude", "projects", "appweb-login", `${LOGIN_SESSION_ID}.jsonl`);
+  const { atime, mtime } = await stat(file);
+  const records = (await readFile(file, "utf-8")).trim().split("\n").map((l) => JSON.parse(l));
+  const latest = Math.max(...records.map((r) => Date.parse(r.timestamp)));
+  const shift = Date.now() - AGE_MS - latest;
+  for (const r of records) r.timestamp = new Date(Date.parse(r.timestamp) + shift).toISOString();
+  await writeFile(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  await utimes(file, atime, mtime);
+}
+
+test.beforeEach(async ({ mock }) => {
+  await pinActivityAges(mock.home);
+});
 
 // Save a PNG artifact (not asserted) and assert the styled text grid (the test).
 async function capture(wt: WebTerminal, home: string, name: string) {

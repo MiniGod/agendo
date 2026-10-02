@@ -5,11 +5,13 @@
 //
 //  1. A JSON decode that fails says nothing about WHAT it was decoding. Bun's
 //     `Response.json()` throws literally `Failed to parse JSON`, and
-//     `JSON.parse` isn't much better, so an expired-auth HTML login page from
-//     Azure DevOps and a corrupt `~/.agendo/state.json` produce the same
-//     useless message. Every decode site goes through a helper here that names
-//     its source — an absolute file path (plus line number for `.jsonl`), or
-//     the HTTP method/URL/status plus a short body snippet.
+//     `JSON.parse` isn't much better, so a non-JSON page from a backend and a
+//     corrupt `~/.agendo/state.json` produce the same useless message. Every
+//     decode site goes through a helper here that names its source — an
+//     absolute file path (plus line number for `.jsonl`), or the HTTP
+//     method/URL/status plus a short body snippet. (Azure DevOps' sign-in page
+//     for a refused token never gets this far: it is classified as an auth
+//     failure upstream, in providers/azureDevOps/http.ts.)
 //
 //  2. Nothing distinguishes a failure worth retrying (the network blipped,
 //     the backend 503'd) from one that never will (401, 403, 404, a malformed
@@ -71,8 +73,7 @@ export function messageOf(e: unknown): string {
  *   • 408 / 425 / 429 / 5xx     → transient (timeout, too-early, rate limit, server)
  *   • any other status          → permanent (401/403/404 auth & not-found, and
  *                                 a 2xx whose body wasn't JSON at all — the
- *                                 server answered fine, just not with our API,
- *                                 which is what an auth-redirect login page is)
+ *                                 server answered fine, just not with our API)
  *   • no status at all          → permanent (an unrecognised local failure)
  */
 export function isRetryable(e: unknown): boolean {
@@ -188,11 +189,13 @@ export function scrub(text: string, secrets: readonly string[]): string {
 /**
  * Read an HTTP response body as JSON, naming the request in any failure:
  *
- *   Failed to parse JSON from GET https://dev.azure.com/… -> 203 Non-Authoritative
- *   Information (body starts: "<!DOCTYPE html><html>…")
+ *   Failed to parse JSON from GET https://dev.azure.com/… -> 200 OK
+ *   (body starts: "upstream proxy intercepted this request…")
  *
- * which is instantly recognisable as an auth redirect to a sign-in page rather
- * than the mystery `Failed to parse JSON` the runtime gives you. The response
+ * which says what answered instead of the API, rather than the mystery
+ * `Failed to parse JSON` the runtime gives you. (A sign-in page answering for a
+ * refused ADO token is caught before this, by isAuthRejection in
+ * providers/azureDevOps/auth.ts.) The response
  * status rides along on the error so `isRetryable` can classify it, and
  * `secrets` are scrubbed from everything echoed back.
  */
