@@ -19,8 +19,10 @@
 // list started as exactly the 70 names the single-file version exported, and a
 // symbol only joins it by being added here deliberately — the pane-hosting nine
 // (PANE_TARGET_OPTION, MIN_SPLIT_COLS, isPaneTarget, isPaneHosted, paneLocation,
-// splitTargetWidth, splitPaneIn, killPane, launcherWindowTarget) are the only
-// additions since.
+// splitTargetWidth, splitPaneIn, killPane, launcherWindowTarget), the tag layer
+// and the adoption primitives (LAUNCHER_WINDOW, type LivePane, livePanes,
+// managedFromPanes, stampPaneTarget, adoptWindow, isPlaceholderPane,
+// killPaneById) are the only additions since.
 //
 // Where things went, and why in that order — each module may only import from
 // the ones above it, which is what keeps `import/no-cycle` green:
@@ -44,6 +46,7 @@ export { tmuxQuiet } from "./exec.ts";
 
 export {
   LAUNCHER_SESSION,
+  LAUNCHER_WINDOW,
   ROOT_OPTION,
   PLACEHOLDER_OPTION,
   PANE_TARGET_OPTION,
@@ -120,6 +123,9 @@ export {
   liveWindows,
   liveTargets,
   liveManagedPaths,
+  livePanes,
+  managedFromPanes,
+  type LivePane,
   paneLocation,
   splitTargetWidth,
   exactTarget,
@@ -136,6 +142,7 @@ export {
   killManagedTarget,
   launcherWindowPaths,
   isPlaceholderWindow,
+  isPlaceholderPane,
   windowLocations,
   windowLocation,
   newDetached,
@@ -146,7 +153,10 @@ export {
   newWindow,
   newWindowIn,
   killPane,
+  killPaneById,
   splitPaneIn,
+  stampPaneTarget,
+  adoptWindow,
 } from "./windows.ts";
 
 export { launcherWindowLive, launcherWindowTarget, enterLauncherSession } from "./launcherSession.ts";

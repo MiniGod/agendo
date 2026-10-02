@@ -4,8 +4,8 @@
 // Every function here is about the CHEAP half of a refresh: one list-sessions /
 // list-windows / list-panes read, no backend fetch and no transcript parse.
 import {
-  liveManagedPaths, liveTargets, managedKind, sessionName,
-  type LiveTarget, type ManagedTarget, type SessionKind,
+  livePanes, liveTargets, managedFromPanes, managedKind, sessionName,
+  type LivePane, type LiveTarget, type ManagedTarget, type SessionKind,
 } from "../../runtime/tmux/index.ts";
 import { resolveWindowSession } from "../../runtime/restore/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
@@ -16,7 +16,7 @@ export function isRunning(s: AgentSession, live: Set<string>): boolean {
 
 /**
  * Recompute live tmux state without any backend/network work (just the tmux CLI
- * reads via liveTargets + liveManagedPaths), so it's cheap enough to poll.
+ * reads via liveTargets + livePanes), so it's cheap enough to poll.
  * Returns the set of live session names plus, for each running session, how it
  * was launched (`liveKinds`, for the UI badge) and which window it occupies
  * (`liveWindows`, for pane reads).
@@ -32,7 +32,7 @@ export function isRunning(s: AgentSession, live: Set<string>): boolean {
  * directory. See `resolveWindowSession` for the full precedence. `allSessions` is the full local session
  * collection (loadModel passes index.all; the App poll passes the same set).
  */
-export function refreshLiveTmux(allSessions: AgentSession[]): {
+export function refreshLiveTmux(allSessions: AgentSession[], panes: LivePane[] = livePanes()): {
   live: Set<string>;
   liveKinds: Map<string, SessionKind>;
   liveWindows: Map<string, LiveTarget>;
@@ -41,9 +41,10 @@ export function refreshLiveTmux(allSessions: AgentSession[]): {
   liveWindowLocations: Map<string, string[]>;
 } {
   // `base` is membership only — the names tmux currently lists. The addressable
-  // targets ride along on `liveManagedPaths`, which is where reconciliation picks
-  // the window it attributes a session to.
-  return reconcileLive(new Set(liveTargets().keys()), liveManagedPaths(), allSessions);
+  // targets ride along on the pane listing, which is where reconciliation picks
+  // the window it attributes a session to. `panes` is accepted so a caller that
+  // also feeds the listing to adoption (loadLocalSessions) runs it once.
+  return reconcileLive(new Set(liveTargets().keys()), managedFromPanes(panes), allSessions);
 }
 
 /**
