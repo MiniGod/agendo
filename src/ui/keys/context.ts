@@ -49,7 +49,9 @@ export type Mode =
   // "kill this session?" — the y/n the list's `x` / `X` put up before ending it
   // (src/ui/actions/sessionEnd.ts). `prompt` says what is, or is not, in flight;
   // `waived` is every refusal it names, all a `y` to `X` may force past.
-  | { kind: "confirmEnd"; session: AgentSession; force: boolean; prompt: string; waived: readonly string[] };
+  | { kind: "confirmEnd"; session: AgentSession; force: boolean; prompt: string; waived: readonly string[] }
+  // The cleanup view (C). It keeps its own state and keys (CleanupScreen.tsx).
+  | { kind: "cleanup" };
 
 /** The two screens on which a parent folder can be chosen for a new repo. */
 export type InitParentMode = Extract<Mode, { kind: "initDir" | "initPath" }>;

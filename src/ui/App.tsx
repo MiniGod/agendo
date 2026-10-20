@@ -348,6 +348,7 @@ export default function App({
     mode, model, identity, roster, settingsItems, providerLabel, provider, autoResume,
     available, authStatus, cloneNote, cloneUrl, resolved, filterRoot, canClone,
     anyHostableRepo, reposForTarget,
+    cleanup: { inScope, extraRoots: discoveredRepos.map((r) => r.root), onBack: () => setMode({ kind: "list" }), onQuit: exit },
   });
   if (modal) return modal;
 

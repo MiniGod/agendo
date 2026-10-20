@@ -19,6 +19,7 @@ import { ProviderScreen } from "./ProviderScreen.tsx";
 import { WtChoiceScreen } from "./WtChoiceScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
 import { RepoScreen } from "./RepoScreen.tsx";
+import { CleanupScreen } from "./CleanupScreen.tsx";
 
 /**
  * The two screens App shows INSTEAD of anything else when the model failed to
@@ -89,10 +90,18 @@ export interface ModeProps {
   canClone: boolean;
   anyHostableRepo: boolean;
   reposForTarget: (t: FreshTarget) => RepoInfo[];
+  /** What the cleanup view (C) needs from App: the scope, the path context's repos, and the way out. */
+  cleanup: { inScope: (cwd: string) => boolean; extraRoots: readonly string[]; onBack: () => void; onQuit: () => void };
 }
 
 export function renderMode(p: ModeProps): ReactElement | null {
-  return renderLaunchMode(p) ?? renderPromptMode(p) ?? renderSettingsMode(p);
+  return renderLaunchMode(p) ?? renderPromptMode(p) ?? renderSettingsMode(p) ?? renderCleanupMode(p);
+}
+
+/** The cleanup view — a component with its own state and keys, unlike the screens above. */
+function renderCleanupMode({ mode, model, cleanup }: ModeProps): ReactElement | null {
+  if (mode.kind !== "cleanup") return null;
+  return <CleanupScreen model={model} {...cleanup} />;
 }
 
 /** The screens on the way to a session: which agent, which repo, worktree or not, the branch, a profile, a link. */

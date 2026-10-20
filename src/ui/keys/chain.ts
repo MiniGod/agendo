@@ -5,6 +5,7 @@ import type { Key } from "ink";
 import type { KeyContext } from "./context.ts";
 import { handleAgentKeys } from "./agent.ts";
 import { handleBranchKeys } from "./branch.ts";
+import { handleCleanupModeKeys } from "./cleanup.ts";
 import { handleCloneKeys, handleCloningKeys } from "./clone.ts";
 import { handleConfirmEndKeys } from "./confirmEnd.ts";
 import { handleIdentityKeys } from "./identity.ts";
@@ -23,6 +24,7 @@ import { handleSettingsKeys } from "./settings.ts";
 export type KeyHandler = (input: string, key: Key, ctx: KeyContext) => boolean;
 
 export const KEY_HANDLERS: readonly KeyHandler[] = [
+  handleCleanupModeKeys,
   handleOpenKeys,
   handleConfirmEndKeys,
   handleSearchKeys,
