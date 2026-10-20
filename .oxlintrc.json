@@ -142,7 +142,10 @@
         // src/launch/prompt.ts `llmGuide` is now `endGuide` beside `listGuide`
         // (with `pause` added to it). The holder is still `llmGuide`; 165 fails
         // against the current tree.
-        "max-lines-per-function": ["error", { "max": 166, "skipBlankLines": false, "skipComments": false }], // src/launch/prompt.ts llmGuide
+        // LOWERED 166 -> 153: the `send` section of `llmGuide` is now `sendGuide`,
+        // and `llmGuide` is 138. The holder is src/ui/actions/sessionFlow.ts
+        // `makeSessionFlow`.
+        "max-lines-per-function": ["error", { "max": 153, "skipBlankLines": false, "skipComments": false }], // src/ui/actions/sessionFlow.ts makeSessionFlow
         // Was also src/cli/wait/index.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/sessions/activity/index.ts; both are now
         // walks over small per-record handlers under src/sessions/activity/, the worst of

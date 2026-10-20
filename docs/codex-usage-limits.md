@@ -167,17 +167,22 @@ supplies the reset time and nothing else.
   state where the notice is load-bearing, because the field it would rather read
   is not on screen.
 
-That last point has a structural consequence: `codexPane` is anchored on the
-footer status bar (`codexFooter` rejects a last line with fewer than two ` · `
-fields), so `codex-limit-model-switch` is **not recognised as a codex pane at
-all** and falls through to the claude classifier. Codex limit detection
-therefore cannot live only inside `codexReadiness`.
+That last point has a structural consequence. `codexPane` is anchored on the
+footer status bar (`codexFooter` looks for it in the bottom two non-empty rows,
+since codex 0.163 draws a key-hint row under it, and only under codex's input
+box) or on codex's own numbered
+option list (`codexOptionDialog`). `codex-limit-model-switch` has no footer, so
+it is recognised through the second anchor alone: as a pane with
+`dialog: true, footer: null`, which `codexReadiness` reads as `dialog`. Nothing
+on that path sees the quota field, so the limit check for this state has to
+read the dialog's wording and the notice, not the footer.
 
 ### Precedence
 
-`codexReadiness` checks `isDialog` first, then busy, then the run-state field.
-The limit check must sit **above the dialog check** (so 04 reads `limited`, not
-just `dialog`) and **above the `Ready` read** (so 03/05 stop reading `ready`),
+`codexReadiness` checks for a dialog first (`isDialog`, or codex's own option
+list), then busy, then the run-state field. The limit check must sit **above
+the dialog check** (so 04 reads `limited`, not just `dialog`) and **above the
+`Ready` read** (so 03/05 stop reading `ready`),
 while staying **below busy** — a session that is generating again is busy,
 whatever a stale quota field says. That mirrors the claude path, where
 `paneUsageLimited` is checked after busy and before `isDialog`.

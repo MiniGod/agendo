@@ -239,6 +239,13 @@ Usage:
                                 Always names the route it took: "queued via socket"
                                 (may be mid-turn) vs "pasted into pane" (had to be
                                 idle). The two differ, so never assume which.
+                                Into a codex pane it reads the input box back: Enter
+                                only once the paste shows, again if codex swallowed
+                                it, and success only once the box empties (or codex
+                                holds it for its startup) — else exit 1, saying what
+                                is left in the box. A box it can't read before
+                                typing refuses (exit 2); only --force into a codex
+                                box it couldn't read at first look types blind.
                                 Refuses (never auto-resumes) a session parked as a
                                 restore-tab placeholder ("list" shows it ⏸ paused) —
                                 "resume <id>" first, then send.
@@ -247,7 +254,10 @@ Usage:
       --json                    Emit the outcome as JSON: ok, route ("socket" |
                                 "pane" | null), queued, the resolved sessionId /
                                 target / pid, the socket setting in force, and a
-                                "reason" when it refused.
+                                "reason" when it refused or failed. The codex
+                                read-back path adds enters (Enter presses),
+                                turnStarted and held, and on failure composer (what
+                                the box holds).
       --timeout <dur>           Deadline for the input box to appear after that
                                 dialog is answered — a ceiling, not a wait: it
                                 proceeds as soon as the box is there (default 120s)

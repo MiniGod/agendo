@@ -13,7 +13,7 @@ import { blockAbove, isBoxSideHint, looksLikeTaskPanelRow, taskPanelLines, LOOSE
  * glyphs. Expects the raw line *with* SGR escapes; returns "" when the input is
  * effectively empty (blank or only a placeholder).
  */
-function inputRealText(line: string, marker: string = CLAUDE_PROMPT): string {
+export function inputRealText(line: string, marker: string = CLAUDE_PROMPT): string {
   const after = line.split(marker)[1] ?? "";
   let faint = false;
   let gray = false;

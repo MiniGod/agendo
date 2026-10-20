@@ -127,6 +127,52 @@ function endGuide(): string[] {
 }
 
 /**
+ * `send`: its two routes, claude's resume dialog, the not-running cases, and
+ * codex's read-back delivery. Its own function, like `endGuide`, so `llmGuide`
+ * stays a table of contents rather than growing past its length budget.
+ */
+function sendGuide(): string[] {
+  return [
+    `Message it:   ${SELF_CMD} send <id> "<prompt>"`,
+    "  Sends a follow-up prompt. A claude session takes it on its messaging socket, which",
+    "  QUEUES it even mid-turn, so you don't have to wait for one to go idle first; a",
+    "  session without that channel (Copilot, Codex) has it typed into the pane, which",
+    "  needs an idle input and refuses otherwise (--force to override). Either way it",
+    "  refuses a session at its usage limit — check back with `status` or `wait`.",
+    "  Exception: claude's OWN resume dialog (\"Resume from summary / Resume full session",
+    "  as-is\") is not a question for you — such a session reports ready, and send answers",
+    "  the dialog itself (config resumeDialogChoice), waits for the input box, then",
+    "  delivers. Answering it is always keystrokes — the socket can't do it, since a frame",
+    "  arrives as a peer message the receiver won't take as the answer to a prompt — so if",
+    "  that box never appears, send fails WITHOUT delivering by EITHER route, and --force",
+    "  will not change that (pasting into the menu would pick an option) — retry, or attach.",
+    "  The socket does not shorten that wait: it replaces the DELIVERY step only, never the",
+    "  dialog step, so the retry advice under `resume` below applies exactly as written.",
+    "  \"Session <id> is not running\" is not a dead end either: `resume` it (below), then send.",
+    "  (A session that IS running but has the socket switched off says so instead, and names",
+    "  the switch — don't `resume` that one, it is already alive.) \"Parked as a restore",
+    "  tab\" is a third case: `list` already showed it ⏸ paused, and this is the same",
+    "  thing said again at send time — `resume` it, same as the plain not-running case,",
+    "  but never with --force (there is no pane there to force a paste into).",
+    "  It always NAMES the route: \"queued via socket\" means the message is sitting in that",
+    "  session's queue and may not be read for a while; \"pasted into pane\" means it is on",
+    "  screen now, and the pane had to be idle to accept it. Do not assume which you got —",
+    "  `--json` carries the same as route: \"socket\" | \"pane\" plus queued: true/false.",
+    "  The socket can be switched off (AGENDO_PEER_SOCKET=0, or \"peerSocket\": false in",
+    "  ~/.agendo/config.json), in which case every send is the pane route and refuses a",
+    "  busy session — so route reporting is the only reliable way to know what you have.",
+    "  Into a codex pane, send reads the input box back: it presses Enter only once the",
+    "  paste shows there, presses again if codex swallowed it, and succeeds only once the",
+    "  box has emptied (or codex says it is holding the message for its startup:",
+    "  held: true). Otherwise it exits 1 and says what is left in the box (composer",
+    "  in --json) — look before re-sending, or the message may go twice. A box it",
+    "  can't read at all is a refusal like the others: nothing typed, exit 2 — and",
+    "  --force there types blind, with none of the read-back.",
+    "",
+  ];
+}
+
+/**
  * On-demand, agent-facing guide for the background-session workflow. Kept out of
  * the injected system prompt (which only points here) so every session isn't
  * bloated with detail it may never use. Printed by `agendo --llm`.
@@ -209,35 +255,7 @@ export function llmGuide(): string {
     `  bare number, and never hand-assemble one. \`${SELF_CMD} list --json\` carries the`,
     "  same links per session as prUrl / workItemUrl.",
     "",
-    `Message it:   ${SELF_CMD} send <id> "<prompt>"`,
-    "  Sends a follow-up prompt. A claude session takes it on its messaging socket, which",
-    "  QUEUES it even mid-turn, so you don't have to wait for one to go idle first; a",
-    "  session without that channel (Copilot) has it typed into the pane, and that needs",
-    "  an idle input and refuses otherwise (--force to override). Either way it refuses a",
-    "  session at its usage limit — check back with `status` or `wait`.",
-    "  Exception: claude's OWN resume dialog (\"Resume from summary / Resume full session",
-    "  as-is\") is not a question for you — such a session reports ready, and send answers",
-    "  the dialog itself (config resumeDialogChoice), waits for the input box, then",
-    "  delivers. Answering it is always keystrokes — the socket can't do it, since a frame",
-    "  arrives as a peer message the receiver won't take as the answer to a prompt — so if",
-    "  that box never appears, send fails WITHOUT delivering by EITHER route, and --force",
-    "  will not change that (pasting into the menu would pick an option) — retry, or attach.",
-    "  The socket does not shorten that wait: it replaces the DELIVERY step only, never the",
-    "  dialog step, so the retry advice under `resume` below applies exactly as written.",
-    "  \"Session <id> is not running\" is not a dead end either: `resume` it (below), then send.",
-    "  (A session that IS running but has the socket switched off says so instead, and names",
-    "  the switch — don't `resume` that one, it is already alive.) \"Parked as a restore",
-    "  tab\" is a third case: `list` already showed it ⏸ paused, and this is the same",
-    "  thing said again at send time — `resume` it, same as the plain not-running case,",
-    "  but never with --force (there is no pane there to force a paste into).",
-    "  It always NAMES the route: \"queued via socket\" means the message is sitting in that",
-    "  session's queue and may not be read for a while; \"pasted into pane\" means it is on",
-    "  screen now, and the pane had to be idle to accept it. Do not assume which you got —",
-    "  `--json` carries the same as route: \"socket\" | \"pane\" plus queued: true/false.",
-    "  The socket can be switched off (AGENDO_PEER_SOCKET=0, or \"peerSocket\": false in",
-    "  ~/.agendo/config.json), in which case every send is the pane route and refuses a",
-    "  busy session — so route reporting is the only reliable way to know what you have.",
-    "",
+    ...sendGuide(),
     `Be told when it needs you (DON'T poll):`,
     `              ${SELF_CMD} wait <id...> --any --json --timeout 30m`,
     "  Blocks until a session settles — a non-busy state that isn't limited or unknown and",

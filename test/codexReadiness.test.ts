@@ -57,14 +57,15 @@ describe("codexReadiness", () => {
     expect(codexReadiness(codexPane(dropRunState(fixture("codex-busy.ansi")))!)).toBe("busy");
   });
 
-  // The real dialog capture ends in the dialog's own footer, so the recogniser
-  // rejects it and paneReadiness reaches "dialog" by the claude path instead.
-  // The classifier's own ordering — dialog before run-state — is pinned on a
-  // recognised pane whose capture holds the dialog.
+  // The real dialog capture ends in the dialog's own key-hint row, with the bar
+  // still reading `Ready` one row up — inside the footer search since 0.163 drew
+  // a hint row of its own under the bar. So the pane is recognised, and the
+  // classifier's ordering (dialog before run-state) is what answers.
   test("a dialog outranks a footer still saying Ready", () => {
     const dialog = fixture("codex-dialog.ansi");
     expect(stripAnsi(dialog)).toContain("Ready");
-    expect(codexReadiness({ ...pane("codex-idle.ansi"), raw: dialog })).toBe("dialog");
+    expect(codexReadiness(pane("codex-dialog.ansi"))).toBe("dialog");
+    expect(pane("codex-dialog.ansi").footer?.state).toBe("ready");
     expect(paneReadiness(dialog, cursor("codex-dialog.cursor"))).toBe("dialog");
   });
 
@@ -75,7 +76,7 @@ describe("codexReadiness", () => {
     expect(paneReadiness(dropRunState(fixture("codex-idle.ansi")), cursor("codex-idle.cursor"))).toBe("unknown");
     // The classifier holds the same line on its own: no word, no "ready".
     const idle = pane("codex-idle.ansi");
-    expect(codexReadiness({ ...idle, footer: { ...idle.footer, state: null } })).toBe("unknown");
+    expect(codexReadiness({ ...idle, footer: { ...idle.footer!, state: null } })).toBe("unknown");
     expect(codexReadiness({ ...idle, box: null })).toBe("unknown");
   });
 });
