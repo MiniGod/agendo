@@ -1,11 +1,13 @@
-import { open, readdir, stat } from "fs/promises";
-import { join } from "path";
+import { readdir, stat } from "fs/promises";
+import { basename, join } from "path";
 import { homedir } from "os";
 import { parseGithubRemote } from "../providers/github/index.ts";
 import { codexUserText } from "./transcript.ts";
 import type { AgentSession } from "../shared/types.ts";
 import { TranscriptCache } from "./cache.ts";
 import type { SessionProvider } from "./provider.ts";
+import { forEachLine } from "../shared/lines.ts";
+import { forEachPooled, INDEX_CONCURRENCY } from "../shared/pool.ts";
 
 // ── Codex CLI ─────────────────────────────────────────────────────────────────
 // Sessions ("threads") are JSONL rollout files under
@@ -26,25 +28,8 @@ const CODEX_SESSIONS = join(CODEX_HOME, "sessions");
 // message follows within a few records, so this comfortably covers both while
 // keeping the scan bounded on multi-MB transcripts.
 const CODEX_HEAD_BYTES = 256 * 1024;
-
-/** Read at most `max` bytes from the head of a file (utf-8, may split a line). */
-async function readHead(path: string, max: number): Promise<string | null> {
-  let fh;
-  try {
-    fh = await open(path, "r");
-  } catch {
-    return null;
-  }
-  try {
-    const buf = Buffer.alloc(max);
-    const { bytesRead } = await fh.read(buf, 0, max, 0);
-    return buf.subarray(0, bytesRead).toString("utf-8");
-  } catch {
-    return null;
-  } finally {
-    await fh.close().catch(() => {});
-  }
-}
+// Read in smaller steps than that, since the scan usually stops in the first one.
+const CODEX_CHUNK_BYTES = 64 * 1024;
 
 /**
  * Reduce a git remote URL to the identity domain `sessionInScope` compares in:
@@ -131,91 +116,120 @@ function takeTitle(meta: CodexMeta, line: HeadLine): boolean {
   return true;
 }
 
-function headLines(head: string): HeadLine[] {
-  return head.split("\n").map(parseHeadLine).filter((l): l is HeadLine => l !== null);
+/**
+ * The walk over a rollout's head, fed one line at a time so it can stop the
+ * moment it has what it needs — usually within the first few records, long
+ * before CODEX_HEAD_BYTES.
+ */
+class CodexHeadScan {
+  meta: CodexMeta | null = null;
+
+  /** One line; true once nothing later in the file can change the result. */
+  line(text: string): boolean {
+    const line = parseHeadLine(text);
+    if (!line) return false;
+    if (line.e.type === "session_meta") {
+      this.meta = sessionMetaOf(line.p);
+      return !!this.meta.skip; // nothing else to learn about a thread we won't list
+    }
+    // The meta line always precedes the first message, so that is everything.
+    return !!this.meta && !this.meta.title && takeTitle(this.meta, line);
+  }
 }
 
 export function parseCodexHead(head: string): CodexMeta | null {
-  let meta: CodexMeta | null = null;
-  for (const line of headLines(head)) {
-    if (line.e.type === "session_meta") {
-      meta = sessionMetaOf(line.p);
-      if (meta.skip) return meta; // nothing else to learn about a thread we won't list
-      continue;
-    }
-    // The meta line always precedes the first message, so that is everything.
-    if (meta && !meta.title && takeTitle(meta, line)) return meta;
-  }
-  return meta;
+  const scan = new CodexHeadScan();
+  for (const text of head.split("\n")) if (scan.line(text)) break;
+  return scan.meta;
+}
+
+/**
+ * A rollout's head, streamed: exactly parseCodexHead of its first
+ * CODEX_HEAD_BYTES, without holding them. Undefined when nothing could be read
+ * (a missing, unreadable or empty file), which the caller does not cache.
+ */
+export async function readCodexHead(filePath: string): Promise<CodexMeta | null | undefined> {
+  const scan = new CodexHeadScan();
+  const read = await forEachLine(filePath, (text) => scan.line(text), { maxBytes: CODEX_HEAD_BYTES, chunkBytes: CODEX_CHUNK_BYTES });
+  return read ? scan.meta : undefined;
 }
 
 const CODEX_FILE_ID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 
 const codexParseCache = new TranscriptCache();
 
+/** The session a rollout head describes, or null when it isn't a listable one. */
+function sessionOf(file: string, filePath: string, st: { mtime: Date }, meta: CodexMeta | null): AgentSession | null {
+  // Sub-agent threads and malformed rollouts are cached as "not a
+  // session" — codex writes one sub-agent rollout per real one, so
+  // re-reading their heads every rebuild would dominate the scan.
+  if (!meta || meta.skip || !meta.cwd) return null;
+  // Fall back to the trailing uuid in the filename when the record has
+  // no id — it's the same value, and it's what `codex resume` matches
+  // on. (The name is `rollout-<timestamp>-<uuid>.jsonl`, and the
+  // timestamp is dash-separated too, so anchor on the uuid shape.)
+  const id = meta.id ?? file.match(CODEX_FILE_ID)?.[1];
+  if (!id) return null;
+  return {
+    id,
+    source: "codex",
+    cwd: meta.cwd,
+    branch: meta.branch,
+    repository: meta.repository,
+    title: meta.title || id.slice(0, 8),
+    lastUsed: st.mtime,
+    createdAt: meta.createdAt,
+    logPath: filePath,
+  };
+}
+
+/**
+ * One rollout through the cache: its session, null when it isn't one, or
+ * undefined when it couldn't be stat'd or read (a read failure is not cached,
+ * so the next rebuild tries again).
+ */
+async function indexRollout(filePath: string, seen: Set<string>): Promise<AgentSession | null | undefined> {
+  const st = await stat(filePath).catch(() => null);
+  if (!st) return undefined;
+  seen.add(filePath);
+  const cached = codexParseCache.hit(filePath, st);
+  if (cached !== undefined) return cached;
+  const meta = await readCodexHead(filePath);
+  if (meta === undefined) return undefined;
+  const session = sessionOf(basename(filePath), filePath, st, meta);
+  codexParseCache.store(filePath, st, session);
+  return session;
+}
+
+/** Every rollout file in the given day dirs. */
+async function rolloutFiles(dayDirs: string[]): Promise<string[]> {
+  const perDay = await Promise.all(
+    dayDirs.map(async (dir) => {
+      try {
+        return (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
+      } catch {
+        return [];
+      }
+    }),
+  );
+  return perDay.flat();
+}
+
 export const codexProvider: SessionProvider = {
   source: "codex",
   async index() {
     // sessions/<YYYY>/<MM>/<DD>/*.jsonl — walk the date tree rather than glob,
     // so an unexpected extra level can't blow the scan up.
-    const dayDirs = await codexDayDirs();
+    const files = await rolloutFiles(await codexDayDirs());
     const sessions: AgentSession[] = [];
     const seen = new Set<string>();
-    await Promise.all(
-      dayDirs.map(async (dir) => {
-        let files: string[];
-        try {
-          files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
-        } catch {
-          return;
-        }
-        await Promise.all(
-          files.map(async (file) => {
-            const filePath = join(dir, file);
-            const st = await stat(filePath).catch(() => null);
-            if (!st) return;
-            seen.add(filePath);
-            const cached = codexParseCache.hit(filePath, st);
-            if (cached !== undefined) {
-              if (cached) sessions.push(cached);
-              return;
-            }
-            const head = await readHead(filePath, CODEX_HEAD_BYTES);
-            if (!head) return;
-            const meta = parseCodexHead(head);
-            // Sub-agent threads and malformed rollouts are cached as "not a
-            // session" — codex writes one sub-agent rollout per real one, so
-            // re-reading their heads every rebuild would dominate the scan.
-            if (!meta || meta.skip || !meta.cwd) {
-              codexParseCache.store(filePath, st, null);
-              return;
-            }
-            // Fall back to the trailing uuid in the filename when the record has
-            // no id — it's the same value, and it's what `codex resume` matches
-            // on. (The name is `rollout-<timestamp>-<uuid>.jsonl`, and the
-            // timestamp is dash-separated too, so anchor on the uuid shape.)
-            const id = meta.id ?? file.match(CODEX_FILE_ID)?.[1];
-            if (!id) {
-              codexParseCache.store(filePath, st, null);
-              return;
-            }
-            const session: AgentSession = {
-              id,
-              source: "codex",
-              cwd: meta.cwd,
-              branch: meta.branch,
-              repository: meta.repository,
-              title: meta.title || id.slice(0, 8),
-              lastUsed: st.mtime,
-              createdAt: meta.createdAt,
-              logPath: filePath,
-            };
-            codexParseCache.store(filePath, st, session);
-            sessions.push(session);
-          }),
-        );
-      }),
-    );
+    // Bounded: each miss holds a read buffer and up to CODEX_HEAD_BYTES of a
+    // pending line, so the number in flight — not the number on disk — is what
+    // sets peak memory.
+    await forEachPooled(files, INDEX_CONCURRENCY, async (filePath) => {
+      const session = await indexRollout(filePath, seen);
+      if (session) sessions.push(session);
+    });
     codexParseCache.prune(seen);
     return sessions;
   },
