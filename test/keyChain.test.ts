@@ -6,6 +6,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import { KEY_HANDLERS, dispatchKey, type KeyHandler } from "../src/ui/keys/chain.ts";
 import type { KeyContext } from "../src/ui/keys/context.ts";
+import { handleCleanupModeKeys } from "../src/ui/keys/cleanup.ts";
 import { handleListKeys } from "../src/ui/keys/list.ts";
 import { handleOpenKeys } from "../src/ui/keys/open.ts";
 
@@ -25,8 +26,11 @@ describe("dispatchKey", () => {
 });
 
 describe("KEY_HANDLERS", () => {
-  test("the open prompt is asked first and the list last", () => {
-    expect(KEY_HANDLERS[0]).toBe(handleOpenKeys);
+  test("the cleanup view's guard is asked first, the open prompt next, and the list last", () => {
+    // The cleanup view reads its own keys; the guard keeps every other handler
+    // — the search, the global q/esc, the list — from seeing them too.
+    expect(KEY_HANDLERS[0]).toBe(handleCleanupModeKeys);
+    expect(KEY_HANDLERS[1]).toBe(handleOpenKeys);
     expect(KEY_HANDLERS.at(-1)).toBe(handleListKeys);
     expect(new Set(KEY_HANDLERS).size).toBe(KEY_HANDLERS.length);
   });

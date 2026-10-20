@@ -443,6 +443,27 @@ subscription. It refuses rather than clobber anything already at the destination
 falls back to copy-then-delete across filesystems, and won't touch a session that is
 currently running — exit it first.
 
+### Clean up sessions and worktrees
+
+Press `C` to open the cleanup view: every session in scope (running, paused or idle)
+plus every worktree under `.claude/worktrees/` that no session points at. Each row
+shows when it was updated and created, how much disk its worktree, transcript and
+Claude scratch dir take (measured in the background), and its git state — dirty
+files, commits no remote has, and whether the branch is merged into the origin
+default branch (squash merges included, judged offline by tree and patch-id). `s`
+cycles the sort between updated, created and size; `r` reverses it.
+
+Enter (or space) on a row opens a dialog with four boxes: worktree, branch, session
+transcript and tmp/scratch files. The session is kept by default; the worktree and
+branch start ticked only when deleting them loses nothing, and otherwise the dialog
+says exactly what would be lost and asks a second time before `git worktree remove
+--force` / `git branch -D`. It never offers the main checkout, its branch, or a
+worktree outside `.claude/worktrees/`, and refuses everything for a running session.
+Ignored files a worktree holds (a `.env`, local settings — build output like
+`node_modules/` aside) count as something to lose, and a session written to in the
+last five minutes that isn't running in agendo (paused, or with no window at all) is
+treated as possibly still in use: nothing starts ticked and anything deleted needs the second confirmation.
+
 ## Config
 
 Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `project`,

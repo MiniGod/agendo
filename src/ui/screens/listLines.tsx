@@ -63,7 +63,7 @@ export function viewHint(view: View, s: ViewHintState): string {
     // `agendo list` prints for those sessions. `p/x/X pause/kill` sits
     // right after `enter resume`, the other half of a session's lifecycle,
     // folded into one entry so as little as possible of the tail is pushed off.
-    return `↑/↓ move · → expand · ⇥ view · g ${s.grouped ? "ungroup" : "group"} · s sort: ${s.sessionSort} · / search · n new · O orch · G global · enter resume · p/x/X pause/kill · c →other agent · m →profile · o browser · , settings · r refresh · q/esc quit`;
+    return `↑/↓ move · → expand · ⇥ view · g ${s.grouped ? "ungroup" : "group"} · s sort: ${s.sessionSort} · / search · n new · O orch · G global · enter resume · p/x/X pause/kill · c →other agent · m →profile · o browser · C cleanup · , settings · r refresh · q/esc quit`;
   }
   if (view === "prs") {
     return `↑/↓ move · → expand · ⇥ view · g ${s.prsGrouped ? "ungroup" : "group"} · s sort: ${s.prSort === "created" ? "created" : "updated"} · / search · enter open · o browser · , settings · r refresh · q/esc quit`;

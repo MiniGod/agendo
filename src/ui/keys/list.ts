@@ -24,6 +24,7 @@ type ViewCtx = Pick<
   | "setSessionSort"
   | "enterSettings"
   | "enterIdentity"
+  | "setMode"
   | "setNotice"
   | "setActivity"
   | "requested"
@@ -138,9 +139,10 @@ export function handleGroupSortKeys(
   return false;
 }
 
-/** `/` focuses the fuzzy search, `,` opens Settings, `u` switches who you are (Work items & PRs only). */
-export function handleScreenKeys(input: string, ctx: Pick<ViewCtx, "setSearchFocus" | "enterSettings" | "enterIdentity">): boolean {
+/** `/` focuses the fuzzy search, `,` opens Settings, `u` switches who you are (Work items & PRs only), `C` opens the cleanup view. */
+export function handleScreenKeys(input: string, ctx: Pick<ViewCtx, "setSearchFocus" | "enterSettings" | "enterIdentity" | "setMode">): boolean {
   if (input === "/") { ctx.setSearchFocus("input"); return true; }
+  if (input === "C") { ctx.setMode({ kind: "cleanup" }); return true; }
   if (input === ",") { ctx.enterSettings(); return true; }
   if (input === "u") { ctx.enterIdentity(); return true; }
   return false;

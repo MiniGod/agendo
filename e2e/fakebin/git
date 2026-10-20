@@ -5,6 +5,7 @@
 // ever goes near the network. Everything is appended to FAKE_CALL_LOG.
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const argv = process.argv.slice(2);
 const LOG = process.env.FAKE_CALL_LOG;
@@ -15,6 +16,115 @@ let args = argv.slice();
 let root = process.cwd();
 if (args[0] === "-C") { root = args[1]; args = args.slice(2); }
 while (args[0] === "-c") args = args.slice(2);
+
+// Real-git passthrough, for specs that need genuine repositories (the cleanup
+// view judges dirty / unpushed / merged state, which no registry can fake
+// honestly). FAKE_GIT_REAL names the real binary and FAKE_GIT_REAL_ROOT a
+// fixture directory in the spec's temp dir (the "fence"). It FAILS CLOSED: a
+// call is refused loudly — never run against real git and never quietly faked
+// — unless everything it could touch resolves inside the fence, so a buggy
+// spec cannot `worktree remove` or `branch -D` in a real repository:
+//   • the leading global options are walked whole, and only `-C`, `--no-pager`
+//     and an allowlisted `-c` are accepted (a `-c alias.x=!cmd`, a hooks path or
+//     an fsmonitor would run anything), as are no GIT_CONFIG_* injections and
+//     no `git config` at all (it would plant the same thing for the next call);
+//     the real run gets fsmonitor and hooks switched off besides;
+//   • the `-C` dir, every GIT_DIR-like variable, every later argument and
+//     every `--opt=value` value is resolved as a path, symlinks followed before
+//     each `..` the way the kernel does, and must land inside the fence;
+//   • `-o<path>`-style short options are checked the same way, and anything
+//     that looks like a URL (`https://…`, `host:path`) is refused outright;
+//   • the repository git would DISCOVER from there (a parent repo, a `.git`
+//     gitfile pointing elsewhere) must be inside the fence too, and so must
+//     every worktree it has registered (`worktree remove` matches by suffix)
+//     and every remote URL it could push to or fetch from; the real run gets
+//     GIT_CEILING_DIRECTORIES so discovery cannot climb out of it.
+if (process.env.FAKE_GIT_REAL || process.env.FAKE_GIT_REAL_ROOT) {
+  const refuse = (why) => {
+    process.stderr.write(`fake git: refusing real-git passthrough — ${why}\n`);
+    if (LOG) { try { fs.appendFileSync(LOG, "git-refused " + JSON.stringify({ why, argv }) + "\n"); } catch {} }
+    process.exit(128);
+  };
+  const REAL = process.env.FAKE_GIT_REAL;
+  if (!REAL || !process.env.FAKE_GIT_REAL_ROOT) refuse("FAKE_GIT_REAL and FAKE_GIT_REAL_ROOT must both be set");
+  const realOf = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const fence = realOf(process.env.FAKE_GIT_REAL_ROOT);
+  const inFence = (p) => p === fence || p.startsWith(fence + path.sep);
+  // `p` against `base`, one component at a time, each existing prefix
+  // realpath'd BEFORE the next `..` applies — `link/..` is the parent of the
+  // link's target, not the link's own directory. A missing tail (a removed
+  // worktree) is joined lexically: nothing below it exists to be a symlink.
+  const resolveReal = (base, p) => {
+    let cur = path.isAbsolute(p) ? "/" : base;
+    for (const seg of p.split("/")) {
+      if (!seg || seg === ".") continue;
+      if (seg === "..") { cur = path.dirname(cur); continue; }
+      const next = path.join(cur, seg);
+      try { cur = fs.realpathSync(next); } catch { cur = next; }
+    }
+    return cur;
+  };
+  for (const k of Object.keys(process.env)) {
+    if (/^GIT_CONFIG_(PARAMETERS|COUNT|KEY_|VALUE_)/.test(k)) refuse(`config injection via ${k}`);
+  }
+  const SAFE_CONFIG = new Set(["commit.gpgsign=false"]);
+  let dir = realOf(process.cwd());
+  let i = 0;
+  for (; i < argv.length && argv[i].startsWith("-"); i++) {
+    const a = argv[i];
+    if (a === "-C") dir = resolveReal(dir, argv[++i] ?? "");
+    else if (a === "-c") { if (!SAFE_CONFIG.has(argv[++i])) refuse(`config -c ${argv[i]} is not allowlisted`); }
+    else if (a !== "--no-pager") refuse(`global option ${a} is not allowed`);
+  }
+  if (!inFence(dir)) refuse(`-C / cwd ${dir} is outside ${fence}`);
+  if (argv[i] === "config") refuse("git config can plant commands for later calls");
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) {
+    const v = process.env[name];
+    if (v && !inFence(resolveReal(dir, v))) refuse(`${name} ${v} is outside ${fence}`);
+  }
+  // Every argument after the subcommand is checked as if it were a path. A ref
+  // or a format string resolves to some harmless name under `dir`; only a real
+  // escape (`../..`, an absolute path, `--output=/x`) lands outside.
+  // A URL — or anything git could read as one (`host:path`) — is never local.
+  const urlish = (v) => /^[A-Za-z][\w+.-]*:\/\//.test(v) || /^[^/]*:/.test(v);
+  // A remote is a local path or file:// URL inside the fence, or refused.
+  const checkUrl = (what, url) => {
+    const local = url.replace(/^file:\/\//, "");
+    if (urlish(local) || !inFence(resolveReal(dir, local))) refuse(`${what} ${url} is not a path inside ${fence}`);
+  };
+  for (const a of argv.slice(i)) {
+    let v = a;
+    if (a.startsWith("--")) v = a.match(/^--[^=]*=([\s\S]*)$/)?.[1];
+    else if (a.startsWith("-")) v = a.slice(2); // `-o<dir>`, `-f<file>`: the value rides attached
+    if (v && urlish(v)) refuse(`argument ${a} looks like a URL`);
+    if (v && !inFence(resolveReal(dir, v))) refuse(`argument ${a} reaches outside ${fence}`);
+  }
+  // Where would git actually look? Asked WITHOUT a ceiling, so a parent repo
+  // above the fence or a gitfile pointing out of it shows up here and is refused
+  // rather than silently masked; no repo at all (init, clone) is fine.
+  const globals = argv.slice(0, i);
+  const ask = (...q) => {
+    const r = spawnSync(REAL, [...globals, ...q], { encoding: "utf-8" });
+    return r.status === 0 ? r.stdout.split("\n").filter(Boolean) : [];
+  };
+  for (const q of [["--git-common-dir", "--git-dir"], ["--show-toplevel"]]) {
+    for (const line of ask("rev-parse", "--path-format=absolute", ...q)) {
+      if (!inFence(realOf(line))) refuse(`git would use ${line}, outside ${fence}`);
+    }
+  }
+  for (const line of ask("worktree", "list", "--porcelain")) {
+    const wt = line.match(/^worktree (.+)$/)?.[1];
+    if (wt && !inFence(resolveReal(dir, wt))) refuse(`the repo has a worktree at ${wt}, outside ${fence}`);
+  }
+  for (const line of ask("config", "--get-regexp", "^remote\\..*\\.(push)?url$")) {
+    const [key, ...rest] = line.split(" ");
+    checkUrl(key, rest.join(" "));
+  }
+  const ceiling = [fence, process.env.GIT_CEILING_DIRECTORIES].filter(Boolean).join(path.delimiter);
+  const off = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+  const r = spawnSync(REAL, [...off, ...argv], { stdio: "inherit", env: { ...process.env, GIT_CEILING_DIRECTORIES: ceiling } });
+  process.exit(r.status ?? 1);
+}
 
 if (args[0] === "init") {
   // `git -C <dest> init --quiet` (initRepo.ts). FAKE_GIT_INIT selects the outcome:

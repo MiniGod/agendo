@@ -26,7 +26,7 @@ function ctxIn(view: View, filterRoot: string | null = "/w") {
     switchView: mock(), setCursor: mock(), setGlobalView: mock(), setRepoFilterOn: mock(),
     setGrouped: mock(), setPrsGrouped: mock(), setPrSort: mock(), setSessionSort: mock(),
     enterNewSession: mock(), enterOrchestrator: mock(), enterGlobalOrchestrator: mock(),
-    setSearchFocus: mock(), enterSettings: mock(), enterIdentity: mock(),
+    setSearchFocus: mock(), enterSettings: mock(), enterIdentity: mock(), setMode: mock(),
     setNotice: mock(), setActivity: mock(), requested: { current: new Set<string>(["x"]) }, setRescanKey: mock(), reload: mock(),
   };
 }
@@ -91,7 +91,7 @@ describe("group and sort keys", () => {
 });
 
 describe("screen keys and refresh", () => {
-  test("/ focuses the search, comma opens settings, u the identity picker", () => {
+  test("/ focuses the search, comma opens settings, u the identity picker, C the cleanup view", () => {
     const c = ctxIn("items");
     expect(handleScreenKeys("/", c)).toBe(true);
     expect(c.setSearchFocus).toHaveBeenCalledWith("input");
@@ -99,6 +99,9 @@ describe("screen keys and refresh", () => {
     expect(c.enterSettings).toHaveBeenCalled();
     expect(handleScreenKeys("u", c)).toBe(true);
     expect(c.enterIdentity).toHaveBeenCalled();
+    expect(handleScreenKeys("C", c)).toBe(true);
+    expect(c.setMode).toHaveBeenCalledWith({ kind: "cleanup" });
+    expect(handleScreenKeys("c", c)).toBe(false);
     expect(handleScreenKeys("q", c)).toBe(false);
   });
 
