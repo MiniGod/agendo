@@ -10,10 +10,13 @@ import {
 import { idleSeconds, isStalled } from "../../sessions/idle.ts";
 import type { SessionLink } from "../../app/model/types.ts";
 import type { OrchestratorRole } from "../../orchestration/index.ts";
+import { recordedRole } from "../../orchestration/repoOrchestrator.ts";
 import { repoRootForCwd } from "../../repositories/index.ts";
 import type { AgentSession, AgentSource, BranchSync, BranchSyncReader, WorkflowStatus } from "../../shared/types.ts";
 import { workflowStatus } from "../../orchestration/workflows.ts";
 import { rowCompactionPercent, rowResetAt } from "./cells.ts";
+
+const NO_CWD_MARKS: ReadonlyMap<string, OrchestratorRole> = new Map();
 
 export interface ListRow {
   id: string;
@@ -130,7 +133,13 @@ export interface ListRowContext {
   /** Canonical names of sessions parked as a paused restore-tab placeholder. */
   livePlaceholders: ReadonlySet<string>;
   /** One read of the marker file for the whole listing, not one per row. */
-  roles: Map<string, OrchestratorRole>;
+  roles: ReadonlyMap<string, OrchestratorRole>;
+  /**
+   * The cwd markers a Codex orchestrator is recorded by (it has no id at
+   * launch), read the way `resume` reads them (`recordedRole`). Absent reads
+   * as none — the shape every caller had before Codex orchestrators counted.
+   */
+  cwdRoles?: ReadonlyMap<string, OrchestratorRole>;
   linkOf: (s: AgentSession) => SessionLink | undefined;
   thresholdMs: number;
   /**
@@ -232,7 +241,7 @@ export function sessionState(running: boolean, canon: string, livePlaceholders: 
 
 export function listRow(s: AgentSession, ctx: ListRowContext): ListRow {
   const { running, kind, pane } = liveFields(s, ctx);
-  const role = ctx.roles.get(s.id) ?? null;
+  const role = recordedRole(s, { roles: ctx.roles, cwdRoles: ctx.cwdRoles ?? NO_CWD_MARKS }) ?? null;
   const idle = idleSeconds(s.lastUsed);
   return {
     id: s.id,
@@ -246,7 +255,7 @@ export function listRow(s: AgentSession, ctx: ListRowContext): ListRow {
     compactionPercent: pane.compactionPercent,
     shells: pane.shells,
     kind,
-    orchestrator: ctx.roles.has(s.id),
+    orchestrator: role !== null,
     role,
     branch: s.branch ?? null,
     cwd: s.cwd,

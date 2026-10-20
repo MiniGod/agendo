@@ -5,6 +5,7 @@ import type { AgentSource } from "../shared/types.ts";
 import { slugify, createWorktree, freeWorktreeBranch, worktreePath } from "../repositories/worktree/index.ts";
 import { inspectWorktree, type AdoptedWorktree } from "../repositories/worktree/adopt.ts";
 import { repoRootForCwd } from "../repositories/index.ts";
+import { mainCheckoutOf } from "../repositories/scopeRepo.ts";
 import { ORCHESTRATOR_SLUG } from "../orchestration/index.ts";
 import { freshArgv } from "./argv.ts";
 import { openTarget, type OpenPlan } from "./open.ts";
@@ -190,7 +191,9 @@ export function launchTask(cwd: string, opts: LaunchOptions): LaunchResult {
   // as user-chosen and skip the collision stepping below.
   const named = slugify(opts.name || "");
   const slug = named || fallbackSlug;
-  const root = repoRootForCwd(cwd);
+  // An orchestrator belongs to the MAIN checkout even when launched from a linked
+  // worktree elsewhere: where the rule files it, and where `O` starts one.
+  const root = opts.orchestrator ? mainCheckoutOf(repoRootForCwd(cwd)) : repoRootForCwd(cwd);
   const where = resolveLaunchCwd(cwd, root, slug, !!named, opts);
   if (where.error) return { cwd, error: where.error };
   const { plan, id } = launchManaged(where.cwd, "background", opts.agent ?? "claude", opts.prompt, {

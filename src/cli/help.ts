@@ -50,7 +50,10 @@ Usage:
                                 (-2, -3, … if taken) unless --name says otherwise.
                                 Unlike other background launches it keeps its
                                 approval prompts, since it acts on your main
-                                checkout; --unattended waives them.
+                                checkout; --unattended waives them. One repo has ONE
+                                orchestrator: where it already has one, that one is
+                                reused (resumed if paused or idle, left alone if
+                                running) and the prompt is NOT delivered — use send.
       --global-orchestrator, -G Run the GLOBAL orchestrator — one level above
                                 --orchestrator. It writes no code and operates on no
                                 repository at all (not even a merge; that is each

@@ -4,8 +4,9 @@ import type { LoadedModel } from "../../app/model/index.ts";
 import type { PaneState } from "../format/index.ts";
 import { V } from "../models/vocabState.ts";
 import {
-  columnHeader, edgeLine, hintLine, identityLine, noticeLine, scopeLine, searchLine, viewTab, type SearchFocus,
+  columnHeader, edgeLine, hintLine, identityLine, noticeLine, pinnedBlock, scopeLine, searchLine, viewTab, type SearchFocus,
 } from "./listLines.tsx";
+import type { OrchestratorPins } from "../models/orchestratorPins.ts";
 import { renderRow } from "./listRows.tsx";
 import type { Row, PrSort, SessionSort } from "../models/rows.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
@@ -97,6 +98,7 @@ export function ListScreen({
   panes,
   loadState,
   retrying,
+  pins,
 }: {
   model: LoadedModel;
   view: View;
@@ -121,6 +123,8 @@ export function ListScreen({
   panes: Map<string, PaneState>;
   loadState: ModelLoadState;
   retrying: RetryState | null;
+  /** The pinned orchestrator block, shown above the Sessions view's rows. */
+  pins: OrchestratorPins | null;
 }) {
   const slice = sliceForView(loadState, view);
   const blocked = blockingLoad(view, slice, retrying);
@@ -136,10 +140,11 @@ export function ListScreen({
         {viewTab(view, "sessions", "3 Sessions")}
       </Box>
       {scopeLine({ filterRoot, scoped, hostSession, discoveredRepos, repoFilterOn })}
-      {hintLine(searchFocus, view, { grouped, prsGrouped, prSort, sessionSort })}
+      {hintLine(searchFocus, view, { grouped, prsGrouped, prSort, sessionSort, repoScope: pins?.repoScope })}
       {searchLine(searchFocus, search)}
       {blocked ?? (
         <>
+          {pinnedBlock(view, pins)}
           {identityLine(view, model)}
           {columnHeader(view, prSort)}
           {edgeLine(moreAbove, "↑")}

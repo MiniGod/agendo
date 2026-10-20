@@ -9,6 +9,8 @@
 import { basename } from "path";
 import { repoRootForCwd } from "../../repositories/index.ts";
 import type { OrchestratorRole } from "../../orchestration/index.ts";
+import { recordedRole, type OrchestratorFacts } from "../../orchestration/repoOrchestrator.ts";
+import type { AgentSession } from "../../shared/types.ts";
 import type { SessionKind } from "../../runtime/tmux/index.ts";
 import { KIND_LABEL } from "../glyphs.ts";
 
@@ -94,15 +96,15 @@ export function repoOrchestrators(rows: OrchestratorSummaryRow[]): RepoOrchestra
  */
 export function withRememberedOrchestrators(
   live: OrchestratorSummaryRow[],
-  sessions: { id: string; cwd: string }[],
-  roles: Map<string, OrchestratorRole>,
+  sessions: Pick<AgentSession, "id" | "cwd" | "source">[],
+  marks: Pick<OrchestratorFacts, "roles" | "cwdRoles">,
   toShortId: (id: string) => string,
 ): OrchestratorSummaryRow[] {
   const listed = new Set(live.map((r) => r.shortId));
   const repos = new Set(live.filter((r) => r.role !== "global").map((r) => repoRootForCwd(r.cwd)));
   const out = [...live];
   for (const s of sessions) {
-    const role = roles.get(s.id);
+    const role = recordedRole(s, marks);
     if (!role) continue;
     const sid = toShortId(s.id);
     if (listed.has(sid)) continue;

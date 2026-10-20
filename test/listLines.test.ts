@@ -5,7 +5,7 @@
 // variants, the repo filter with none, one and several repos — so a change to
 // one reads against the rest.
 import { describe, expect, test } from "bun:test";
-import { repoFilterHint, scopeText, scopeToggleHint, searchHint, viewHint } from "../src/ui/screens/listLines.tsx";
+import { coordinatorHint, pinnedLineCount, repoFilterHint, scopeText, scopeToggleHint, searchHint, viewHint } from "../src/ui/screens/listLines.tsx";
 
 const state = { grouped: false, prsGrouped: true, prSort: "created" as const, sessionSort: "updated" as const };
 
@@ -21,6 +21,13 @@ describe("viewHint", () => {
   test("sessions: the group toggle and the sort in force", () => {
     expect(viewHint("sessions", state)).toMatch(/^↑\/↓ move · → expand · ⇥ view · g group · s sort: updated · \/ search · n new · O orch · G global · enter resume/);
     expect(viewHint("sessions", { ...state, grouped: true })).toContain("· g ungroup ·");
+  });
+
+  test("sessions scoped to one repo: O and G open the same orchestrator, so they share one entry", () => {
+    expect(coordinatorHint(true)).toBe("O/G orch");
+    expect(coordinatorHint(false)).toBe("O orch · G global");
+    expect(coordinatorHint(undefined)).toBe("O orch · G global");
+    expect(viewHint("sessions", { ...state, repoScope: true })).toContain("· n new · O/G orch · enter resume ·");
   });
 
   test("PRs: its own group toggle and the sort spelled created or updated", () => {
@@ -46,5 +53,14 @@ describe("the scope line", () => {
     expect(repoFilterHint(2, false)).toBe("  · f repo filter: off");
     expect(repoFilterHint(1, true)).toBe("  · f repo filter: on (1 repo)");
     expect(repoFilterHint(3, true)).toBe("  · f repo filter: on (3 repos)");
+  });
+});
+
+describe("pinnedLineCount", () => {
+  test("the pinned block's height on the Sessions view, and nothing anywhere else or without one", () => {
+    const pins = { repoScope: true, lines: [[{ text: "a" }], [{ text: "b" }]] };
+    expect(pinnedLineCount("sessions", pins)).toBe(2);
+    expect(pinnedLineCount("prs", pins)).toBe(0);
+    expect(pinnedLineCount("sessions", null)).toBe(0);
   });
 });

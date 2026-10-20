@@ -27,6 +27,12 @@ export interface FreshTarget {
    */
   orchestrator?: boolean;
   /**
+   * The repo this target is already tied to, by root — set when `O` (or `G`) is
+   * pressed in a launcher scoped to one repo, so the repo picker is skipped.
+   * A root rather than `preferRepo`'s name: two checkouts can share a basename.
+   */
+  repoRoot?: string;
+  /**
    * The work item / PR this target was derived from, for the launched window's
    * own tag (`@cl_item` / `@cl_pr`). `tmuxName` already encodes the number, but
    * only after `scopeTag` has folded a repo discriminator in and reduced the

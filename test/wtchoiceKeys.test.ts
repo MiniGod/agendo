@@ -1,6 +1,7 @@
 // The worktree-or-main choice's keys (src/ui/keys/wtchoice.ts). The e2e suite
 // takes the worktree row for a free session and the main-checkout row for an
-// orchestrator; it never escapes back to the repo picker, never wraps the
+// orchestrator; it never escapes back to the repo picker (nor, for a target
+// that came with its repo, to the agent picker it skipped from), never wraps the
 // cursor, never opens the prompt for the main checkout, and never has an
 // orchestrator worktree already in the repo for the seed to step past.
 import { describe, expect, mock, test } from "bun:test";
@@ -11,7 +12,8 @@ import type { Key } from "ink";
 import { ORCHESTRATOR_SLUG } from "../src/orchestration/index.ts";
 import type { RepoInfo } from "../src/repositories/index.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
-import { branchPrompt, branchSeed, chooseWorktree, handleWtchoiceKeys } from "../src/ui/keys/wtchoice.ts";
+import { backFromWtchoice, branchPrompt, branchSeed, chooseWorktree, handleWtchoiceKeys } from "../src/ui/keys/wtchoice.ts";
+import { agentChoicesFor } from "../src/ui/keys/agent.ts";
 import type { FreshTarget } from "../src/ui/models/targets.ts";
 import { worktreePath } from "../src/repositories/worktree/index.ts";
 
@@ -94,5 +96,20 @@ describe("handleWtchoiceKeys", () => {
     expect(handleWtchoiceKeys("x", key(), other)).toBe(true);
     expect(other.setMode).not.toHaveBeenCalled();
     expect(other.startFresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("backFromWtchoice", () => {
+  test("a target that came with its repo steps back to the agent picker, since the repo picker was skipped", () => {
+    const scoped: FreshTarget = { ...orchestrator, repoRoot: root };
+    expect(backFromWtchoice(choice(scoped, 0))).toEqual({ kind: "agent", target: scoped, cursor: 0 });
+    expect(backFromWtchoice(choice(orchestrator, 0))).toEqual({ kind: "repo", target: orchestrator, agent: "claude", cursor: 0 });
+  });
+
+  test("the agent picker it steps back to still highlights the agent that was picked", () => {
+    const scoped: FreshTarget = { ...orchestrator, repoRoot: root };
+    const codexAt = agentChoicesFor(scoped).findIndex((a) => a.source === "codex");
+    expect(codexAt).toBeGreaterThan(0);
+    expect(backFromWtchoice({ ...choice(scoped, 0), agent: "codex" })).toEqual({ kind: "agent", target: scoped, cursor: codexAt });
   });
 });
