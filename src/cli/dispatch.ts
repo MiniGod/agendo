@@ -233,6 +233,10 @@ const SESSION_VERBS: Record<string, SessionVerb> = {
   close: CLOSE,
   kill: CLOSE,
   stop: CLOSE,
+  // `pause <id>`: end the session's agent but leave its tab behind as the paused
+  // restore placeholder (`⏸ paused` in `list`), so a keypress in it — or
+  // `resume <id>` — wakes it again. Same guards as `close`, same --force.
+  pause: CLOSE,
   // `unblock <id>`: nudge a session sitting at its usage limit to continue — sends
   // <esc>continue<enter>. Distinct from `resume` (which relaunches an idle session
   // in a fresh window); this pokes a live, limited pane. Refuses unless the pane is

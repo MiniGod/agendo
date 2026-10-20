@@ -138,9 +138,11 @@
         // 197 -> 195: src/cli/list/index.ts `runList` set 197 and is now load, select,
         // sort, map, print, each step named, `runList` itself 38 lines. The
         // holder is src/app/model/index.ts `loadModel`.
-        // LOWERED 195 -> 183. The current holder is src/launch/prompt.ts
-        // `llmGuide`; 182 fails against the current tree.
-        "max-lines-per-function": ["error", { "max": 183, "skipBlankLines": false, "skipComments": false }], // src/launch/prompt.ts llmGuide
+        // LOWERED 195 -> 183. LOWERED 183 -> 166: the `close` section of
+        // src/launch/prompt.ts `llmGuide` is now `endGuide` beside `listGuide`
+        // (with `pause` added to it). The holder is still `llmGuide`; 165 fails
+        // against the current tree.
+        "max-lines-per-function": ["error", { "max": 166, "skipBlankLines": false, "skipComments": false }], // src/launch/prompt.ts llmGuide
         // Was also src/cli/wait/index.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/sessions/activity/index.ts; both are now
         // walks over small per-record handlers under src/sessions/activity/, the worst of

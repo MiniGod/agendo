@@ -6,6 +6,7 @@ import type { KeyContext } from "./context.ts";
 import { handleAgentKeys } from "./agent.ts";
 import { handleBranchKeys } from "./branch.ts";
 import { handleCloneKeys, handleCloningKeys } from "./clone.ts";
+import { handleConfirmEndKeys } from "./confirmEnd.ts";
 import { handleIdentityKeys } from "./identity.ts";
 import { handleInitKeys } from "./init.ts";
 import { handleListKeys } from "./list.ts";
@@ -13,6 +14,7 @@ import { handleOpenKeys } from "./open.ts";
 import { handleProfileKeys } from "./profile.ts";
 import { handleProviderKeys } from "./provider.ts";
 import { handleQuitKeys } from "./quit.ts";
+import { noteKey } from "./keySeq.ts";
 import { handleRepoKeys } from "./repo.ts";
 import { handleWtchoiceKeys } from "./wtchoice.ts";
 import { handleSearchKeys } from "./search.ts";
@@ -22,6 +24,7 @@ export type KeyHandler = (input: string, key: Key, ctx: KeyContext) => boolean;
 
 export const KEY_HANDLERS: readonly KeyHandler[] = [
   handleOpenKeys,
+  handleConfirmEndKeys,
   handleSearchKeys,
   handleQuitKeys,
   handleAgentKeys,
@@ -40,5 +43,6 @@ export const KEY_HANDLERS: readonly KeyHandler[] = [
 
 /** Offer a key to each handler in turn, stopping at the first that takes it. */
 export function dispatchKey(input: string, key: Key, ctx: KeyContext, handlers: readonly KeyHandler[] = KEY_HANDLERS): void {
+  noteKey();
   for (const h of handlers) if (h(input, key, ctx)) return;
 }

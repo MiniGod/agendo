@@ -1,5 +1,6 @@
 // The row actions of list mode (src/ui/keys/rowActions.ts): `c`, `m` and `o`
-// on the row under the cursor. The e2e suite presses `o` on a work item and
+// on the row under the cursor (`p` / `x` / `X` have their own suite,
+// test/sessionEndUi.test.ts). The e2e suite presses `o` on a work item and
 // `c` on a session; it never reaches the wrong-row notices, a row whose
 // targets hold no URL, `m`, or a chord that must be declined.
 import { describe, expect, mock, test } from "bun:test";
@@ -35,7 +36,7 @@ const prRow = (open?: object): Row => ({ kind: "pr", pr: { id: 9, title: "Fix" }
 const header: Row = { kind: "header", label: "h" };
 
 function ctxOver(rows: Row[], cursor = 0) {
-  return { rows, cursor, setNotice: mock(), setMode: mock(), continueInOtherAgent: mock(), enterProfilePicker: mock() };
+  return { rows, cursor, setNotice: mock(), setMode: mock(), continueInOtherAgent: mock(), enterProfilePicker: mock(), reload: mock(), model: null };
 }
 
 describe("rowActions helpers", () => {
@@ -100,11 +101,13 @@ describe("handleListRowActionKeys", () => {
     }
   });
 
-  test("c and m need the bare letter, o takes any modifier, and other keys are declined", () => {
+  test("c, m, p and x need the bare letter, o takes any modifier, and other keys are declined", () => {
     const ctx = ctxOver([sessRow({ pr })]);
     expect(handleListRowActionKeys("c", key({ ctrl: true }), ctx)).toBe(false);
     expect(handleListRowActionKeys("m", key({ meta: true }), ctx)).toBe(false);
-    expect(handleListRowActionKeys("x", NONE, ctx)).toBe(false);
+    expect(handleListRowActionKeys("p", key({ ctrl: true }), ctx)).toBe(false);
+    expect(handleListRowActionKeys("x", key({ meta: true }), ctx)).toBe(false);
+    expect(handleListRowActionKeys("z", NONE, ctx)).toBe(false);
     expect(ctx.setNotice).not.toHaveBeenCalled();
     expect(handleListRowActionKeys("o", key({ ctrl: true }), ctx)).toBe(true);
     expect(ctx.setMode).toHaveBeenCalledTimes(1);
