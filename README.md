@@ -137,6 +137,13 @@ It remembers the agent tabs you had open and lazily restores them next launch â€
 reappears in the tab strip but stays unloaded until you switch to it and press a key,
 so startup never spawns a fleet of agents.
 
+The same paused state is one keypress away for a session you are running now: on a
+session row, `p` ends its agent and leaves its tab paused (`agendo pause <id>` does
+the same from a script), `x` kills it the way `agendo close` does after a y/n, and `X`
+force-kills, its y/n saying what is still in flight. `p` and `x` refuse a session that
+is mid-turn, holds an open question or has background agents running; `x` on a paused
+tab closes it for good. None of them touch the session's worktree, branch or transcript.
+
 ### Orchestrator agents that spin up their own worktrees
 
 Every Claude agendo starts is given a small system prompt pointing at `agendo

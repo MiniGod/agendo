@@ -1,6 +1,7 @@
 // The row actions of list mode: `c` continues the hovered session in the
 // other agent, `m` moves it to another Claude profile, `o` opens the hovered
-// work item / PR / session in the browser. Each works on the row under the
+// work item / PR / session in the browser, `p` pauses it and `x` / `X` kill it
+// (src/ui/actions/sessionEnd.ts). Each works on the row under the
 // cursor in any view, and says in the notice what it needed when that row is
 // the wrong kind. list.ts dispatches to this between the view keys and
 // navigation; nothing here knows about focus or the view.
@@ -11,10 +12,11 @@ import type { Row } from "../models/rows.ts";
 import type { OpenTargets } from "../models/targets.ts";
 import { V } from "../models/vocabState.ts";
 import type { KeyContext } from "./context.ts";
+import { killHovered, pauseHovered } from "../actions/sessionEnd.ts";
 
 export type RowActionCtx = Pick<
   KeyContext,
-  "rows" | "cursor" | "setNotice" | "setMode" | "continueInOtherAgent" | "enterProfilePicker"
+  "rows" | "cursor" | "setNotice" | "setMode" | "continueInOtherAgent" | "enterProfilePicker" | "reload" | "model"
 >;
 
 /** The session under the cursor, or null after a notice saying which row the action needs. */
@@ -69,12 +71,15 @@ function openHovered(ctx: RowActionCtx): void {
   ctx.setMode({ kind: "open", targets: row.open, title: openTitle(row) });
 }
 
-// `c` and `m` need the bare letter: ctrl-c is quit, handled earlier, and a
+// `c`, `m`, `p` and `x` need the bare letter: ctrl-c is quit, handled earlier, and a
 // chord is never one of these. `o` has always taken any modifier.
 const ACTIONS = new Map<string, { bare: boolean; run: (ctx: RowActionCtx) => void }>([
   ["c", { bare: true, run: continueHovered }],
   ["m", { bare: true, run: moveHovered }],
   ["o", { bare: false, run: openHovered }],
+  ["p", { bare: true, run: pauseHovered }],
+  ["x", { bare: true, run: (ctx) => killHovered(ctx, false) }],
+  ["X", { bare: true, run: (ctx) => killHovered(ctx, true) }],
 ]);
 
 export function handleListRowActionKeys(input: string, key: Key, ctx: RowActionCtx): boolean {

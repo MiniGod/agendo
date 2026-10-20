@@ -45,7 +45,11 @@ export type Mode =
   // orientation but skipped by the cursor, since moving somewhere you already are
   // is not a choice.
   | { kind: "profile"; session: AgentSession; choices: ProfileChoice[]; cursor: number }
-  | { kind: "open"; targets: OpenTargets; title: string };
+  | { kind: "open"; targets: OpenTargets; title: string }
+  // "kill this session?" — the y/n the list's `x` / `X` put up before ending it
+  // (src/ui/actions/sessionEnd.ts). `prompt` says what is, or is not, in flight;
+  // `waived` is every refusal it names, all a `y` to `X` may force past.
+  | { kind: "confirmEnd"; session: AgentSession; force: boolean; prompt: string; waived: readonly string[] };
 
 /** The two screens on which a parent folder can be chosen for a new repo. */
 export type InitParentMode = Extract<Mode, { kind: "initDir" | "initPath" }>;

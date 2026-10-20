@@ -351,3 +351,11 @@ export function setSessionRoot(session: string, root: string): boolean {
   return r.status === 0;
 }
 
+/**
+ * How many windows the tmux session named exactly `session` holds — 0 when
+ * there is no such session or the read failed. Read across `-a` and matched by
+ * equality rather than by `-t`, which tmux resolves by prefix.
+ */
+export function sessionWindowCount(session: string): number {
+  return tmuxLines(["list-windows", "-a", "-F", "#{session_name}"]).filter((s) => s === session).length;
+}

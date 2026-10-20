@@ -10,6 +10,7 @@ import { AgentScreen } from "./AgentScreen.tsx";
 import { BranchScreen } from "./BranchScreen.tsx";
 import { CloneScreen } from "./CloneScreen.tsx";
 import { CloningScreen } from "./CloningScreen.tsx";
+import { ConfirmEndScreen } from "./ConfirmEndScreen.tsx";
 import { IdentityScreen } from "./IdentityScreen.tsx";
 import { InitDirScreen, InitNameScreen, InitPathScreen } from "./InitScreens.tsx";
 import { OpenScreen } from "./OpenScreen.tsx";
@@ -135,6 +136,10 @@ function renderLaunchMode({ mode, cloneNote, filterRoot, canClone, anyHostableRe
 
   if (mode.kind === "open") {
     return <OpenScreen targets={mode.targets} title={mode.title} />;
+  }
+
+  if (mode.kind === "confirmEnd") {
+    return <ConfirmEndScreen title={mode.session.title} prompt={mode.prompt} force={mode.force} />;
   }
   return null;
 }

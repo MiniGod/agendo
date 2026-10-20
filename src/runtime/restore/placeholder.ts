@@ -39,10 +39,11 @@ export function refreshPlaceholder(hostSession: string, tab: RestoreTab): boolea
 
 /**
  * Create one lazy placeholder window for `tab` in the host session and flag it as
- * unloaded. Shared by first-run restore and the retarget path above so the two
- * can't drift on the marker or the argv.
+ * unloaded. Shared by first-run restore, the retarget path above and pausing a
+ * live session (src/app/sessionEnd/pause.ts) so they can't drift on the marker or
+ * the argv.
  */
-function spawnPlaceholder(hostSession: string, tab: RestoreTab): void {
+export function spawnPlaceholder(hostSession: string, tab: RestoreTab): void {
   newWindowIn(hostSession, tab.name, tab.cwd, placeholderArgv(tab));
   // Mark it as an unloaded placeholder so isRunning doesn't report the idle
   // bash window as a running session. The placeholder script owns the flag from

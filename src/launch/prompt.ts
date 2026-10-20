@@ -101,6 +101,32 @@ function hierarchyGuide(): string[] {
 }
 
 /**
+ * `close` and `pause`: the two ways to end a session, and the guarantee they
+ * share. Its own function, like `listGuide`, so `llmGuide` stays a table of
+ * contents rather than growing past its length budget.
+ */
+function endGuide(): string[] {
+  return [
+    `Close it:     ${SELF_CMD} close <id>`,
+    "  Ends the session by killing ONLY its tmux window. Its git worktree, branch and",
+    "  commits are guaranteed untouched on disk, so nothing is lost and `resume <id>`",
+    "  brings it back — see \"Bring one back\" below. Refuses a session with work in flight",
+    "  (--force to override). That includes a session whose SUBAGENT is still running while",
+    "  its main agent sits idle: it reads \"ready\" and `send` reaches it, but closing it now",
+    "  would kill the subagent mid-write. `wait` holds for the same reason.",
+    "  Use this instead of `tmux kill-window`/`kill-session` — never hand-roll a kill.",
+    "  A `wait` on a session you close ends at once, reporting it as \"exited\".",
+    "",
+    `Pause it:     ${SELF_CMD} pause <id>`,
+    "  Ends the agent the same way, with the same refusals (and --force), but leaves its",
+    "  tmux tab behind as a paused restore placeholder — `list` shows it ⏸ paused, and",
+    "  a keypress in that tab or `resume <id>` wakes it. Only a session running in a",
+    "  tmux tab (window) of its own can be paused; for anything else, close it.",
+    "",
+  ];
+}
+
+/**
  * On-demand, agent-facing guide for the background-session workflow. Kept out of
  * the injected system prompt (which only points here) so every session isn't
  * bloated with detail it may never use. Printed by `agendo --llm`.
@@ -248,16 +274,7 @@ export function llmGuide(): string {
     "  Check the exit code before parsing --json: a setup error (unknown id, nothing",
     "  running) reports on stderr and prints no payload at all.",
     "",
-    `Close it:     ${SELF_CMD} close <id>`,
-    "  Ends the session by killing ONLY its tmux window. Its git worktree, branch and",
-    "  commits are guaranteed untouched on disk, so nothing is lost and `resume <id>`",
-    "  brings it back — see \"Bring one back\" below. Refuses a session with work in flight",
-    "  (--force to override). That includes a session whose SUBAGENT is still running while",
-    "  its main agent sits idle: it reads \"ready\" and `send` reaches it, but closing it now",
-    "  would kill the subagent mid-write. `wait` holds for the same reason.",
-    "  Use this instead of `tmux kill-window`/`kill-session` — never hand-roll a kill.",
-    "  A `wait` on a session you close ends at once, reporting it as \"exited\".",
-    "",
+    ...endGuide(),
     `Bring one back: ${SELF_CMD} resume <id>`,
     "  A session whose tmux window is GONE is NOT a lost session, and must never be",
     "  relaunched from scratch. That holds however the window went away: you closed it, the",

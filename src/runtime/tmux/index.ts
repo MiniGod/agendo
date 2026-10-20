@@ -22,7 +22,8 @@
 // splitTargetWidth, splitPaneIn, killPane, launcherWindowTarget), the tag layer
 // and the adoption primitives (LAUNCHER_WINDOW, type LivePane, livePanes,
 // managedFromPanes, stampPaneTarget, adoptWindow, isPlaceholderPane,
-// killPaneById) are the only additions since.
+// killPaneById) and `sessionWindowCount` (a pause refusing a host's only
+// window) are the only additions since.
 //
 // Where things went, and why in that order — each module may only import from
 // the ones above it, which is what keeps `import/no-cycle` green:
@@ -125,6 +126,7 @@ export {
   liveManagedPaths,
   livePanes,
   managedFromPanes,
+  sessionWindowCount,
   type LivePane,
   paneLocation,
   splitTargetWidth,

@@ -36,8 +36,8 @@ import { refreshPlaceholder } from "./placeholder.ts";
 //
 // This file stays the one import path, so the re-exports below keep the surface
 // it had before.
-export { loadRestore, type RestoreTab } from "./store.ts";
-export { placeholderArgv, restoreTabs } from "./placeholder.ts";
+export { loadRestore, rememberRestoreTab, type RestoreTab } from "./store.ts";
+export { placeholderArgv, restoreTabs, spawnPlaceholder } from "./placeholder.ts";
 
 
 /**

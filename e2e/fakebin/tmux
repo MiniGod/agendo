@@ -394,9 +394,22 @@ switch (cmd) {
     process.exit(0);
   }
   case "new-window": {
+    // A `-t <session>` naming a session the state knows lands the window THERE,
+    // at the next free index — what pausing a session relies on to put the paused
+    // tab back in the host it was taken from. Anything else keeps the historical
+    // catch-all `launcher-session`, which the older specs were written against.
     const name = flag("-n");
     const cwd = flag("-c");
-    if (name) {
+    // Only an explicit `-t` resolves: an empty target prefix-matches every name,
+    // which would send a bare `new-window` into whichever session is alone.
+    const t = flag("-t");
+    const host = t ? resolveTarget(t.replace(/:$/, ""), state.sessions) : undefined;
+    if (name && host) {
+      const next = Math.max(-1, ...state.windows.filter((w) => w.session === host).map((w) => w.index ?? 0)) + 1;
+      state.windows.push({ session: host, index: next, name, cwd: cwd ?? "" });
+      state.panes.push({ session: host, window: name, cwd: cwd ?? "", placeholder: false });
+      writeState(state);
+    } else if (name) {
       state.windows.push({ session: "launcher-session", index: state.windows.length + 1, name });
       state.panes.push({ session: "launcher-session", window: name, cwd: cwd ?? "" });
       writeState(state);
@@ -461,16 +474,16 @@ switch (cmd) {
     // the two paths that read it. An empty window half (`=session:`) means that
     // session's current window, which for a managed session is its only one.
     //
-    // `@cl_placeholder` keeps the silent-success path it has always had: the
-    // fixtures set `placeholder` on the record directly, and `markPlaceholder`
-    // is asserted by argv. So is the exit status here — always 0, as before,
+    // `@cl_placeholder` flags the records of a fully named `session:window`
+    // target (a paused tab being marked, below); any other `@cl_placeholder`
+    // write keeps the silent success it has always had, the fixtures setting
+    // `placeholder` on the record directly. The exit status stays always 0,
     // rather than modelling tmux's "no such window" — because several callers
     // target windows this stub does not model, and failing them would be a new
     // behaviour rather than a more faithful one.
     if (argv.includes("-w")) {
       const target = flag("-t") ?? "";
       const [opt, value] = argv.slice(argv.indexOf("-t") + 2).filter((a) => !a.startsWith("-"));
-      if (!opt || !/^@cl_(session_id|source|acquired|branch|pr|item)$/.test(opt)) process.exit(0);
       // A pane id addresses its own window — how adoption stamps a window it
       // reached through the pane listing, since `%N` is the one handle that
       // cannot prefix-match a neighbour. Real tmux resolves it the same way.
@@ -481,6 +494,16 @@ switch (cmd) {
       const window = byPane ? byPane.window : bare === "" ? null : targetName(state, target);
       const hits = (rec, recWindow) =>
         (session === undefined || rec.session === session) && (window === null || recWindow === window);
+      // `markPlaceholder` on a window this stub just created (a paused tab):
+      // flag its records, so the list formats read it back as a placeholder the
+      // way they read a fixture's own `placeholder: true`. Only a fully named
+      // `session:window` target, so a stray write can't flag a whole session.
+      if (opt === "@cl_placeholder" && session !== undefined && window !== null) {
+        for (const rec of [...state.windows, ...state.panes]) if (hits(rec, rec.name ?? rec.window)) rec.placeholder = true;
+        writeState(state);
+        process.exit(0);
+      }
+      if (!opt || !/^@cl_(session_id|source|acquired|branch|pr|item)$/.test(opt)) process.exit(0);
       let matched = false;
       for (const w of state.windows) {
         if (!hits(w, w.name ?? w.window)) continue;

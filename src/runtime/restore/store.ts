@@ -109,3 +109,13 @@ export function saveRestore(session: string, tabs: RestoreTab[]): void {
     // Persisting the tab snapshot is best-effort; ignore write failures.
   }
 }
+
+/**
+ * Keep `tab` in one host session's snapshot, replacing any earlier tab of the
+ * same name — what a PAUSED session needs, since its placeholder must come back
+ * on that launcher's next start the way any restored tab does. The counterpart
+ * of `forgetRestoreTab`, which a close uses to drop it.
+ */
+export function rememberRestoreTab(session: string, tab: RestoreTab): void {
+  saveRestore(session, [...loadRestore(session).filter((t) => t.name !== tab.name), tab]);
+}
