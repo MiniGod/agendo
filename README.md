@@ -224,6 +224,20 @@ session that is mid-turn; pasted means it is on screen now, and the pane had to 
 to accept it. Nothing about the session afterwards distinguishes the two, and the socket
 isn't guaranteed to exist, so the route is reported rather than inferred.
 
+Typing into a codex pane is checked rather than assumed. Codex can swallow the Enter
+that follows a paste, so `send` reads the input box back. It presses Enter only once
+the paste shows in the box, and presses again (a bounded number of times) while the
+box still holds it. It reports success once the box has emptied, or once codex says
+it is holding the message until its own startup finishes, and waits briefly for the
+turn to start so an `agendo wait` run straight after doesn't return early. If the
+message never shows, never leaves the box, is rewritten by a completion popup, or
+the box can no longer be read after Enter, `send` exits 1 and says what is left in
+the box. Look before re-sending, or the message may go twice. If the box can't be
+read before typing, nothing is typed and `send` exits 2. Only `--force` into a
+codex pane whose box `send` couldn't read when it first looked types blind, as it
+does into any other pane. On the read-back path `--json` adds `enters`,
+`turnStarted` and `held`, and `composer` (what the box holds) when it failed.
+
 ### Turning the socket off
 
 The socket speaks an internal, undocumented claude protocol. agendo gates on the

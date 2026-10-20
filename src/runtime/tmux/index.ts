@@ -22,8 +22,10 @@
 // splitTargetWidth, splitPaneIn, killPane, launcherWindowTarget), the tag layer
 // and the adoption primitives (LAUNCHER_WINDOW, type LivePane, livePanes,
 // managedFromPanes, stampPaneTarget, adoptWindow, isPlaceholderPane,
-// killPaneById) and `sessionWindowCount` (a pause refusing a host's only
-// window) are the only additions since.
+// killPaneById), `sessionWindowCount` (a pause refusing a host's only
+// window) and codex's read-back delivery (codexComposerText, deliverToCodex,
+// codexPaneIo, CODEX_TURN_START_MS, type CodexDelivery) are the only additions
+// since.
 //
 // Where things went, and why in that order — each module may only import from
 // the ones above it, which is what keeps `import/no-cycle` green:
@@ -38,6 +40,7 @@
 //   chrome.ts        limit notice, task panel, compaction bar, agent/shell counts
 //   codex.ts         the codex TUI, which shares no structure with claude's
 //   paneReadiness.ts the classifier that composes all of the above
+//   codexDelivery.ts type into a codex pane and read back that it was taken
 //   server.ts        read the live server: sessions, windows, managed targets
 //   windows.ts       change it: kill windows/sessions, create them
 //   launcherSession.ts  bootstrap the launcher host session and its menu window
@@ -94,6 +97,10 @@ export {
 export { sessionFinished, type Readiness } from "./readiness.ts";
 
 export { paneReadiness, paneAcceptsPaste } from "./paneReadiness.ts";
+
+export { codexComposerText } from "./codex.ts";
+
+export { deliverToCodex, codexPaneIo, CODEX_TURN_START_MS, type CodexDelivery } from "./codexDelivery.ts";
 
 export {
   paneResumeDialogActive,

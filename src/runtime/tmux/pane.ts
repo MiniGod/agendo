@@ -100,8 +100,18 @@ export function stripAnsi(s: string): string {
  * early), then a single Enter to send.
  */
 export function sendToPane(target: string, text: string): void {
+  pasteToPane(target, text);
+  pressEnter(target);
+}
+
+/** The paste half of `sendToPane`: `text` as one bracketed paste, nothing submitted. */
+export function pasteToPane(target: string, text: string): void {
   tmuxQuiet(["set-buffer", "-b", "cl-send", "--", text]);
   tmuxQuiet(["paste-buffer", "-p", "-d", "-b", "cl-send", "-t", target]);
+}
+
+/** The submit half of `sendToPane`: one Enter. */
+export function pressEnter(target: string): void {
   tmuxQuiet(["send-keys", "-t", target, "Enter"]);
 }
 

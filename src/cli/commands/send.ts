@@ -3,11 +3,12 @@ import { SELF_CMD, notRunningHint } from "../../launch/index.ts";
 import { printJson } from "../output.ts";
 import { findPeer, type PeerSession, sendPeerMessage } from "../../orchestration/peer.ts";
 import {
-  answerResumeDialog, capturePane, capturePaneState, liveTargetForShortId, livePlaceholderForShortId,
+  answerResumeDialog, capturePane, capturePaneState, codexComposerText, liveTargetForShortId, livePlaceholderForShortId,
   paneAcceptsPaste, paneReadiness, paneResumeDialogActive, paneResumeMenuSuspect, resumeDialogOption, sendToPane,
   shortId, stripAnsi, RESUME_DIALOG_POLL_MS, type LiveTarget, type PaneSnapshot, type Readiness,
 } from "../../runtime/tmux/index.ts";
 import { flushWarnings } from "../warnings.ts";
+import { sendToCodex } from "./sendCodex.ts";
 
 /**
  * Poll `target` until it's genuinely at an empty input box (see
@@ -88,7 +89,7 @@ async function waitForInputBox(target: string, timeoutMs: number): Promise<PaneS
  * transient. Nothing about the session tells it apart afterwards, so `send` says.
  */
 export async function runSend(token: string | undefined, prompt: string, force: boolean, dialogWaitMs: number, json: boolean): Promise<void> {
-  if (!token || !prompt) usageExit();
+  if (!token || !prompt.trim()) usageExit();
   const ctx = await resolveSend(token, json);
   await ensureReachable(ctx);
   const pane = await answerDialogIfOpen(ctx, readPane(ctx.target), dialogWaitMs);
@@ -424,9 +425,18 @@ export function pasteWhy(socketFellBack: boolean, socket: Pick<SendContext["sock
   return ` (socket disabled by ${socket.source === "env" ? PEER_SOCKET_ENV : "config"})`;
 }
 
+/**
+ * Type the message. A codex pane whose input box can be read gets delivery with
+ * read-back (sendToCodex): its TUI can swallow an Enter, and only the screen can
+ * say whether the message was taken. Everything else is pasted and submitted
+ * blind, as it always was.
+ */
 function pasteIntoPane(ctx: SendContext, prompt: string, pane: PaneRead, socketFellBack: boolean): Promise<never> {
   const target = ctx.target!; // non-null: reaching here means the peer path didn't return
+  const why = `${pasteWhy(socketFellBack, ctx.socket)}${pane.readiness !== "ready" ? ` (forced; was "${pane.readiness}")` : ""}`;
+  const extra = { state: pane.readiness, resumeDialog: pane.dialogAnswered, socketFellBack };
+  if (codexComposerText(pane.raw) !== null) return sendToCodex(ctx, prompt, why, extra);
   sendToPane(target.target, prompt);
-  ctx.say(`▸ pasted into pane ${target.name}${pasteWhy(socketFellBack, ctx.socket)}${pane.readiness !== "ready" ? ` (forced; was "${pane.readiness}")` : ""}`);
-  return ctx.finish({ ok: true, route: "pane", extra: { state: pane.readiness, resumeDialog: pane.dialogAnswered, socketFellBack } }, 0);
+  ctx.say(`▸ pasted into pane ${target.name}${why}`);
+  return ctx.finish({ ok: true, route: "pane", extra }, 0);
 }

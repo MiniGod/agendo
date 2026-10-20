@@ -176,7 +176,9 @@
     // (test/codexReadiness.test.ts) started driving it over the real codex
     // captures; two thirds now are. The number rides exactly at the observed
     // value — if it crosses on e2e noise, the fix is a unit suite over the
-    // scan itself, not a raised pin.
-    { "file": "src/runtime/tmux/inputBox.ts", "function": "inputRealText", "max": 62.67 }
+    // scan itself, not a raised pin. LOWERED 62.67 -> 36.85: the codex 0.163
+    // captures (test/codex163Readiness.test.ts) take it down rows the older
+    // captures never reached; 79% of it is exercised now.
+    { "file": "src/runtime/tmux/inputBox.ts", "function": "inputRealText", "max": 36.85 }
   ]
 }
