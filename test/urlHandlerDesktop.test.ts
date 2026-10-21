@@ -179,6 +179,16 @@ describe("desktop database", () => {
     expect(warning).toContain("run `update-desktop-database '/x/my apps'`");
   });
 
+  test("a run that hangs past its timeout is a warning, not a missing package", () => {
+    const bin = tempDir("agendo-udd-hang-");
+    writeFileSync(join(bin, "update-desktop-database"), "#!/bin/sh\nexec sleep 5\n");
+    chmodSync(join(bin, "update-desktop-database"), 0o755);
+    const warning = refreshDesktopDatabase("/x/applications", { PATH: `${bin}:/usr/bin:/bin` }, 200);
+    expect(warning).toContain("update-desktop-database did not finish");
+    expect(warning).not.toContain("desktop-file-utils");
+    expect(warning).toContain("run `update-desktop-database /x/applications`");
+  });
+
   test("a failing run is a warning too, carrying the first thing it said", () => {
     const warning = refreshDesktopDatabase("/x/applications", { PATH: fakePath(1, "\\nboom: no such dir\\nmore\\n").path });
     expect(warning).toContain("update-desktop-database failed: boom: no such dir;");

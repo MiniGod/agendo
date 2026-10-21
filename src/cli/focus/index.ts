@@ -3,10 +3,11 @@
 // handler that is its browser-facing door.
 //
 // Runs OUTSIDE tmux when a browser starts it, so it never assumes a current
-// client: it moves a client already showing the tmux session the target's
+// client. A link moves a client already showing the tmux session the target's
 // window is (or will be) in, else the attached client with the latest input.
-// The latter is usually the terminal the human is busy in; the former is the
-// one meant to show the target.
+// The latest-input client is usually the one the human is busy in; a client
+// already on the target's session is the one meant to show it. `focus` typed
+// by hand moves the client with the latest input: the terminal it was typed in.
 // It only ever focuses, or resumes and then focuses, a session that already
 // exists. It never launches a new one, sends to one or closes one — a URL that
 // any web page can trigger must not be able to do more than change what is on
@@ -24,7 +25,7 @@ import { flushWarnings } from "../warnings.ts";
 import { sessionState } from "../list/rows.ts";
 import { findSession, resumeSession } from "../commands/resume.ts";
 import { describeLinkTarget, describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
-import { parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
+import { launcherForCwd, parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
 import { linkedMatches, narrowToRepo, resolveLinked } from "./linked.ts";
 import { failLoudly, notify, onNotify } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
@@ -111,16 +112,26 @@ function isLauncherSession(session: string): boolean {
 
 /**
  * Which tmux session a resume opens the agent in: the one its paused tab sat
- * in; else the launcher session the client is showing; else the shared
- * launcher, if it is up. Never a session of the user's own — `main`, `work` —
- * which an agent window (and its restore tab) would only clutter. Undefined
- * means none of those: the agent gets a detached session of its own, as
- * `agendo resume` gives it.
+ * in; else the path-scoped launcher for its directory that a client is
+ * showing; else the launcher session the most recently active client is
+ * showing; else the shared launcher, if it is up. Never a session of the
+ * user's own — `main`, `work` — which an agent window (and its restore tab)
+ * would only clutter. Undefined means none of those: the agent gets a detached
+ * session of its own, as `agendo resume` gives it.
  */
-function resumeHost(c: FocusCandidate, client: TmuxClient | null): string | undefined {
+function resumeHost(c: FocusCandidate, clients: TmuxClient[]): string | undefined {
   if (c.host) return c.host;
+  const own = repoLauncher(c.s.cwd, clients);
+  if (own) return own;
+  const client = pickClient(clients);
   if (client && isLauncherSession(client.session)) return client.session;
   return hasSession(LAUNCHER_SESSION) ? LAUNCHER_SESSION : undefined;
+}
+
+/** The path-scoped launcher holding `cwd` among the sessions clients are showing (see `launcherForCwd`). */
+function repoLauncher(cwd: string, clients: TmuxClient[]): string | undefined {
+  const shown = [...new Set(clients.map((c) => c.session))];
+  return launcherForCwd(cwd, shown.map((session) => ({ session, root: sessionRoot(session) })));
 }
 
 /** The session's window, and — when focus had to resume it — what to tell the human if the rest then fails. */
@@ -160,11 +171,11 @@ interface Landing {
   session: string | undefined;
 }
 
-/** Where `c` is, or where a resume will put it (see `resumeHost`, asked about the most recently active client). */
+/** Where `c` is, or where a resume will put it (see `resumeHost`). */
 function landing(c: FocusCandidate, all: AgentSession[], clients: TmuxClient[]): Landing {
   const running = c.state === "running" ? runningTarget(c.s, all) : null;
   if (running) return { running, session: windowIdentity(running)?.session };
-  return { running: null, session: resumeHost(c, pickClient(clients)) };
+  return { running: null, session: resumeHost(c, clients) };
 }
 
 /**
@@ -197,18 +208,31 @@ function paneOf(target: string): string | undefined {
   return target.startsWith("%") ? target : undefined;
 }
 
+/** The client a focus moves, and whether to raise its terminal too. */
+interface Mover {
+  client: TmuxClient;
+  raise: boolean;
+}
+
 /**
- * The client to move, chosen again now the window exists: a resume takes
- * seconds, may have landed somewhere other than foreseen, and the human may
- * have started typing in the client, or detached it, meanwhile. For a link,
- * the typing guard is applied once more, to the client chosen now.
+ * For a link, the client to move, chosen again now the window exists: a resume
+ * takes seconds, may have landed somewhere other than foreseen, and the human
+ * may have started typing in the client, or detached it, meanwhile. The typing
+ * guard is applied once more, to the client chosen now.
+ *
+ * Its terminal is NOT raised while another terminal is being typed in: raising
+ * takes keyboard focus, and a page firing links on a timer would otherwise
+ * steer keystrokes meant for that terminal into the agent's prompt. The switch
+ * itself still happens. `focus` typed by hand moves the client it was given.
  */
-function finalClient(client: TmuxClient, where: WindowIdentity, up: Brought, fail: Fail, origin: FocusOrigin): TmuxClient {
-  const now = pickClientFor(listClients(), where.session);
-  if (!origin.fromUrl) return now ?? client;
+function finalClient(client: TmuxClient, where: WindowIdentity, up: Brought, fail: Fail, origin: FocusOrigin): Mover {
+  if (!origin.fromUrl) return { client, raise: true };
+  const clients = listClients();
+  const now = pickClientFor(clients, where.session);
   if (!now) return refuseLink(`${client.name} detached`, null, up, fail);
   const why = typingIn(now);
-  return why ? refuseLink(why, now, up, fail) : now;
+  if (why) return refuseLink(why, now, up, fail);
+  return { client: now, raise: !clients.some((c) => c.name !== now.name && typingIn(c)) };
 }
 
 /**
@@ -230,18 +254,21 @@ function refuseLink(why: string, typist: TmuxClient | null, up: Brought, fail: F
  */
 function ignoreLink(why: string, typist: TmuxClient | null): never {
   console.error(`url: ignored — ${why}`);
-  if (typist) notify(`ignored — you were typing in ${typist.session}`);
+  // Through the refusal-note floor too: links refused by the focus floor while
+  // this one was still working may already have said something. (The onNotify
+  // hook then claims it again and finds it taken — harmless.)
+  if (typist && "go" in claimRefusalNote()) notify(`ignored — you were typing in ${typist.session}`);
   process.exit(1);
 }
 
-/** Move the client chosen for the window onto it and raise that client's terminal. */
+/** Move the client chosen for the window onto it and raise that client's terminal (see `finalClient`). */
 function switchTo(chosen: TmuxClient, where: WindowIdentity, up: Brought, s: AgentSession, fail: Fail, origin: FocusOrigin): never {
-  const client = finalClient(chosen, where, up, fail, origin);
+  const { client, raise } = finalClient(chosen, where, up, fail, origin);
   const target = up.target;
   if (!focusClientOn(client.name, where, paneOf(target))) {
     fail(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
   }
-  raiseTerminal(client.pid);
+  if (raise) raiseTerminal(client.pid);
   console.log(`focused session ${shortId(s.id)} (window ${where.windowId} in ${where.session}) on ${client.name}`);
   process.exit(0);
 }
@@ -272,7 +299,9 @@ function typingIn(client: TmuxClient, nowS = Date.now() / 1000): string | null {
 function clientOrTerminal(
   clients: TmuxClient[], session: string | undefined, origin: FocusOrigin,
 ): { client: TmuxClient; template: null } | { client: null; template: string } {
-  const client = pickClientFor(clients, session);
+  // A link moves the terminal meant to show the target; `focus` typed by hand,
+  // the terminal it was typed in — the one with the latest input.
+  const client = origin.fromUrl ? pickClientFor(clients, session) : pickClient(clients);
   if (client) {
     if (origin.fromUrl) leaveTypistAlone(client);
     return { client, template: null };
@@ -334,7 +363,9 @@ export async function urlCommand(argv: string[]): Promise<never> {
     process.exit(1);
   }
   // Whatever this link goes on to say counts against the refusal-note floor, so
-  // the links refused behind it add nothing to the notification it raised.
+  // links refused behind it add nothing to it. Its failures are not gated — a
+  // real failure is always shown — but its own typing refusal goes through the
+  // same floor (`ignoreLink`; see throttle.ts).
   onNotify(() => void claimRefusalNote());
   const parsed = argv.length === 1 ? parseFocusUrl(argv[0]) : { ok: false as const, reason: "expected exactly one URL" };
   if (!parsed.ok) {

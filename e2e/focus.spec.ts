@@ -3,11 +3,11 @@
 //
 // Everything they touch outside agendo is a fake on PATH: tmux (attached
 // clients are fixture data in `state.clients`), notify-send, wmctrl, xdotool,
-// xdg-mime and update-desktop-database. The installer runs against a temp XDG_DATA_HOME /
-// XDG_CONFIG_HOME, so neither the developer's desktop entries nor their
-// mimeapps.list is ever written.
+// xdg-mime and update-desktop-database. The installer runs against a temp
+// XDG_DATA_HOME / XDG_CONFIG_HOME, so neither the developer's desktop entries
+// nor their mimeapps.list is ever written.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { delimiter, join } from "node:path";
 import { test, expect } from "./harness/test.ts";
@@ -17,6 +17,29 @@ import { CRASH_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, sessionName, t
 const FAKE_TMUX = join(REPO_ROOT, "e2e", "fakebin", "tmux");
 const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
 const STANDALONE_TARGET = sessionName("claude", STANDALONE_SESSION_ID);
+
+/**
+ * An activity stamp that still reads as "typed into just now" however slowly the
+ * CLI under test starts: in the future, which the typing guard counts as typing
+ * (a stamp of plain `now` expires three seconds later, mid-run on a loaded runner).
+ * Relies on `typingIn` in src/cli/focus/index.ts treating a future activity as typing.
+ */
+const typingNow = () => Math.floor(Date.now() / 1000) + 60;
+
+/**
+ * Hold link floor `name` (src/cli/focus/throttle.ts) the way a concurrent
+ * link's claim does: its lock dir, dated in the future so it never reads as
+ * stale. A stamp would expire two seconds after it was written — mid-run on a
+ * loaded runner — while a held lock refuses every claim until the test ends.
+ * Relies on `clearIfStale` in src/cli/focus/throttle.ts never reading a
+ * future-dated lock as stale.
+ */
+function holdFloor(mock: MockEnv, name: string): void {
+  const lock = join(mock.home, ".agendo", `${name}.lock`);
+  mkdirSync(lock, { recursive: true });
+  const future = Date.now() / 1000 + 3600;
+  utimesSync(lock, future, future);
+}
 
 /** Two attached clients; /dev/pts/7 was typed into last, so it is the one to move. */
 const CLIENTS = [
@@ -185,7 +208,7 @@ test("a path-scoped launcher the client shows keeps both an idle and a paused re
 });
 
 test("a link never moves a terminal that is being typed in", async ({ mock }) => {
-  await seed(mock, { clients: [{ name: "/dev/pts/7", pid: 4107, activity: Math.floor(Date.now() / 1000), session: "agendo" }] });
+  await seed(mock, { clients: [{ name: "/dev/pts/7", pid: 4107, activity: typingNow(), session: "agendo" }] });
   const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
   expect(r.code).not.toBe(0);
   expect(r.stderr).toContain("/dev/pts/7 was typed into");
@@ -204,24 +227,119 @@ function spreadClients(targetSession: string, extra: { sessions?: string[] } = {
     sessions: ["agendo-tv-launcher", "agendo-agendo", ...(extra.sessions ?? [])],
     clients: [
       { name: "/dev/pts/1", pid: 4101, activity: now - 600, session: "agendo-tv-launcher" },
-      { name: "/dev/pts/21", pid: 4121, activity: now, session: "agendo-agendo" },
+      { name: "/dev/pts/21", pid: 4121, activity: typingNow(), session: "agendo-agendo" },
       { name: "/dev/pts/6", pid: 4106, activity: now - 300, session: targetSession },
       { name: "/dev/pts/24", pid: 4124, activity: now - 60, session: "agendo-agendo" },
     ],
   };
 }
 
+/** wmctrl's view of the busy terminal (pts/21's) and the target's (pts/6's). */
+const TWO_TERMINALS = "0x04000021  0 4121   host  Busy\n0x04000006  0 4106   host  Target";
+
 test("a link moves the client already on the target's tmux session, not the one being typed in", async ({ mock }) => {
   await seed(mock, spreadClients(RUNNING_TARGET));
-  const env = { ...mock.env, DISPLAY: ":99", FAKE_WMCTRL_LIST: "0x04000021  0 4121   host  Busy\n0x04000006  0 4106   host  Target" };
+  const env = { ...mock.env, DISPLAY: ":99", FAKE_WMCTRL_LIST: TWO_TERMINALS };
   const r = await agendo(env, "url", "agendo://focus?pr=5001");
   expect(r.code, r.stderr).toBe(0);
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/6", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
   expect(await notifications(mock)).toEqual([]);
-  // Its terminal is the one raised, not the busy one.
+  // No terminal is raised while pts/21 is being typed in: raising takes keyboard
+  // focus, which would send those keystrokes into the agent's prompt.
+  expect((await mock.callLog()).some((l) => l.startsWith("wmctrl -ia"))).toBe(false);
+});
+
+test("with nobody typing, the link raises the moved client's terminal, not the most recent one's", async ({ mock }) => {
+  const layout = spreadClients(RUNNING_TARGET);
+  const quiet = layout.clients.map((c) => (c.name === "/dev/pts/21" ? { ...c, activity: Math.floor(Date.now() / 1000) - 30 } : c));
+  await seed(mock, { ...layout, clients: quiet });
+  const env = { ...mock.env, DISPLAY: ":99", FAKE_WMCTRL_LIST: TWO_TERMINALS };
+  const r = await agendo(env, "url", "agendo://focus?pr=5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/6", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
   const log = await mock.callLog();
   expect(log).toContain("wmctrl -ia 0x04000006");
   expect(log).not.toContain("wmctrl -ia 0x04000021");
+});
+
+test("focus typed by hand moves the terminal it was typed in, even with a client on the target's session", async ({ mock }) => {
+  await seed(mock, spreadClients(RUNNING_TARGET));
+  const r = await agendo(mock.env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/21", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+});
+
+test("a link resuming an idle session opens it in its repo's launcher, and moves the client there", async ({ mock }) => {
+  // pts/21 sits in a launcher of another repo and is being typed in; pts/6 shows the standalone repo's launcher.
+  const layout = spreadClients("agendo-standalone", { sessions: ["agendo-standalone"] });
+  await seed(mock, {
+    ...layout,
+    options: { "agendo-agendo": { "@cl_root": "/elsewhere/agendo" }, "agendo-standalone": { "@cl_root": join(mock.home, "repos", "standalone") } },
+    windows: [{ session: "agendo-standalone", index: 0, name: "launcher" }],
+  });
+  const r = await agendo(mock.env, "url", "agendo://focus?session=standalonese");
+  expect(r.code, r.stderr).toBe(0);
+  const log = await mock.tmuxLog();
+  expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo-standalone") && a.includes(STANDALONE_TARGET))).toBe(true);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/6", "-t", switchTarget(mock.env, "agendo-standalone", STANDALONE_TARGET)]]);
+});
+
+/** The paused crash session's tab, parked in the shared `agendo` session, with `clientsLater` as the listing after the resume. */
+async function seedPausedWithLater(mock: MockEnv, later: (now: number) => { name: string; pid: number; activity: number; session: string }[]) {
+  const layout = spreadClients("agendo");
+  await seed(mock, {
+    ...layout,
+    clientsLater: [...layout.clients, ...later(Math.floor(Date.now() / 1000))],
+    windows: [{ session: "agendo", index: 1, name: CRASH_TARGET }],
+    panes: [{ session: "agendo", window: CRASH_TARGET, cwd: "/crash", placeholder: true }],
+  });
+}
+
+test("the re-check after a resume guards the client chosen THEN, and says the agent was resumed", async ({ mock }) => {
+  // pts/6 stays idle; a client attached to the landing session meanwhile is being typed in.
+  await seedPausedWithLater(mock, () => [{ name: "/dev/pts/30", pid: 4130, activity: typingNow(), session: "agendo" }]);
+  const r = await agendo(mock.env, "url", "agendo://focus?workItem=102");
+  expect(r.code).not.toBe(0);
+  expect(await switches(mock)).toEqual([]);
+  const said = (await notifications(mock)).join("\n");
+  expect(said).toContain("not switching: /dev/pts/30 was typed into");
+  expect(said).toContain(`WAS resumed and is running in tmux window ${CRASH_TARGET}`);
+});
+
+test("the re-check after a resume moves the client on the landing session that is most recent THEN", async ({ mock }) => {
+  await seedPausedWithLater(mock, (now) => [{ name: "/dev/pts/30", pid: 4130, activity: now - 20, session: "agendo" }]);
+  const r = await agendo(mock.env, "url", "agendo://focus?workItem=102");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/30", "-t", switchTarget(mock.env, "agendo", CRASH_TARGET)]]);
+});
+
+test("a link that got through and notified counts against the refusal-note floor", async ({ mock }) => {
+  await seed(mock);
+  const stamp = join(mock.home, ".agendo", "url-refused-note.stamp");
+  const ok = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(ok.code, ok.stderr).toBe(0);
+  // Said nothing, so the note floor is untouched: a refusal behind it would still be heard.
+  expect(existsSync(stamp)).toBe(false);
+  // Its focus stamp is what holds the next link, fired after it, to the two-second gap.
+  expect(existsSync(join(mock.home, ".agendo", "url-focus.stamp"))).toBe(true);
+  await pastFocusFloor();
+  const failed = await agendo(mock.env, "url", "agendo://focus?pr=99999");
+  expect(failed.code).not.toBe(0);
+  const said = await notifications(mock);
+  expect(said).toHaveLength(1);
+  expect(said[0]).toContain("No agendo session for");
+  // Said something: the floor is taken, so the refusals behind it stay quiet (see "a burst's later refusals are quiet").
+  expect(existsSync(stamp)).toBe(true);
+});
+
+test("a typing refusal is not a second notification when a refused link already raised one", async ({ mock }) => {
+  await seed(mock, { clients: [{ name: "/dev/pts/7", pid: 4107, activity: typingNow(), session: "agendo" }] });
+  // The refusal-note floor held, as by a concurrent claim — a stamp from a refused link that just notified reads the same.
+  holdFloor(mock, "url-refused-note");
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code).not.toBe(0);
+  expect(r.stderr).toContain("/dev/pts/7 was typed into");
+  expect(await notifications(mock)).toEqual([]);
 });
 
 test("a link resuming a paused session moves the client on the session it lands in", async ({ mock }) => {
@@ -254,7 +372,7 @@ test("a link leaves a client alone that detached before the switch", async ({ mo
 });
 
 test("a link that resumed an agent and then finds the client typed in says so, and does not switch", async ({ mock }) => {
-  await seed(mock, { clientsLater: [{ name: "/dev/pts/7", pid: 4107, activity: Math.floor(Date.now() / 1000), session: "agendo" }] });
+  await seed(mock, { clientsLater: [{ name: "/dev/pts/7", pid: 4107, activity: typingNow(), session: "agendo" }] });
   const r = await agendo(mock.env, "url", "agendo://focus?session=standalonese");
   expect(r.code).not.toBe(0);
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-window" && a.includes(STANDALONE_TARGET))).toBe(true);
@@ -378,23 +496,38 @@ test("focus with no client opens the configured focusTerminal on the session, at
 /** Past the floor every link is held to (URL_FOCUS_GAP_MS), so a spec can reach the resume floor behind it. */
 const pastFocusFloor = () => new Promise((r) => setTimeout(r, 2_100));
 
-test("links are held to one per two seconds, and a burst's refusals are one notification", async ({ mock }) => {
+test("links are held to one per two seconds, and a refused one says so", async ({ mock }) => {
   await seed(mock);
-  const first = await agendo(mock.env, "url", "agendo://focus?pr=5001");
-  expect(first.code, first.stderr).toBe(0);
-  for (let i = 0; i < 3; i++) {
-    const burst = await agendo(mock.env, "url", "agendo://focus?pr=5001");
-    expect(burst.code).not.toBe(0);
-    expect(burst.stderr).toContain("another agendo:// link was handled less than");
-  }
-  // Said once, so a double click is not a mystery; a burst of links must not become a burst of notifications.
+  // The focus floor taken, as by a link handled just now — held directly, since spawning one would race the gap.
+  holdFloor(mock, "url-focus");
+  const second = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(second.code).not.toBe(0);
+  expect(second.stderr).toContain("another agendo:// link was handled less than");
+  // Said, so a double click is not a mystery.
   expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo ignored a link — another one was handled moments ago"]);
-  expect(await switches(mock)).toHaveLength(1);
+  expect(await switches(mock)).toEqual([]);
+});
+
+test("a burst's later refusals are quiet: one notification per gap, not one each", async ({ mock }) => {
+  await seed(mock);
+  // What a burst leaves behind: a link handled and a refusal noted, both just now.
+  // Held directly, since spawning the burst would race the two-second gaps.
+  for (const floor of ["url-focus", "url-refused-note"]) holdFloor(mock, floor);
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code).not.toBe(0);
+  expect(r.stderr).toContain("another agendo:// link was handled less than");
+  expect(await notifications(mock)).toEqual([]);
+  expect(await switches(mock)).toEqual([]);
 });
 
 test("a burst of malformed links raises one notification, not one each", async ({ mock }) => {
   await seed(mock);
-  for (let i = 0; i < 3; i++) expect((await agendo(mock.env, "url", `agendo://evil?n=${i}`)).code).not.toBe(0);
+  expect((await agendo(mock.env, "url", "agendo://evil?n=0")).code).not.toBe(0);
+  expect(await notifications(mock)).toHaveLength(1);
+  // The rest of the burst, behind it: both floors held, as the first link's claim
+  // and its notification leave them — held directly, since spawning would race the gap.
+  for (const floor of ["url-focus", "url-refused-note"]) holdFloor(mock, floor);
+  for (let i = 1; i < 3; i++) expect((await agendo(mock.env, "url", `agendo://evil?n=${i}`)).code).not.toBe(0);
   expect(await notifications(mock)).toHaveLength(1);
 });
 
@@ -507,6 +640,21 @@ test("url-handler install, status and uninstall stay inside XDG_DATA_HOME / XDG_
   expect((await mock.callLog()).filter((l) => l.startsWith("update-desktop-database "))).toEqual([
     `update-desktop-database ${apps}`, `update-desktop-database ${apps}`,
   ]);
+  expect(readFileSync(join(apps, "mimeinfo.cache"), "utf-8")).not.toContain("x-scheme-handler/agendo");
+});
+
+test("url-handler uninstall refreshes the database only when it removed an entry or one exists", async ({ mock }) => {
+  const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+  const apps = join(mock.tmpDir, "data", "applications");
+  mkdirSync(apps, { recursive: true });
+  const bare = await agendo(env, "url-handler", "uninstall");
+  expect(bare.code, bare.stderr).toBe(0);
+  expect((await mock.callLog()).some((l) => l.startsWith("update-desktop-database"))).toBe(false);
+  // A database that may still list a stale entry is rebuilt, though nothing was removed.
+  writeFileSync(join(apps, "mimeinfo.cache"), "[MIME Cache]\nx-scheme-handler/agendo=agendo-url-handler.desktop;\n");
+  const stale = await agendo(env, "url-handler", "uninstall");
+  expect(stale.code, stale.stderr).toBe(0);
+  expect(await mock.callLog()).toContain(`update-desktop-database ${apps}`);
   expect(readFileSync(join(apps, "mimeinfo.cache"), "utf-8")).not.toContain("x-scheme-handler/agendo");
 });
 

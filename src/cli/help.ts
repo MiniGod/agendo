@@ -183,8 +183,15 @@ Usage:
                               (agendo://focus?pr=<n>[&repo=<repo>], ?workItem=<n>
                               [&repo=<repo>], ?session=<id>),
                               which run focus — e.g. from the browser user-script
-                              in extras/userscript/. Writes one .desktop file under
-                              $XDG_DATA_HOME/applications and runs xdg-mime.
+                              in extras/userscript/. A link moves a client already
+                              showing the target's tmux session, else the one used
+                              last; never one being typed in, and it raises no
+                              terminal while another is being typed in. Writes one
+                              .desktop file under $XDG_DATA_HOME/applications,
+                              refreshes that dir's desktop database
+                              (update-desktop-database) and runs xdg-mime. status
+                              exits 1 until the entry is both the default and
+                              listed in mimeinfo.cache.
       --exec <command>          Command the handler runs (default: a global agendo
                                 install, else bunx agendo@<this version>)
   agendo wait [id...]          Block until the target session(s) settle, then exit

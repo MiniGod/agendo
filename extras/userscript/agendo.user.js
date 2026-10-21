@@ -31,10 +31,14 @@
 // warning. So the click is cancelled and the link is handed over from a hidden
 // iframe instead (`launch`), created inside the click handler so it carries the
 // click's user activation, which Firefox and Chromium both require before an
-// iframe may open an external protocol. If the page's Content-Security-Policy
-// refuses an agendo: frame, the browser reports a securitypolicyviolation and
-// the script falls back to following the link: the warning comes back, but the
-// button still works. Nothing in this script assigns window.location.
+// iframe may open an external protocol. The frame stays until the next click
+// or a minute has passed: the first click raises the browser's "open this
+// link?" prompt, which belongs to the frame and must outlive the human reading
+// it. If the page's Content-Security-Policy ENFORCES a rule refusing an agendo:
+// frame, the browser reports a securitypolicyviolation and the script falls
+// back to following the link: the warning comes back, but the button still
+// works. A report-only policy did not block anything and is ignored. Nothing
+// in this script assigns window.location.
 (function () {
   "use strict";
 
@@ -79,34 +83,44 @@
     return `agendo://focus?${target.kind}=${target.id}${target.repo ? `&repo=${target.repo}` : ""}`;
   }
 
-  /** How long the hidden iframe stays: long enough for the browser to hand the link over. */
-  const FRAME_MS = 2000;
+  /** How long the hidden iframe stays at most: long enough to answer the browser's first-use prompt. */
+  const FRAME_MS = 60000;
+
+  /** The previous launch's teardown: its frame and its CSP listener go when the next click comes. */
+  let pending = null;
 
   /**
    * Hand `href` to the desktop's agendo:// handler from a hidden iframe, so the
-   * page itself never begins to unload (see the header). If the page's CSP
-   * blocks the frame, follow the link after all (`fallback`). `doc` and `later`
-   * are injected for tests.
+   * page itself never begins to unload (see the header). If an ENFORCED CSP
+   * blocks the frame, follow the link after all (`fallback`), once. `doc` and
+   * `later` are injected for tests.
    */
   function launch(href, fallback, doc = document, later = setTimeout) {
-    const onBlocked = (e) => {
-      if (!String(e.blockedURI).startsWith("agendo")) return;
+    if (pending) pending();
+    const frame = doc.createElement("iframe");
+    const done = () => {
+      frame.remove();
       doc.removeEventListener("securitypolicyviolation", onBlocked);
+      if (pending === done) pending = null;
+    };
+    const onBlocked = (e) => {
+      if (e.disposition !== "enforce" || !String(e.blockedURI).startsWith("agendo")) return;
+      done();
       fallback();
     };
+    pending = done;
     doc.addEventListener("securitypolicyviolation", onBlocked);
-    const frame = doc.createElement("iframe");
     frame.style.display = "none";
     frame.src = href;
     doc.body.appendChild(frame);
-    later(() => {
-      frame.remove();
-      doc.removeEventListener("securitypolicyviolation", onBlocked);
-    }, FRAME_MS);
+    later(done, FRAME_MS);
   }
 
-  /** The button's click: launch from an iframe instead of following the link; a modified click is left to the browser. */
-  function onClick(e) {
+  /**
+   * The button's click: launch from an iframe instead of following the link; a
+   * modified click is left to the browser. `later` is injected for tests.
+   */
+  function onClick(e, later = setTimeout) {
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
     const link = e.currentTarget;
@@ -119,7 +133,12 @@
       document.body.appendChild(copy);
       copy.click();
       copy.remove();
-    });
+    }, document, later);
+  }
+
+  /** Tear down any pending launch — for tests, which share this script's state. */
+  function reset() {
+    if (pending) pending();
   }
 
   function render() {
@@ -158,10 +177,13 @@
   }
 
   // Under `bun test` (test/userscript.test.ts), which loads this file as a
-  // CommonJS module: hand over the pieces and leave the DOM alone. A script
-  // manager defines no `module`, so in a browser this is skipped.
-  if (typeof module === "object" && module && module.exports) {
-    module.exports = { linkFor, hrefFor, launch, onClick, FRAME_MS };
+  // CommonJS module: hand over the pieces and leave the DOM alone. With
+  // `@grant none` the script runs in the page's own realm, where a loader shim
+  // may well define a global `module` — so the test is for the script manager,
+  // whose GM_info every one of them (Tampermonkey, Violentmonkey,
+  // Greasemonkey 4) defines even then.
+  if (typeof GM_info === "undefined" && typeof module === "object" && module && module.exports) {
+    module.exports = { linkFor, hrefFor, launch, onClick, reset, FRAME_MS };
     return;
   }
 

@@ -2,7 +2,7 @@
 // of: which of several linked sessions it brings forward, which attached tmux
 // client it moves, and how its argv is read. All pure, so each case is a row.
 import { describe, expect, test } from "bun:test";
-import { parseFocusArgs, pickSession, type FocusCandidate } from "../src/cli/focus/choose.ts";
+import { launcherForCwd, parseFocusArgs, pickSession, type FocusCandidate } from "../src/cli/focus/choose.ts";
 import { asPaneTarget, parseClients, parseWindowIdentity, pickClient, pickClientFor, scopedWindowTarget } from "../src/runtime/tmux/clients.ts";
 import type { AgentSession } from "../src/shared/types.ts";
 
@@ -55,6 +55,30 @@ describe("parseClients / pickClient", () => {
   });
 
   test("no client attached", () => expect(pickClient([])).toBeNull());
+});
+
+describe("launcherForCwd", () => {
+  const sessions = [
+    { session: "agendo", root: null },
+    { session: "agendo-agendo", root: "/home/me/git/agendo" },
+    { session: "agendo-mc-applications", root: "/home/me/git/mc-applications/" },
+    { session: "agendo-mc-sub", root: "/home/me/git/mc-applications/sub" },
+  ];
+
+  test("the launcher whose root holds the directory, at the root or under it", () => {
+    expect(launcherForCwd("/home/me/git/mc-applications", sessions)).toBe("agendo-mc-applications");
+    expect(launcherForCwd("/home/me/git/mc-applications/.claude/worktrees/x", sessions)).toBe("agendo-mc-applications");
+  });
+
+  test("the deepest root wins when roots nest", () => {
+    expect(launcherForCwd("/home/me/git/mc-applications/sub/pkg", sessions)).toBe("agendo-mc-sub");
+  });
+
+  test("a sibling sharing a name prefix is not under the root; nothing matches → undefined", () => {
+    expect(launcherForCwd("/home/me/git/agendo-old", sessions)).toBeUndefined();
+    expect(launcherForCwd("/tmp/x", sessions)).toBeUndefined();
+    expect(launcherForCwd("/tmp/x", [])).toBeUndefined();
+  });
 });
 
 describe("pickClientFor", () => {

@@ -4,7 +4,7 @@
 // a hidden iframe rather than navigating the page — the navigation is what made
 // Azure DevOps drop its live-update connection. That the iframe really keeps
 // the page from unloading in Firefox/Chromium is NOT tested here.
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -12,6 +12,9 @@ const PATH = join(import.meta.dir, "..", "extras", "userscript", "agendo.user.js
 const script = require(PATH);
 
 const loc = (url: string) => new URL(url);
+
+// The script keeps its pending launch between calls; no test inherits another's.
+afterEach(() => script.reset());
 
 describe("linkFor / hrefFor", () => {
   const href = (url: string) => {
@@ -72,23 +75,54 @@ describe("launch", () => {
     expect(frame.src).toBe("agendo://focus?pr=1");
     expect(frame.style).toEqual({ display: "none" });
     expect(timers.map(([, ms]) => ms)).toEqual([script.FRAME_MS]);
-    expect(script.FRAME_MS).toBe(2000);
+    // Long enough for the browser's first-use "open this link?" prompt, which belongs to the frame.
+    expect(script.FRAME_MS).toBeGreaterThanOrEqual(60_000);
     timers[0][0]();
     expect(frame.removed).toBe(true);
     expect(doc.listeners.has("securitypolicyviolation")).toBe(false);
     expect(fellBack).toBe(false);
   });
 
-  test("a CSP that blocks the agendo: frame falls back to the link, once; other violations are ignored", () => {
+  test("an enforced CSP that blocks the agendo: frame falls back to the link, once; other violations are ignored", () => {
     const doc = fakeDoc();
     let fellBack = 0;
     script.launch("agendo://focus?pr=1", () => fellBack++, doc, () => {});
     const report = doc.listeners.get("securitypolicyviolation")!;
-    report({ blockedURI: "https://ads.example" });
+    report({ blockedURI: "https://ads.example", disposition: "enforce" });
     expect(fellBack).toBe(0);
-    report({ blockedURI: "agendo" });
+    report({ blockedURI: "agendo", disposition: "enforce" });
     expect(fellBack).toBe(1);
     expect(doc.listeners.has("securitypolicyviolation")).toBe(false);
+    expect(doc.children[0].removed).toBe(true);
+  });
+
+  test("a report-only CSP blocked nothing: no fallback, so the link is not launched twice", () => {
+    const doc = fakeDoc();
+    let fellBack = 0;
+    script.launch("agendo://focus?pr=1", () => fellBack++, doc, () => {});
+    doc.listeners.get("securitypolicyviolation")!({ blockedURI: "agendo", disposition: "report" });
+    expect(fellBack).toBe(0);
+    expect(doc.children[0].removed).toBe(false);
+  });
+
+  test("a second click tears the first launch down: one frame, one listener, one fallback", () => {
+    const doc = fakeDoc();
+    let fellBack = 0;
+    script.launch("agendo://focus?pr=1", () => fellBack++, doc, () => {});
+    script.launch("agendo://focus?pr=2", () => fellBack++, doc, () => {});
+    expect(doc.children.map((f) => [f.src, f.removed])).toEqual([["agendo://focus?pr=1", true], ["agendo://focus?pr=2", false]]);
+    doc.listeners.get("securitypolicyviolation")!({ blockedURI: "agendo", disposition: "enforce" });
+    expect(fellBack).toBe(1);
+  });
+
+  test("a late timer from an earlier launch leaves the current one alone", () => {
+    const doc = fakeDoc();
+    const timers: (() => void)[] = [];
+    script.launch("agendo://focus?pr=1", () => {}, doc, (fn: () => void) => timers.push(fn));
+    script.launch("agendo://focus?pr=2", () => {}, doc, (fn: () => void) => timers.push(fn));
+    timers[0]();
+    expect(doc.children[1].removed).toBe(false);
+    expect(doc.listeners.has("securitypolicyviolation")).toBe(true);
   });
 });
 
@@ -102,7 +136,7 @@ describe("onClick", () => {
       script.onClick({
         button: 0, preventDefault: () => (prevented = true),
         currentTarget: { getAttribute: () => "agendo://focus?pr=1" },
-      });
+      }, () => {});
     } finally {
       (globalThis as { document?: unknown }).document = realDocument;
     }
@@ -111,7 +145,8 @@ describe("onClick", () => {
   });
 
   test("a middle or modified click is left to the browser", () => {
-    for (const e of [{ button: 1 }, { button: 0, ctrlKey: true }, { button: 0, metaKey: true }, { button: 0, shiftKey: true }]) {
+    const clicks = [{ button: 1 }, { button: 0, ctrlKey: true }, { button: 0, metaKey: true }, { button: 0, shiftKey: true }, { button: 0, altKey: true }];
+    for (const e of clicks) {
       let prevented = false;
       script.onClick({ ...e, preventDefault: () => (prevented = true) });
       expect(prevented).toBe(false);
@@ -119,7 +154,8 @@ describe("onClick", () => {
   });
 });
 
-test("nothing in the script navigates the page: no window.location assignment or assign()/replace()", () => {
+// The CSP fallback does follow the link (a click on a throwaway <a>), by design; what is pinned is no direct navigation.
+test("no window.location assignment, location.assign()/replace() or window.open()", () => {
   const code = readFileSync(PATH, "utf-8").split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
   expect(code).not.toMatch(/location(\.href)?\s*=[^=]/);
   expect(code).not.toMatch(/location\.(assign|replace)\s*\(/);

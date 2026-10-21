@@ -6,7 +6,7 @@
 // refreshes that dir's desktop database (mimeinfo.cache) and asks `xdg-mime`
 // to make it the scheme's default. Uninstall removes that file, refreshes the
 // database again, and drops the one mimeapps.list line pointing at it. Nothing
-// else is touched.
+// else is touched beyond what `update-desktop-database` rewrites in that dir.
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -69,7 +69,7 @@ function install(execArg: string | undefined): void {
   if (xdgMime(["default", DESKTOP_FILE, SCHEME_MIME]) === null) {
     fail(`could not register it: \`xdg-mime default ${DESKTOP_FILE} ${SCHEME_MIME}\` failed`);
   }
-  console.log(`registered ${DESKTOP_FILE} as the default handler for ${SCHEME_MIME}`);
+  console.log(`set ${DESKTOP_FILE} as the default handler for ${SCHEME_MIME}`);
 }
 
 /** Rebuild `dir`'s desktop database; a warning, never a failure, when that is not possible. */
@@ -84,8 +84,8 @@ function uninstall(): void {
   const had = existsSync(file);
   rmSync(file, { force: true });
   console.log(had ? `removed ${file}` : `${file} was not installed`);
-  // Also when the entry was already gone: a stale cache may still list it.
-  if (existsSync(dir)) refresh(dir);
+  // Also when the entry was already gone, if there is a database: it may still list it.
+  if (had || existsSync(join(dir, MIMEINFO_CACHE))) refresh(dir);
   const list = mimeappsPath(process.env, homedir());
   if (!existsSync(list)) return;
   const before = readFileSync(list, "utf-8");
@@ -113,9 +113,9 @@ function status(): void {
   console.log(`desktop entry: ${entry.installed ? entry.file : "not installed"}`);
   if (entry.installed) console.log(`  Exec=${entry.exec ?? "(none)"}`);
   warnIfMissing(entry.exec);
-  const registered = entry.installed && isRegistered(dirname(entry.file));
   const handler = currentHandler();
   console.log(`${SCHEME_MIME}: ${handlerLine(handler)}`);
+  const registered = entry.installed && isRegistered(dirname(entry.file));
   // 0 only when the entry exists, the desktop database lists it, AND the desktop
   // resolves the scheme to it: default-but-unregistered is the state in which a
   // Flatpak or Snap browser shows an empty "Open With…" dialog.

@@ -508,18 +508,22 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 
 ### Jump to a session from the PR page
 
-`agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional `--repo`)
-or `agendo focus <id>` brings a
-session to the front. A tmux client already showing the tmux session that holds (or,
-once resumed, will hold) the session's window is switched to it — the most recently
-used one, if several are. Only when no client is on that session does the client you
-typed into last move instead. A paused or idle session is resumed first. On X11 the
-chosen client's terminal window is raised too. When several sessions are linked, the latest running one wins;
-if none is running, the latest one wins. A paused session goes back into the tmux
-session its tab was parked in. An idle one opens in the agendo session the client is
-showing, else in the shared `agendo` session, else in a detached session of its own;
-never in a tmux session of yours. It never launches a new session. If nothing matches,
-or no tmux client is attached, it says so in a desktop notification.
+`agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional
+`--repo`) or `agendo focus <id>` brings a session to the front. Typed in a terminal,
+it switches the tmux client you typed into last. From a link, it switches a client
+already showing the tmux session that holds (or, once resumed, will hold) the
+session's window — the most recently used one, if several are. When no client is on
+that session, it switches the client you typed into last. A paused or idle session is
+resumed first. On X11 the chosen client's terminal window is raised too, except when a
+link arrives while another terminal is being typed in: raising it would steal that
+terminal's keyboard focus. When several sessions are linked, the latest running one
+wins; if none is running, the latest one wins. A paused session goes back into the
+tmux session its tab was parked in. An idle one opens in the path-scoped agendo
+session for its repository when a client is showing one, else in the agendo session
+the client you typed into last is showing, else in the shared `agendo` session, else
+in a detached session of its own; never in a tmux session of yours. It never launches
+a new session. If nothing matches, or no tmux client is attached, it says so in a
+desktop notification.
 
 PR and work-item numbers are looked up in the backend agendo is currently using
 (Azure DevOps or GitHub), the same one `agendo list --pr` reads. A GitHub number can

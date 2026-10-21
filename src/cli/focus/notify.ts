@@ -7,11 +7,15 @@
 // one who clicked a button.
 import { spawnSync } from "child_process";
 
-let afterNotify: (() => void) | null = null;
+let beforeNotify: (() => void) | null = null;
 
-/** Run `hook` after each notification this process shows — `agendo url` stamps its refusal-note floor with it (see throttle.ts). */
+/**
+ * Run `hook` as each notification this process shows is decided — before it is
+ * sent, so a link refused meanwhile already finds the floor `agendo url`
+ * stamps with it taken (see throttle.ts).
+ */
 export function onNotify(hook: () => void): void {
-  afterNotify = hook;
+  beforeNotify = hook;
 }
 
 /**
@@ -29,12 +33,12 @@ export function notifyBody(text: string): string {
  * already said the same thing. argv only, never a shell.
  */
 export function notify(text: string): void {
+  beforeNotify?.();
   try {
     spawnSync("notify-send", ["--app-name=agendo", "agendo", notifyBody(text)], { stdio: "ignore", timeout: 5_000 });
   } catch {
     // nothing to do: the message is on stderr already
   }
-  afterNotify?.();
 }
 
 /** Say `text` on stderr and as a notification, then exit with `code`. */

@@ -19,15 +19,18 @@ export function refreshCommand(dir: string): string {
  * not installed) is not a failure — a browser that reads mimeapps.list itself
  * still works.
  */
-export function refreshDesktopDatabase(dir: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  const r = spawnSync(UPDATE_DESKTOP_DATABASE, [dir], { env, encoding: "utf-8", timeout: 10_000 });
+export function refreshDesktopDatabase(dir: string, env: NodeJS.ProcessEnv = process.env, timeoutMs = 10_000): string | null {
+  const r = spawnSync(UPDATE_DESKTOP_DATABASE, [dir], { env, encoding: "utf-8", timeout: timeoutMs });
   if (r.status === 0) return null;
-  return `warning: ${failure(r.error, r.stderr)}; run \`${refreshCommand(dir)}\` so the desktop portal (Flatpak/Snap browsers) sees the handler`;
+  return `warning: ${failure(r.error, r.stderr)}; run \`${refreshCommand(dir)}\` so the desktop database matches the applications dir (Flatpak/Snap browsers find handlers through it)`;
 }
 
-/** Why the refresh did not happen: not runnable (likely no desktop-file-utils), or failed with what it said. */
+/** Why the refresh did not happen: not installed, did not finish, or failed with what it said. */
 function failure(error: Error | undefined, stderr: string | null): string {
-  if (error) return `${UPDATE_DESKTOP_DATABASE} could not run (${error.message}; it comes with desktop-file-utils)`;
+  if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+    return `${UPDATE_DESKTOP_DATABASE} could not run (${error?.message}; it comes with desktop-file-utils)`;
+  }
+  if (error) return `${UPDATE_DESKTOP_DATABASE} did not finish (${error.message})`;
   const said = (stderr ?? "").split("\n").find((l) => l.trim());
   return said ? `${UPDATE_DESKTOP_DATABASE} failed: ${said.trim()}` : `${UPDATE_DESKTOP_DATABASE} failed`;
 }
