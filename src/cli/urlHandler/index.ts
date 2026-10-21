@@ -108,11 +108,16 @@ function handlerLine(handler: string | null): string {
   return isOurs(handler) ? handler : `${handler} (not agendo's entry)`;
 }
 
-function status(): void {
-  const entry = installedEntry();
+/** The desktop entry's part of `status`: where it is, what it runs, and whether that still exists. */
+function printEntry(entry: ReturnType<typeof installedEntry>): void {
   console.log(`desktop entry: ${entry.installed ? entry.file : "not installed"}`);
   if (entry.installed) console.log(`  Exec=${entry.exec ?? "(none)"}`);
   warnIfMissing(entry.exec);
+}
+
+function status(): void {
+  const entry = installedEntry();
+  printEntry(entry);
   const handler = currentHandler();
   console.log(`${SCHEME_MIME}: ${handlerLine(handler)}`);
   const registered = entry.installed && isRegistered(dirname(entry.file));
