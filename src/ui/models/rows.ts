@@ -4,7 +4,7 @@ import { sessionName } from "../../runtime/tmux/index.ts";
 import { convertTarget } from "./convert.ts";
 import { homeShort, sessionRepo, timeAgo, type Activity, type Cell } from "../format/index.ts";
 import { prTarget, prOpen, wiTarget, wiOpen, type FreshTarget, type OpenTargets } from "./targets.ts";
-import { itemMatches, prMatches, sessionMatches } from "./search.ts";
+import { itemRank, prRank, rankMatches, searchContext, sessionRank, uniqueBy } from "./search.ts";
 import { liveInfoOf, tmuxLine, type LiveInfo } from "./tmuxMeta.ts";
 import { V } from "./vocabState.ts";
 import type {
@@ -181,15 +181,12 @@ export function buildItemsRows(
   const live = liveInfoOf(model);
 
   // Search mode: a single flat, fuzzy-filtered list across all sections (primary
-  // / secondary / linked via PRs), de-duped by work item id.
+  // / secondary / linked via PRs), de-duped by work item id, exact id hits first.
   const q = query.trim();
   if (q) {
-    const seen = new Set<string>();
-    const matches = [...model.current, ...model.other, ...model.prLinked].filter((it) => {
-      if (seen.has(itemKey(it)) || !itemMatches(it, q)) return false;
-      seen.add(itemKey(it));
-      return true;
-    });
+    const ctx = searchContext(live, inScope, q);
+    const all = uniqueBy([...model.current, ...model.other, ...model.prLinked], itemKey);
+    const matches = rankMatches(all, (it) => itemRank(it, ctx));
     rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
     if (matches.length === 0) {
       rows.push({ kind: "header", label: `  (no matching ${V.itemsTab.toLowerCase()})` });
@@ -293,24 +290,21 @@ export function buildPrsRows(
   const reviewCtx = (pr: ReviewPRWithSessions): Cell => ({ text: pr.reviewReason, color: "cyan" });
 
   // Search mode: a single flat, fuzzy-filtered list across all sections (linked /
-  // awaiting review / orphan), de-duped by PR id. Each PR keeps the context cell
-  // of the first section it appears in (linked → work item, review → reason).
+  // awaiting review / orphan), de-duped by PR id, exact id hits first. Each PR
+  // keeps the context cell of the first section it appears in (linked → work
+  // item, review → reason).
   const q = query.trim();
   if (q) {
-    const seen = new Set<string>();
+    const ctx = searchContext(live, inScope, q);
     const ctxFor = (pr: PullRequest): Cell | undefined =>
       "workItemId" in pr
         ? linkedCtx(pr as LinkedPR)
         : "reviewReason" in pr
           ? reviewCtx(pr as ReviewPRWithSessions)
           : undefined;
-    const matches = sortPrs(
-      [...model.linkedPrs, ...model.reviewPrs, ...model.orphanPrs].filter((pr) => {
-        if (seen.has(prKey(pr)) || !prMatches(pr, q)) return false;
-        seen.add(prKey(pr));
-        return true;
-      }),
-      sort,
+    const matches = rankMatches(
+      sortPrs(uniqueBy([...model.linkedPrs, ...model.reviewPrs, ...model.orphanPrs], prKey), sort),
+      (pr) => prRank(pr, ctx),
     );
     rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
     if (matches.length === 0) {
@@ -393,12 +387,11 @@ export function buildSessionsRows(
   }
 
   // Search mode: a single flat, fuzzy-filtered list across all repos (grouping
-  // and the running section are suppressed so results read top-to-bottom).
+  // and the running section are suppressed so results read top-to-bottom),
+  // exact session-id / window-name hits first.
   if (q) {
-    const matches = sortSessions(
-      groups.flatMap((g) => g.sessions).filter((s) => sessionMatches(s, q)),
-      sort,
-    );
+    const ctx = searchContext(live, inScope, q);
+    const matches = rankMatches(sortSessions(groups.flatMap((g) => g.sessions), sort), (s) => sessionRank(s, ctx));
     rows.push({ kind: "header", label: "▌ Search results", sub: `(${matches.length}) — "${q}"` });
     if (matches.length === 0) {
       rows.push({ kind: "header", label: "  (no matching sessions)" });
