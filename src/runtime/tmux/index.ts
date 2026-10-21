@@ -24,8 +24,10 @@
 // managedFromPanes, stampPaneTarget, adoptWindow, isPlaceholderPane,
 // killPaneById), `sessionWindowCount` (a pause refusing a host's only
 // window) and codex's read-back delivery (codexComposerText, deliverToCodex,
-// codexPaneIo, CODEX_TURN_START_MS, type CodexDelivery) are the only additions
-// since.
+// codexPaneIo, CODEX_TURN_START_MS, type CodexDelivery) and the attached-client
+// layer `agendo focus` drives (parseClients, pickClient, listClients,
+// windowIdentity, focusClientOn, type TmuxClient, type WindowIdentity) are the
+// only additions since.
 //
 // Where things went, and why in that order — each module may only import from
 // the ones above it, which is what keeps `import/no-cycle` green:
@@ -44,6 +46,7 @@
 //   server.ts        read the live server: sessions, windows, managed targets
 //   windows.ts       change it: kill windows/sessions, create them
 //   launcherSession.ts  bootstrap the launcher host session and its menu window
+//   clients.ts       the attached clients, and moving one onto a window
 // ─────────────────────────────────────────────────────────────────────────────
 
 export { tmuxQuiet } from "./exec.ts";
@@ -169,3 +172,13 @@ export {
 } from "./windows.ts";
 
 export { launcherWindowLive, launcherWindowTarget, enterLauncherSession } from "./launcherSession.ts";
+
+export {
+  parseClients,
+  pickClient,
+  listClients,
+  windowIdentity,
+  focusClientOn,
+  type TmuxClient,
+  type WindowIdentity,
+} from "./clients.ts";

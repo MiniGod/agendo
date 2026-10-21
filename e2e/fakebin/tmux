@@ -169,6 +169,36 @@ function windowIndexOf(pane) {
   return w?.index ?? 0;
 }
 
+/**
+ * The window id (`@N`) of window `window` in `session`. Derived from the two
+ * names rather than stored, so it is stable across every state rewrite and
+ * distinct between windows — which is all `agendo focus` needs of it: the id it
+ * switches a client to must be the one of the window it meant.
+ */
+function windowIdOf(session, window) {
+  let h = 7;
+  for (const ch of `${session}\0${window}`) h = (h * 31 + ch.codePointAt(0)) % 99991;
+  return `@${h + 1}`;
+}
+
+/**
+ * The `{session, window}` a target-PANE value names: a pane id, an exact
+ * `=session:=window`, or `=session:` (that session's current window — the first
+ * one this stub knows of). Undefined when nothing matches.
+ */
+function windowAtTarget(state, target) {
+  const byPane = paneWindow(state, target);
+  if (byPane) return byPane;
+  const t = target ?? "";
+  if (!t.includes(":")) return undefined;
+  const session = sessionOptionTarget(state, t);
+  if (session === undefined) return undefined;
+  const bare = t.slice(t.indexOf(":") + 1);
+  const records = [...state.windows.map((w) => ({ session: w.session, window: w.name ?? w.window })), ...state.panes];
+  const hit = records.find((r) => r.session === session && (bare === "" || r.window === targetName(state, t)));
+  return hit ? { session, window: hit.window } : undefined;
+}
+
 function emit(fmt, record) {
   return fmt
     .replace(/#\{session_name\}/g, record.session ?? "")
@@ -442,6 +472,15 @@ switch (cmd) {
     // this stub has always answered `#{session_name}` (⇒ currentSessionName null).
     const fmt = argv[argv.length - 1] ?? "";
     const target = flag("-t");
+    // `#{window_id}\t#{session_name}` at a target: which window a session's
+    // target lives in, as `agendo focus` asks before switching a client there.
+    // Unresolvable targets print nothing and fail, as tmux does.
+    if (fmt.includes("#{window_id}")) {
+      const at = windowAtTarget(state, target);
+      if (!at) process.exit(1);
+      process.stdout.write(`${windowIdOf(at.session, at.window)}\t${at.session}\n`);
+      process.exit(0);
+    }
     const codex = simFor(state, target);
     const cursor = (codex && simCursor(codex.sim)) ?? state.cursors?.[targetName(state, target)];
     if (fmt.includes("#{cursor_x}") && cursor) process.stdout.write(`${cursor.x} ${cursor.y}\n`);
@@ -462,6 +501,23 @@ switch (cmd) {
       const name = at ?? targetName(state, target);
       if (at || windowNames(state).includes(name)) process.stdout.write(`${name}\n`);
     }
+    process.exit(0);
+  }
+  case "list-clients": {
+    // The attached clients a fixture declares in `state.clients` — each
+    // `{name, pid, activity, session, control}` — which `agendo focus` reads to
+    // pick the terminal to move. None declared means nothing is attached.
+    const fmt = format() ?? "#{client_name}";
+    const clients = state.clients ?? [];
+    const line = (c) =>
+      fmt
+        .replace(/#\{client_activity\}/g, String(c.activity ?? 0))
+        .replace(/#\{client_name\}/g, c.name ?? "")
+        .replace(/#\{client_pid\}/g, String(c.pid ?? 0))
+        .replace(/#\{client_session\}/g, c.session ?? "")
+        .replace(/#\{client_control_mode\}/g, c.control ? "1" : "0");
+    process.stdout.write(clients.map(line).join("\n"));
+    if (clients.length) process.stdout.write("\n");
     process.exit(0);
   }
   case "has-session": {

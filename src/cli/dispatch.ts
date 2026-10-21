@@ -26,6 +26,8 @@ import { runListPrs } from "./list/pullRequests.ts";
 import { runListIssues } from "./list/issues.ts";
 import { runListRepos } from "./list/repositories.ts";
 import { readVersion } from "./version.ts";
+import { focusCommand, urlCommand } from "./focus/index.ts";
+import { urlHandlerCommand } from "./urlHandler/index.ts";
 
 // `status <id>`: print a session's state + the same recent-activity summary the
 // menu shows, so an agent that launched a background session can poll it.
@@ -209,6 +211,18 @@ const PLAIN_VERBS: Record<string, (readBranchSync: BranchSyncReader) => Promise<
   ls: listCommand,
 };
 
+/**
+ * Verbs dispatched BEFORE the tmux check. `url-handler` never needs tmux, and
+ * `focus` / `url` usually run from a browser, where a stderr line about tmux
+ * would reach nobody — they check for it themselves and say so in a desktop
+ * notification. Each takes the argv after the verb.
+ */
+const EARLY_VERBS: Record<string, (argv: string[]) => Promise<void> | void> = {
+  focus: focusCommand,
+  url: urlCommand,
+  "url-handler": urlHandlerCommand,
+};
+
 /** A verb that acts on one session: `<verb> <id> [flag]`, then exit 0. */
 interface SessionVerb {
   long: string;
@@ -256,6 +270,14 @@ function verbEntry<T>(table: Record<string, T>, verb: string): T | undefined {
   return Object.hasOwn(table, verb) ? table[verb] : undefined;
 }
 
+/** Run `verb` and exit if it is one of `EARLY_VERBS`; otherwise return to the tmux-bound dispatch. */
+async function runEarlyVerb(verb: string): Promise<void> {
+  const early = verbEntry(EARLY_VERBS, verb);
+  if (!early) return;
+  await early(process.argv.slice(3));
+  process.exit();
+}
+
 async function runSessionVerb(verb: string, spec: SessionVerb): Promise<never> {
   const { id, flag } = parseSessionArgs(verb, process.argv.slice(3), { long: spec.long, short: spec.short });
   await spec.run(id, flag, verb);
@@ -277,9 +299,10 @@ export async function runSubcommand(readBranchSync: BranchSyncReader): Promise<v
     console.log(readVersion());
     process.exit(0);
   }
+  const verb = process.argv[2] ?? "";
+  await runEarlyVerb(verb);
   requireTmux();
 
-  const verb = process.argv[2] ?? "";
   const plain = verbEntry(PLAIN_VERBS, verb);
   if (plain) await plain(readBranchSync);
   const session = verbEntry(SESSION_VERBS, verb);

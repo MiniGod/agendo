@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake `wmctrl` — records the call so a spec can assert it, and acts on nothing.
+# Never let the real one run under test: it would raise windows on the
+# developer's desktop. `-lp` lists $FAKE_WMCTRL_LIST verbatim, so a spec can say
+# which pid owns which X window.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "wmctrl $*" >> "$FAKE_CALL_LOG"; fi
+if [ "$1" = "-lp" ] && [ -n "$FAKE_WMCTRL_LIST" ]; then printf '%s\n' "$FAKE_WMCTRL_LIST"; fi
+exit 0

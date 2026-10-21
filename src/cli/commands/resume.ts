@@ -82,21 +82,33 @@ export async function runResume(token: string | undefined, attach: boolean): Pro
   const id = requireToken(token);
   const index = await SessionIndex.build();
   const s = requireSession(index.all, id);
-  const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
+  const r = await resumeSession(s, index.all);
+  if ("peer" in r) refuseRunningElsewhere(s, r.peer);
+  if (attach) {
+    const [cmd, ...args] = r.plan.handover;
+    spawnSync(cmd, args, { stdio: "inherit" });
+    return;
+  }
+  reportResumed(s, r.plan);
+}
+
+/**
+ * The part of `resume` that brings a session back, without the terminal
+ * handover or the report — shared with `focus`, which resumes a paused or idle
+ * session and then moves an attached client onto it instead. Hands back the
+ * peer instead of exiting when the session is live outside agendo, so each
+ * caller can refuse in its own words.
+ */
+export async function resumeSession(s: AgentSession, all: AgentSession[]): Promise<{ plan: OpenPlan } | { peer: PeerSession }> {
+  const { liveWindows, livePlaceholders } = refreshLiveTmux(all);
   const canon = sessionName(s);
   const liveWindow = liveWindows.get(canon);
   if (!liveWindow) {
     const peer = await peerOf(s);
-    if (peer) refuseRunningElsewhere(s, peer);
+    if (peer) return { peer };
     // A dormant placeholder holds the canonical name but no live agent; drop it so
     // the resume actually starts one instead of no-op'ing onto the idle bash pane.
     if (livePlaceholders.has(canon)) killWindow(canon);
   }
-  const plan = openSession(s, liveWindow);
-  if (attach) {
-    const [cmd, ...args] = plan.handover;
-    spawnSync(cmd, args, { stdio: "inherit" });
-    return;
-  }
-  reportResumed(s, plan);
+  return { plan: openSession(s, liveWindow) };
 }

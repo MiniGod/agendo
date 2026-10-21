@@ -67,6 +67,13 @@ export interface Config {
    * see `peerSocketEnabled`.
    */
   peerSocket?: boolean;
+  /**
+   * What `agendo focus` runs when NO tmux client is attached to move, e.g.
+   * `"x-terminal-emulator -e tmux attach -t {session}"`. Unset (the default)
+   * means it just says so and fails. Split on whitespace and run without a
+   * shell; `{session}` becomes the session to attach to (src/cli/focus/terminal.ts).
+   */
+  focusTerminal?: string;
 }
 
 /** Env override for `peerSocket`. Recognized in either direction; see below. */

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Fake `xdg-mime` — records every call, and models just the two subcommands
+# `agendo url-handler` uses against a mimeapps.list under the test's own
+# $XDG_CONFIG_HOME (or its fake $HOME), never the developer's:
+#   xdg-mime default <file.desktop> <mime>   → record the default
+#   xdg-mime query default <mime>            → print it back (exit 0 either way)
+if [ -n "$FAKE_CALL_LOG" ]; then echo "xdg-mime $*" >> "$FAKE_CALL_LOG"; fi
+list="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
+case "$1" in
+  default)
+    mkdir -p "$(dirname "$list")"
+    touch "$list"
+    grep -v "^$3=" "$list" > "$list.tmp" || true
+    if ! grep -q '^\[Default Applications\]' "$list.tmp"; then echo "[Default Applications]" >> "$list.tmp"; fi
+    echo "$3=$2" >> "$list.tmp"
+    mv "$list.tmp" "$list"
+    ;;
+  query)
+    [ "$2" = default ] && [ -f "$list" ] && grep "^$3=" "$list" | head -n1 | cut -d= -f2- | sed 's/;$//'
+    ;;
+  *) exit 1 ;;
+esac
+exit 0

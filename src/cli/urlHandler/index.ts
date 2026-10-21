@@ -1,0 +1,124 @@
+// `agendo url-handler install|uninstall|status` — register agendo as the
+// desktop's handler for agendo:// links, so a button on a PR page can focus the
+// session working on it (see src/cli/focus/).
+//
+// Install writes ONE file, `$XDG_DATA_HOME/applications/agendo-url-handler.desktop`,
+// and asks `xdg-mime` to make it the scheme's default. Uninstall removes that
+// file and the one mimeapps.list line pointing at it. Nothing else is touched.
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+import { spawnSync } from "child_process";
+import {
+  DESKTOP_FILE, SCHEME_MIME, applicationsDir, defaultCommand, desktopEntry, findOnPath, isOurs, isVolatile,
+  mimeappsPath, parseExec, readExec, withoutOurDefault, type Resolved,
+} from "./desktop.ts";
+
+const USAGE = "usage: url-handler install [--exec <command>] | uninstall | status";
+
+function fail(text: string): never {
+  console.error(`url-handler: ${text}`);
+  process.exit(1);
+}
+
+function realpathOr(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/** `agendo` on PATH, and whether it is a runner's temporary copy. */
+function resolveAgendo(pathEnv: string): Resolved | null {
+  const p = findOnPath("agendo", pathEnv, existsSync);
+  return p ? { path: p, volatile: isVolatile(realpathOr(p)) } : null;
+}
+
+/** The command words for the Exec line: `--exec`'s, or the detected default. */
+function execCommand(execArg: string | undefined): string[] {
+  if (execArg !== undefined) return parseExec(execArg) ?? fail("--exec needs a command (and may not contain %)");
+  const pathEnv = process.env.PATH ?? "";
+  return defaultCommand(resolveAgendo(pathEnv), findOnPath("bunx", pathEnv, existsSync))
+    ?? fail("found neither a global agendo install nor bunx on PATH; pass --exec <command>");
+}
+
+/** `xdg-mime …`, or null when it could not run or failed. */
+function xdgMime(args: string[]): string | null {
+  const r = spawnSync("xdg-mime", args, { encoding: "utf-8", timeout: 10_000 });
+  return r.status === 0 ? r.stdout ?? "" : null;
+}
+
+function install(execArg: string | undefined): void {
+  const command = execCommand(execArg);
+  const dir = applicationsDir(process.env, homedir());
+  const file = join(dir, DESKTOP_FILE);
+  const text = desktopEntry(command);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file, text);
+  console.log(`wrote ${file}:\n`);
+  console.log(text);
+  if (xdgMime(["default", DESKTOP_FILE, SCHEME_MIME]) === null) {
+    fail(`could not register it: \`xdg-mime default ${DESKTOP_FILE} ${SCHEME_MIME}\` failed`);
+  }
+  console.log(`registered ${DESKTOP_FILE} as the default handler for ${SCHEME_MIME}`);
+}
+
+function uninstall(): void {
+  const file = join(applicationsDir(process.env, homedir()), DESKTOP_FILE);
+  const had = existsSync(file);
+  rmSync(file, { force: true });
+  console.log(had ? `removed ${file}` : `${file} was not installed`);
+  const list = mimeappsPath(process.env, homedir());
+  if (!existsSync(list)) return;
+  const before = readFileSync(list, "utf-8");
+  const after = withoutOurDefault(before);
+  if (after === before) return;
+  writeFileSync(list, after);
+  console.log(`removed the ${SCHEME_MIME} default from ${list}`);
+}
+
+/** The desktop entry's path, and its Exec line when it is installed. */
+function installedEntry(): { file: string; exec: string | null; installed: boolean } {
+  const file = join(applicationsDir(process.env, homedir()), DESKTOP_FILE);
+  if (!existsSync(file)) return { file, exec: null, installed: false };
+  return { file, exec: readExec(readFileSync(file, "utf-8")), installed: true };
+}
+
+/** How `status` describes what `xdg-mime` says handles the scheme. */
+function handlerLine(handler: string | null): string {
+  if (!handler) return "no handler registered";
+  return isOurs(handler) ? handler : `${handler} (not agendo's entry)`;
+}
+
+function status(): void {
+  const entry = installedEntry();
+  console.log(`desktop entry: ${entry.installed ? entry.file : "not installed"}`);
+  if (entry.installed) console.log(`  Exec=${entry.exec ?? "(none)"}`);
+  const handler = currentHandler();
+  console.log(`${SCHEME_MIME}: ${handlerLine(handler)}`);
+  // 0 only when the entry exists AND the desktop resolves the scheme to it.
+  process.exitCode = entry.installed && isOurs(handler ?? "") ? 0 : 1;
+}
+
+/** The desktop file `xdg-mime` says handles the scheme now, or null. */
+function currentHandler(): string | null {
+  return xdgMime(["query", "default", SCHEME_MIME])?.trim() || null;
+}
+
+/** The `install` flags: only `--exec <command>`. */
+function installArgs(rest: string[]): string | undefined {
+  if (rest.length === 0) return undefined;
+  if (rest[0] === "--exec" && rest.length === 2) return rest[1];
+  if (rest.length === 1 && rest[0].startsWith("--exec=")) return rest[0].slice("--exec=".length);
+  return fail(`unexpected arguments: ${rest.join(" ")}\n${USAGE}`);
+}
+
+export function urlHandlerCommand(argv: string[]): void {
+  const [sub, ...rest] = argv;
+  if (sub === "install") return install(installArgs(rest));
+  if (rest.length > 0) fail(`unexpected arguments: ${rest.join(" ")}\n${USAGE}`);
+  if (sub === "uninstall") return uninstall();
+  if (sub === "status") return status();
+  fail(USAGE);
+}
