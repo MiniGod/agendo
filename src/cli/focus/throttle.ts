@@ -18,8 +18,8 @@
 // Each claim is atomic: two links fired at once (frames, tabs) must not both read
 // "no stamp yet" and both go. A `mkdir` lock serialises the read-and-stamp, and a
 // link that finds the lock held is simply refused — a concurrent claim is exactly
-// the burst a floor exists for. So is a state dir agendo cannot write: without a
-// stamp there is no floor, so the link is refused.
+// the burst a floor exists for. A state dir agendo cannot write refuses too —
+// without a stamp there is no floor — but as an error, said once, not a wait.
 import { mkdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { STATE_DIR } from "../../app/config.ts";
@@ -44,45 +44,64 @@ function mtimeMs(path: string): number | null {
   }
 }
 
-/** Take the lock; false when another claim holds it (a stale one is cleared for the NEXT link, not taken over). */
-function lock(dir: string, lockPath: string, nowMs: number): boolean {
+/** What a claim came to: go, wait this long, or the floor cannot be kept at all. */
+export type Claim = { go: true } | { waitMs: number } | { error: string };
+
+const errText = (e: unknown) => (e as Error)?.message ?? String(e);
+
+/**
+ * Take the lock. Held by another claim: wait (a stale one is cleared for the NEXT
+ * link, not taken over). Any other failure — no state dir, no permission — is an
+ * error, not a wait: it will not clear by itself, and saying "try again" forever
+ * would hide it.
+ */
+function lock(dir: string, lockPath: string, gapMs: number, nowMs: number): Claim {
   try {
+    // Apart from the lock's own mkdir: a recursive mkdir over a FILE fails with
+    // EEXIST too, which must read as the error it is, not as a held lock.
     mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    return { error: errText(e) };
+  }
+  try {
     mkdirSync(lockPath);
-    return true;
-  } catch {
+    return { go: true };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") return { error: errText(e) };
     if (nowMs - (mtimeMs(lockPath) ?? nowMs) > STALE_LOCK_MS) rmSync(lockPath, { recursive: true, force: true });
-    return false;
+    return { waitMs: gapMs };
   }
 }
 
 /** Read the stamp and, when the gap has passed, renew it. Runs under the lock. */
-function stampIfDue(stamp: string, gapMs: number, nowMs: number): number {
+function stampIfDue(stamp: string, gapMs: number, nowMs: number): Claim {
   const wait = resumeWaitMs(mtimeMs(stamp), nowMs, gapMs);
-  if (wait === 0) writeFileSync(stamp, String(nowMs));
-  return wait;
+  if (wait > 0) return { waitMs: wait };
+  writeFileSync(stamp, String(nowMs));
+  return { go: true };
 }
 
-/** How long a `name` claim must still wait; 0 means go, and records this claim. `dir` is injected for tests. */
-export function claimFloor(name: string, gapMs: number, nowMs = Date.now(), dir = STATE_DIR): number {
+/** Claim floor `name`: go (and record it), wait, or the error that keeps it from being kept. `dir` is injected for tests. */
+export function claimFloor(name: string, gapMs: number, nowMs = Date.now(), dir = STATE_DIR): Claim {
   const lockPath = join(dir, `${name}.lock`);
-  if (!lock(dir, lockPath, nowMs)) return gapMs;
+  const locked = lock(dir, lockPath, gapMs, nowMs);
+  if (!("go" in locked)) return locked;
   try {
     return stampIfDue(join(dir, `${name}.stamp`), gapMs, nowMs);
-  } catch {
+  } catch (e) {
     // A stamp that cannot be written cannot hold the floor: refuse rather than run unthrottled.
-    return gapMs;
+    return { error: errText(e) };
   } finally {
     rmSync(lockPath, { recursive: true, force: true });
   }
 }
 
 /** The resume floor (see the header). */
-export function claimUrlResume(nowMs = Date.now()): number {
+export function claimUrlResume(nowMs = Date.now()): Claim {
   return claimFloor("url-resume", URL_RESUME_GAP_MS, nowMs);
 }
 
 /** The focus floor (see the header). */
-export function claimUrlFocus(nowMs = Date.now()): number {
+export function claimUrlFocus(nowMs = Date.now()): Claim {
   return claimFloor("url-focus", URL_FOCUS_GAP_MS, nowMs);
 }

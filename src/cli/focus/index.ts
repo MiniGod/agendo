@@ -86,8 +86,15 @@ function runningTarget(s: AgentSession, all: AgentSession[]): string | null {
 
 /** A link may not resume twice in quick succession (see throttle.ts). */
 function throttleUrlResume(origin: FocusOrigin): void {
-  const wait = origin.fromUrl ? claimUrlResume() : 0;
-  if (wait > 0) failLoudly(`not resuming another session from a link so soon — try again in ${Math.ceil(wait / 1000)}s`);
+  if (!origin.fromUrl) return;
+  const claim = claimUrlResume();
+  if ("error" in claim) failLoudly(floorBroken(claim.error));
+  if ("waitMs" in claim) failLoudly(`not resuming another session from a link so soon — try again in ${Math.ceil(claim.waitMs / 1000)}s`);
+}
+
+/** Why links are refused when their floor cannot be recorded. */
+function floorBroken(error: string): string {
+  return `agendo:// links are refused: agendo cannot record their use in its state dir (${error})`;
 }
 
 /** Is `session` one of agendo's own launcher sessions — the shared one, or a path-scoped one carrying `@cl_root`? */
@@ -126,7 +133,7 @@ function placedTarget(host: string | undefined, name: string): string {
 
 /** Resume the chosen session in `host` (see `resumeHost`) and return its window. */
 async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<Brought> {
-  const r = await resumeSession(c.s, all, host);
+  const r = await resumeSession(c.s, all, host === undefined ? { detached: true } : { host });
   if ("peer" in r) {
     failLoudly(`session ${shortId(c.s.id)} is running outside agendo (pid ${r.peer.pid}); there is no window to focus`, 2);
   }
@@ -224,16 +231,19 @@ export async function focusCommand(argv: string[]): Promise<never> {
  * attacker-controlled part.
  */
 export async function urlCommand(argv: string[]): Promise<never> {
+  // Claimed before the link is even read: a burst of MALFORMED links must not
+  // become a burst of refusal notifications either.
+  const claim = claimUrlFocus();
+  if ("error" in claim) failLoudly(floorBroken(claim.error));
+  if ("waitMs" in claim) {
+    // Quiet on purpose: a page firing links in a burst would otherwise also fire a burst of notifications.
+    console.error(`url: ignored — another agendo:// link was handled less than ${URL_FOCUS_GAP_MS / 1000}s ago`);
+    process.exit(1);
+  }
   const parsed = argv.length === 1 ? parseFocusUrl(argv[0]) : { ok: false as const, reason: "expected exactly one URL" };
   if (!parsed.ok) {
     console.error(`url: refused ${JSON.stringify((argv[0] ?? "").slice(0, 200))}`);
     failLoudly(`refused an agendo:// link: ${parsed.reason}`);
-  }
-  const wait = claimUrlFocus();
-  if (wait > 0) {
-    // Quiet on purpose: a page firing links in a burst would otherwise also fire a burst of notifications.
-    console.error(`url: ignored — another agendo:// link was handled less than ${URL_FOCUS_GAP_MS / 1000}s ago`);
-    process.exit(1);
   }
   return runFocus(parsed.target, { fromUrl: true });
 }

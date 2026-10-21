@@ -41,14 +41,27 @@ function agendo(env: Record<string, string>, ...args: string[]) {
 /** The fixture tmux state with clients attached, a menu window, and anything extra. */
 async function seed(
   mock: MockEnv,
-  extra: { clients?: unknown[]; windows?: unknown[]; panes?: unknown[]; sessions?: string[]; switchFails?: boolean } = {},
+  extra: {
+    clients?: unknown[];
+    windows?: unknown[];
+    panes?: unknown[];
+    sessions?: string[];
+    switchFails?: boolean;
+    /** Leave the shared `agendo` launcher session out. */
+    noLauncher?: boolean;
+  } = {},
 ) {
+  const launcher = extra.noLauncher ? [] : ["agendo"];
   await mock.setTmuxState({
     ...tmuxState,
     switchFails: extra.switchFails ?? false,
-    sessions: [...tmuxState.sessions, "agendo", ...(extra.sessions ?? [])],
-    windows: [{ session: "agendo", index: 0, name: "launcher" }, ...(extra.windows ?? [])],
-    panes: [...tmuxState.panes, { session: "agendo", window: "launcher", cwd: "/menu", placeholder: false }, ...(extra.panes ?? [])],
+    sessions: [...tmuxState.sessions, ...launcher, ...(extra.sessions ?? [])],
+    windows: [...launcher.map((session) => ({ session, index: 0, name: "launcher" })), ...(extra.windows ?? [])],
+    panes: [
+      ...tmuxState.panes,
+      ...launcher.map((session) => ({ session, window: "launcher", cwd: "/menu", placeholder: false })),
+      ...(extra.panes ?? []),
+    ],
     clients: extra.clients ?? CLIENTS,
   });
 }
@@ -139,6 +152,24 @@ test("an idle session is never resumed into the user's own tmux session", async 
   expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo") && a.includes(STANDALONE_TARGET))).toBe(true);
   expect(log.some((a) => a[0] === "new-window" && a.includes("=main"))).toBe(false);
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", STANDALONE_TARGET)]]);
+});
+
+test("with no launcher session, an idle session gets a detached session of its own — even when focus runs inside tmux", async ({ mock }) => {
+  await seed(mock, {
+    noLauncher: true,
+    sessions: ["main"],
+    windows: [{ session: "main", index: 0, name: "zsh" }],
+    clients: [{ name: "/dev/pts/7", pid: 4107, activity: 1_700_000_900, session: "main" }],
+  });
+  // Inside the user's own session, where a bare `new-window` would land in it.
+  // The socket path is the test's own, so even an escaped real tmux finds no server.
+  const env = { ...mock.env, TMUX: `${join(mock.tmpDir, "no-such-socket")},1,0`, TMUX_PANE: "%0" };
+  const r = await agendo(env, "focus", "standalonese");
+  expect(r.code, r.stderr).toBe(0);
+  const log = await mock.tmuxLog();
+  expect(log.some((a) => a[0] === "new-session" && a.includes(STANDALONE_TARGET))).toBe(true);
+  expect(log.some((a) => a[0] === "new-window")).toBe(false);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, STANDALONE_TARGET)]]);
 });
 
 test("focus refuses a session running outside agendo: there is no window to bring forward", async ({ mock }) => {
@@ -239,6 +270,24 @@ test("links are held to one per two seconds, quietly", async ({ mock }) => {
   // A burst of links must not become a burst of notifications.
   expect(await notifications(mock)).toEqual([]);
   expect(await switches(mock)).toHaveLength(1);
+});
+
+test("a burst of malformed links raises one notification, not one each", async ({ mock }) => {
+  await seed(mock);
+  for (let i = 0; i < 3; i++) expect((await agendo(mock.env, "url", `agendo://evil?n=${i}`)).code).not.toBe(0);
+  expect(await notifications(mock)).toHaveLength(1);
+});
+
+test("a state dir agendo cannot write refuses links, and says why", async ({ mock }) => {
+  await seed(mock);
+  // A FILE where a directory has to be: unwritable for root too, unlike a chmod.
+  const env = { ...mock.env, HOME: join(mock.tmpDir, "blocked-home") };
+  mkdirSync(env.HOME, { recursive: true });
+  writeFileSync(join(env.HOME, ".agendo"), "");
+  const r = await agendo(env, "url", "agendo://focus?pr=5001");
+  expect(r.code).not.toBe(0);
+  expect((await notifications(mock)).join("\n"), r.stderr).toContain("cannot record their use in its state dir");
+  expect(await switches(mock)).toEqual([]);
 });
 
 test("url may resume only once in quick succession; focus typed by hand is not throttled", async ({ mock }) => {

@@ -25,7 +25,7 @@ export { SELF_CMD, SELF_CMD_ENV, withSelfCmdEnv, notRunningHint } from "./selfCo
 export { llmGuide } from "./prompt.ts";
 export { resumeArgv, preassignsSessionId, FORWARDABLE_LAUNCH_FLAGS } from "./argv.ts";
 
-export { openTarget, openSession, openSessionIn, runInline, type OpenPlan } from "./open.ts";
+export { openTarget, openSession, openSessionDetached, openSessionIn, runInline, type OpenPlan } from "./open.ts";
 
 export { launchNewSession } from "./managed.ts";
 

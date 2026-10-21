@@ -4,7 +4,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { linkedMatches, resolveLinked } from "../src/cli/focus/linked.ts";
 import { claimFloor, resumeWaitMs, STALE_LOCK_MS, URL_RESUME_GAP_MS } from "../src/cli/focus/throttle.ts";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { AgentSession } from "../src/shared/types.ts";
@@ -80,6 +80,7 @@ describe("resumeWaitMs", () => {
 
 describe("claimFloor", () => {
   const T0 = 1_800_000_000_000;
+  const GO = { go: true } as const;
   const made: string[] = [];
   const fresh = () => {
     const dir = mkdtempSync(join(tmpdir(), "agendo-floor-"));
@@ -89,15 +90,16 @@ describe("claimFloor", () => {
   afterAll(() => {
     for (const dir of made) rmSync(dir, { recursive: true, force: true });
   });
+  const waitOf = (c: ReturnType<typeof claimFloor>) => ("waitMs" in c ? c.waitMs : null);
 
   test("the first claim goes and stamps; a second inside the gap waits it out; after it, goes again", () => {
     const dir = fresh();
-    expect(claimFloor("f", 10_000, T0, dir)).toBe(0);
+    expect(claimFloor("f", 10_000, T0, dir)).toEqual(GO);
     expect(existsSync(join(dir, "f.stamp"))).toBe(true);
     // The stamp's mtime is the real clock's, so ask relative to it.
     const stamped = Date.now();
-    expect(claimFloor("f", 10_000, stamped + 4_000, dir)).toBeGreaterThan(5_000);
-    expect(claimFloor("f", 10_000, stamped + 60_000, dir)).toBe(0);
+    expect(waitOf(claimFloor("f", 10_000, stamped + 4_000, dir))).toBeGreaterThan(5_000);
+    expect(claimFloor("f", 10_000, stamped + 60_000, dir)).toEqual(GO);
   });
 
   test("the lock is released after every claim", () => {
@@ -107,10 +109,10 @@ describe("claimFloor", () => {
     expect(existsSync(join(dir, "f.lock"))).toBe(false);
   });
 
-  test("a held lock refuses: a concurrent claim is the burst the floor is for", () => {
+  test("a held lock waits: a concurrent claim is the burst the floor is for", () => {
     const dir = fresh();
     mkdirSync(join(dir, "f.lock"));
-    expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(10_000);
+    expect(claimFloor("f", 10_000, Date.now(), dir)).toEqual({ waitMs: 10_000 });
     expect(existsSync(join(dir, "f.lock"))).toBe(true);
     expect(existsSync(join(dir, "f.stamp"))).toBe(false);
   });
@@ -121,24 +123,39 @@ describe("claimFloor", () => {
     mkdirSync(lockDir);
     const old = (Date.now() - STALE_LOCK_MS - 60_000) / 1000;
     utimesSync(lockDir, old, old);
-    expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(10_000);
+    expect(claimFloor("f", 10_000, Date.now(), dir)).toEqual({ waitMs: 10_000 });
     expect(existsSync(lockDir)).toBe(false);
-    expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(0);
+    expect(claimFloor("f", 10_000, Date.now(), dir)).toEqual(GO);
   });
 
-  test.skipIf(process.getuid?.() === 0)("a directory it cannot write refuses rather than running unthrottled", () => {
+  test.skipIf(process.getuid?.() === 0)("a directory it cannot write is an error, not a wait", () => {
     const dir = fresh();
     chmodSync(dir, 0o500);
     try {
-      expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(10_000);
+      expect("error" in claimFloor("f", 10_000, Date.now(), dir)).toBe(true);
     } finally {
       chmodSync(dir, 0o700);
     }
   });
 
+  test.skipIf(process.getuid?.() === 0)("a stamp it cannot write is an error too", () => {
+    const dir = fresh();
+    // A directory where the stamp goes, old enough that the floor has passed: the write is what fails.
+    mkdirSync(join(dir, "f.stamp"));
+    utimesSync(join(dir, "f.stamp"), 1, 1);
+    expect("error" in claimFloor("f", 10_000, Date.now(), dir)).toBe(true);
+    expect(existsSync(join(dir, "f.lock"))).toBe(false);
+  });
+
+  test("a FILE where the state dir should be is an error, not a held lock", () => {
+    const dir = join(fresh(), "file");
+    writeFileSync(dir, "");
+    expect("error" in claimFloor("f", 10_000, Date.now(), dir)).toBe(true);
+  });
+
   test("floors are independent by name", () => {
     const dir = fresh();
-    expect(claimFloor("a", 10_000, Date.now(), dir)).toBe(0);
-    expect(claimFloor("b", 10_000, Date.now(), dir)).toBe(0);
+    expect(claimFloor("a", 10_000, Date.now(), dir)).toEqual(GO);
+    expect(claimFloor("b", 10_000, Date.now(), dir)).toEqual(GO);
   });
 });

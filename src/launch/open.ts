@@ -180,6 +180,19 @@ export function openSessionIn(s: AgentSession, host: string): OpenPlan {
 }
 
 /**
+ * Cold-resume a session as a detached tmux session of its own — even from inside
+ * tmux, where `openSession` would add it as a window of the CURRENT session,
+ * which for `agendo focus` may be a session of the user's own. The caller has
+ * already established that nothing is running for `s`.
+ */
+export function openSessionDetached(s: AgentSession): OpenPlan {
+  const name = sessionName(s);
+  newDetached(name, s.cwd, resumeArgv(s));
+  stampNewTarget(name, sessionTags(s));
+  return { alreadyRunning: false, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name] };
+}
+
+/**
  * The window tag for a session we are resuming. This is the one launch path that
  * knows the session's FULL id up front — it is resuming a session that already
  * exists — so the tag it writes is complete, and the window it opens attributes
