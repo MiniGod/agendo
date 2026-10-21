@@ -186,7 +186,7 @@
         // is a three-way one since src/ui/hooks/useReadinessPoll.ts's poll became
         // a loop over samplePane.
         "max-depth": ["error", 5], // src/orchestration/workflows.ts, src/runtime/tmux/inputBox.ts, src/ui/hooks/useModelLoader.ts
-        "max-nested-callbacks": ["error", 4] // src/sessions/claude.ts:172
+        "max-nested-callbacks": ["error", 4] // src/ui/hooks/useCleanupData.ts:142
       }
     },
 
