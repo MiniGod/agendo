@@ -7,7 +7,7 @@ import { isPaneTarget, type LiveTarget } from "../../runtime/tmux/index.ts";
 import type { LoadedModel } from "../../app/model/index.ts";
 
 /** The slice of live-tmux state `sessionMeta` needs, precomputed once per row
- *  build rather than re-derived per row (see rows.ts's PERFORMANCE note). */
+ *  build rather than re-derived per row. */
 export interface LiveInfo {
   names: Set<string>;
   /** Running windows and paused restore placeholders, merged — the tmux line
