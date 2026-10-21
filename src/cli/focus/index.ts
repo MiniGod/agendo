@@ -3,13 +3,16 @@
 // handler that is its browser-facing door.
 //
 // Runs OUTSIDE tmux when a browser starts it, so it never assumes a current
-// client: it picks the attached client with the latest input and moves THAT one.
+// client: it moves a client already showing the tmux session the target's
+// window is (or will be) in, else the attached client with the latest input.
+// The latter is usually the terminal the human is busy in; the former is the
+// one meant to show the target.
 // It only ever focuses, or resumes and then focuses, a session that already
 // exists. It never launches a new one, sends to one or closes one — a URL that
 // any web page can trigger must not be able to do more than change what is on
 // screen.
 import {
-  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, selectWindow,
+  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, pickClientFor, selectWindow,
   sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
@@ -23,10 +26,10 @@ import { findSession, resumeSession } from "../commands/resume.ts";
 import { describeLinkTarget, describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
 import { linkedMatches, narrowToRepo, resolveLinked } from "./linked.ts";
-import { failLoudly } from "./notify.ts";
+import { failLoudly, notify, onNotify } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
-import { URL_FOCUS_GAP_MS, claimUrlFocus, claimUrlResume } from "./throttle.ts";
+import { URL_FOCUS_GAP_MS, claimRefusalNote, claimUrlFocus, claimUrlResume } from "./throttle.ts";
 
 /** A link leaves alone a client typed into this recently: the human is busy in it, not clicking a button. */
 export const TYPING_GRACE_S = 3;
@@ -149,17 +152,31 @@ async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string
   return { target, resumed };
 }
 
+/** Where the chosen session will be on screen, worked out before anything is resumed. */
+interface Landing {
+  /** A running session's window, freshly read; null when it has to be resumed. */
+  running: string | null;
+  /** The tmux session that window is in — or a resume will open it in; undefined for a detached session of its own. */
+  session: string | undefined;
+}
+
+/** Where `c` is, or where a resume will put it (see `resumeHost`, asked about the most recently active client). */
+function landing(c: FocusCandidate, all: AgentSession[], clients: TmuxClient[]): Landing {
+  const running = c.state === "running" ? runningTarget(c.s, all) : null;
+  if (running) return { running, session: windowIdentity(running)?.session };
+  return { running: null, session: resumeHost(c, pickClient(clients)) };
+}
+
 /**
  * Make sure the chosen session has a window — resuming it if needed — and return
  * that window's target. Everything past a running session's own window goes
  * through the link's resume floor — including a "running" session whose window
  * has vanished since the scan, which `resumeSession` would cold-start.
  */
-async function bringUp(c: FocusCandidate, all: AgentSession[], client: TmuxClient | null, origin: FocusOrigin): Promise<Brought> {
-  const running = c.state === "running" ? runningTarget(c.s, all) : null;
-  if (running) return { target: running, resumed: null };
+async function bringUp(c: FocusCandidate, all: AgentSession[], land: Landing, origin: FocusOrigin): Promise<Brought> {
+  if (land.running) return { target: land.running, resumed: null };
   throttleUrlResume(origin);
-  return resumeChosen(c, all, resumeHost(c, client));
+  return resumeChosen(c, all, land.session);
 }
 
 /** Fail, saying so when the session was resumed on the way: it is running, and the human should know where. */
@@ -181,23 +198,45 @@ function paneOf(target: string): string | undefined {
 }
 
 /**
- * For a link, re-checked right before the switch: a resume takes seconds, and
- * the human may have started typing in the client, or detached it, meanwhile.
- * Quiet like the first check — unless the agent was resumed on the way, which
- * the human should hear about.
+ * The client to move, chosen again now the window exists: a resume takes
+ * seconds, may have landed somewhere other than foreseen, and the human may
+ * have started typing in the client, or detached it, meanwhile. For a link,
+ * the typing guard is applied once more, to the client chosen now.
  */
-function recheckClient(client: TmuxClient, up: Brought, fail: Fail): void {
-  const now = listClients().find((c) => c.name === client.name);
-  const why = now ? typingIn(now) : `${client.name} detached`;
-  if (!why) return;
+function finalClient(client: TmuxClient, where: WindowIdentity, up: Brought, fail: Fail, origin: FocusOrigin): TmuxClient {
+  const now = pickClientFor(listClients(), where.session);
+  if (!origin.fromUrl) return now ?? client;
+  if (!now) return refuseLink(`${client.name} detached`, null, up, fail);
+  const why = typingIn(now);
+  return why ? refuseLink(why, now, up, fail) : now;
+}
+
+/**
+ * Refuse a link past its first check. Said like the first check (`ignoreLink`)
+ * — unless the agent was resumed on the way, which the human must hear about,
+ * and where.
+ */
+function refuseLink(why: string, typist: TmuxClient | null, up: Brought, fail: Fail): never {
   if (up.resumed) fail(`not switching: ${why}`);
+  ignoreLink(why, typist);
+}
+
+/**
+ * Drop a link and exit 1. A refusal for typing is NOTIFIED, naming the tmux
+ * session typed in but nothing from the link: the human clicked a button and
+ * saw nothing happen, and should know why. A link fired on a timer cannot turn
+ * that into a burst — the focus floor lets one link through per
+ * URL_FOCUS_GAP_MS.
+ */
+function ignoreLink(why: string, typist: TmuxClient | null): never {
   console.error(`url: ignored — ${why}`);
+  if (typist) notify(`ignored — you were typing in ${typist.session}`);
   process.exit(1);
 }
 
-/** Move `client` onto the window and raise its terminal. */
-function switchTo(client: TmuxClient, where: WindowIdentity, up: Brought, s: AgentSession, fail: Fail, origin: FocusOrigin): never {
-  if (origin.fromUrl) recheckClient(client, up, fail);
+/** Move the client chosen for the window onto it and raise that client's terminal. */
+function switchTo(chosen: TmuxClient, where: WindowIdentity, up: Brought, s: AgentSession, fail: Fail, origin: FocusOrigin): never {
+  const client = finalClient(chosen, where, up, fail, origin);
   const target = up.target;
   if (!focusClientOn(client.name, where, paneOf(target))) {
     fail(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
@@ -208,16 +247,15 @@ function switchTo(client: TmuxClient, where: WindowIdentity, up: Brought, s: Age
 }
 
 /**
- * Refuse a link, quietly, when the client it would move was typed into within
- * `TYPING_GRACE_S`. A human who clicked a browser button is not typing in the
+ * Refuse a link when the client it would move was typed into within
+ * `TYPING_GRACE_S`. A human who clicked a browser button is not typing in that
  * terminal at that moment; a page firing links on a timer would otherwise land
- * their keystrokes in an agent's prompt mid-sentence.
+ * their keystrokes in an agent's prompt mid-sentence. Only the client chosen
+ * is checked: typing in another terminal is no reason to leave this one alone.
  */
 function leaveTypistAlone(client: TmuxClient): void {
   const why = typingIn(client);
-  if (!why) return;
-  console.error(`url: ignored — ${why}`);
-  process.exit(1);
+  if (why) ignoreLink(why, client);
 }
 
 /** Why `client` counts as being typed in, or null when it does not. */
@@ -231,8 +269,10 @@ function typingIn(client: TmuxClient, nowS = Date.now() / 1000): string | null {
  * open. Checked BEFORE any resume: with nothing to show it on and no terminal
  * to open, waking an agent would only leave it running unseen.
  */
-function clientOrTerminal(origin: FocusOrigin): { client: TmuxClient; template: null } | { client: null; template: string } {
-  const client = pickClient(listClients());
+function clientOrTerminal(
+  clients: TmuxClient[], session: string | undefined, origin: FocusOrigin,
+): { client: TmuxClient; template: null } | { client: null; template: string } {
+  const client = pickClientFor(clients, session);
   if (client) {
     if (origin.fromUrl) leaveTypistAlone(client);
     return { client, template: null };
@@ -259,8 +299,10 @@ async function chooseSession(target: FocusTarget, origin: FocusOrigin): Promise<
 export async function runFocus(target: FocusTarget, origin: FocusOrigin = { fromUrl: false }): Promise<never> {
   if (!tmuxAvailable()) failLoudly("tmux was not found on PATH");
   const { chosen, all } = await chooseSession(target, origin);
-  const { client, template } = clientOrTerminal(origin);
-  const up = await bringUp(chosen, all, client, origin);
+  const clients = listClients();
+  const land = landing(chosen, all, clients);
+  const { client, template } = clientOrTerminal(clients, land.session, origin);
+  const up = await bringUp(chosen, all, land, origin);
   const fail: Fail = (text) => failLoudly(up.resumed ? `${text} — ${up.resumed}` : text);
   const where = windowIdentity(up.target) ?? fail(`could not find the tmux window of session ${shortId(chosen.s.id)}`);
   if (!client) withoutClient(where, up.target, template, fail);
@@ -286,10 +328,14 @@ export async function urlCommand(argv: string[]): Promise<never> {
   const claim = claimUrlFocus();
   if ("error" in claim) failLoudly(floorBroken(claim.error));
   if ("waitMs" in claim) {
-    // Quiet on purpose: a page firing links in a burst would otherwise also fire a burst of notifications.
+    // Notified, but at most once per gap: a page firing links in a burst must not fire a burst of notifications.
     console.error(`url: ignored — another agendo:// link was handled less than ${URL_FOCUS_GAP_MS / 1000}s ago`);
+    if ("go" in claimRefusalNote()) notify("ignored a link — another one was handled moments ago");
     process.exit(1);
   }
+  // Whatever this link goes on to say counts against the refusal-note floor, so
+  // the links refused behind it add nothing to the notification it raised.
+  onNotify(() => void claimRefusalNote());
   const parsed = argv.length === 1 ? parseFocusUrl(argv[0]) : { ok: false as const, reason: "expected exactly one URL" };
   if (!parsed.ok) {
     console.error(`url: refused ${JSON.stringify((argv[0] ?? "").slice(0, 200))}`);

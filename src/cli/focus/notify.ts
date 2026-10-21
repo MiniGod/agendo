@@ -7,6 +7,13 @@
 // one who clicked a button.
 import { spawnSync } from "child_process";
 
+let afterNotify: (() => void) | null = null;
+
+/** Run `hook` after each notification this process shows — `agendo url` stamps its refusal-note floor with it (see throttle.ts). */
+export function onNotify(hook: () => void): void {
+  afterNotify = hook;
+}
+
 /**
  * Body markup is interpreted by many notification servers (a subset of HTML),
  * so the three characters that open markup are escaped. Text reaching here is
@@ -27,6 +34,7 @@ export function notify(text: string): void {
   } catch {
     // nothing to do: the message is on stderr already
   }
+  afterNotify?.();
 }
 
 /** Say `text` on stderr and as a notification, then exit with `code`. */

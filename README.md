@@ -510,9 +510,11 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 
 `agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional `--repo`)
 or `agendo focus <id>` brings a
-session to the front. The attached tmux client you typed into last is switched to the
-session's window, and a paused or idle session is resumed first. On X11 the terminal
-window is raised too. When several sessions are linked, the latest running one wins;
+session to the front. A tmux client already showing the tmux session that holds (or,
+once resumed, will hold) the session's window is switched to it — the most recently
+used one, if several are. Only when no client is on that session does the client you
+typed into last move instead. A paused or idle session is resumed first. On X11 the
+chosen client's terminal window is raised too. When several sessions are linked, the latest running one wins;
 if none is running, the latest one wins. A paused session goes back into the tmux
 session its tab was parked in. An idle one opens in the agendo session the client is
 showing, else in the shared `agendo` session, else in a detached session of its own;
@@ -537,17 +539,29 @@ GitHub page can run it. Setup on Linux:
 
 1. **Register the handler:** `agendo url-handler install`. This writes one `.desktop`
    file to `${XDG_DATA_HOME:-~/.local/share}/applications/` and makes it the default
-   for `x-scheme-handler/agendo` through `xdg-mime`. It runs a global `agendo` install
+   for `x-scheme-handler/agendo` through `xdg-mime`, after refreshing that directory's
+   desktop database with `update-desktop-database`. It runs a global `agendo` install
    if you have one (by `bun`'s absolute path, since a browser may start it without
    your shell's `PATH`), otherwise `bunx agendo@<this version>`, so a link never runs code newer than what
    you installed. Choose the command with
    `--exec <command>`. Check the setup with `agendo url-handler status`, and remove
    it with `agendo url-handler uninstall`.
+
+   **Flatpak and Snap browsers** (Zen, Firefox or Chromium from Flathub or the Snap
+   store) open links through the desktop portal, which offers only handlers listed
+   in the desktop database (`mimeinfo.cache`), not just the `xdg-mime` default.
+   Without that entry the link opens an empty "Open With… No Apps available" dialog.
+   `install` refreshes the database for you; if `update-desktop-database` is missing
+   (it comes with `desktop-file-utils`), it warns instead, and `status` warns while
+   the entry is unlisted. The fix is the command they print:
+   `update-desktop-database ${XDG_DATA_HOME:-~/.local/share}/applications`.
 2. **Install the user-script:** open
    [`extras/userscript/agendo.user.js`](extras/userscript/agendo.user.js) in
    Tampermonkey or Violentmonkey. It adds an **Open in agendo** button to pull requests
    and work items on `dev.azure.com`, `*.visualstudio.com` and `github.com`, including
-   pages reached by in-app navigation.
+   pages reached by in-app navigation. A click hands the link over from a hidden
+   iframe rather than navigating the page, so Azure DevOps keeps its live updates
+   instead of warning that they were paused.
 3. **Click it once and allow the prompt:** the browser asks whether to open `agendo`
    links with the registered app. Prefer allowing it per site (dev.azure.com,
    github.com). Some browsers' "always" applies to every site, which lets any page
@@ -561,9 +575,11 @@ so in a notification. A link can only focus a session, or resume one and then fo
 it. Links are limited, so a page that fires them cannot do much with them:
 
 - A link never moves a terminal you typed into during the last three seconds. A page
-  firing links on a timer cannot switch your terminal while you type in it.
+  firing links on a timer cannot switch your terminal while you type in it. Only the
+  terminal the link would move counts, and a refused link says so in a notification
+  naming the tmux session you were typing in.
 - Links are handled at most once every two seconds. Links over that rate are
-  dropped without a notification.
+  dropped, with at most one notification per two seconds saying so.
 - A link resumes at most one session every 15 seconds.
 
 `agendo focus` typed in a terminal is not limited.

@@ -3,7 +3,7 @@
 // client it moves, and how its argv is read. All pure, so each case is a row.
 import { describe, expect, test } from "bun:test";
 import { parseFocusArgs, pickSession, type FocusCandidate } from "../src/cli/focus/choose.ts";
-import { asPaneTarget, parseClients, parseWindowIdentity, pickClient, scopedWindowTarget } from "../src/runtime/tmux/clients.ts";
+import { asPaneTarget, parseClients, parseWindowIdentity, pickClient, pickClientFor, scopedWindowTarget } from "../src/runtime/tmux/clients.ts";
 import type { AgentSession } from "../src/shared/types.ts";
 
 function cand(id: string, state: FocusCandidate["state"], minutesAgo: number): FocusCandidate {
@@ -55,6 +55,32 @@ describe("parseClients / pickClient", () => {
   });
 
   test("no client attached", () => expect(pickClient([])).toBeNull());
+});
+
+describe("pickClientFor", () => {
+  // Four terminals, one per tmux session; pts/21 is the one typed into all day.
+  const layout = [
+    { name: "/dev/pts/1", pid: 1, activity: 100, session: "agendo-tv-launcher" },
+    { name: "/dev/pts/24", pid: 24, activity: 200, session: "agendo-pc-to-phone-audio" },
+    { name: "/dev/pts/21", pid: 21, activity: 900, session: "agendo-agendo" },
+    { name: "/dev/pts/6", pid: 6, activity: 300, session: "agendo-mc-applications" },
+  ];
+
+  test("the client already on the target's tmux session, though another was typed into more recently", () => {
+    expect(pickClientFor(layout, "agendo-mc-applications")?.name).toBe("/dev/pts/6");
+  });
+
+  test("no client on the target's session: the most recently active overall", () => {
+    expect(pickClientFor(layout, "agendo-somewhere-else")?.name).toBe("/dev/pts/21");
+    expect(pickClientFor(layout, undefined)?.name).toBe("/dev/pts/21");
+  });
+
+  test("several clients on the target's session: the most recently active of them", () => {
+    const more = [...layout, { name: "/dev/pts/8", pid: 8, activity: 500, session: "agendo-mc-applications" }];
+    expect(pickClientFor(more, "agendo-mc-applications")?.name).toBe("/dev/pts/8");
+  });
+
+  test("no client attached", () => expect(pickClientFor([], "agendo")).toBeNull());
 });
 
 describe("parseFocusArgs", () => {

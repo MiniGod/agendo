@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Open in agendo
 // @namespace    https://github.com/MiniGod/agendo
-// @version      1.1.0
+// @version      1.2.0
 // @description  Adds an "Open in agendo" button to Azure DevOps and GitHub pull requests and work items. It focuses the agendo session for that PR or work item, resuming it first if it is paused or idle.
 // @match        https://dev.azure.com/*
 // @match        https://*.visualstudio.com/*
@@ -23,6 +23,18 @@
 // Azure DevOps and GitHub are both single-page apps: moving from one PR to
 // another changes the URL without loading a page. So the script re-reads the
 // location whenever it changes and moves, relabels or removes the button.
+//
+// A click never navigates the page itself. Following the link would send the
+// TOP window to agendo://, and even though the page stays put, the browser
+// fires beforeunload/pagehide first — Firefox included — and Azure DevOps tears
+// down its live-update (SignalR) connection and shows an "updates paused"
+// warning. So the click is cancelled and the link is handed over from a hidden
+// iframe instead (`launch`), created inside the click handler so it carries the
+// click's user activation, which Firefox and Chromium both require before an
+// iframe may open an external protocol. If the page's Content-Security-Policy
+// refuses an agendo: frame, the browser reports a securitypolicyviolation and
+// the script falls back to following the link: the warning comes back, but the
+// button still works. Nothing in this script assigns window.location.
 (function () {
   "use strict";
 
@@ -62,6 +74,54 @@
     return null;
   }
 
+  /** The href for a `linkFor` result. */
+  function hrefFor(target) {
+    return `agendo://focus?${target.kind}=${target.id}${target.repo ? `&repo=${target.repo}` : ""}`;
+  }
+
+  /** How long the hidden iframe stays: long enough for the browser to hand the link over. */
+  const FRAME_MS = 2000;
+
+  /**
+   * Hand `href` to the desktop's agendo:// handler from a hidden iframe, so the
+   * page itself never begins to unload (see the header). If the page's CSP
+   * blocks the frame, follow the link after all (`fallback`). `doc` and `later`
+   * are injected for tests.
+   */
+  function launch(href, fallback, doc = document, later = setTimeout) {
+    const onBlocked = (e) => {
+      if (!String(e.blockedURI).startsWith("agendo")) return;
+      doc.removeEventListener("securitypolicyviolation", onBlocked);
+      fallback();
+    };
+    doc.addEventListener("securitypolicyviolation", onBlocked);
+    const frame = doc.createElement("iframe");
+    frame.style.display = "none";
+    frame.src = href;
+    doc.body.appendChild(frame);
+    later(() => {
+      frame.remove();
+      doc.removeEventListener("securitypolicyviolation", onBlocked);
+    }, FRAME_MS);
+  }
+
+  /** The button's click: launch from an iframe instead of following the link; a modified click is left to the browser. */
+  function onClick(e) {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    const link = e.currentTarget;
+    launch(link.getAttribute("href"), () => {
+      // Only reached when the page's CSP refused the iframe: a real click on a
+      // throwaway copy, which this handler is not listening to.
+      // Attached for the click, since Firefox long ignored click() on a detached link.
+      const copy = document.createElement("a");
+      copy.href = link.getAttribute("href");
+      document.body.appendChild(copy);
+      copy.click();
+      copy.remove();
+    });
+  }
+
   function render() {
     const target = linkFor(window.location);
     let button = document.getElementById(BUTTON_ID);
@@ -87,13 +147,22 @@
         boxShadow: "0 2px 8px rgba(0,0,0,.3)",
         cursor: "pointer",
       });
+      button.addEventListener("click", onClick);
       document.body.appendChild(button);
     }
-    const href = `agendo://focus?${target.kind}=${target.id}${target.repo ? `&repo=${target.repo}` : ""}`;
+    const href = hrefFor(target);
     if (button.getAttribute("href") !== href) {
       button.setAttribute("href", href);
       button.title = target.kind === "pr" ? `Focus the agendo session for PR ${target.id}` : `Focus the agendo session for work item ${target.id}`;
     }
+  }
+
+  // Under `bun test` (test/userscript.test.ts), which loads this file as a
+  // CommonJS module: hand over the pieces and leave the DOM alone. A script
+  // manager defines no `module`, so in a browser this is skipped.
+  if (typeof module === "object" && module && module.exports) {
+    module.exports = { linkFor, hrefFor, launch, onClick, FRAME_MS };
+    return;
   }
 
   let last = "";

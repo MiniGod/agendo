@@ -8,7 +8,9 @@
 //    a link has to wait `URL_RESUME_GAP_MS` after the previous one. A page
 //    walking `?pr=1…N` wakes one session per 15s, not N at once.
 //  • FOCUS: links at all are held to one per `URL_FOCUS_GAP_MS`, so a burst is
-//    one link, and its refusals are not a burst of notifications.
+//    one link. A refused link is notified, but those notes have a floor of
+//    their own (`claimRefusalNote`), which the link let through also stamps
+//    when IT notifies — so a burst is one notification, whoever raises it.
 //
 // Neither stops a page from moving the terminal while the human types in it —
 // one switch every two seconds is plenty for that. What stops it is in
@@ -115,4 +117,9 @@ export function claimUrlResume(nowMs = Date.now()): Claim {
 /** The focus floor (see the header). */
 export function claimUrlFocus(nowMs = Date.now()): Claim {
   return claimFloor("url-focus", URL_FOCUS_GAP_MS, nowMs);
+}
+
+/** The floor on notifying refused links (see the header). */
+export function claimRefusalNote(nowMs = Date.now()): Claim {
+  return claimFloor("url-refused-note", URL_FOCUS_GAP_MS, nowMs);
 }

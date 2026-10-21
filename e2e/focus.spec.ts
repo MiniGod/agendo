@@ -2,14 +2,14 @@
 // button — plus `agendo url-handler`, which registers the agendo:// scheme.
 //
 // Everything they touch outside agendo is a fake on PATH: tmux (attached
-// clients are fixture data in `state.clients`), notify-send, wmctrl, xdotool
-// and xdg-mime. The installer runs against a temp XDG_DATA_HOME /
+// clients are fixture data in `state.clients`), notify-send, wmctrl, xdotool,
+// xdg-mime and update-desktop-database. The installer runs against a temp XDG_DATA_HOME /
 // XDG_CONFIG_HOME, so neither the developer's desktop entries nor their
 // mimeapps.list is ever written.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT, type MockEnv } from "./harness/mockEnv.ts";
 import { CRASH_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, sessionName, tmuxState } from "./harness/fixtures.ts";
@@ -190,10 +190,58 @@ test("a link never moves a terminal that is being typed in", async ({ mock }) =>
   expect(r.code).not.toBe(0);
   expect(r.stderr).toContain("/dev/pts/7 was typed into");
   expect(await switches(mock)).toEqual([]);
-  expect(await notifications(mock)).toEqual([]);
+  // Said, so a click that did nothing is not a mystery — naming the session, nothing from the link.
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo ignored — you were typing in agendo"]);
   // The same focus typed by hand is the human's own choice.
   const typed = await agendo(mock.env, "focus", "--pr", "5001");
   expect(typed.code, typed.stderr).toBe(0);
+});
+
+/** Four terminals, each on its own tmux session; pts/21 is being typed into right now. */
+function spreadClients(targetSession: string, extra: { sessions?: string[] } = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    sessions: ["agendo-tv-launcher", "agendo-agendo", ...(extra.sessions ?? [])],
+    clients: [
+      { name: "/dev/pts/1", pid: 4101, activity: now - 600, session: "agendo-tv-launcher" },
+      { name: "/dev/pts/21", pid: 4121, activity: now, session: "agendo-agendo" },
+      { name: "/dev/pts/6", pid: 4106, activity: now - 300, session: targetSession },
+      { name: "/dev/pts/24", pid: 4124, activity: now - 60, session: "agendo-agendo" },
+    ],
+  };
+}
+
+test("a link moves the client already on the target's tmux session, not the one being typed in", async ({ mock }) => {
+  await seed(mock, spreadClients(RUNNING_TARGET));
+  const env = { ...mock.env, DISPLAY: ":99", FAKE_WMCTRL_LIST: "0x04000021  0 4121   host  Busy\n0x04000006  0 4106   host  Target" };
+  const r = await agendo(env, "url", "agendo://focus?pr=5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/6", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+  expect(await notifications(mock)).toEqual([]);
+  // Its terminal is the one raised, not the busy one.
+  const log = await mock.callLog();
+  expect(log).toContain("wmctrl -ia 0x04000006");
+  expect(log).not.toContain("wmctrl -ia 0x04000021");
+});
+
+test("a link resuming a paused session moves the client on the session it lands in", async ({ mock }) => {
+  await seed(mock, {
+    ...spreadClients("agendo"),
+    windows: [{ session: "agendo", index: 1, name: CRASH_TARGET }],
+    panes: [{ session: "agendo", window: CRASH_TARGET, cwd: "/crash", placeholder: true }],
+  });
+  const r = await agendo(mock.env, "url", "agendo://focus?workItem=102");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/6", "-t", switchTarget(mock.env, "agendo", CRASH_TARGET)]]);
+});
+
+test("with no client on the target's session, a link falls back to the most recent client — and its typing guard", async ({ mock }) => {
+  await seed(mock, spreadClients("agendo-pc-to-phone-audio", { sessions: ["agendo-pc-to-phone-audio"] }));
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code).not.toBe(0);
+  expect(r.stderr).toContain("/dev/pts/21 was typed into");
+  expect(await switches(mock)).toEqual([]);
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo ignored — you were typing in agendo-agendo"]);
 });
 
 test("a link leaves a client alone that detached before the switch", async ({ mock }) => {
@@ -330,15 +378,17 @@ test("focus with no client opens the configured focusTerminal on the session, at
 /** Past the floor every link is held to (URL_FOCUS_GAP_MS), so a spec can reach the resume floor behind it. */
 const pastFocusFloor = () => new Promise((r) => setTimeout(r, 2_100));
 
-test("links are held to one per two seconds, quietly", async ({ mock }) => {
+test("links are held to one per two seconds, and a burst's refusals are one notification", async ({ mock }) => {
   await seed(mock);
   const first = await agendo(mock.env, "url", "agendo://focus?pr=5001");
   expect(first.code, first.stderr).toBe(0);
-  const burst = await agendo(mock.env, "url", "agendo://focus?pr=5001");
-  expect(burst.code).not.toBe(0);
-  expect(burst.stderr).toContain("another agendo:// link was handled less than");
-  // A burst of links must not become a burst of notifications.
-  expect(await notifications(mock)).toEqual([]);
+  for (let i = 0; i < 3; i++) {
+    const burst = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+    expect(burst.code).not.toBe(0);
+    expect(burst.stderr).toContain("another agendo:// link was handled less than");
+  }
+  // Said once, so a double click is not a mystery; a burst of links must not become a burst of notifications.
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo ignored a link — another one was handled moments ago"]);
   expect(await switches(mock)).toHaveLength(1);
 });
 
@@ -426,6 +476,7 @@ test("url-handler install, status and uninstall stay inside XDG_DATA_HOME / XDG_
   const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
   const file = join(mock.tmpDir, "data", "applications", "agendo-url-handler.desktop");
   const mimeapps = join(mock.tmpDir, "config", "mimeapps.list");
+  const apps = join(mock.tmpDir, "data", "applications");
 
   const before = await agendo(env, "url-handler", "status");
   expect(before.code).not.toBe(0);
@@ -439,15 +490,83 @@ test("url-handler install, status and uninstall stay inside XDG_DATA_HOME / XDG_
   expect(text).toContain("MimeType=x-scheme-handler/agendo;");
   expect(text).toContain("NoDisplay=true");
   expect(await mock.callLog()).toContain("xdg-mime default agendo-url-handler.desktop x-scheme-handler/agendo");
+  // The desktop database is refreshed for exactly the dir the entry went into, so the portal sees it.
+  expect(await mock.callLog()).toContain(`update-desktop-database ${apps}`);
+  expect(readFileSync(join(apps, "mimeinfo.cache"), "utf-8")).toContain("x-scheme-handler/agendo=agendo-url-handler.desktop;");
+  expect(inst.stderr).not.toContain("warning");
 
   const st = await agendo(env, "url-handler", "status");
   expect(st.code, st.stdout).toBe(0);
   expect(st.stdout).toContain("x-scheme-handler/agendo: agendo-url-handler.desktop");
+  expect(st.stdout).not.toContain("mimeinfo.cache");
 
   const un = await agendo(env, "url-handler", "uninstall");
   expect(un.code, un.stderr).toBe(0);
   expect(existsSync(file)).toBe(false);
   expect(readFileSync(mimeapps, "utf-8")).not.toContain("x-scheme-handler/agendo");
+  expect((await mock.callLog()).filter((l) => l.startsWith("update-desktop-database "))).toEqual([
+    `update-desktop-database ${apps}`, `update-desktop-database ${apps}`,
+  ]);
+  expect(readFileSync(join(apps, "mimeinfo.cache"), "utf-8")).not.toContain("x-scheme-handler/agendo");
+});
+
+test("url-handler status warns when the desktop database does not list the entry", async ({ mock }) => {
+  const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+  const apps = join(mock.tmpDir, "data", "applications");
+  const inst = await agendo(env, "url-handler", "install", "--exec", "/opt/agendo/bin/agendo");
+  expect(inst.code, inst.stderr).toBe(0);
+  // Default set, but not registered: what `gio mime` shows as "No registered applications".
+  writeFileSync(join(apps, "mimeinfo.cache"), "[MIME Cache]\ntext/html=firefox.desktop;\n");
+  const st = await agendo(env, "url-handler", "status");
+  expect(st.code).toBe(1);
+  expect(st.stdout).toContain("x-scheme-handler/agendo: agendo-url-handler.desktop");
+  expect(st.stdout).toContain(`warning: ${join(apps, "mimeinfo.cache")} does not list agendo-url-handler.desktop`);
+  expect(st.stdout).toContain(`run \`update-desktop-database ${apps}\``);
+});
+
+/**
+ * A PATH with every fake but update-desktop-database, plus only the real tools
+ * the CLI and the fakes need — so the real binary, which /usr/bin may well hold,
+ * is out of reach as surely as a desktop without desktop-file-utils.
+ */
+function pathWithoutUpdateDb(mock: MockEnv): string {
+  const bin = join(mock.tmpDir, "bin-without-update-db");
+  mkdirSync(bin);
+  const fakebin = join(REPO_ROOT, "e2e", "fakebin");
+  for (const name of readdirSync(fakebin)) {
+    if (name !== "update-desktop-database") symlinkSync(join(fakebin, name), join(bin, name));
+  }
+  const realDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  for (const tool of ["bun", "bash", "grep", "mkdir", "dirname", "touch", "mv", "head", "cut", "sed", "cat"]) {
+    const dir = realDirs.find((d) => existsSync(join(d, tool)));
+    if (dir) symlinkSync(join(dir, tool), join(bin, tool));
+  }
+  return bin;
+}
+
+test("url-handler install and uninstall only warn when update-desktop-database is missing", async ({ mock }) => {
+  const env = {
+    ...mock.env, PATH: pathWithoutUpdateDb(mock), XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config"),
+  };
+  const apps = join(mock.tmpDir, "data", "applications");
+  const inst = await agendo(env, "url-handler", "install", "--exec", "/opt/agendo/bin/agendo");
+  expect(inst.code, inst.stderr).toBe(0);
+  expect(inst.stderr).toContain(`warning: update-desktop-database could not run`);
+  expect(inst.stderr).toContain(`run \`update-desktop-database ${apps}\``);
+  expect(existsSync(join(apps, "agendo-url-handler.desktop"))).toBe(true);
+  expect(await mock.callLog()).toContain("xdg-mime default agendo-url-handler.desktop x-scheme-handler/agendo");
+  // Nothing rebuilt the database: no real update-desktop-database ran either.
+  expect(existsSync(join(apps, "mimeinfo.cache"))).toBe(false);
+
+  const st = await agendo(env, "url-handler", "status");
+  expect(st.code).toBe(1);
+  expect(st.stdout).toContain("does not list agendo-url-handler.desktop");
+
+  const un = await agendo(env, "url-handler", "uninstall");
+  expect(un.code, un.stderr).toBe(0);
+  expect(un.stderr).toContain(`run \`update-desktop-database ${apps}\``);
+  expect(existsSync(join(apps, "agendo-url-handler.desktop"))).toBe(false);
+  expect(existsSync(join(apps, "mimeinfo.cache"))).toBe(false);
 });
 
 test("url-handler status warns when the program its entry starts is gone", async ({ mock }) => {
@@ -477,6 +596,7 @@ for (const argv of BAD_HANDLER_ARGS) {
     expect(r.stderr).toContain("url-handler:");
     expect(existsSync(join(mock.tmpDir, "data", "applications"))).toBe(false);
     expect((await mock.callLog()).some((l) => l.startsWith("xdg-mime default"))).toBe(false);
+    expect((await mock.callLog()).some((l) => l.startsWith("update-desktop-database"))).toBe(false);
   });
 }
 

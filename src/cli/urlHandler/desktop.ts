@@ -148,3 +148,22 @@ export function parseExec(raw: string): string[] | null {
 export function isOurs(queryOutput: string): boolean {
   return basename(queryOutput.trim()) === DESKTOP_FILE;
 }
+
+/** The desktop database's file in an applications dir, written by `update-desktop-database`. */
+export const MIMEINFO_CACHE = "mimeinfo.cache";
+
+/**
+ * Does a mimeinfo.cache list our entry among the scheme's handlers? This is
+ * what `gio` calls "registered", as opposed to "default" (mimeapps.list) — and
+ * what xdg-desktop-portal, which Flatpak and Snap browsers open links through,
+ * needs before it will offer the entry at all.
+ */
+export function cacheListsUs(cacheText: string): boolean {
+  const line = cacheText.split("\n").find((l) => l.startsWith(`${SCHEME_MIME}=`));
+  return line !== undefined && line.slice(SCHEME_MIME.length + 1).split(";").includes(DESKTOP_FILE);
+}
+
+/** One word quoted for a POSIX shell, so a printed fix command pastes as-is. */
+export function shellQuote(word: string): string {
+  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, "'\\''")}'`;
+}

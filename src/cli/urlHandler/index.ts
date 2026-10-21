@@ -3,17 +3,20 @@
 // session working on it (see src/cli/focus/).
 //
 // Install writes ONE file, `$XDG_DATA_HOME/applications/agendo-url-handler.desktop`,
-// and asks `xdg-mime` to make it the scheme's default. Uninstall removes that
-// file and the one mimeapps.list line pointing at it. Nothing else is touched.
+// refreshes that dir's desktop database (mimeinfo.cache) and asks `xdg-mime`
+// to make it the scheme's default. Uninstall removes that file, refreshes the
+// database again, and drops the one mimeapps.list line pointing at it. Nothing
+// else is touched.
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { spawnSync } from "child_process";
 import { readVersion } from "../version.ts";
 import {
-  DESKTOP_FILE, SCHEME_MIME, applicationsDir, defaultCommand, defaultSpec, desktopEntry, execProgram, findOnPath, isOurs, isVolatile,
+  DESKTOP_FILE, MIMEINFO_CACHE, SCHEME_MIME, applicationsDir, cacheListsUs, defaultCommand, defaultSpec, desktopEntry, execProgram, findOnPath, isOurs, isVolatile,
   mimeappsPath, parseExec, readExec, withoutOurDefault, type Resolved,
 } from "./desktop.ts";
+import { refreshCommand, refreshDesktopDatabase } from "./desktopDb.ts";
 
 const USAGE = "usage: url-handler install [--exec <command>] | uninstall | status";
 
@@ -62,17 +65,27 @@ function install(execArg: string | undefined): void {
   writeFileSync(file, text);
   console.log(`wrote ${file}:\n`);
   console.log(text);
+  refresh(dir);
   if (xdgMime(["default", DESKTOP_FILE, SCHEME_MIME]) === null) {
     fail(`could not register it: \`xdg-mime default ${DESKTOP_FILE} ${SCHEME_MIME}\` failed`);
   }
   console.log(`registered ${DESKTOP_FILE} as the default handler for ${SCHEME_MIME}`);
 }
 
+/** Rebuild `dir`'s desktop database; a warning, never a failure, when that is not possible. */
+function refresh(dir: string): void {
+  const warning = refreshDesktopDatabase(dir);
+  if (warning) console.error(warning);
+}
+
 function uninstall(): void {
-  const file = join(applicationsDir(process.env, homedir()), DESKTOP_FILE);
+  const dir = applicationsDir(process.env, homedir());
+  const file = join(dir, DESKTOP_FILE);
   const had = existsSync(file);
   rmSync(file, { force: true });
   console.log(had ? `removed ${file}` : `${file} was not installed`);
+  // Also when the entry was already gone: a stale cache may still list it.
+  if (existsSync(dir)) refresh(dir);
   const list = mimeappsPath(process.env, homedir());
   if (!existsSync(list)) return;
   const before = readFileSync(list, "utf-8");
@@ -100,10 +113,13 @@ function status(): void {
   console.log(`desktop entry: ${entry.installed ? entry.file : "not installed"}`);
   if (entry.installed) console.log(`  Exec=${entry.exec ?? "(none)"}`);
   warnIfMissing(entry.exec);
+  const registered = entry.installed && isRegistered(dirname(entry.file));
   const handler = currentHandler();
   console.log(`${SCHEME_MIME}: ${handlerLine(handler)}`);
-  // 0 only when the entry exists AND the desktop resolves the scheme to it.
-  process.exitCode = entry.installed && isOurs(handler ?? "") ? 0 : 1;
+  // 0 only when the entry exists, the desktop database lists it, AND the desktop
+  // resolves the scheme to it: default-but-unregistered is the state in which a
+  // Flatpak or Snap browser shows an empty "Open With…" dialog.
+  process.exitCode = registered && isOurs(handler ?? "") ? 0 : 1;
 }
 
 /** Say so when the program the entry starts is gone — a cleared bunx cache, an uninstalled bun. */
@@ -112,6 +128,18 @@ function warnIfMissing(exec: string | null): void {
   if (program?.startsWith("/") && !existsSync(program)) {
     console.log(`  warning: ${program} does not exist; re-run \`url-handler install\``);
   }
+}
+
+/**
+ * Does the desktop database list the entry? Says so when it does not: `xdg-mime`
+ * may still report it as the default, but the desktop portal — which Flatpak and
+ * Snap browsers open links through — offers only registered handlers.
+ */
+function isRegistered(dir: string): boolean {
+  const cache = join(dir, MIMEINFO_CACHE);
+  if (existsSync(cache) && cacheListsUs(readFileSync(cache, "utf-8"))) return true;
+  console.log(`  warning: ${cache} does not list ${DESKTOP_FILE} for ${SCHEME_MIME}; run \`${refreshCommand(dir)}\``);
+  return false;
 }
 
 /** The desktop file `xdg-mime` says handles the scheme now, or null. */

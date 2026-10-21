@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake `update-desktop-database` — records the call, then writes a minimal
+# mimeinfo.cache for the one dir it is given, built from the MimeType= lines of
+# the .desktop files in it. It only ever writes inside the dir it is handed,
+# which `agendo url-handler` takes from the test's own $XDG_DATA_HOME.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "update-desktop-database $*" >> "$FAKE_CALL_LOG"; fi
+dir="${@: -1}"
+[ -d "$dir" ] || exit 1
+{
+  echo "[MIME Cache]"
+  for f in "$dir"/*.desktop; do
+    [ -f "$f" ] || continue
+    types=$(grep -m1 '^MimeType=' "$f" | cut -d= -f2-)
+    IFS=';' read -ra list <<< "$types"
+    for t in "${list[@]}"; do
+      [ -n "$t" ] && echo "$t=$(basename "$f");"
+    done
+  done
+} > "$dir/mimeinfo.cache"
+exit 0
