@@ -20,7 +20,7 @@ import { currentModelOptions } from "../links.ts";
 import { flushWarnings } from "../warnings.ts";
 import { sessionState } from "../list/rows.ts";
 import { findSession, resumeSession } from "../commands/resume.ts";
-import { describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
+import { describeLinkTarget, describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
 import { linkedMatches, narrowToRepo, resolveLinked } from "./linked.ts";
 import { failLoudly } from "./notify.ts";
@@ -39,28 +39,28 @@ export interface FocusOrigin {
 }
 
 /** The model the PR / work-item lookup runs against, or a loud failure — with load warnings flushed first, since they may be why. */
-async function loadFocusModel(target: FocusTarget): Promise<Awaited<ReturnType<typeof loadModel>>> {
+async function loadFocusModel(label: string): Promise<Awaited<ReturnType<typeof loadModel>>> {
   try {
     const model = await loadModel(currentModelOptions());
     flushWarnings("focus");
     return model;
   } catch (e) {
     flushWarnings("focus");
-    failLoudly(`could not look up ${describeTarget(target)}: ${(e as Error)?.message ?? String(e)}`);
+    failLoudly(`could not look up ${label}: ${(e as Error)?.message ?? String(e)}`);
   }
 }
 
 /** The sessions a PR / work item links to — refused when the number names more than one of them (see linked.ts). */
-async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>): Promise<AgentSession[]> {
-  const matches = linkedMatches(await loadFocusModel(target), target);
+async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>, label: string): Promise<AgentSession[]> {
+  const matches = linkedMatches(await loadFocusModel(label), target);
   const r = resolveLinked(target.repo ? narrowToRepo(matches, target.repo) : matches);
   if ("sessions" in r) return r.sessions;
-  return failLoudly(`${describeTarget(target)} is ambiguous — it matches ${r.ambiguous.join(" and ")}; name the repo (\`focus --repo <repo>\`) or the session (\`focus <session-id>\`)`);
+  return failLoudly(`${label} is ambiguous — it matches ${r.ambiguous.join(" and ")}; name the repo (\`focus --repo <repo>\`) or the session (\`focus <session-id>\`)`);
 }
 
 /** Every session the target could mean. */
-async function candidates(target: FocusTarget, index: SessionIndex): Promise<AgentSession[]> {
-  if (target.kind !== "session") return linkedSessions(target);
+async function candidates(target: FocusTarget, label: string, index: SessionIndex): Promise<AgentSession[]> {
+  if (target.kind !== "session") return linkedSessions(target, label);
   const s = findSession(index.all, target.token);
   return s ? [s] : [];
 }
@@ -241,12 +241,16 @@ function clientOrTerminal(origin: FocusOrigin): { client: TmuxClient; template: 
   return template ? { client: null, template } : failLoudly(NO_CLIENT);
 }
 
-/** The session to focus, its candidates' states read live; fails when there is none. */
-async function chooseSession(target: FocusTarget): Promise<{ chosen: FocusCandidate; all: AgentSession[] }> {
+/**
+ * The session to focus, its candidates' states read live; fails when there is
+ * none. A link's failures name its target by `describeLinkTarget` only.
+ */
+async function chooseSession(target: FocusTarget, origin: FocusOrigin): Promise<{ chosen: FocusCandidate; all: AgentSession[] }> {
+  const label = origin.fromUrl ? describeLinkTarget(target) : describeTarget(target);
   const index = await SessionIndex.build();
-  const found = withStates(await candidates(target, index), index.all);
+  const found = withStates(await candidates(target, label, index), index.all);
   const chosen = pickSession(found);
-  if (!chosen) failLoudly(`No agendo session for ${describeTarget(target)}`);
+  if (!chosen) failLoudly(`No agendo session for ${label}`);
   reportChoice(chosen, found, target);
   return { chosen, all: index.all };
 }
@@ -254,7 +258,7 @@ async function chooseSession(target: FocusTarget): Promise<{ chosen: FocusCandid
 /** Focus what `target` names; see the header. Always exits. */
 export async function runFocus(target: FocusTarget, origin: FocusOrigin = { fromUrl: false }): Promise<never> {
   if (!tmuxAvailable()) failLoudly("tmux was not found on PATH");
-  const { chosen, all } = await chooseSession(target);
+  const { chosen, all } = await chooseSession(target, origin);
   const { client, template } = clientOrTerminal(origin);
   const up = await bringUp(chosen, all, client, origin);
   const fail: Fail = (text) => failLoudly(up.resumed ? `${text} — ${up.resumed}` : text);
@@ -291,5 +295,6 @@ export async function urlCommand(argv: string[]): Promise<never> {
     console.error(`url: refused ${JSON.stringify((argv[0] ?? "").slice(0, 200))}`);
     failLoudly(`refused an agendo:// link: ${parsed.reason}`);
   }
+  console.error(`url: ${describeTarget(parsed.target)}`);
   return runFocus(parsed.target, { fromUrl: true });
 }

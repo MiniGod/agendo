@@ -3,7 +3,7 @@
 // string. The e2e suite proves a refusal reaches no tmux at all; this pins the
 // allowlist itself, input by input, including the injection shapes.
 import { describe, expect, test } from "bun:test";
-import { MAX_URL_LENGTH, describeTarget, isRepo, isSessionToken, parseFocusUrl, parseItemId } from "../src/cli/focus/url.ts";
+import { MAX_URL_LENGTH, describeLinkTarget, describeTarget, isRepo, isSessionToken, parseFocusUrl, parseItemId } from "../src/cli/focus/url.ts";
 
 describe("parseFocusUrl accepts exactly the three forms", () => {
   const ACCEPT: [string, unknown][] = [
@@ -175,5 +175,11 @@ describe("the per-field shapes", () => {
     expect(describeTarget({ kind: "workItem", id: 7 })).toBe("work item #7");
     expect(describeTarget({ kind: "session", token: "abc" })).toBe("session abc");
     expect(describeTarget({ kind: "pr", id: 5, repo: "acme/appweb" })).toBe("PR !5 in acme/appweb");
+  });
+
+  test("describeLinkTarget never repeats a link's free text", () => {
+    expect(describeLinkTarget({ kind: "pr", id: 5, repo: "reinstall-from-evil.example" })).toBe("PR !5");
+    expect(describeLinkTarget({ kind: "workItem", id: 7, repo: "x" })).toBe("work item #7");
+    expect(describeLinkTarget({ kind: "session", token: "reinstall-agendo-now" })).toBe("the linked session");
   });
 });

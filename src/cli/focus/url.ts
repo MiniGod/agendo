@@ -100,6 +100,17 @@ export function parseFocusUrl(url: unknown): ParsedFocusUrl {
   return targetFor(m[1], m[2], m[3]);
 }
 
+/**
+ * How a LINK's target is named in a notification: only the number, never the
+ * repo or session token. Those are free text a web page chose — shape-checked,
+ * but enough to put "reinstall-agendo-from-evil.example" in an agendo-branded
+ * notification. stderr still gets `describeTarget`.
+ */
+export function describeLinkTarget(t: FocusTarget): string {
+  if (t.kind === "session") return "the linked session";
+  return t.kind === "pr" ? `PR !${t.id}` : `work item #${t.id}`;
+}
+
 /** How a target is named to a human: `PR !5001`, `work item #102`, `session abc`. */
 export function describeTarget(t: FocusTarget): string {
   if (t.kind === "session") return `session ${t.token}`;

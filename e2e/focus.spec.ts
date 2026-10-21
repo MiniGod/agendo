@@ -256,6 +256,14 @@ test("focus refuses a session running outside agendo: there is no window to brin
   }
 });
 
+test("a link to no session names it in the notification only by what agendo chose, not the page's token", async ({ mock }) => {
+  await seed(mock);
+  const r = await agendo(mock.env, "url", "agendo://focus?session=reinstall-agendo-now");
+  expect(r.code).not.toBe(0);
+  expect(r.stderr).toContain("session reinstall-agendo-now");
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for the linked session"]);
+});
+
 test("focus with no linked session notifies and fails without launching anything", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "focus", "--pr", "9999");
@@ -379,7 +387,9 @@ test("a link's repo narrows the lookup to the PR in that repo", async ({ mock })
   await seed(mock);
   const elsewhere = await agendo(mock.env, "url", "agendo://focus?pr=5001&repo=acme/other");
   expect(elsewhere.code).not.toBe(0);
-  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for PR !5001 in acme/other"]);
+  // The repo is the page's free text: stderr names it, the notification does not.
+  expect(elsewhere.stderr).toContain("PR !5001 in acme/other");
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for PR !5001"]);
   expect(await switches(mock)).toEqual([]);
   // The PR's session lives in appweb: the same number from appweb's page focuses it.
   const typed = await agendo(mock.env, "focus", "--pr", "5001", "--repo", "appweb");
