@@ -15,6 +15,7 @@ import {
   newWindow,
   newWindowIn,
   windowTarget,
+  exactTarget,
   windowLocation,
   insideTmux,
   tmuxQuiet,
@@ -36,6 +37,8 @@ export interface OpenPlan {
   mode: "inline" | "handover";
   /** argv to run to hand over to / navigate to the target. */
   handover: string[];
+  /** The exact tmux target of the window just created, from the openers that know it without a scan. */
+  target?: string;
 }
 
 /**
@@ -176,7 +179,8 @@ export function openSessionIn(s: AgentSession, host: string): OpenPlan {
   const name = sessionName(s);
   newWindowIn(host, name, s.cwd, resumeArgv(s));
   stampNewTarget(name, sessionTags(s));
-  return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: ["tmux", "select-window", "-t", windowTarget(host, name)] };
+  const target = windowTarget(host, name);
+  return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: ["tmux", "select-window", "-t", target], target };
 }
 
 /**
@@ -189,7 +193,7 @@ export function openSessionDetached(s: AgentSession): OpenPlan {
   const name = sessionName(s);
   newDetached(name, s.cwd, resumeArgv(s));
   stampNewTarget(name, sessionTags(s));
-  return { alreadyRunning: false, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name] };
+  return { alreadyRunning: false, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name], target: exactTarget(name) };
 }
 
 /**

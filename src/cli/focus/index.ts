@@ -10,7 +10,7 @@
 // screen.
 import {
   LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, selectWindow,
-  sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, windowTarget, type TmuxClient, type WindowIdentity,
+  sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
@@ -126,15 +126,6 @@ interface Brought {
   resumed: string | null;
 }
 
-/**
- * Where a just-resumed window is, when the fresh scan missed it: in `host` if
- * `openSessionIn` put it there, else the detached session `openSession` made.
- */
-function placedTarget(host: string | undefined, name: string): string {
-  const inHost = host === undefined ? null : windowTarget(host, name);
-  return inHost && windowIdentity(inHost) ? inHost : exactTarget(name);
-}
-
 /** Resume the chosen session in `host` (see `resumeHost`) and return its window. */
 async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<Brought> {
   const r = await resumeSession(c.s, all, host === undefined ? { detached: true } : { host });
@@ -149,21 +140,22 @@ async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string
     );
     console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
   }
-  const target = runningTarget(c.s, all) ?? placedTarget(host, r.plan.tmuxName);
+  // A cold resume knows exactly what it created; anything else was found running.
+  const target = r.plan.target ?? runningTarget(c.s, all) ?? exactTarget(r.plan.tmuxName);
   const resumed = r.plan.alreadyRunning ? null : `session ${shortId(c.s.id)} WAS resumed and is running in tmux window ${r.plan.tmuxName}`;
   return { target, resumed };
 }
 
 /**
  * Make sure the chosen session has a window — resuming it if needed — and return
- * that window's target. Only a real resume is throttled: a running session whose
- * window the fresh scan missed goes through `resumeSession` too, but that only
- * navigates, and must not spend a link's resume.
+ * that window's target. Everything past a running session's own window goes
+ * through the link's resume floor — including a "running" session whose window
+ * has vanished since the scan, which `resumeSession` would cold-start.
  */
 async function bringUp(c: FocusCandidate, all: AgentSession[], client: TmuxClient | null, origin: FocusOrigin): Promise<Brought> {
   const running = c.state === "running" ? runningTarget(c.s, all) : null;
   if (running) return { target: running, resumed: null };
-  if (c.state !== "running") throttleUrlResume(origin);
+  throttleUrlResume(origin);
   return resumeChosen(c, all, resumeHost(c, client));
 }
 
@@ -185,8 +177,25 @@ function paneOf(target: string): string | undefined {
   return target.startsWith("%") ? target : undefined;
 }
 
+/**
+ * For a link, re-checked right before the switch: a resume takes seconds, and
+ * the human may have started typing in the client, or detached it, meanwhile.
+ * Quiet like the first check — unless the agent was resumed on the way, which
+ * the human should hear about.
+ */
+function recheckClient(client: TmuxClient, up: Brought, fail: Fail): void {
+  const now = listClients().find((c) => c.name === client.name);
+  const why = now ? typingIn(now) : `${client.name} detached`;
+  if (!why) return;
+  if (up.resumed) fail(`not switching: ${why}`);
+  console.error(`url: ignored — ${why}`);
+  process.exit(1);
+}
+
 /** Move `client` onto the window and raise its terminal. */
-function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: AgentSession, fail: Fail): never {
+function switchTo(client: TmuxClient, where: WindowIdentity, up: Brought, s: AgentSession, fail: Fail, origin: FocusOrigin): never {
+  if (origin.fromUrl) recheckClient(client, up, fail);
+  const target = up.target;
   if (!focusClientOn(client.name, where, paneOf(target))) {
     fail(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
   }
@@ -201,10 +210,32 @@ function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: 
  * terminal at that moment; a page firing links on a timer would otherwise land
  * their keystrokes in an agent's prompt mid-sentence.
  */
-function leaveTypistAlone(client: TmuxClient, nowS = Date.now() / 1000): void {
-  if (nowS - client.activity >= TYPING_GRACE_S) return;
-  console.error(`url: ignored — ${client.name} was typed into ${Math.max(0, Math.round(nowS - client.activity))}s ago`);
+function leaveTypistAlone(client: TmuxClient): void {
+  const why = typingIn(client);
+  if (!why) return;
+  console.error(`url: ignored — ${why}`);
   process.exit(1);
+}
+
+/** Why `client` counts as being typed in, or null when it does not. */
+function typingIn(client: TmuxClient, nowS = Date.now() / 1000): string | null {
+  if (nowS - client.activity >= TYPING_GRACE_S) return null;
+  return `${client.name} was typed into ${Math.max(0, Math.round(nowS - client.activity))}s ago`;
+}
+
+/**
+ * The client to move, or — with none attached — the configured terminal to
+ * open. Checked BEFORE any resume: with nothing to show it on and no terminal
+ * to open, waking an agent would only leave it running unseen.
+ */
+function clientOrTerminal(origin: FocusOrigin): { client: TmuxClient; template: null } | { client: null; template: string } {
+  const client = pickClient(listClients());
+  if (client) {
+    if (origin.fromUrl) leaveTypistAlone(client);
+    return { client, template: null };
+  }
+  const template = focusTerminalTemplate();
+  return template ? { client: null, template } : failLoudly(NO_CLIENT);
 }
 
 /** The session to focus, its candidates' states read live; fails when there is none. */
@@ -221,17 +252,12 @@ async function chooseSession(target: FocusTarget): Promise<{ chosen: FocusCandid
 export async function runFocus(target: FocusTarget, origin: FocusOrigin = { fromUrl: false }): Promise<never> {
   if (!tmuxAvailable()) failLoudly("tmux was not found on PATH");
   const { chosen, all } = await chooseSession(target);
-  // Checked BEFORE any resume: with nothing to show it on and no terminal to
-  // open, waking an agent would only leave it running unseen.
-  const client = pickClient(listClients());
-  if (origin.fromUrl && client) leaveTypistAlone(client);
-  const template = client ? null : focusTerminalTemplate();
-  if (!client && !template) failLoudly(NO_CLIENT);
+  const { client, template } = clientOrTerminal(origin);
   const up = await bringUp(chosen, all, client, origin);
   const fail: Fail = (text) => failLoudly(up.resumed ? `${text} — ${up.resumed}` : text);
   const where = windowIdentity(up.target) ?? fail(`could not find the tmux window of session ${shortId(chosen.s.id)}`);
   if (!client) withoutClient(where, up.target, template, fail);
-  switchTo(client, where, up.target, chosen.s, fail);
+  switchTo(client, where, up, chosen.s, fail, origin);
 }
 
 /** `agendo focus <args>`. */

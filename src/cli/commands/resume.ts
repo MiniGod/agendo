@@ -118,21 +118,34 @@ export async function resumeSession(
   all: AgentSession[],
   place?: ResumePlace,
 ): Promise<{ plan: OpenPlan } | { peer: PeerSession }> {
-  const { liveWindows, livePlaceholders, placeholderWindows } = refreshLiveTmux(all);
-  const canon = sessionName(s);
-  const liveWindow = liveWindows.get(canon);
+  const live = refreshLiveTmux(all);
+  const liveWindow = live.liveWindows.get(sessionName(s));
   if (!liveWindow) {
-    const peer = await peerOf(s);
+    const peer = await clearForResume(s, live);
     if (peer) return { peer };
-    // A dormant placeholder holds the canonical name but no live agent; drop it so
-    // the resume actually starts one instead of no-op'ing onto the idle bash pane.
-    // Killed where it IS: a bare name resolves in tmux's current session first,
-    // which outside tmux need not be the placeholder's host.
-    if (livePlaceholders.has(canon)) killWindow(placeholderLocation(canon, placeholderWindows.get(canon)?.session));
   }
   // Only asked with a place: `resume` itself makes no extra tmux call.
   if (place !== undefined && !liveWindow && !liveTargetForShortId(shortId(s.id))) return { plan: coldPlan(s, place) };
   return { plan: openSession(s, liveWindow) };
+}
+
+/**
+ * Before resuming a session no window holds: hand back the peer if it is live
+ * outside agendo; else drop a dormant placeholder, which holds the canonical
+ * name but no live agent, so the resume actually starts one instead of
+ * no-op'ing onto the idle bash pane. Killed where it IS: a bare name resolves
+ * in tmux's current session first, which outside tmux need not be the
+ * placeholder's host.
+ */
+async function clearForResume(
+  s: AgentSession,
+  live: Pick<ReturnType<typeof refreshLiveTmux>, "livePlaceholders" | "placeholderWindows">,
+): Promise<PeerSession | null> {
+  const peer = await peerOf(s);
+  if (peer) return peer;
+  const canon = sessionName(s);
+  if (live.livePlaceholders.has(canon)) killWindow(placeholderLocation(canon, live.placeholderWindows.get(canon)?.session));
+  return null;
 }
 
 /**
