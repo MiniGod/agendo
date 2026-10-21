@@ -21,6 +21,15 @@ export interface LinkedMatch {
 
 type LinkedModel = Pick<LoadedModel, "linkedPrs" | "orphanPrs" | "reviewPrs" | "current" | "other" | "prLinked">;
 
+/**
+ * The matches with only the sessions in `inRepo` — how a link's `repo=` narrows
+ * the lookup, the same predicate `list --repo` filters by. A match left with no
+ * sessions drops out of the ambiguity check with them.
+ */
+export function narrowToRepo(matches: LinkedMatch[], inRepo: (s: AgentSession) => boolean): LinkedMatch[] {
+  return matches.map((m) => ({ key: m.key, sessions: m.sessions.filter(inRepo) }));
+}
+
 /** Every PR / work item in the model with this number, each with its sessions. */
 export function linkedMatches(m: LinkedModel, target: Exclude<FocusTarget, { kind: "session" }>): LinkedMatch[] {
   if (target.kind === "pr") {

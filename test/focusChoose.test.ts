@@ -65,6 +65,11 @@ describe("parseFocusArgs", () => {
     expect(parseFocusArgs(["abc123"])).toEqual({ ok: true, target: { kind: "session", token: "abc123" } });
   });
 
+  test("--repo narrows a PR or work item, before or after it", () => {
+    expect(parseFocusArgs(["--pr", "5", "--repo", "acme/appweb"])).toEqual({ ok: true, target: { kind: "pr", id: 5, repo: "acme/appweb" } });
+    expect(parseFocusArgs(["--repo", "appweb", "--work-item", "102"])).toEqual({ ok: true, target: { kind: "workItem", id: 102, repo: "appweb" } });
+  });
+
   const REFUSED: string[][] = [
     [],
     ["--pr"],
@@ -78,6 +83,12 @@ describe("parseFocusArgs", () => {
     ["--attach"],
     ["--pr=1"],
     ["a;b"],
+    ["--repo", "appweb"],
+    ["abc", "--repo", "appweb"],
+    ["--pr", "5", "--repo"],
+    ["--pr", "5", "--repo", "../x"],
+    ["--pr", "5", "--repo", "a/b/c"],
+    ["--pr", "5", "--repo", "a", "--repo", "b"],
   ];
   for (const argv of REFUSED) {
     test(`refuses ${JSON.stringify(argv)}`, () => expect(parseFocusArgs(argv).ok).toBe(false));

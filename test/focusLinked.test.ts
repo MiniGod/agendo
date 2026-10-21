@@ -2,7 +2,7 @@
 // throttle's arithmetic. A number is not always one entity — GitHub numbers per
 // repository — and the e2e fixtures never collide, so the refusal lives here.
 import { afterAll, describe, expect, test } from "bun:test";
-import { linkedMatches, resolveLinked } from "../src/cli/focus/linked.ts";
+import { linkedMatches, narrowToRepo, resolveLinked } from "../src/cli/focus/linked.ts";
 import { claimFloor, resumeWaitMs, STALE_LOCK_MS, URL_RESUME_GAP_MS } from "../src/cli/focus/throttle.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -36,6 +36,17 @@ describe("resolveLinked", () => {
   test("a second entity WITHOUT sessions does not make it ambiguous", () => {
     const got = resolveLinked([{ key: "repo-a/5", sessions: [sess("a")] }, { key: "repo-b/5", sessions: [] }]);
     expect(got).toEqual({ sessions: [sess("a")] });
+  });
+});
+
+describe("narrowToRepo", () => {
+  test("keeps only the sessions in the repo, so two repos' PR #5 stop being ambiguous", () => {
+    const a = { ...sess("a"), cwd: "/w/repo-a" } as AgentSession;
+    const b = { ...sess("b"), cwd: "/w/repo-b" } as AgentSession;
+    const matches = [{ key: "repo-a/5", sessions: [a] }, { key: "repo-b/5", sessions: [b] }];
+    expect(resolveLinked(matches)).toEqual({ ambiguous: ["repo-a/5", "repo-b/5"] });
+    expect(resolveLinked(narrowToRepo(matches, (s) => s.cwd === "/w/repo-b"))).toEqual({ sessions: [b] });
+    expect(resolveLinked(narrowToRepo(matches, () => false))).toEqual({ sessions: [] });
   });
 });
 

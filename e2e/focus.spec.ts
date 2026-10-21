@@ -352,6 +352,18 @@ test("url focuses through the same path as focus", async ({ mock }) => {
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
 });
 
+test("a link's repo narrows the lookup the way list --repo does", async ({ mock }) => {
+  await seed(mock);
+  const elsewhere = await agendo(mock.env, "url", "agendo://focus?pr=5001&repo=acme/other");
+  expect(elsewhere.code).not.toBe(0);
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for PR !5001 in acme/other"]);
+  expect(await switches(mock)).toEqual([]);
+  // The PR's session lives in appweb: the same number from appweb's page focuses it.
+  const typed = await agendo(mock.env, "focus", "--pr", "5001", "--repo", "appweb");
+  expect(typed.code, typed.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+});
+
 const MALICIOUS = [
   "agendo://launch?prompt=rm%20-rf",
   "agendo://focus?pr=5001&session=x",
@@ -359,6 +371,8 @@ const MALICIOUS = [
   "agendo://focus?pr=$(touch${IFS}/tmp/pwned)",
   "agendo://focus?pr=5001;id",
   "agendo://focus?session=--attach",
+  "agendo://focus?pr=5001&repo=../../etc",
+  "agendo://focus?session=standalonese&repo=appweb",
   "agendo://focus/../send?session=abc",
   "javascript:alert(1)",
   `agendo://focus?pr=${"1".repeat(400)}`,

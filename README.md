@@ -508,7 +508,8 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 
 ### Jump to a session from the PR page
 
-`agendo focus --pr <n>`, `agendo focus --work-item <n>` or `agendo focus <id>` brings a
+`agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional `--repo`)
+or `agendo focus <id>` brings a
 session to the front. The attached tmux client you typed into last is switched to the
 session's window, and a paused or idle session is resumed first. On X11 the terminal
 window is raised too. When several sessions are linked, the latest running one wins;
@@ -522,10 +523,12 @@ PR and work-item numbers are looked up in the backend agendo is currently using
 (Azure DevOps or GitHub), the same one `agendo list --pr` reads. A GitHub number can
 name PRs or issues in several repositories at once. When more than one of them has
 sessions, `focus` refuses rather than guess, and names them; use `focus <id>` then.
-A link carries only the number, not the repository or site it came from. So when
-only one repository has sessions for that number, the button on another
-repository's PR with the same number brings that session forward. The same goes for
-a GitHub button while agendo uses Azure DevOps, and the other way round.
+Add `--repo <repo>` (`owner/name`, or a bare repo name) to narrow the lookup to that
+repository's sessions, the way `agendo list --repo` does. The user-script always does
+this from the page URL. It matters on GitHub, where every repository numbers its own
+PRs and issues; Azure DevOps PR ids are unique per organisation, so there it only
+breaks ties. A link from a GitHub page while agendo uses Azure DevOps, or the other
+way round, still matches by number in the backend agendo is using.
 
 The same command sits behind an `agendo://` link, so a button on an Azure DevOps or
 GitHub page can run it. Setup on Linux:
@@ -549,7 +552,8 @@ GitHub page can run it. Setup on Linux:
    you visit fire `agendo://` links.
 
 Any web page can open an `agendo://` link, so the handler accepts exactly
-`agendo://focus?pr=<n>`, `?workItem=<n>` and `?session=<id>`. It refuses anything
+`agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
+and `?session=<id>`. It refuses anything
 else, such as other verbs, extra or encoded parameters, or overlong input, and says
 so in a notification. A link can only focus a session, or resume one and then focus
 it. Links are limited, so a page that fires them cannot do much with them:

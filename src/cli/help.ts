@@ -176,9 +176,12 @@ Usage:
                               attached, it says so in a desktop notification.
                               "focusTerminal" in config.json opens a terminal
                               when no client is attached (off by default).
+      --repo <repo>             Only that repo's sessions (owner/name or a bare
+                                name), as list --repo: GitHub numbers per repo
   agendo url-handler install|uninstall|status
                               Register agendo as the handler for agendo:// links
-                              (agendo://focus?pr=<n>, ?workItem=<n>, ?session=<id>),
+                              (agendo://focus?pr=<n>[&repo=<repo>], ?workItem=<n>
+                              [&repo=<repo>], ?session=<id>),
                               which run focus — e.g. from the browser user-script
                               in extras/userscript/. Writes one .desktop file under
                               $XDG_DATA_HOME/applications and runs xdg-mime.

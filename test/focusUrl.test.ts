@@ -3,7 +3,7 @@
 // string. The e2e suite proves a refusal reaches no tmux at all; this pins the
 // allowlist itself, input by input, including the injection shapes.
 import { describe, expect, test } from "bun:test";
-import { MAX_URL_LENGTH, describeTarget, isSessionToken, parseFocusUrl, parseItemId } from "../src/cli/focus/url.ts";
+import { MAX_URL_LENGTH, describeTarget, isRepo, isSessionToken, parseFocusUrl, parseItemId } from "../src/cli/focus/url.ts";
 
 describe("parseFocusUrl accepts exactly the three forms", () => {
   const ACCEPT: [string, unknown][] = [
@@ -14,6 +14,11 @@ describe("parseFocusUrl accepts exactly the three forms", () => {
     // Browsers differ on whether they add an empty path.
     ["agendo://focus/?pr=1", { kind: "pr", id: 1 }],
     ["agendo://focus?pr=2147483647", { kind: "pr", id: 2147483647 }],
+    // The one optional extra: a repo, after a pr or workItem.
+    ["agendo://focus?pr=5&repo=acme/appweb", { kind: "pr", id: 5, repo: "acme/appweb" }],
+    ["agendo://focus?workItem=102&repo=Mc.Applications", { kind: "workItem", id: 102, repo: "Mc.Applications" }],
+    ["agendo://focus/?pr=5&repo=my_org/my-repo.js", { kind: "pr", id: 5, repo: "my_org/my-repo.js" }],
+    [`agendo://focus?workItem=2147483647&repo=${"a".repeat(60)}/${"b".repeat(59)}`, { kind: "workItem", id: 2147483647, repo: `${"a".repeat(60)}/${"b".repeat(59)}` }],
   ];
   for (const [url, target] of ACCEPT) {
     test(url, () => expect(parseFocusUrl(url)).toEqual({ ok: true, target } as never));
@@ -91,6 +96,30 @@ describe("parseFocusUrl refuses everything else", () => {
     "agendo://focus?session=../../etc/passwd",
     "agendo://focus?session=a/b",
     "agendo://focus?session=a.b",
+    // repo: only after pr / workItem, only once, only its own shape
+    "agendo://focus?repo=acme/appweb",
+    "agendo://focus?repo=acme/appweb&pr=5",
+    "agendo://focus?session=abc&repo=acme/appweb",
+    "agendo://focus?pr=5&repo=",
+    "agendo://focus?pr=5&repo=a&repo=b",
+    "agendo://focus?pr=5&repo=acme/appweb&x=1",
+    "agendo://focus?pr=5&Repo=acme",
+    "agendo://focus?pr=5&repo=a/b/c",
+    "agendo://focus?pr=5&repo=/abs",
+    "agendo://focus?pr=5&repo=acme/",
+    "agendo://focus?pr=5&repo=../etc",
+    "agendo://focus?pr=5&repo=acme/..",
+    "agendo://focus?pr=5&repo=.hidden",
+    "agendo://focus?pr=5&repo=-x",
+    "agendo://focus?pr=5&repo=acme/--attach",
+    "agendo://focus?pr=5&repo=a%2Fb",
+    "agendo://focus?pr=5&repo=a b",
+    "agendo://focus?pr=5&repo=a;id",
+    "agendo://focus?pr=5&repo=$(id)",
+    "agendo://focus?pr=5&repo=a\nb",
+    "agendo://focus?pr=5&repo=acme/appweb\n",
+    "agendo://focus?pr=5&repo=ａcme",
+    `agendo://focus?pr=5&repo=${"a".repeat(121)}`,
     // flag-shaped and overlong session ids
     "agendo://focus?session=-x",
     "agendo://focus?session=--attach",
@@ -128,6 +157,11 @@ describe("the per-field shapes", () => {
     expect(parseItemId(" 1")).toBeNull();
   });
 
+  test("isRepo: a name or one owner/name slug, each segment opening with a letter, digit or _", () => {
+    for (const ok of ["appweb", "acme/appweb", "Mc.Applications", "_x/y-z.1", "a".repeat(120)]) expect(isRepo(ok), ok).toBe(true);
+    for (const bad of ["", "a/b/c", "/a", "a/", ".a", "a/.b", "-a", "a/-b", "a b", "a".repeat(121)]) expect(isRepo(bad), bad).toBe(false);
+  });
+
   test("isSessionToken: id or short id, never flag-shaped", () => {
     expect(isSessionToken("standalonese")).toBe(true);
     expect(isSessionToken("019cde00-1111-7000-8000-00000000cde0")).toBe(true);
@@ -140,5 +174,6 @@ describe("the per-field shapes", () => {
     expect(describeTarget({ kind: "pr", id: 1234 })).toBe("PR !1234");
     expect(describeTarget({ kind: "workItem", id: 7 })).toBe("work item #7");
     expect(describeTarget({ kind: "session", token: "abc" })).toBe("session abc");
+    expect(describeTarget({ kind: "pr", id: 5, repo: "acme/appweb" })).toBe("PR !5 in acme/appweb");
   });
 });

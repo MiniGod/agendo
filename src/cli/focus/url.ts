@@ -5,9 +5,17 @@
 // `agendo url` with nothing but a one-time "open this app?" prompt in between. So
 // the parser is an allowlist, not a sanitizer: it accepts exactly
 //
-//     agendo://focus?pr=<digits>
-//     agendo://focus?workItem=<digits>
+//     agendo://focus?pr=<digits>[&repo=<repo>]
+//     agendo://focus?workItem=<digits>[&repo=<repo>]
 //     agendo://focus?session=<session id or short id>
+//
+// `repo` — a bare repo name (ADO) or one `owner/name` slug (GitHub) — is the one
+// optional extra, only after `pr` or `workItem` and only in that order. GitHub
+// numbers PRs and issues per repository, so without it `?pr=5` from repo A's
+// page could bring repo B's session forward. It narrows the lookup exactly as
+// `list --repo` does, and is shape-checked like everything else: a name that
+// starts with a letter, digit or `_` (never `.`/`-`, so no `..`, no flag), and
+// at most one `/`.
 //
 // (an empty path, `agendo://focus/?…`, is tolerated because browsers differ on
 // whether they add one) and refuses everything else outright. It never decodes:
@@ -18,14 +26,14 @@
 
 /** What a URL (or `agendo focus`'s own flags) asks to focus. */
 export type FocusTarget =
-  | { kind: "pr"; id: number }
-  | { kind: "workItem"; id: number }
+  | { kind: "pr"; id: number; repo?: string }
+  | { kind: "workItem"; id: number; repo?: string }
   | { kind: "session"; token: string };
 
 export type ParsedFocusUrl = { ok: true; target: FocusTarget } | { ok: false; reason: string };
 
-/** Longer than any URL the allowlist below can match, by a margin. */
-export const MAX_URL_LENGTH = 128;
+/** Longer than any URL the allowlist below can match. */
+export const MAX_URL_LENGTH = 200;
 
 /** Digits only, no leading zero, at most 10 of them (ADO and GitHub ids are int32). */
 const ID_RE = /^[1-9]\d{0,9}$/;
@@ -37,8 +45,11 @@ const ID_RE = /^[1-9]\d{0,9}$/;
  */
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
-/** The whole URL: one known verb, one key, one value, nothing else at all. */
-const URL_RE = /^agendo:\/\/focus\/?\?(pr|workItem|session)=([A-Za-z0-9-]+)$/;
+/** A repo name or `owner/name` slug: each segment opens with a letter, digit or `_`; 120 characters at most. */
+const REPO_RE = /^(?=.{1,120}$)[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)?$/;
+
+/** The whole URL: one known verb, one key and value, and at most a `repo` after it — nothing else at all. */
+const URL_RE = /^agendo:\/\/focus\/?\?(pr|workItem|session)=([A-Za-z0-9-]+)(?:&repo=([A-Za-z0-9._/-]+))?$/;
 
 const refuse = (reason: string): ParsedFocusUrl => ({ ok: false, reason });
 
@@ -49,19 +60,31 @@ export function parseItemId(raw: string): number | null {
   return Number.isSafeInteger(n) && n <= 0x7fffffff ? n : null;
 }
 
+/** Is `raw` a repo a URL (or `focus --repo`) may carry? */
+export function isRepo(raw: string): boolean {
+  return REPO_RE.test(raw);
+}
+
 /** Is `raw` a session token a URL may carry? */
 export function isSessionToken(raw: string): boolean {
   return SESSION_RE.test(raw);
 }
 
-/** The value checked against its key's own shape. */
-function targetFor(key: string, value: string): ParsedFocusUrl {
+/** The value checked against its key's own shape; `repo` only alongside an item id. */
+function targetFor(key: string, value: string, repo: string | undefined): ParsedFocusUrl {
   if (key === "session") {
+    if (repo !== undefined) return refuse("repo goes only with pr or workItem");
     return isSessionToken(value) ? { ok: true, target: { kind: "session", token: value } } : refuse("malformed session id");
   }
   const id = parseItemId(value);
   if (id === null) return refuse(`malformed ${key} id`);
-  return { ok: true, target: key === "pr" ? { kind: "pr", id } : { kind: "workItem", id } };
+  if (repo !== undefined && !isRepo(repo)) return refuse("malformed repo");
+  return { ok: true, target: itemTarget(key === "pr" ? "pr" : "workItem", id, repo) };
+}
+
+/** A pr / workItem target, carrying `repo` only when there is one. */
+export function itemTarget(kind: "pr" | "workItem", id: number, repo: string | undefined): FocusTarget {
+  return repo === undefined ? { kind, id } : { kind, id, repo };
 }
 
 /** Parse an agendo:// URL; see the header for exactly what is accepted. */
@@ -70,13 +93,13 @@ export function parseFocusUrl(url: unknown): ParsedFocusUrl {
   if (url.length > MAX_URL_LENGTH) return refuse("URL too long");
   if (!url.startsWith("agendo://")) return refuse("not an agendo:// URL");
   const m = URL_RE.exec(url);
-  if (!m) return refuse("only agendo://focus?pr=<n>, ?workItem=<n> or ?session=<id> is accepted");
-  return targetFor(m[1], m[2]);
+  if (!m) return refuse("only agendo://focus?pr=<n>, ?workItem=<n> (each with an optional &repo=) or ?session=<id> is accepted");
+  return targetFor(m[1], m[2], m[3]);
 }
 
 /** How a target is named to a human: `PR !5001`, `work item #102`, `session abc`. */
 export function describeTarget(t: FocusTarget): string {
-  if (t.kind === "pr") return `PR !${t.id}`;
-  if (t.kind === "workItem") return `work item #${t.id}`;
-  return `session ${t.token}`;
+  if (t.kind === "session") return `session ${t.token}`;
+  const what = t.kind === "pr" ? `PR !${t.id}` : `work item #${t.id}`;
+  return t.repo ? `${what} in ${t.repo}` : what;
 }

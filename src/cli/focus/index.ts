@@ -14,7 +14,7 @@ import {
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
-import { SessionIndex } from "../../sessions/index.ts";
+import { SessionIndex, repoScopeFilter } from "../../sessions/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import { currentModelOptions } from "../links.ts";
 import { flushWarnings } from "../warnings.ts";
@@ -22,7 +22,7 @@ import { sessionState } from "../list/rows.ts";
 import { findSession, resumeSession } from "../commands/resume.ts";
 import { describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
-import { linkedMatches, resolveLinked } from "./linked.ts";
+import { linkedMatches, narrowToRepo, resolveLinked } from "./linked.ts";
 import { failLoudly } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
@@ -52,9 +52,10 @@ async function loadFocusModel(target: FocusTarget): Promise<Awaited<ReturnType<t
 
 /** The sessions a PR / work item links to — refused when the number names more than one of them (see linked.ts). */
 async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>): Promise<AgentSession[]> {
-  const r = resolveLinked(linkedMatches(await loadFocusModel(target), target));
+  const matches = linkedMatches(await loadFocusModel(target), target);
+  const r = resolveLinked(target.repo ? narrowToRepo(matches, repoScopeFilter(target.repo)) : matches);
   if ("sessions" in r) return r.sessions;
-  return failLoudly(`${describeTarget(target)} is ambiguous — it matches ${r.ambiguous.join(" and ")}; use \`focus <session-id>\``);
+  return failLoudly(`${describeTarget(target)} is ambiguous — it matches ${r.ambiguous.join(" and ")}; name the repo (\`focus --repo <repo>\`) or the session (\`focus <session-id>\`)`);
 }
 
 /** Every session the target could mean. */
