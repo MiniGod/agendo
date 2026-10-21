@@ -183,7 +183,7 @@ Usage:
                               in extras/userscript/. Writes one .desktop file under
                               $XDG_DATA_HOME/applications and runs xdg-mime.
       --exec <command>          Command the handler runs (default: a global agendo
-                                install, else bunx github:minigod/agendo)
+                                install, else bunx agendo@<this version>)
   agendo wait [id...]          Block until the target session(s) settle, then exit
                                 0; exit non-zero if they don't (timeout, exited,
                                 usage-limited). Run it in the background and use

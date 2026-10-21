@@ -28,6 +28,9 @@ import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
 import { URL_FOCUS_GAP_MS, claimUrlFocus, claimUrlResume } from "./throttle.ts";
 
+/** A link leaves alone a client typed into this recently: the human is busy in it, not clicking a button. */
+export const TYPING_GRACE_S = 3;
+
 const NO_CLIENT = "no tmux client is attached — open a terminal and run `tmux attach` first";
 
 /** Where a focus came from: a link may resume only so often (see throttle.ts). */
@@ -191,6 +194,18 @@ function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: 
   process.exit(0);
 }
 
+/**
+ * Refuse a link, quietly, when the client it would move was typed into within
+ * `TYPING_GRACE_S`. A human who clicked a browser button is not typing in the
+ * terminal at that moment; a page firing links on a timer would otherwise land
+ * their keystrokes in an agent's prompt mid-sentence.
+ */
+function leaveTypistAlone(client: TmuxClient, nowS = Date.now() / 1000): void {
+  if (nowS - client.activity >= TYPING_GRACE_S) return;
+  console.error(`url: ignored — ${client.name} was typed into ${Math.max(0, Math.round(nowS - client.activity))}s ago`);
+  process.exit(1);
+}
+
 /** The session to focus, its candidates' states read live; fails when there is none. */
 async function chooseSession(target: FocusTarget): Promise<{ chosen: FocusCandidate; all: AgentSession[] }> {
   const index = await SessionIndex.build();
@@ -208,6 +223,7 @@ export async function runFocus(target: FocusTarget, origin: FocusOrigin = { from
   // Checked BEFORE any resume: with nothing to show it on and no terminal to
   // open, waking an agent would only leave it running unseen.
   const client = pickClient(listClients());
+  if (origin.fromUrl && client) leaveTypistAlone(client);
   const template = client ? null : focusTerminalTemplate();
   if (!client && !template) failLoudly(NO_CLIENT);
   const up = await bringUp(chosen, all, client, origin);

@@ -2,17 +2,18 @@
 //
 // Any web page can fire agendo:// links — in a loop, if the browser was told to
 // "always" allow them, which in some browsers is a choice for every site at once.
-// Two floors keep that from mattering:
+// Two floors bound what that costs:
 //
 //  • RESUME: resuming starts an agent process, so a resume that came in through
 //    a link has to wait `URL_RESUME_GAP_MS` after the previous one. A page
-//    walking `?pr=1…N` gets one resume, not N.
-//  • FOCUS: every link moves the terminal the human last typed into. A page
-//    firing links on a timer could yank it onto an agent's window mid-sentence
-//    and land their keystrokes in its prompt, so links at all are held to one
-//    per `URL_FOCUS_GAP_MS`.
+//    walking `?pr=1…N` wakes one session per 15s, not N at once.
+//  • FOCUS: links at all are held to one per `URL_FOCUS_GAP_MS`, so a burst is
+//    one link, and its refusals are not a burst of notifications.
 //
-// A human clicking a button never notices either. `agendo focus` typed in a
+// Neither stops a page from moving the terminal while the human types in it —
+// one switch every two seconds is plenty for that. What stops it is in
+// src/cli/focus/index.ts: a link never moves a client that was typed into in the
+// last few seconds. A human clicking a button never notices any of the three. `agendo focus` typed in a
 // terminal is not throttled.
 //
 // Each claim is atomic: two links fired at once (frames, tabs) must not both read
@@ -68,8 +69,18 @@ function lock(dir: string, lockPath: string, gapMs: number, nowMs: number): Clai
     return { go: true };
   } catch (e) {
     if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") return { error: errText(e) };
-    if (nowMs - (mtimeMs(lockPath) ?? nowMs) > STALE_LOCK_MS) rmSync(lockPath, { recursive: true, force: true });
+    return clearIfStale(lockPath, gapMs, nowMs);
+  }
+}
+
+/** A held lock: wait — after clearing it for the NEXT link when it is stale. */
+function clearIfStale(lockPath: string, gapMs: number, nowMs: number): Claim {
+  if (nowMs - (mtimeMs(lockPath) ?? nowMs) <= STALE_LOCK_MS) return { waitMs: gapMs };
+  try {
+    rmSync(lockPath, { recursive: true, force: true });
     return { waitMs: gapMs };
+  } catch (e) {
+    return { error: errText(e) };
   }
 }
 

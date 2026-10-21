@@ -4,25 +4,25 @@
 // choice, and the mimeapps.list edit on uninstall are pinned here.
 import { describe, expect, test } from "bun:test";
 import {
-  DEFAULT_SPEC, applicationsDir, defaultCommand, desktopEntry, execLine, execProgram, findOnPath, isOurs, isVolatile, mimeappsPath,
+  applicationsDir, defaultCommand, defaultSpec, desktopEntry, execLine, execProgram, findOnPath, isOurs, isVolatile, mimeappsPath,
   parseExec, quoteExecArg, readExec, withoutOurDefault,
 } from "../src/cli/urlHandler/desktop.ts";
 
 describe("desktopEntry", () => {
   test("registers the scheme, hidden from menus, with the URL as one argument", () => {
-    const text = desktopEntry(["/home/me/.bun/bin/bunx", DEFAULT_SPEC]);
+    const text = desktopEntry(["/home/me/.bun/bin/bunx", "agendo@0.2.3"]);
     expect(text.split("\n")).toEqual([
       "[Desktop Entry]",
       "Type=Application",
       "Name=agendo",
       "Comment=Focus an agendo session from an agendo:// link",
-      "Exec=/home/me/.bun/bin/bunx github:minigod/agendo url %u",
+      "Exec=/home/me/.bun/bin/bunx agendo@0.2.3 url %u",
       "Terminal=false",
       "NoDisplay=true",
       "MimeType=x-scheme-handler/agendo;",
       "",
     ]);
-    expect(readExec(text)).toBe("/home/me/.bun/bin/bunx github:minigod/agendo url %u");
+    expect(readExec(text)).toBe("/home/me/.bun/bin/bunx agendo@0.2.3 url %u");
   });
 
   test("quoting per the Desktop Entry spec", () => {
@@ -59,20 +59,26 @@ describe("defaultCommand", () => {
   const global = { path: "/usr/local/bin/agendo", real: "/home/me/.bun/install/global/node_modules/agendo/src/index.tsx", volatile: false };
 
   test("a stable global install runs its script by bun's absolute path, not through the shebang's PATH lookup", () => {
-    expect(defaultCommand(global, "/u/bun", "/u/bunx")).toEqual(["/u/bun", global.real]);
+    expect(defaultCommand(global, "/u/bun", "/u/bunx", "agendo@1.2.3")).toEqual(["/u/bun", global.real]);
   });
 
   test("without bun found, the global bin itself", () => {
-    expect(defaultCommand(global, null, "/u/bunx")).toEqual(["/usr/local/bin/agendo"]);
+    expect(defaultCommand(global, null, "/u/bunx", "agendo@1.2.3")).toEqual(["/usr/local/bin/agendo"]);
   });
 
   test("a runner's /tmp copy is skipped for bunx with an unpinned spec", () => {
     const tmp = { path: "/tmp/bunx-1000-agendo/agendo", real: "/tmp/bunx-1000-agendo/agendo", volatile: true };
-    expect(defaultCommand(tmp, "/u/bun", "/u/bunx")).toEqual(["/u/bunx", DEFAULT_SPEC]);
-    expect(DEFAULT_SPEC).not.toContain("#");
+    expect(defaultCommand(tmp, "/u/bun", "/u/bunx", "agendo@1.2.3")).toEqual(["/u/bunx", "agendo@1.2.3"]);
   });
 
-  test("neither available", () => expect(defaultCommand(null, "/u/bun", null)).toBeNull());
+  test("neither available", () => expect(defaultCommand(null, "/u/bun", null, "agendo@1.2.3")).toBeNull());
+
+  test("defaultSpec pins the npm release, never a git ref", () => {
+    expect(defaultSpec("0.2.3")).toBe("agendo@0.2.3");
+    expect(defaultSpec("1.0.0-rc.1")).toBe("agendo@1.0.0-rc.1");
+    expect(defaultSpec("unknown")).toBe("agendo");
+    expect(defaultSpec("1.0.0 ; rm -rf ~")).toBe("agendo");
+  });
 
   test("isVolatile", () => {
     expect(isVolatile("/tmp/bunx-1000-agendo@latest/node_modules/agendo/src/index.tsx")).toBe(true);

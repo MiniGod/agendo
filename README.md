@@ -522,6 +522,10 @@ PR and work-item numbers are looked up in the backend agendo is currently using
 (Azure DevOps or GitHub), the same one `agendo list --pr` reads. A GitHub number can
 name PRs or issues in several repositories at once. When more than one of them has
 sessions, `focus` refuses rather than guess, and names them; use `focus <id>` then.
+A link carries only the number, not the repository or site it came from. So when
+only one repository has sessions for that number, the button on another
+repository's PR with the same number brings that session forward. The same goes for
+a GitHub button while agendo uses Azure DevOps, and the other way round.
 
 The same command sits behind an `agendo://` link, so a button on an Azure DevOps or
 GitHub page can run it. Setup on Linux:
@@ -530,7 +534,8 @@ GitHub page can run it. Setup on Linux:
    file to `${XDG_DATA_HOME:-~/.local/share}/applications/` and makes it the default
    for `x-scheme-handler/agendo` through `xdg-mime`. It runs a global `agendo` install
    if you have one (by `bun`'s absolute path, since a browser may start it without
-   your shell's `PATH`), otherwise `bunx github:minigod/agendo`. Choose the command with
+   your shell's `PATH`), otherwise `bunx agendo@<this version>`, so a link never runs code newer than what
+   you installed. Choose the command with
    `--exec <command>`. Check the setup with `agendo url-handler status`, and remove
    it with `agendo url-handler uninstall`.
 2. **Install the user-script:** open
@@ -547,10 +552,15 @@ Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` and `?session=<id>`. It refuses anything
 else, such as other verbs, extra or encoded parameters, or overlong input, and says
 so in a notification. A link can only focus a session, or resume one and then focus
-it. A link may resume at most one session every 15 seconds, so a page cannot wake
-your agents one after another, and links at all are handled at most once every two
-seconds, so a page cannot keep moving the terminal you are typing in. `agendo focus`
-typed in a terminal is not limited.
+it. Links are limited, so a page that fires them cannot do much with them:
+
+- A link never moves a terminal you typed into during the last three seconds. A page
+  firing links on a timer cannot switch your terminal while you type in it.
+- Links are handled at most once every two seconds. Links over that rate are
+  dropped without a notification.
+- A link resumes at most one session every 15 seconds.
+
+`agendo focus` typed in a terminal is not limited.
 
 With no tmux client attached, `focus` fails by default. To open a terminal instead,
 set a terminal command. It runs without a shell, and `{session}` is replaced with the

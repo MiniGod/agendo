@@ -9,8 +9,9 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { homedir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
+import { readVersion } from "../version.ts";
 import {
-  DESKTOP_FILE, SCHEME_MIME, applicationsDir, defaultCommand, desktopEntry, execProgram, findOnPath, isOurs, isVolatile,
+  DESKTOP_FILE, SCHEME_MIME, applicationsDir, defaultCommand, defaultSpec, desktopEntry, execProgram, findOnPath, isOurs, isVolatile,
   mimeappsPath, parseExec, readExec, withoutOurDefault, type Resolved,
 } from "./desktop.ts";
 
@@ -42,7 +43,7 @@ function execCommand(execArg: string | undefined): string[] {
   if (execArg !== undefined) return parseExec(execArg) ?? fail("--exec needs a command (and may not contain %)");
   const pathEnv = process.env.PATH ?? "";
   const onPath = (cmd: string) => findOnPath(cmd, pathEnv, existsSync);
-  return defaultCommand(resolveAgendo(pathEnv), onPath("bun"), onPath("bunx"))
+  return defaultCommand(resolveAgendo(pathEnv), onPath("bun"), onPath("bunx"), defaultSpec(readVersion()))
     ?? fail("found neither a global agendo install nor bunx on PATH; pass --exec <command>");
 }
 

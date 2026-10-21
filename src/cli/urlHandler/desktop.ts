@@ -8,8 +8,17 @@ export const DESKTOP_FILE = "agendo-url-handler.desktop";
 /** The MIME type a browser looks up for an agendo:// link. */
 export const SCHEME_MIME = "x-scheme-handler/agendo";
 
-/** The package spec the default Exec line runs through bunx: unpinned, so it never goes stale the way a commit-pinned self-command does. */
-export const DEFAULT_SPEC = "github:minigod/agendo";
+/**
+ * The package spec the default Exec line runs through bunx: the npm RELEASE this
+ * install is, pinned. Never a git ref — a link any allowed page can fire would
+ * then fetch and run whatever that branch says today — and never the
+ * commit-pinned self-command, which can name a /tmp staging dir. An upgrade lands
+ * on the next `url-handler install`. Without a readable version, the latest
+ * release: still a published, reviewed build.
+ */
+export function defaultSpec(version: string): string {
+  return /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version) ? `agendo@${version}` : "agendo";
+}
 
 /** `${XDG_DATA_HOME:-~/.local/share}/applications`. */
 export function applicationsDir(env: NodeJS.ProcessEnv, home: string): string {
@@ -105,15 +114,14 @@ export function isVolatile(realPath: string): boolean {
  *     temporary copy), run by bun's absolute path. Its bin is a
  *     `#!/usr/bin/env bun` script, and the shebang would look bun up on that
  *     same thin PATH. Without bun found, the bin itself is the best there is;
- *  2. else `bunx github:minigod/agendo`, by bunx's absolute path. Not the
- *     self-command agendo prints for agents: that one is pinned to a commit
- *     (or to a /tmp staging dir) and goes stale.
+ *  2. else `bunx agendo@<this version>` (see `defaultSpec`), by bunx's
+ *     absolute path.
  *
  * Null when neither is available; the caller then asks for `--exec`.
  */
-export function defaultCommand(agendo: Resolved | null, bun: string | null, bunx: string | null): string[] | null {
+export function defaultCommand(agendo: Resolved | null, bun: string | null, bunx: string | null, spec: string): string[] | null {
   if (agendo && !agendo.volatile) return bun ? [bun, agendo.real] : [agendo.path];
-  if (bunx) return [bunx, DEFAULT_SPEC];
+  if (bunx) return [bunx, spec];
   return null;
 }
 

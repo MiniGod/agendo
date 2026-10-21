@@ -49,12 +49,15 @@ async function seed(
     switchFails?: boolean;
     /** Leave the shared `agendo` launcher session out. */
     noLauncher?: boolean;
+    /** Session options, e.g. a path-scoped launcher's `@cl_root`. */
+    options?: Record<string, Record<string, string>>;
   } = {},
 ) {
   const launcher = extra.noLauncher ? [] : ["agendo"];
   await mock.setTmuxState({
     ...tmuxState,
     switchFails: extra.switchFails ?? false,
+    options: extra.options ?? {},
     sessions: [...tmuxState.sessions, ...launcher, ...(extra.sessions ?? [])],
     windows: [...launcher.map((session) => ({ session, index: 0, name: "launcher" })), ...(extra.windows ?? [])],
     panes: [
@@ -152,6 +155,42 @@ test("an idle session is never resumed into the user's own tmux session", async 
   expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo") && a.includes(STANDALONE_TARGET))).toBe(true);
   expect(log.some((a) => a[0] === "new-window" && a.includes("=main"))).toBe(false);
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", STANDALONE_TARGET)]]);
+});
+
+test("a path-scoped launcher the client shows keeps both an idle and a paused resume", async ({ mock }) => {
+  // `agendo-repo` is a launcher scoped to one repo (it carries `@cl_root`); the
+  // crash session's tab is parked in it, and the client is looking at it.
+  await seed(mock, {
+    sessions: ["agendo-repo"],
+    options: { "agendo-repo": { "@cl_root": "/repo" } },
+    windows: [{ session: "agendo-repo", index: 0, name: "launcher" }, { session: "agendo-repo", index: 1, name: CRASH_TARGET }],
+    panes: [
+      { session: "agendo-repo", window: "launcher", cwd: "/repo", placeholder: false },
+      { session: "agendo-repo", window: CRASH_TARGET, cwd: "/crash", placeholder: true },
+    ],
+    clients: [{ name: "/dev/pts/7", pid: 4107, activity: 1_700_000_900, session: "agendo-repo" }],
+  });
+  const idle = await agendo(mock.env, "focus", "standalonese");
+  expect(idle.code, idle.stderr).toBe(0);
+  const paused = await agendo(mock.env, "focus", "--work-item", "102");
+  expect(paused.code, paused.stderr).toBe(0);
+  const log = await mock.tmuxLog();
+  for (const name of [STANDALONE_TARGET, CRASH_TARGET]) {
+    expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo-repo") && a.includes(name)), name).toBe(true);
+  }
+  expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo"))).toBe(false);
+});
+
+test("a link never moves a terminal that is being typed in", async ({ mock }) => {
+  await seed(mock, { clients: [{ name: "/dev/pts/7", pid: 4107, activity: Math.floor(Date.now() / 1000), session: "agendo" }] });
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code).not.toBe(0);
+  expect(r.stderr).toContain("/dev/pts/7 was typed into");
+  expect(await switches(mock)).toEqual([]);
+  expect(await notifications(mock)).toEqual([]);
+  // The same focus typed by hand is the human's own choice.
+  const typed = await agendo(mock.env, "focus", "--pr", "5001");
+  expect(typed.code, typed.stderr).toBe(0);
 });
 
 test("with no launcher session, an idle session gets a detached session of its own — even when focus runs inside tmux", async ({ mock }) => {
