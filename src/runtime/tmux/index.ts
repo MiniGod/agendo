@@ -25,7 +25,7 @@
 // killPaneById), `sessionWindowCount` (a pause refusing a host's only
 // window) and codex's read-back delivery (codexComposerText, deliverToCodex,
 // codexPaneIo, CODEX_TURN_START_MS, type CodexDelivery) and the attached-client
-// layer `agendo focus` drives (parseClients, pickClient, listClients,
+// layer `agendo focus` drives (parseClients, pickClient, pickClientFor, listClients,
 // windowIdentity, scopedWindowTarget, selectWindow, focusClientOn, type
 // TmuxClient, type WindowIdentity) are the
 // only additions since.
@@ -177,6 +177,7 @@ export { launcherWindowLive, launcherWindowTarget, enterLauncherSession } from "
 export {
   parseClients,
   pickClient,
+  pickClientFor,
   listClients,
   windowIdentity,
   scopedWindowTarget,

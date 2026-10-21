@@ -8,13 +8,17 @@
 //    a link has to wait `URL_RESUME_GAP_MS` after the previous one. A page
 //    walking `?pr=1…N` wakes one session per 15s, not N at once.
 //  • FOCUS: links at all are held to one per `URL_FOCUS_GAP_MS`, so a burst is
-//    one link, and its refusals are not a burst of notifications.
+//    one link. A refused link is notified, but those notes have a floor of
+//    their own (`claimRefusalNote`): a burst's refusals are at most one
+//    notification per gap. The link let through stamps that floor too when it
+//    notifies, so refusals behind it stay quiet; its own outcome — a real
+//    failure — is always said.
 //
 // Neither stops a page from moving the terminal while the human types in it —
 // one switch every two seconds is plenty for that. What stops it is in
 // src/cli/focus/index.ts: a link never moves a client that was typed into in the
-// last few seconds. A human clicking a button never notices any of the three. `agendo focus` typed in a
-// terminal is not throttled.
+// last few seconds; its refusal shares the refusal-note floor above. `agendo
+// focus` typed in a terminal is not throttled.
 //
 // Each claim is atomic: two links fired at once (frames, tabs) must not both read
 // "no stamp yet" and both go. A `mkdir` lock serialises the read-and-stamp, and a
@@ -115,4 +119,9 @@ export function claimUrlResume(nowMs = Date.now()): Claim {
 /** The focus floor (see the header). */
 export function claimUrlFocus(nowMs = Date.now()): Claim {
   return claimFloor("url-focus", URL_FOCUS_GAP_MS, nowMs);
+}
+
+/** The floor on notifying refused links (see the header). */
+export function claimRefusalNote(nowMs = Date.now()): Claim {
+  return claimFloor("url-refused-note", URL_FOCUS_GAP_MS, nowMs);
 }

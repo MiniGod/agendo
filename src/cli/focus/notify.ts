@@ -7,6 +7,17 @@
 // one who clicked a button.
 import { spawnSync } from "child_process";
 
+let beforeNotify: (() => void) | null = null;
+
+/**
+ * Run `hook` as each notification this process shows is decided — before it is
+ * sent, so a link refused meanwhile already finds the floor `agendo url`
+ * stamps with it taken (see throttle.ts).
+ */
+export function onNotify(hook: () => void): void {
+  beforeNotify = hook;
+}
+
 /**
  * Body markup is interpreted by many notification servers (a subset of HTML),
  * so the three characters that open markup are escaped. Text reaching here is
@@ -22,6 +33,7 @@ export function notifyBody(text: string): string {
  * already said the same thing. argv only, never a shell.
  */
 export function notify(text: string): void {
+  beforeNotify?.();
   try {
     spawnSync("notify-send", ["--app-name=agendo", "agendo", notifyBody(text)], { stdio: "ignore", timeout: 5_000 });
   } catch {

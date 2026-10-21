@@ -41,14 +41,25 @@ function parseClientLine(line: string): TmuxClient | null {
 }
 
 /**
- * The client to move: the one with the most recent input, i.e. the terminal the
- * human last typed into. Ties keep tmux's own listing order. Null when nothing
- * is attached.
+ * The most recently active client: the one with the most recent input, i.e. the
+ * terminal the human last typed into. Ties keep tmux's own listing order. Null
+ * when nothing is attached.
  */
 export function pickClient(clients: TmuxClient[]): TmuxClient | null {
   let best: TmuxClient | null = null;
   for (const c of clients) if (!best || c.activity > best.activity) best = c;
   return best;
+}
+
+/**
+ * The client to move onto a window of tmux session `session`: the most recently
+ * active of the clients already showing that session, else — none on it, or no
+ * session known — the most recently active client overall. The terminal the
+ * human last typed into is usually the one they are BUSY in; a terminal already
+ * showing the target's session is the one meant to show it.
+ */
+export function pickClientFor(clients: TmuxClient[], session: string | undefined): TmuxClient | null {
+  return pickClient(clients.filter((c) => c.session === session)) ?? pickClient(clients);
 }
 
 /** Every attached client on the server (empty when none, or no server). */

@@ -80,3 +80,27 @@ function parseSelector(argv: string[]): FocusArgs {
   }
   return found ?? { ok: false, error: USAGE };
 }
+
+/** A tmux session and the root it is scoped to (`@cl_root`), null for one that is not a path-scoped launcher. */
+export interface ScopedSession {
+  session: string;
+  root: string | null;
+}
+
+/** Is `path` `root` itself or somewhere under it? */
+function isUnder(path: string, root: string): boolean {
+  const r = root.replace(/\/+$/, "");
+  return path === r || path.startsWith(`${r}/`);
+}
+
+/**
+ * The path-scoped launcher an agent working in `cwd` belongs in: the one whose
+ * root holds `cwd`, the deepest when roots nest. Undefined when none does.
+ */
+export function launcherForCwd(cwd: string, sessions: ScopedSession[]): string | undefined {
+  let best: { session: string; root: string } | undefined;
+  for (const { session, root } of sessions) {
+    if (root && isUnder(cwd, root) && (!best || root.length > best.root.length)) best = { session, root };
+  }
+  return best?.session;
+}

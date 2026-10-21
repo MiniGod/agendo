@@ -1,12 +1,17 @@
 // The .desktop entry `agendo url-handler install` writes
 // (src/cli/urlHandler/desktop.ts). The e2e suite installs one with a plain
 // `--exec`; the quoting a path with spaces or a `%` needs, the default command
-// choice, and the mimeapps.list edit on uninstall are pinned here.
-import { describe, expect, test } from "bun:test";
+// choice, the mimeapps.list edit on uninstall, and the desktop-database refresh
+// (against a fake update-desktop-database on PATH) are pinned here.
+import { afterAll, describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
-  applicationsDir, defaultCommand, defaultSpec, desktopEntry, execLine, execProgram, findOnPath, isOurs, isVolatile, mimeappsPath,
-  parseExec, quoteExecArg, readExec, withoutOurDefault,
+  applicationsDir, cacheListsUs, defaultCommand, defaultSpec, desktopEntry, execLine, execProgram, findOnPath, isOurs, isVolatile, mimeappsPath,
+  parseExec, quoteExecArg, readExec, shellQuote, withoutOurDefault,
 } from "../src/cli/urlHandler/desktop.ts";
+import { refreshCommand, refreshDesktopDatabase } from "../src/cli/urlHandler/desktopDb.ts";
 
 describe("desktopEntry", () => {
   test("registers the scheme, hidden from menus, with the URL as one argument", () => {
@@ -124,5 +129,70 @@ describe("execProgram", () => {
   test("empty or unterminated", () => {
     expect(execProgram("")).toBeNull();
     expect(execProgram('"/never/closed url %u')).toBeNull();
+  });
+});
+
+describe("desktop database", () => {
+  test("cacheListsUs: our entry among the scheme's handlers, and nowhere else", () => {
+    expect(cacheListsUs("[MIME Cache]\nx-scheme-handler/agendo=agendo-url-handler.desktop;\n")).toBe(true);
+    expect(cacheListsUs("[MIME Cache]\nx-scheme-handler/agendo=other.desktop;agendo-url-handler.desktop;\n")).toBe(true);
+    expect(cacheListsUs("[MIME Cache]\nx-scheme-handler/agendo=other.desktop;\n")).toBe(false);
+    expect(cacheListsUs("[MIME Cache]\nx-scheme-handler/agendox=agendo-url-handler.desktop;\n")).toBe(false);
+    expect(cacheListsUs("[MIME Cache]\ntext/html=agendo-url-handler.desktop;\n")).toBe(false);
+    expect(cacheListsUs("")).toBe(false);
+  });
+
+  test("the printed fix command pastes as-is", () => {
+    expect(shellQuote("/home/me/.local/share/applications")).toBe("/home/me/.local/share/applications");
+    expect(shellQuote("/home/my dir/it's")).toBe("'/home/my dir/it'\\''s'");
+    expect(refreshCommand("/a b")).toBe("update-desktop-database '/a b'");
+  });
+
+  const dirs: string[] = [];
+  afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
+  const tempDir = (prefix: string) => {
+    const d = mkdtempSync(join(tmpdir(), prefix));
+    dirs.push(d);
+    return d;
+  };
+
+  /** A PATH holding only a fake update-desktop-database that logs its argv, prints `stderr`, and exits `code`. */
+  function fakePath(code: number, stderr = ""): { path: string; log: string } {
+    const bin = tempDir("agendo-udd-");
+    const log = join(bin, "calls.txt");
+    writeFileSync(join(bin, "update-desktop-database"), `#!/bin/sh\necho "$@" >> "${log}"\nprintf '${stderr}' >&2\nexit ${code}\n`);
+    chmodSync(join(bin, "update-desktop-database"), 0o755);
+    return { path: bin, log };
+  }
+
+  test("runs update-desktop-database on exactly the dir it is given", () => {
+    const fake = fakePath(0);
+    expect(refreshDesktopDatabase("/x/applications", { PATH: fake.path })).toBeNull();
+    expect(readFileSync(fake.log, "utf-8")).toBe("/x/applications\n");
+  });
+
+  test("a missing binary is a warning with the manual command, not a throw", () => {
+    const empty = tempDir("agendo-udd-none-");
+    const warning = refreshDesktopDatabase("/x/my apps", { PATH: empty });
+    expect(warning).toContain("update-desktop-database could not run");
+    expect(warning).toContain("desktop-file-utils");
+    expect(warning).toContain("run `update-desktop-database '/x/my apps'`");
+  });
+
+  test("a run that hangs past its timeout is a warning, not a missing package", () => {
+    const bin = tempDir("agendo-udd-hang-");
+    writeFileSync(join(bin, "update-desktop-database"), "#!/bin/sh\nexec sleep 5\n");
+    chmodSync(join(bin, "update-desktop-database"), 0o755);
+    const warning = refreshDesktopDatabase("/x/applications", { PATH: `${bin}:/usr/bin:/bin` }, 200);
+    expect(warning).toContain("update-desktop-database did not finish");
+    expect(warning).not.toContain("desktop-file-utils");
+    expect(warning).toContain("run `update-desktop-database /x/applications`");
+  });
+
+  test("a failing run is a warning too, carrying the first thing it said", () => {
+    const warning = refreshDesktopDatabase("/x/applications", { PATH: fakePath(1, "\\nboom: no such dir\\nmore\\n").path });
+    expect(warning).toContain("update-desktop-database failed: boom: no such dir;");
+    expect(refreshDesktopDatabase("/x/applications", { PATH: fakePath(1).path })).toContain("update-desktop-database failed;");
+    expect(warning).toContain("run `update-desktop-database /x/applications`");
   });
 });
