@@ -76,6 +76,8 @@ export function withoutOurDefault(text: string): string {
 /** Where a command was found on PATH, and whether that place survives a reboot. */
 export interface Resolved {
   path: string;
+  /** `path` with its symlinks resolved — the script itself, for a global install's bin link. */
+  real: string;
   /** A package runner's staging copy (`/tmp/bunx-…`, `_npx`) — gone the next time its cache is cleared. */
   volatile: boolean;
 }
@@ -96,20 +98,35 @@ export function isVolatile(realPath: string): boolean {
 /**
  * The command the Exec line runs, when `--exec` did not name one. A browser
  * starts it with the desktop session's environment — often without the PATH
- * entries a shell profile adds — so it is an ABSOLUTE path either way:
+ * entries a shell profile adds — so every word that names a program is an
+ * ABSOLUTE path:
  *
  *  1. a global install of `agendo` (anything on PATH that is not a runner's
- *     temporary copy), run directly;
+ *     temporary copy), run by bun's absolute path. Its bin is a
+ *     `#!/usr/bin/env bun` script, and the shebang would look bun up on that
+ *     same thin PATH. Without bun found, the bin itself is the best there is;
  *  2. else `bunx github:minigod/agendo`, by bunx's absolute path. Not the
  *     self-command agendo prints for agents: that one is pinned to a commit
  *     (or to a /tmp staging dir) and goes stale.
  *
  * Null when neither is available; the caller then asks for `--exec`.
  */
-export function defaultCommand(agendo: Resolved | null, bunx: string | null): string[] | null {
-  if (agendo && !agendo.volatile) return [agendo.path];
+export function defaultCommand(agendo: Resolved | null, bun: string | null, bunx: string | null): string[] | null {
+  if (agendo && !agendo.volatile) return bun ? [bun, agendo.real] : [agendo.path];
   if (bunx) return [bunx, DEFAULT_SPEC];
   return null;
+}
+
+/**
+ * The program an Exec value starts — its first word, with the desktop-file and
+ * Exec quoting undone — so `status` can say when it has gone missing. Null for
+ * an empty or unterminated value.
+ */
+export function execProgram(exec: string): string | null {
+  const value = exec.replace(/\\\\/g, "\\").trimStart();
+  const m = /^"((?:[^"\\]|\\.)*)"|^([^"\s]\S*)/.exec(value);
+  if (!m) return null;
+  return m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2].replace(/%%/g, "%");
 }
 
 /** `--exec` split into words; refused when it already carries the URL slot or is empty. */

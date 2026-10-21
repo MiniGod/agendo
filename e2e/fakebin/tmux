@@ -812,9 +812,12 @@ switch (cmd) {
   }
   // Navigation / config commands: nothing to do, just succeed.
   case "set-window-option":
+  // `state.switchFails` makes moving a client fail, as it does when the client
+  // detached between list-clients and the switch.
+  case "switch-client":
+    process.exit(state.switchFails ? 1 : 0);
   case "select-pane":
   case "select-window":
-  case "switch-client":
   case "attach-session":
   default:
     process.exit(0);

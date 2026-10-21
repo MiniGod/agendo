@@ -7,6 +7,8 @@ import { isSessionToken, parseItemId, type FocusTarget } from "./url.ts";
 export interface FocusCandidate {
   s: AgentSession;
   state: "running" | "paused" | "idle";
+  /** For a paused session: the tmux session its placeholder tab sits in, where a resume should put it back. */
+  host?: string;
 }
 
 /**

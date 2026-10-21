@@ -9,8 +9,8 @@
 // any web page can trigger must not be able to do more than change what is on
 // screen.
 import {
-  exactTarget, focusClientOn, listClients, liveTargetForShortId, pickClient, sessionName, shortId, tmuxAvailable, windowIdentity,
-  type TmuxClient, type WindowIdentity,
+  LAUNCHER_SESSION, exactTarget, focusClientOn, listClients, liveTargetForShortId, pickClient, selectWindow, sessionName,
+  shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
@@ -18,27 +18,40 @@ import { SessionIndex } from "../../sessions/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import { currentModelOptions } from "../links.ts";
 import { flushWarnings } from "../warnings.ts";
-import { querySessions } from "../list/index.ts";
 import { sessionState } from "../list/rows.ts";
 import { findSession, resumeSession } from "../commands/resume.ts";
 import { describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
+import { linkedMatches, resolveLinked } from "./linked.ts";
 import { failLoudly } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
+import { claimUrlResume } from "./throttle.ts";
 
 const NO_CLIENT = "no tmux client is attached — open a terminal and run `tmux attach` first";
 
-/** The sessions a PR / work item links to, through the same query `list --pr/--work-item` runs. */
-async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>): Promise<AgentSession[]> {
+/** Where a focus came from: a link may resume only so often (see throttle.ts). */
+export interface FocusOrigin {
+  fromUrl: boolean;
+}
+
+/** The model the PR / work-item lookup runs against, or a loud failure — with load warnings flushed first, since they may be why. */
+async function loadFocusModel(target: FocusTarget): Promise<Awaited<ReturnType<typeof loadModel>>> {
   try {
     const model = await loadModel(currentModelOptions());
-    return target.kind === "pr" ? querySessions(model, target.id, undefined) : querySessions(model, undefined, target.id);
-  } catch (e) {
-    failLoudly(`could not look up ${describeTarget(target)}: ${(e as Error)?.message ?? String(e)}`);
-  } finally {
     flushWarnings("focus");
+    return model;
+  } catch (e) {
+    flushWarnings("focus");
+    failLoudly(`could not look up ${describeTarget(target)}: ${(e as Error)?.message ?? String(e)}`);
   }
+}
+
+/** The sessions a PR / work item links to — refused when the number names more than one of them (see linked.ts). */
+async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>): Promise<AgentSession[]> {
+  const r = resolveLinked(linkedMatches(await loadFocusModel(target), target));
+  if ("sessions" in r) return r.sessions;
+  return failLoudly(`${describeTarget(target)} is ambiguous — it matches ${r.ambiguous.join(" and ")}; use \`focus <session-id>\``);
 }
 
 /** Every session the target could mean. */
@@ -48,12 +61,12 @@ async function candidates(target: FocusTarget, index: SessionIndex): Promise<Age
   return s ? [s] : [];
 }
 
-/** The candidates with their live state, as `list` would report it. */
+/** The candidates with their live state, as `list` would report it, and where a paused one's tab sits. */
 function withStates(sessions: AgentSession[], all: AgentSession[]): FocusCandidate[] {
-  const { live, livePlaceholders } = refreshLiveTmux(all);
+  const { live, livePlaceholders, placeholderWindows } = refreshLiveTmux(all);
   return sessions.map((s) => {
     const canon = sessionName(s);
-    return { s, state: sessionState(live.has(canon), canon, livePlaceholders) };
+    return { s, state: sessionState(live.has(canon), canon, livePlaceholders), host: placeholderWindows.get(canon)?.session };
   });
 }
 
@@ -71,26 +84,41 @@ function runningTarget(s: AgentSession, all: AgentSession[]): string | null {
   return refreshLiveTmux(all).liveWindows.get(sessionName(s))?.target ?? liveTargetForShortId(shortId(s.id))?.target ?? null;
 }
 
-/** Make sure the chosen session has a window — resuming it if needed — and return that window's target. */
-async function bringUp(c: FocusCandidate, all: AgentSession[]): Promise<string> {
-  if (c.state === "running") {
-    const t = runningTarget(c.s, all);
-    if (t) return t;
-  }
-  const r = await resumeSession(c.s, all);
+/** A link may not resume twice in quick succession (see throttle.ts). */
+function throttleUrlResume(origin: FocusOrigin): void {
+  const wait = origin.fromUrl ? claimUrlResume() : 0;
+  if (wait > 0) failLoudly(`not resuming another session from a link so soon — try again in ${Math.ceil(wait / 1000)}s`);
+}
+
+/**
+ * Resume the chosen session — into the tmux session its paused tab sat in, else
+ * the one the client is showing — and return its window's target.
+ */
+async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<string> {
+  const r = await resumeSession(c.s, all, host);
   if ("peer" in r) {
     failLoudly(`session ${shortId(c.s.id)} is running outside agendo (pid ${r.peer.pid}); there is no window to focus`, 2);
   }
   recordLaunchedSession(
     { id: c.s.id, cwd: c.s.cwd, title: c.s.title, source: c.s.source, configDir: c.s.configDir },
     r.plan.tmuxName,
+    host ?? LAUNCHER_SESSION,
   );
   console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
   return runningTarget(c.s, all) ?? exactTarget(r.plan.tmuxName);
 }
 
-/** No client to move: open the configured terminal on the session, or fail. */
-function withoutClient(where: WindowIdentity, template: string | null): never {
+/** Make sure the chosen session has a window — resuming it if needed — and return that window's target. */
+async function bringUp(c: FocusCandidate, all: AgentSession[], client: TmuxClient | null, origin: FocusOrigin): Promise<string> {
+  const running = c.state === "running" ? runningTarget(c.s, all) : null;
+  if (running) return running;
+  throttleUrlResume(origin);
+  return resumeChosen(c, all, c.host ?? client?.session);
+}
+
+/** No client to move: open the configured terminal on the session, showing the session's window, or fail. */
+function withoutClient(where: WindowIdentity, target: string, template: string | null): never {
+  selectWindow(where.windowId, paneOf(target));
   if (template && openTerminal(template, where.session)) {
     console.log(`focus: no tmux client attached; opened a terminal on ${where.session}`);
     process.exit(0);
@@ -98,9 +126,14 @@ function withoutClient(where: WindowIdentity, template: string | null): never {
   failLoudly(NO_CLIENT);
 }
 
+/** The pane to focus inside the window, for a session parked in a pane rather than owning a window. */
+function paneOf(target: string): string | undefined {
+  return target.startsWith("%") ? target : undefined;
+}
+
 /** Move `client` onto the window and raise its terminal. */
 function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: AgentSession): never {
-  if (!focusClientOn(client.name, where.windowId, target.startsWith("%") ? target : undefined)) {
+  if (!focusClientOn(client.name, where.windowId, paneOf(target))) {
     failLoudly(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
   }
   raiseTerminal(client.pid);
@@ -119,7 +152,7 @@ async function chooseSession(target: FocusTarget): Promise<{ chosen: FocusCandid
 }
 
 /** Focus what `target` names; see the header. Always exits. */
-export async function runFocus(target: FocusTarget): Promise<never> {
+export async function runFocus(target: FocusTarget, origin: FocusOrigin = { fromUrl: false }): Promise<never> {
   if (!tmuxAvailable()) failLoudly("tmux was not found on PATH");
   const { chosen, all } = await chooseSession(target);
   // Checked BEFORE any resume: with nothing to show it on and no terminal to
@@ -127,9 +160,9 @@ export async function runFocus(target: FocusTarget): Promise<never> {
   const client = pickClient(listClients());
   const template = client ? null : focusTerminalTemplate();
   if (!client && !template) failLoudly(NO_CLIENT);
-  const t = await bringUp(chosen, all);
+  const t = await bringUp(chosen, all, client, origin);
   const where = windowIdentity(t) ?? failLoudly(`could not find the tmux window of session ${shortId(chosen.s.id)}`);
-  if (!client) withoutClient(where, template);
+  if (!client) withoutClient(where, t, template);
   switchTo(client, where, t, chosen.s);
 }
 
@@ -152,5 +185,5 @@ export async function urlCommand(argv: string[]): Promise<never> {
     console.error(`url: refused ${JSON.stringify((argv[0] ?? "").slice(0, 200))}`);
     failLoudly(`refused an agendo:// link: ${parsed.reason}`);
   }
-  return runFocus(parsed.target);
+  return runFocus(parsed.target, { fromUrl: true });
 }

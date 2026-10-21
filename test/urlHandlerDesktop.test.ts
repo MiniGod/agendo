@@ -4,7 +4,7 @@
 // choice, and the mimeapps.list edit on uninstall are pinned here.
 import { describe, expect, test } from "bun:test";
 import {
-  DEFAULT_SPEC, applicationsDir, defaultCommand, desktopEntry, execLine, findOnPath, isOurs, isVolatile, mimeappsPath,
+  DEFAULT_SPEC, applicationsDir, defaultCommand, desktopEntry, execLine, execProgram, findOnPath, isOurs, isVolatile, mimeappsPath,
   parseExec, quoteExecArg, readExec, withoutOurDefault,
 } from "../src/cli/urlHandler/desktop.ts";
 
@@ -56,16 +56,23 @@ describe("paths", () => {
 });
 
 describe("defaultCommand", () => {
-  test("a stable global install is run directly", () => {
-    expect(defaultCommand({ path: "/usr/local/bin/agendo", volatile: false }, "/u/bunx")).toEqual(["/usr/local/bin/agendo"]);
+  const global = { path: "/usr/local/bin/agendo", real: "/home/me/.bun/install/global/node_modules/agendo/src/index.tsx", volatile: false };
+
+  test("a stable global install runs its script by bun's absolute path, not through the shebang's PATH lookup", () => {
+    expect(defaultCommand(global, "/u/bun", "/u/bunx")).toEqual(["/u/bun", global.real]);
+  });
+
+  test("without bun found, the global bin itself", () => {
+    expect(defaultCommand(global, null, "/u/bunx")).toEqual(["/usr/local/bin/agendo"]);
   });
 
   test("a runner's /tmp copy is skipped for bunx with an unpinned spec", () => {
-    expect(defaultCommand({ path: "/tmp/bunx-1000-agendo/agendo", volatile: true }, "/u/bunx")).toEqual(["/u/bunx", DEFAULT_SPEC]);
+    const tmp = { path: "/tmp/bunx-1000-agendo/agendo", real: "/tmp/bunx-1000-agendo/agendo", volatile: true };
+    expect(defaultCommand(tmp, "/u/bun", "/u/bunx")).toEqual(["/u/bunx", DEFAULT_SPEC]);
     expect(DEFAULT_SPEC).not.toContain("#");
   });
 
-  test("neither available", () => expect(defaultCommand(null, null)).toBeNull());
+  test("neither available", () => expect(defaultCommand(null, "/u/bun", null)).toBeNull());
 
   test("isVolatile", () => {
     expect(isVolatile("/tmp/bunx-1000-agendo@latest/node_modules/agendo/src/index.tsx")).toBe(true);
@@ -99,4 +106,17 @@ test("withoutOurDefault removes only our own line", () => {
 test("isOurs", () => {
   expect(isOurs("agendo-url-handler.desktop\n")).toBe(true);
   expect(isOurs("other.desktop")).toBe(false);
+});
+
+describe("execProgram", () => {
+  test("reads back the first word of every Exec line execLine writes", () => {
+    for (const cmd of [["/u/bun", "/x/index.tsx"], ["/with space/bun"], ['/q"uo`te$/b\\s'], ["/pct%/bun"]]) {
+      expect(execProgram(execLine(cmd))).toBe(cmd[0]);
+    }
+  });
+
+  test("empty or unterminated", () => {
+    expect(execProgram("")).toBeNull();
+    expect(execProgram('"/never/closed url %u')).toBeNull();
+  });
 });

@@ -82,9 +82,14 @@ function raiseWithWmctrl(chain: number[]): boolean {
   return wid !== null && quietRun("wmctrl", ["-ia", wid]) !== null;
 }
 
-/** xdotool when wmctrl is absent: one search per ancestor. */
+/** The first X window xdotool finds for `pid`. */
+function xdotoolWindowOf(pid: number): string | undefined {
+  return quietRun("xdotool", ["search", "--pid", String(pid)])?.split("\n")[0]?.trim() || undefined;
+}
+
+/** xdotool when wmctrl is absent or knows no ancestor: one search per ancestor. */
 function raiseWithXdotool(chain: number[]): boolean {
-  const wid = nearestWindow(chain, (pid) => quietRun("xdotool", ["search", "--pid", String(pid)])?.split("\n")[0]?.trim() || undefined);
+  const wid = nearestWindow(chain, xdotoolWindowOf);
   return wid !== null && /^\d+$/.test(wid) && quietRun("xdotool", ["windowactivate", wid]) !== null;
 }
 

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Fake `xdotool` — records the call so a spec can assert it, and does nothing else.
+# Fake `xdotool` — records the call so a spec can assert it, and acts on nothing.
 # Never let the real one run under test: it would act on the developer's desktop.
+# `search --pid $FAKE_XDOTOOL_PID` prints $FAKE_XDOTOOL_WID, so a spec can say
+# which pid owns which X window; any other search finds nothing.
 if [ -n "$FAKE_CALL_LOG" ]; then echo "xdotool $*" >> "$FAKE_CALL_LOG"; fi
+if [ "$1" = "search" ] && [ "$2" = "--pid" ]; then
+  if [ -n "$FAKE_XDOTOOL_PID" ] && [ "$3" = "$FAKE_XDOTOOL_PID" ]; then echo "$FAKE_XDOTOOL_WID"; exit 0; fi
+  exit 1
+fi
 exit 0

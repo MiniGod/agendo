@@ -93,13 +93,21 @@ export function parseWindowIdentity(stdout: string): WindowIdentity | null {
 }
 
 /**
- * Show window `windowId` on `client`: make it the current window of its session,
- * focus `paneId` inside it when the session is parked in a pane, then switch the
- * client there. Returns whether the switch itself succeeded — the select steps
- * are a nicety, the switch is the whole point.
+ * Make `windowId` the current window of its session, and focus `paneId` inside
+ * it when the session is parked in a pane. Enough on its own for a terminal
+ * about to attach to that session; `focusClientOn` adds the switch.
  */
-export function focusClientOn(client: string, windowId: string, paneId?: string): boolean {
+export function selectWindow(windowId: string, paneId?: string): void {
   spawnSync("tmux", ["select-window", "-t", windowId], { stdio: "ignore" });
   if (paneId) spawnSync("tmux", ["select-pane", "-t", paneId], { stdio: "ignore" });
+}
+
+/**
+ * Show window `windowId` on `client`: select it (see `selectWindow`), then
+ * switch the client there. Returns whether the switch itself succeeded — the
+ * select steps are a nicety, the switch is the whole point.
+ */
+export function focusClientOn(client: string, windowId: string, paneId?: string): boolean {
+  selectWindow(windowId, paneId);
   return spawnSync("tmux", ["switch-client", "-c", client, "-t", windowId], { stdio: "ignore" }).status === 0;
 }

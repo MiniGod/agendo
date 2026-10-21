@@ -10,7 +10,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import {
-  DESKTOP_FILE, SCHEME_MIME, applicationsDir, defaultCommand, desktopEntry, findOnPath, isOurs, isVolatile,
+  DESKTOP_FILE, SCHEME_MIME, applicationsDir, defaultCommand, desktopEntry, execProgram, findOnPath, isOurs, isVolatile,
   mimeappsPath, parseExec, readExec, withoutOurDefault, type Resolved,
 } from "./desktop.ts";
 
@@ -32,14 +32,17 @@ function realpathOr(p: string): string {
 /** `agendo` on PATH, and whether it is a runner's temporary copy. */
 function resolveAgendo(pathEnv: string): Resolved | null {
   const p = findOnPath("agendo", pathEnv, existsSync);
-  return p ? { path: p, volatile: isVolatile(realpathOr(p)) } : null;
+  if (!p) return null;
+  const real = realpathOr(p);
+  return { path: p, real, volatile: isVolatile(real) };
 }
 
 /** The command words for the Exec line: `--exec`'s, or the detected default. */
 function execCommand(execArg: string | undefined): string[] {
   if (execArg !== undefined) return parseExec(execArg) ?? fail("--exec needs a command (and may not contain %)");
   const pathEnv = process.env.PATH ?? "";
-  return defaultCommand(resolveAgendo(pathEnv), findOnPath("bunx", pathEnv, existsSync))
+  const onPath = (cmd: string) => findOnPath(cmd, pathEnv, existsSync);
+  return defaultCommand(resolveAgendo(pathEnv), onPath("bun"), onPath("bunx"))
     ?? fail("found neither a global agendo install nor bunx on PATH; pass --exec <command>");
 }
 
@@ -95,10 +98,19 @@ function status(): void {
   const entry = installedEntry();
   console.log(`desktop entry: ${entry.installed ? entry.file : "not installed"}`);
   if (entry.installed) console.log(`  Exec=${entry.exec ?? "(none)"}`);
+  warnIfMissing(entry.exec);
   const handler = currentHandler();
   console.log(`${SCHEME_MIME}: ${handlerLine(handler)}`);
   // 0 only when the entry exists AND the desktop resolves the scheme to it.
   process.exitCode = entry.installed && isOurs(handler ?? "") ? 0 : 1;
+}
+
+/** Say so when the program the entry starts is gone — a cleared bunx cache, an uninstalled bun. */
+function warnIfMissing(exec: string | null): void {
+  const program = exec === null ? null : execProgram(exec);
+  if (program?.startsWith("/") && !existsSync(program)) {
+    console.log(`  warning: ${program} does not exist; re-run \`url-handler install\``);
+  }
 }
 
 /** The desktop file `xdg-mime` says handles the scheme now, or null. */

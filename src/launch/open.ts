@@ -13,6 +13,8 @@ import {
   hasSession,
   newDetached,
   newWindow,
+  newWindowIn,
+  windowTarget,
   windowLocation,
   insideTmux,
   tmuxQuiet,
@@ -160,6 +162,21 @@ export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan 
   // wants the name.
   const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
   return openTarget(target, s.cwd, resumeArgv(s), sessionTags(s));
+}
+
+/**
+ * Cold-resume a session as a window of tmux session `host`, wherever this
+ * process runs. `openSession` cannot do this from outside tmux — there it makes
+ * the agent its own detached session — which is right for a CLI `resume`, but
+ * wrong for `agendo focus` waking a paused tab: the tab should come back in the
+ * launcher session that held it, next to its siblings, not move out of it.
+ * The caller has already established that nothing is running for `s`.
+ */
+export function openSessionIn(s: AgentSession, host: string): OpenPlan {
+  const name = sessionName(s);
+  newWindowIn(host, name, s.cwd, resumeArgv(s));
+  stampNewTarget(name, sessionTags(s));
+  return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: ["tmux", "select-window", "-t", windowTarget(host, name)] };
 }
 
 /**
