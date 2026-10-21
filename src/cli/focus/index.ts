@@ -126,23 +126,26 @@ interface Brought {
   resumed: string | null;
 }
 
+/** Record a session focus just resumed as `tmuxName` for restore, and say so; returns what to tell the human if the rest then fails. */
+function recordResumed(c: FocusCandidate, tmuxName: string, host: string | undefined): string {
+  recordLaunchedSession(
+    { id: c.s.id, cwd: c.s.cwd, title: c.s.title, source: c.s.source, configDir: c.s.configDir },
+    tmuxName,
+    host ?? LAUNCHER_SESSION,
+  );
+  console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
+  return `session ${shortId(c.s.id)} WAS resumed and is running in tmux window ${tmuxName}`;
+}
+
 /** Resume the chosen session in `host` (see `resumeHost`) and return its window. */
 async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<Brought> {
   const r = await resumeSession(c.s, all, host === undefined ? { detached: true } : { host });
   if ("peer" in r) {
     failLoudly(`session ${shortId(c.s.id)} is running outside agendo (pid ${r.peer.pid}); there is no window to focus`, 2);
   }
-  if (!r.plan.alreadyRunning) {
-    recordLaunchedSession(
-      { id: c.s.id, cwd: c.s.cwd, title: c.s.title, source: c.s.source, configDir: c.s.configDir },
-      r.plan.tmuxName,
-      host ?? LAUNCHER_SESSION,
-    );
-    console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
-  }
   // A cold resume knows exactly what it created; anything else was found running.
   const target = r.plan.target ?? runningTarget(c.s, all) ?? exactTarget(r.plan.tmuxName);
-  const resumed = r.plan.alreadyRunning ? null : `session ${shortId(c.s.id)} WAS resumed and is running in tmux window ${r.plan.tmuxName}`;
+  const resumed = r.plan.alreadyRunning ? null : recordResumed(c, r.plan.tmuxName, host);
   return { target, resumed };
 }
 

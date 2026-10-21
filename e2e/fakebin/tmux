@@ -507,8 +507,16 @@ switch (cmd) {
     // The attached clients a fixture declares in `state.clients` — each
     // `{name, pid, activity, session, control}` — which `agendo focus` reads to
     // pick the terminal to move. None declared means nothing is attached.
+    // `state.clientsLater`, when declared, answers every call after the first:
+    // the human typing in, or detaching, a client while focus resumes an agent.
     const fmt = format() ?? "#{client_name}";
-    const clients = state.clients ?? [];
+    const later = state.clientsLater && (state.listClientsCalls ?? 0) > 0;
+    const clients = (later ? state.clientsLater : state.clients) ?? [];
+    if (state.clientsLater) {
+      try {
+        fs.writeFileSync(STATE, JSON.stringify({ ...state, listClientsCalls: (state.listClientsCalls ?? 0) + 1 }, null, 2));
+      } catch {}
+    }
     const line = (c) =>
       fmt
         .replace(/#\{client_activity\}/g, String(c.activity ?? 0))

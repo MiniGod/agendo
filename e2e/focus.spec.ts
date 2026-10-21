@@ -43,6 +43,8 @@ async function seed(
   mock: MockEnv,
   extra: {
     clients?: unknown[];
+    /** What list-clients answers after its first call (see the fake tmux). */
+    clientsLater?: unknown[];
     windows?: unknown[];
     panes?: unknown[];
     sessions?: string[];
@@ -66,6 +68,7 @@ async function seed(
       ...(extra.panes ?? []),
     ],
     clients: extra.clients ?? CLIENTS,
+    ...(extra.clientsLater ? { clientsLater: extra.clientsLater } : {}),
   });
 }
 
@@ -191,6 +194,26 @@ test("a link never moves a terminal that is being typed in", async ({ mock }) =>
   // The same focus typed by hand is the human's own choice.
   const typed = await agendo(mock.env, "focus", "--pr", "5001");
   expect(typed.code, typed.stderr).toBe(0);
+});
+
+test("a link leaves a client alone that detached before the switch", async ({ mock }) => {
+  await seed(mock, { clientsLater: [] });
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code).toBe(1);
+  expect(r.stderr).toContain("url: ignored — /dev/pts/7 detached");
+  expect(await switches(mock)).toEqual([]);
+  expect(await notifications(mock)).toEqual([]);
+});
+
+test("a link that resumed an agent and then finds the client typed in says so, and does not switch", async ({ mock }) => {
+  await seed(mock, { clientsLater: [{ name: "/dev/pts/7", pid: 4107, activity: Math.floor(Date.now() / 1000), session: "agendo" }] });
+  const r = await agendo(mock.env, "url", "agendo://focus?session=standalonese");
+  expect(r.code).not.toBe(0);
+  expect((await mock.tmuxLog()).some((a) => a[0] === "new-window" && a.includes(STANDALONE_TARGET))).toBe(true);
+  expect(await switches(mock)).toEqual([]);
+  const said = (await notifications(mock)).join("\n");
+  expect(said).toContain("not switching: /dev/pts/7 was typed into");
+  expect(said).toContain(`WAS resumed and is running in tmux window ${STANDALONE_TARGET}`);
 });
 
 test("with no launcher session, an idle session gets a detached session of its own — even when focus runs inside tmux", async ({ mock }) => {

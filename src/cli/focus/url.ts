@@ -72,14 +72,17 @@ export function isSessionToken(raw: string): boolean {
 
 /** The value checked against its key's own shape; `repo` only alongside an item id. */
 function targetFor(key: string, value: string, repo: string | undefined): ParsedFocusUrl {
-  if (key === "session") {
-    if (repo !== undefined) return refuse("repo goes only with pr or workItem");
-    return isSessionToken(value) ? { ok: true, target: { kind: "session", token: value } } : refuse("malformed session id");
-  }
+  if (key === "session") return sessionTarget(value, repo);
   const id = parseItemId(value);
   if (id === null) return refuse(`malformed ${key} id`);
   if (repo !== undefined && !isRepo(repo)) return refuse("malformed repo");
   return { ok: true, target: itemTarget(key === "pr" ? "pr" : "workItem", id, repo) };
+}
+
+/** A session target: an id of the right shape, and never a repo. */
+function sessionTarget(value: string, repo: string | undefined): ParsedFocusUrl {
+  if (repo !== undefined) return refuse("repo goes only with pr or workItem");
+  return isSessionToken(value) ? { ok: true, target: { kind: "session", token: value } } : refuse("malformed session id");
 }
 
 /** A pr / workItem target, carrying `repo` only when there is one. */
