@@ -3,7 +3,7 @@
 // client it moves, and how its argv is read. All pure, so each case is a row.
 import { describe, expect, test } from "bun:test";
 import { parseFocusArgs, pickSession, type FocusCandidate } from "../src/cli/focus/choose.ts";
-import { asPaneTarget, parseClients, parseWindowIdentity, pickClient } from "../src/runtime/tmux/clients.ts";
+import { asPaneTarget, parseClients, parseWindowIdentity, pickClient, scopedWindowTarget } from "../src/runtime/tmux/clients.ts";
 import type { AgentSession } from "../src/shared/types.ts";
 
 function cand(id: string, state: FocusCandidate["state"], minutesAgo: number): FocusCandidate {
@@ -89,6 +89,10 @@ describe("window identity", () => {
     expect(asPaneTarget("=agendo")).toBe("=agendo:");
     expect(asPaneTarget("=agendo:=cl-claude-x")).toBe("=agendo:=cl-claude-x");
     expect(asPaneTarget("%12")).toBe("%12");
+  });
+
+  test("the switch target is scoped to the session the window was found in", () => {
+    expect(scopedWindowTarget({ windowId: "@12", session: "agendo" })).toBe("=agendo:@12");
   });
 
   test("only an @N window id is accepted back", () => {

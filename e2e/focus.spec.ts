@@ -7,7 +7,8 @@
 // XDG_CONFIG_HOME, so neither the developer's desktop entries nor their
 // mimeapps.list is ever written.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT, type MockEnv } from "./harness/mockEnv.ts";
@@ -38,10 +39,14 @@ function agendo(env: Record<string, string>, ...args: string[]) {
 }
 
 /** The fixture tmux state with clients attached, a menu window, and anything extra. */
-async function seed(mock: MockEnv, extra: { clients?: unknown[]; windows?: unknown[]; panes?: unknown[] } = {}) {
+async function seed(
+  mock: MockEnv,
+  extra: { clients?: unknown[]; windows?: unknown[]; panes?: unknown[]; sessions?: string[]; switchFails?: boolean } = {},
+) {
   await mock.setTmuxState({
     ...tmuxState,
-    sessions: [...tmuxState.sessions, "agendo"],
+    switchFails: extra.switchFails ?? false,
+    sessions: [...tmuxState.sessions, "agendo", ...(extra.sessions ?? [])],
     windows: [{ session: "agendo", index: 0, name: "launcher" }, ...(extra.windows ?? [])],
     panes: [...tmuxState.panes, { session: "agendo", window: "launcher", cwd: "/menu", placeholder: false }, ...(extra.panes ?? [])],
     clients: extra.clients ?? CLIENTS,
@@ -49,13 +54,19 @@ async function seed(mock: MockEnv, extra: { clients?: unknown[]; windows?: unkno
 }
 
 /** The window id the fake tmux reports for a session's (only) window — asked directly, not through agendo. */
-function windowIdOf(env: Record<string, string>, session: string): string {
-  const r = spawnSync(FAKE_TMUX, ["display-message", "-p", "-t", `=${session}:`, "#{window_id}\t#{session_name}"], {
+function windowIdOf(env: Record<string, string>, session: string, window?: string): string {
+  const target = window ? `=${session}:=${window}` : `=${session}:`;
+  const r = spawnSync(FAKE_TMUX, ["display-message", "-p", "-t", target, "#{window_id}\t#{session_name}"], {
     env, encoding: "utf-8",
   });
   const id = r.stdout.split("\t")[0];
   expect(id).toMatch(/^@\d+$/);
   return id;
+}
+
+/** The `=session:@N` target agendo switches a client to — scoped, so a linked window can't land elsewhere. */
+function switchTarget(env: Record<string, string>, session: string, window?: string): string {
+  return `=${session}:${windowIdOf(env, session, window)}`;
 }
 
 async function switches(mock: MockEnv): Promise<string[][]> {
@@ -70,9 +81,9 @@ test("focus --pr switches the most recently active client to the running session
   await seed(mock);
   const r = await agendo(mock.env, "focus", "--pr", "5001");
   expect(r.code, r.stderr).toBe(0);
-  const want = windowIdOf(mock.env, RUNNING_TARGET);
+  const want = switchTarget(mock.env, RUNNING_TARGET);
   // Distinct from the menu's window, so a switch to the wrong one can't pass.
-  expect(want).not.toBe(windowIdOf(mock.env, "agendo"));
+  expect(windowIdOf(mock.env, RUNNING_TARGET)).not.toBe(windowIdOf(mock.env, "agendo"));
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", want]]);
   // Already running: nothing was resumed.
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
@@ -90,21 +101,64 @@ test("focus --work-item resumes a paused session, then focuses it", async ({ moc
   expect(r.stderr).toContain("resumed session");
   const log = await mock.tmuxLog();
   const kill = log.findIndex((a) => a[0] === "kill-window");
-  const create = log.findIndex((a) => a[0] === "new-session" && a.includes(CRASH_TARGET));
+  // Back into the tmux session its tab was parked in — not a session of its own.
+  const create = log.findIndex((a) => a[0] === "new-window" && a.includes("=agendo") && a.includes(CRASH_TARGET));
   const sw = log.findIndex((a) => a[0] === "switch-client");
   // The placeholder goes, the agent comes back, and only THEN is the client moved.
   expect(kill).toBeGreaterThanOrEqual(0);
   expect(create).toBeGreaterThan(kill);
   expect(sw).toBeGreaterThan(create);
-  expect(log[sw]).toEqual(["switch-client", "-c", "/dev/pts/7", "-t", windowIdOf(mock.env, CRASH_TARGET)]);
+  expect(log.some((a) => a[0] === "new-session")).toBe(false);
+  expect(log[sw]).toEqual(["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", CRASH_TARGET)]);
 });
 
 test("focus <id> resumes an idle session by id and focuses it", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "focus", "standalonese");
   expect(r.code, r.stderr).toBe(0);
-  expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" && a.includes(STANDALONE_TARGET))).toBe(true);
-  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", windowIdOf(mock.env, STANDALONE_TARGET)]]);
+  // An idle session has no tab to return to: it opens beside what the client is showing.
+  const log = await mock.tmuxLog();
+  expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo") && a.includes(STANDALONE_TARGET))).toBe(true);
+  expect(log.some((a) => a[0] === "new-session")).toBe(false);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", STANDALONE_TARGET)]]);
+});
+
+test("an idle session is never resumed into the user's own tmux session", async ({ mock }) => {
+  // The client is showing a session of the user's, not a launcher: the agent
+  // goes to the launcher session instead, and the client follows it there.
+  await seed(mock, {
+    sessions: ["main"],
+    windows: [{ session: "main", index: 0, name: "zsh" }],
+    clients: [{ name: "/dev/pts/7", pid: 4107, activity: 1_700_000_900, session: "main" }],
+  });
+  const r = await agendo(mock.env, "focus", "standalonese");
+  expect(r.code, r.stderr).toBe(0);
+  const log = await mock.tmuxLog();
+  expect(log.some((a) => a[0] === "new-window" && a.includes("=agendo") && a.includes(STANDALONE_TARGET))).toBe(true);
+  expect(log.some((a) => a[0] === "new-window" && a.includes("=main"))).toBe(false);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", STANDALONE_TARGET)]]);
+});
+
+test("focus refuses a session running outside agendo: there is no window to bring forward", async ({ mock }) => {
+  await seed(mock);
+  // What a live claude advertises: a registry entry naming a socket that answers.
+  const sock = join(mock.tmpDir, "peer.sock");
+  const server = createServer(() => {});
+  await new Promise<void>((r) => server.listen(sock, r));
+  mkdirSync(join(mock.env.HOME, ".claude", "sessions"), { recursive: true });
+  writeFileSync(
+    join(mock.env.HOME, ".claude", "sessions", `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, sessionId: STANDALONE_SESSION_ID, cwd: "/x", peerProtocol: 1, kind: "interactive", messagingSocketPath: sock, status: "busy" }),
+  );
+  try {
+    const r = await agendo(mock.env, "focus", "standalonese");
+    expect(r.code).toBe(2);
+    expect((await notifications(mock)).join("\n")).toContain("is running outside agendo");
+    const log = await mock.tmuxLog();
+    expect(log.some((a) => ["new-session", "new-window", "switch-client"].includes(a[0]))).toBe(false);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 });
 
 test("focus with no linked session notifies and fails without launching anything", async ({ mock }) => {
@@ -133,11 +187,53 @@ test("focus raises the client's terminal through wmctrl on X11", async ({ mock }
   expect(await mock.callLog()).toContain("wmctrl -ia 0x04000007");
 });
 
+test("focus falls back to xdotool when wmctrl knows no ancestor's window", async ({ mock }) => {
+  await seed(mock);
+  const env = { ...mock.env, DISPLAY: ":99", FAKE_WMCTRL_LIST: "", FAKE_XDOTOOL_PID: "4107", FAKE_XDOTOOL_WID: "67108871" };
+  const r = await agendo(env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await mock.callLog()).toContain("xdotool windowactivate 67108871");
+});
+
+test("focus fails loudly when tmux will not switch the client", async ({ mock }) => {
+  await seed(mock, { switchFails: true });
+  const r = await agendo(mock.env, "focus", "--pr", "5001");
+  expect(r.code).not.toBe(0);
+  expect((await notifications(mock)).join("\n")).toContain("tmux could not switch /dev/pts/7");
+});
+
+test("focus with no client opens the configured focusTerminal on the session, at its window", async ({ mock }) => {
+  await seed(mock, { clients: [] });
+  // Merged into the fixture config rather than replacing it: ~/.agendo/ is read first.
+  const cfg = JSON.parse(readFileSync(join(mock.env.HOME, ".claude-launcher", "config.json"), "utf-8"));
+  writeFileSync(join(mock.env.HOME, ".agendo", "config.json"), JSON.stringify({ ...cfg, focusTerminal: "fake-terminal -e tmux attach -t {session}" }));
+  const r = await agendo(mock.env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  const id = windowIdOf(mock.env, RUNNING_TARGET);
+  expect((await mock.tmuxLog()).some((a) => a[0] === "select-window" && a.includes(`=${RUNNING_TARGET}:${id}`))).toBe(true);
+  // The terminal is spawned detached, so its log line can land after agendo exits.
+  await expect.poll(async () => mock.callLog()).toContain(`fake-terminal -e tmux attach -t =${RUNNING_TARGET}`);
+});
+
+test("url may resume only once in quick succession; focus typed by hand is not throttled", async ({ mock }) => {
+  await seed(mock);
+  const first = await agendo(mock.env, "url", "agendo://focus?session=standalonese");
+  expect(first.code, first.stderr).toBe(0);
+  const second = await agendo(mock.env, "url", `agendo://focus?workItem=102`);
+  expect(second.code).not.toBe(0);
+  expect((await notifications(mock)).join("\n")).toContain("not resuming another session from a link so soon");
+  // An already-running session is still focused through a link: only resumes are throttled.
+  const running = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(running.code, running.stderr).toBe(0);
+  const typed = await agendo(mock.env, "focus", "--work-item", "102");
+  expect(typed.code, typed.stderr).toBe(0);
+});
+
 test("url focuses through the same path as focus", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
   expect(r.code, r.stderr).toBe(0);
-  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", windowIdOf(mock.env, RUNNING_TARGET)]]);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
 });
 
 const MALICIOUS = [
@@ -190,6 +286,36 @@ test("url-handler install, status and uninstall stay inside XDG_DATA_HOME / XDG_
   expect(existsSync(file)).toBe(false);
   expect(readFileSync(mimeapps, "utf-8")).not.toContain("x-scheme-handler/agendo");
 });
+
+test("url-handler status warns when the program its entry starts is gone", async ({ mock }) => {
+  const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+  const inst = await agendo(env, "url-handler", "install", "--exec=/nonexistent/agendo-bin --flag");
+  expect(inst.code, inst.stderr).toBe(0);
+  expect(readFileSync(join(mock.tmpDir, "data", "applications", "agendo-url-handler.desktop"), "utf-8"))
+    .toContain("Exec=/nonexistent/agendo-bin --flag url %u");
+  const st = await agendo(env, "url-handler", "status");
+  expect(st.stdout).toContain("warning: /nonexistent/agendo-bin does not exist");
+});
+
+const BAD_HANDLER_ARGS: string[][] = [
+  ["url-handler"],
+  ["url-handler", "frobnicate"],
+  ["url-handler", "install", "--bogus"],
+  ["url-handler", "install", "--exec"],
+  ["url-handler", "install", "--exec", "has%percent"],
+  ["url-handler", "status", "extra"],
+];
+
+for (const argv of BAD_HANDLER_ARGS) {
+  test(`url-handler refuses ${argv.slice(1).join(" ") || "no subcommand"}`, async ({ mock }) => {
+    const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+    const r = await agendo(env, ...argv);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("url-handler:");
+    expect(existsSync(join(mock.tmpDir, "data", "applications"))).toBe(false);
+    expect((await mock.callLog()).some((l) => l.startsWith("xdg-mime default"))).toBe(false);
+  });
+}
 
 test("url-handler install defaults to a stable command, never a /tmp runner copy", async ({ mock }) => {
   const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };

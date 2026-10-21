@@ -512,8 +512,9 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 session to the front. The attached tmux client you typed into last is switched to the
 session's window, and a paused or idle session is resumed first. On X11 the terminal
 window is raised too. When several sessions are linked, the latest running one wins;
-if none is running, the latest one wins. A resumed session goes back into the tmux
-session its tab was parked in. It never launches a new session. If nothing matches,
+if none is running, the latest one wins. A paused session goes back into the tmux
+session its tab was parked in. An idle one opens in the agendo session the client is
+showing, else in the shared `agendo` session; never in a tmux session of your own. It never launches a new session. If nothing matches,
 or no tmux client is attached, it says so in a desktop notification.
 
 PR and work-item numbers are looked up in the backend agendo is currently using

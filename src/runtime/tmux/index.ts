@@ -26,8 +26,8 @@
 // window) and codex's read-back delivery (codexComposerText, deliverToCodex,
 // codexPaneIo, CODEX_TURN_START_MS, type CodexDelivery) and the attached-client
 // layer `agendo focus` drives (parseClients, pickClient, listClients,
-// windowIdentity, selectWindow, focusClientOn, type TmuxClient, type
-// WindowIdentity) are the
+// windowIdentity, scopedWindowTarget, selectWindow, focusClientOn, type
+// TmuxClient, type WindowIdentity) are the
 // only additions since.
 //
 // Where things went, and why in that order — each module may only import from
@@ -179,6 +179,7 @@ export {
   pickClient,
   listClients,
   windowIdentity,
+  scopedWindowTarget,
   selectWindow,
   focusClientOn,
   type TmuxClient,

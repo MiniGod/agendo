@@ -9,8 +9,8 @@
 // any web page can trigger must not be able to do more than change what is on
 // screen.
 import {
-  LAUNCHER_SESSION, exactTarget, focusClientOn, listClients, liveTargetForShortId, pickClient, selectWindow, sessionName,
-  shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
+  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, selectWindow,
+  sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
@@ -90,35 +90,58 @@ function throttleUrlResume(origin: FocusOrigin): void {
   if (wait > 0) failLoudly(`not resuming another session from a link so soon — try again in ${Math.ceil(wait / 1000)}s`);
 }
 
+/** Is `session` one of agendo's own launcher sessions — the shared one, or a path-scoped one carrying `@cl_root`? */
+function isLauncherSession(session: string): boolean {
+  return session === LAUNCHER_SESSION || sessionRoot(session) !== null;
+}
+
 /**
- * Resume the chosen session — into the tmux session its paused tab sat in, else
- * the one the client is showing — and return its window's target.
+ * Which tmux session a resume opens the agent in: the one its paused tab sat
+ * in; else the launcher session the client is showing; else the shared
+ * launcher, if it is up. Never a session of the user's own — `main`, `work` —
+ * which an agent window (and its restore tab) would only clutter. Undefined
+ * means none of those: the agent gets a detached session of its own, as
+ * `agendo resume` gives it.
  */
+function resumeHost(c: FocusCandidate, client: TmuxClient | null): string | undefined {
+  if (c.host) return c.host;
+  if (client && isLauncherSession(client.session)) return client.session;
+  return hasSession(LAUNCHER_SESSION) ? LAUNCHER_SESSION : undefined;
+}
+
+/** Resume the chosen session in `host` (see `resumeHost`) and return its window's target. */
 async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<string> {
   const r = await resumeSession(c.s, all, host);
   if ("peer" in r) {
     failLoudly(`session ${shortId(c.s.id)} is running outside agendo (pid ${r.peer.pid}); there is no window to focus`, 2);
   }
-  recordLaunchedSession(
-    { id: c.s.id, cwd: c.s.cwd, title: c.s.title, source: c.s.source, configDir: c.s.configDir },
-    r.plan.tmuxName,
-    host ?? LAUNCHER_SESSION,
-  );
-  console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
+  if (!r.plan.alreadyRunning) {
+    recordLaunchedSession(
+      { id: c.s.id, cwd: c.s.cwd, title: c.s.title, source: c.s.source, configDir: c.s.configDir },
+      r.plan.tmuxName,
+      host ?? LAUNCHER_SESSION,
+    );
+    console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
+  }
   return runningTarget(c.s, all) ?? exactTarget(r.plan.tmuxName);
 }
 
-/** Make sure the chosen session has a window — resuming it if needed — and return that window's target. */
+/**
+ * Make sure the chosen session has a window — resuming it if needed — and return
+ * that window's target. Only a real resume is throttled: a running session whose
+ * window the fresh scan missed goes through `resumeSession` too, but that only
+ * navigates, and must not spend a link's resume.
+ */
 async function bringUp(c: FocusCandidate, all: AgentSession[], client: TmuxClient | null, origin: FocusOrigin): Promise<string> {
   const running = c.state === "running" ? runningTarget(c.s, all) : null;
   if (running) return running;
-  throttleUrlResume(origin);
-  return resumeChosen(c, all, c.host ?? client?.session);
+  if (c.state !== "running") throttleUrlResume(origin);
+  return resumeChosen(c, all, resumeHost(c, client));
 }
 
 /** No client to move: open the configured terminal on the session, showing the session's window, or fail. */
 function withoutClient(where: WindowIdentity, target: string, template: string | null): never {
-  selectWindow(where.windowId, paneOf(target));
+  selectWindow(where, paneOf(target));
   if (template && openTerminal(template, where.session)) {
     console.log(`focus: no tmux client attached; opened a terminal on ${where.session}`);
     process.exit(0);
@@ -133,7 +156,7 @@ function paneOf(target: string): string | undefined {
 
 /** Move `client` onto the window and raise its terminal. */
 function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: AgentSession): never {
-  if (!focusClientOn(client.name, where.windowId, paneOf(target))) {
+  if (!focusClientOn(client.name, where, paneOf(target))) {
     failLoudly(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
   }
   raiseTerminal(client.pid);
