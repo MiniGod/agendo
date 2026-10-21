@@ -1,6 +1,7 @@
 import type { Key } from "ink";
 import { freeWorktreeBranch } from "../../repositories/worktree/index.ts";
 import { ORCHESTRATOR_SLUG } from "../../orchestration/index.ts";
+import { agentChoicesFor } from "./agent.ts";
 import type { KeyContext, Mode } from "./context.ts";
 import { listStep } from "./nav.ts";
 
@@ -50,6 +51,17 @@ export function chooseWorktree(ctx: Ctx, mode: WtchoiceMode): void {
   ctx.setMode(branchPrompt(mode, worktree, branchSeed(mode, worktree)));
 }
 
+/**
+ * One step back: to the repo picker, or — when the target came with its repo —
+ * to the agent picker it skipped from, with the agent that was picked still
+ * highlighted.
+ */
+export function backFromWtchoice(mode: WtchoiceMode): Mode {
+  if (!mode.target.repoRoot) return { kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 };
+  const picked = agentChoicesFor(mode.target).findIndex((a) => a.source === mode.agent);
+  return { kind: "agent", target: mode.target, cursor: Math.max(0, picked) };
+}
+
 /** Two rows, so a step either way lands on the other one. */
 function stepWtchoice(step: 1 | -1): (p: Mode) => Mode {
   return (p) => (p.kind === "wtchoice" ? { ...p, cursor: (p.cursor + step + 2) % 2 } : p);
@@ -60,7 +72,7 @@ function stepWtchoice(step: 1 | -1): (p: Mode) => Mode {
 export function handleWtchoiceKeys(input: string, key: Key, ctx: Ctx): boolean {
   const mode = ctx.mode;
   if (mode.kind !== "wtchoice") return false;
-  if (key.escape) { ctx.setMode({ kind: "repo", target: mode.target, agent: mode.agent, cursor: 0 }); return true; }
+  if (key.escape) { ctx.setMode(backFromWtchoice(mode)); return true; }
   const step = listStep(input, key);
   if (step !== null) ctx.setMode(stepWtchoice(step));
   else if (key.return) chooseWorktree(ctx, mode);

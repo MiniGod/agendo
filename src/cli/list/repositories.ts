@@ -18,8 +18,10 @@ import { basename } from "path";
 import { sessionName, shortId } from "../../runtime/tmux/index.ts";
 import { SessionIndex } from "../../sessions/index.ts";
 import { refreshLiveTmux } from "../../app/model/index.ts";
-import { orchestratorRoles } from "../../orchestration/index.ts";
+import { recordedRanks, recordedRole, type OrchestratorFacts } from "../../orchestration/repoOrchestrator.ts";
+import { orchestratorFacts } from "../../launch/existingOrchestrator.ts";
 import { discoverGitReposUnder, repoRootForCwd } from "../../repositories/index.ts";
+import { mainCheckoutOf } from "../../repositories/scopeRepo.ts";
 import { isUnderRoot } from "../../app/context.ts";
 import { scopeFilter, scopeNote, type SessionScope } from "../../app/scope.ts";
 import type { AgentSession } from "../../shared/types.ts";
@@ -52,7 +54,8 @@ export interface RepoRow {
   /** How many of those are running right now. */
   running: number;
   /**
-   * The repo-level orchestrators found here, best first (running before idle).
+   * The repo-level orchestrators found here, best first — in the order `O`
+   * picks THE one by: running, paused, idle, then the most recently used.
    * Normally 0 or 1 — a repo with two is a mistake worth seeing, since both
    * would be squash-merging into the same main branch.
    */
@@ -113,6 +116,12 @@ function canonicalPath(dir: string): string {
  * where a global orchestrator picks it up and starts what may be the repo's
  * second orchestrator, squash-merging into the same main branch as the first.
  *
+ * A linked worktree the walk finds is folded onto its MAIN checkout first, as
+ * `repoRowRoot` folds a session's cwd, and kept only if THAT sits under the
+ * root — so `git worktree add ../agendo-feat` is the agendo row, not a phantom
+ * of its own, and a worktree of a repo outside the scope adds no row whose
+ * orchestrator the scope cannot see.
+ *
  * BOTH scope roots are walked. `resolveScopeRoots` hands back the literal path
  * and its symlink-resolved twin precisely because either one can be the spelling
  * a recorded session cwd carries, so picking one and hoping is a coin flip on the
@@ -122,7 +131,7 @@ function canonicalPath(dir: string): string {
 function scopedCheckouts(scope: SessionScope | null): string[] {
   if (!scope || scope.repo) return [];
   return scope.roots.flatMap((root) =>
-    discoverGitReposUnder(root).map((r) => r.root).filter((r) => isUnderRoot(r, root)),
+    discoverGitReposUnder(root).map((r) => mainCheckoutOf(r.root)).filter((r) => isUnderRoot(r, root)),
   );
 }
 
@@ -144,8 +153,24 @@ export function addSession(row: RepoRow, s: Pick<AgentSession, "id">, running: b
   if (running) row.hasRunningOrchestrator = true;
 }
 
+/**
+ * The row a session in `cwd` is counted into: its repo's MAIN checkout. A
+ * worktree folds back onto the repository it belongs to — under
+ * `.claude/worktrees/` (`repoRootForCwd` already folds those) or anywhere else
+ * (`mainCheckoutOf`) — the same repo the orchestrator rule files it under, so
+ * an orchestrator running in a worktree elsewhere still makes its repo managed.
+ */
+export function repoRowRoot(cwd: string): string {
+  return mainCheckoutOf(repoRootForCwd(cwd));
+}
+
 /** The rows the session index can see: one per repo root that hosted an in-scope session. */
-function sessionRows(opts: ListReposOptions, sessions: AgentSession[], live: Set<string>, roles: Map<string, OrchestratorRole>): Map<string, RepoRow> {
+function sessionRows(
+  opts: ListReposOptions,
+  sessions: AgentSession[],
+  live: Set<string>,
+  marks: Pick<OrchestratorFacts, "roles" | "cwdRoles">,
+): Map<string, RepoRow> {
   const inScope = scopeFilter(opts.scope);
   const byRoot = new Map<string, RepoRow>();
   for (const s of sessions) {
@@ -158,17 +183,23 @@ function sessionRows(opts: ListReposOptions, sessions: AgentSession[], live: Set
     // directory that is not a repository, over and over. Where its vantage point
     // DOES sit inside a checkout, the alternative failure is quieter and no
     // better: its session inflates that repo's counts.
-    if (roles.get(s.id) === "global") continue;
+    //
+    // A role is read as `resume` reads it (`recordedRole`): by id, or — for a
+    // Codex session, which has no id until its rollout lands — by its cwd mark.
+    // An id-only read lists a repo whose orchestrator runs on Codex as having
+    // none, and the global orchestrator starts it a second.
+    const role = recordedRole(s, marks);
+    if (role === "global") continue;
     // A worktree folds back onto the repository it belongs to — otherwise every
     // worktree would show up as an unmanaged repo of its own, which is the exact
-    // opposite of what this listing is for.
-    const root = repoRootForCwd(s.cwd);
+    // opposite of what this listing is for (see `repoRowRoot`).
+    const root = repoRowRoot(s.cwd);
     let row = byRoot.get(root);
     if (!row) {
       row = emptyRow(root);
       byRoot.set(root, row);
     }
-    addSession(row, s, live.has(sessionName(s)), roles.get(s.id));
+    addSession(row, s, live.has(sessionName(s)), role);
   }
   return byRoot;
 }
@@ -218,7 +249,7 @@ export function emptyMessage(scope: SessionScope | null): string {
 
 export const REPO_HEADER = ["repo".padEnd(24), "sessions".padEnd(8), "running".padEnd(7), "orchestrator".padEnd(12), "root"].join("  ");
 
-/** One table line; the orchestrator column shows the best one, running before idle. */
+/** One table line; the orchestrator column shows the one `O` opens. */
 export function formatRepoRow(r: RepoRow): string {
   const best = r.orchestrators[0];
   return [
@@ -240,14 +271,16 @@ export function formatRepoRow(r: RepoRow): string {
  */
 export async function runListRepos(opts: ListReposOptions): Promise<void> {
   const index = await SessionIndex.build();
-  const { live } = refreshLiveTmux(index.all);
-  const roles = orchestratorRoles();
+  const t = refreshLiveTmux(index.all);
+  const facts = orchestratorFacts({ live: t.live, placeholders: t.livePlaceholders, windows: t.liveWindows, placeholderWindows: t.placeholderWindows });
   flushWarnings("list repos");
 
-  const byRoot = sessionRows(opts, index.all, live, roles);
+  const byRoot = sessionRows(opts, index.all, t.live, facts);
   addWalkedCheckouts(byRoot, opts.scope);
   const rows = [...byRoot.values()].sort(byNeed);
-  for (const r of rows) r.orchestrators.sort((a, b) => Number(b.running) - Number(a.running));
+  // The order `O` picks THE orchestrator in, so the first named here is the one it opens.
+  const rank = recordedRanks(index.all, facts);
+  for (const r of rows) r.orchestrators.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
 
   if (opts.json) {
     await printJson(rows);

@@ -1,8 +1,9 @@
 import { launchFresh, launchGlobalOrchestrator, launchNewSession, runInline, type OpenPlan } from "../../launch/index.ts";
 import { createWorktree, checkoutWorktree, freeWorktreeBranch } from "../../repositories/worktree/index.ts";
-import { globalOrchestratorCwd, isGitCheckout, type RepoInfo } from "../../repositories/index.ts";
+import { ensureRepoAtTop, globalOrchestratorCwd, isGitCheckout, type RepoInfo } from "../../repositories/index.ts";
 import { openUrl } from "../../runtime/browser.ts";
 import { freeTarget, orchestratorTarget, type FreshTarget } from "../models/targets.ts";
+import { makeOrchestratorFlow } from "./orchestratorFlow.ts";
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { AgentSource } from "../../shared/types.ts";
 import type { WindowTags } from "../../runtime/tmux/index.ts";
@@ -21,6 +22,8 @@ interface FlowDeps {
   setNotice: (n: string | null) => void;
   setBusy: (b: string | null) => void;
   setCloneNote: (n: string | null) => void;
+  /** Go to `root`'s existing orchestrator and return true, or return false when it has none. */
+  openExisting: (root: string) => boolean;
 }
 
 /**
@@ -46,6 +49,9 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
   // After the agent is chosen, resolve where to run: PRs check out their branch
   // as soon as the repo is known; work items prompt for a new branch name.
   const proceedFresh = (target: FreshTarget, agent: AgentSource) => {
+    // An orchestrator for the scope's own repo: the repo is already known, so
+    // there is no picker to show (`ensureRepoAtTop` covers a repo with no sessions yet).
+    if (target.repoRoot) return chooseRepo(target, ensureRepoAtTop(d.model?.repos ?? [], target.repoRoot)[0], agent);
     const repo = target.preferRepo ? d.model?.repos.find((r: RepoInfo) => r.name === target.preferRepo) : undefined;
     if (target.kind === "pr") {
       if (repo) return startCheckout(target, repo, agent);
@@ -71,6 +77,9 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
     agent: AgentSource,
     seed?: string,
   ) => {
+    // One repo, one orchestrator — checked again at the last moment, since one
+    // may have been started (by the CLI, or another launcher) since the repo was picked.
+    if (target.orchestrator && d.openExisting(repo.root)) return;
     // A manual "new session" assigns its own session id (so it gets a canonical,
     // attachable `cl-new-<id>` window); work-item / PR launches keep their
     // item-named target. Both run the chosen agent in the resolved directory.
@@ -139,6 +148,8 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
   // this one function, so a cloned repo takes the exact same path as one that was
   // already on disk; there is no second session-creation flow.
   const chooseRepo = (target: FreshTarget, repo: RepoInfo, agent: AgentSource) => {
+    // A repo that already has an orchestrator gets that one, not a second.
+    if (target.orchestrator && d.openExisting(repo.root)) return;
     if (target.kind === "pr") return startCheckout(target, repo, agent);
     // Default to "New git worktree" (cursor 0) only where one can exist and makes
     // sense. Two cases point at "Main repo checkout" (cursor 1) instead; both
@@ -174,6 +185,41 @@ function makeLaunchRoutes(d: FlowDeps, open: (plan: OpenPlan) => void) {
 }
 
 /**
+ * Start the GLOBAL orchestrator: the one coordinator that belongs to no repo
+ * and talks only to the per-repo orchestrators (see src/orchestration/global.ts).
+ *
+ * Unlike every other entry point here it opens no picker at all — there is no
+ * repo, worktree or branch to choose, so a wizard would be three screens of
+ * nothing. It launches on the keystroke and reports where it landed, because
+ * the default layout (a pane beside this menu) falls back to a window on a
+ * narrow terminal and the user has to be told which one they got.
+ *
+ * Agent is Claude only from this entry point — Codex is orchestrator-eligible
+ * (see `orchestratorAgentClash`) but reaching it here would need the same
+ * "four screens of nothing" wizard this function exists to avoid, for a mode
+ * launched far less often than the per-repo one. A Codex global orchestrator
+ * is reachable via the CLI (`agendo launch --global-orchestrator --codex`) —
+ * a known, deliberate gap, not an oversight.
+ */
+function startGlobalOrchestrator(d: {
+  scopedRepos: RepoInfo[];
+  filterRoot: string | null;
+  hostSession?: string;
+  open: (plan: OpenPlan) => void;
+  setNotice: (n: string | null) => void;
+}): void {
+  const cwd = globalOrchestratorCwd(d.scopedRepos.map((r) => r.root), process.cwd(), d.filterRoot);
+  const res = launchGlobalOrchestrator(cwd, { hostSession: d.hostSession });
+  if (!res.plan) {
+    d.setNotice(`Global orchestrator failed to start: ${res.error ?? "unknown error"}`);
+    return;
+  }
+  const where = { pane: "beside this menu", window: "in its own window", session: "in its own tmux session" }[res.layout];
+  d.open(res.plan);
+  d.setNotice(`▸ global orchestrator started ${where}${res.layoutNote ? ` — ${res.layoutNote}` : ""}`);
+}
+
+/**
  * Starting a session: pick the agent, pick the repo, resolve where it runs
  * (worktree, main checkout, or a PR's existing branch), launch it.
  *
@@ -193,6 +239,7 @@ export function makeSessionFlow({
   model,
   scopedRepos,
   filterRoot,
+  scopeRepo,
   hostSession,
   cloneNoteRef,
   onOpen,
@@ -207,6 +254,8 @@ export function makeSessionFlow({
   scopedRepos: RepoInfo[];
   /** The launcher's path scope, if it has one — the global orchestrator's cwd. */
   filterRoot: string | null;
+  /** The repo the scope IS, when it is one (see scopeRepo.ts) — where `O` and `G` both go. */
+  scopeRepo: string | null;
   /** The tmux session hosting the menu, whose window the pane layout splits. */
   hostSession?: string;
   cloneNoteRef: { current: string | null };
@@ -265,50 +314,36 @@ export function makeSessionFlow({
     setMode({ kind: "agent", target: freeTarget(), cursor: 0 });
   };
 
+  // `open` is defined below; the wrapper reads it when called, not now.
+  const { openExisting } = makeOrchestratorFlow({ model, open: (plan) => open(plan), setMode, setNotice });
+
   /**
    * Open the orchestrator flow: the same agent → repo → worktree → name steps as
    * a plain new session, launching with the orchestrator instructions injected.
    * The agent picker offers Claude and Codex — not Copilot, which can't carry
    * them (see `agentChoicesFor`).
+   *
+   * Scoped to one repo, that repo's existing orchestrator is opened instead when
+   * it has one, and a new one skips the repo picker. Elsewhere the repo picker
+   * runs and `chooseRepo` makes the same check once a repo is picked.
    */
   const enterOrchestrator = () => {
     setNotice(null);
     setCloneNote(null);
     cloneNoteRef.current = null;
     if (!haveRepos()) return;
-    setMode({ kind: "agent", target: orchestratorTarget(), cursor: 0 });
+    if (scopeRepo && openExisting(scopeRepo)) return;
+    setMode({ kind: "agent", target: { ...orchestratorTarget(), repoRoot: scopeRepo ?? undefined }, cursor: 0 });
   };
 
-  /**
-   * Start the GLOBAL orchestrator: the one coordinator that belongs to no repo
-   * and talks only to the per-repo orchestrators (see src/orchestration/global.ts).
-   *
-   * Unlike every other entry point here it opens no picker at all — there is no
-   * repo, worktree or branch to choose, so a wizard would be three screens of
-   * nothing. It launches on the keystroke and reports where it landed, because
-   * the default layout (a pane beside this menu) falls back to a window on a
-   * narrow terminal and the user has to be told which one they got.
-   *
-   * Agent is Claude only from this entry point — Codex is orchestrator-eligible
-   * (see `orchestratorAgentClash`) but reaching it here would need the same
-   * "four screens of nothing" wizard this function exists to avoid, for a mode
-   * launched far less often than the per-repo one. A Codex global orchestrator
-   * is reachable via the CLI (`agendo launch --global-orchestrator --codex`) —
-   * a known, deliberate gap, not an oversight.
-   */
   const enterGlobalOrchestrator = () => {
+    // Scoped to ONE repo there is nothing above it to coordinate: `G` is that
+    // repo's orchestrator, exactly as `O` is.
+    if (scopeRepo) return enterOrchestrator();
     setNotice(null);
     setCloneNote(null);
     cloneNoteRef.current = null;
-    const cwd = globalOrchestratorCwd(scopedRepos.map((r) => r.root), process.cwd(), filterRoot);
-    const res = launchGlobalOrchestrator(cwd, { hostSession });
-    if (!res.plan) {
-      setNotice(`Global orchestrator failed to start: ${res.error ?? "unknown error"}`);
-      return;
-    }
-    const where = { pane: "beside this menu", window: "in its own window", session: "in its own tmux session" }[res.layout];
-    open(res.plan);
-    setNotice(`▸ global orchestrator started ${where}${res.layoutNote ? ` — ${res.layoutNote}` : ""}`);
+    startGlobalOrchestrator({ scopedRepos, filterRoot, hostSession, open, setNotice });
   };
 
   // Open a prepared plan. Outside tmux we unmount and let index.tsx attach;
@@ -332,7 +367,7 @@ export function makeSessionFlow({
 
   return {
     ...makeLaunchRoutes(
-      { model, scopedRepos, cloneNoteRef, onOpen, exit, reload, setMode, setNotice, setBusy, setCloneNote },
+      { model, scopedRepos, cloneNoteRef, onOpen, exit, reload, setMode, setNotice, setBusy, setCloneNote, openExisting },
       open,
     ),
     enterFresh,

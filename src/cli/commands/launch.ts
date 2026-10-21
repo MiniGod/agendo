@@ -15,6 +15,7 @@ import {
   type GlobalLaunchResult, type LaunchResult, type OpenPlan,
 } from "../../launch/index.ts";
 import { adoptionNotice, launchSummary, recordLaunch } from "./launchReport.ts";
+import { reuseRepoOrchestrator } from "./launchExisting.ts";
 import { SessionIndex } from "../../sessions/index.ts";
 import { discoverRepos, globalOrchestratorCwd } from "../../repositories/index.ts";
 
@@ -385,6 +386,8 @@ export async function runLaunch(): Promise<void> {
   const args = parseLaunchArgs(process.argv.slice(3));
   validateLaunchArgs(args);
   const prompt = args.positionals.join(" ").trim();
+  // One repo, one orchestrator: a repo that has one gets it back, not a second.
+  if (args.orchestrator && !args.global && (await reuseRepoOrchestrator(args, prompt))) process.exit(0);
   // Resolved once so the layout report below can read it off the same value the
   // launch produced — `"layout" in result` would widen the union and lose it.
   const globalRes = args.global ? await launchGlobal(prompt, args.layout, args.unattended, args.agent) : null;

@@ -16,6 +16,8 @@ import { resolveWindowSession } from "../../runtime/restore/index.ts";
 import { scopeFilter, scopeNote, type SessionScope } from "../../app/scope.ts";
 import { loadModel, refreshLiveTmux, type LoadedModel } from "../../app/model/index.ts";
 import { orchestratorRoles, type OrchestratorRole } from "../../orchestration/index.ts";
+import { orchestratorCwdRoles } from "../../orchestration/cwdMarks.ts";
+import { recordedRole } from "../../orchestration/repoOrchestrator.ts";
 import { printJson } from "../output.ts";
 import type { AgentSession, BranchSyncReader } from "../../shared/types.ts";
 import { workflowStatus } from "../../orchestration/workflows.ts";
@@ -180,6 +182,7 @@ export async function runList(opts: ListOptions): Promise<void> {
   const ctx: ListRowContext = {
     live, liveKinds, liveWindows, livePlaceholders,
     roles: orchestratorRoles(),
+    cwdRoles: orchestratorCwdRoles(),
     linkOf: (s) => model?.sessionLinks.get(`${s.source}:${s.id}`),
     thresholdMs,
     readBranchSync: opts.json ? opts.readBranchSync : null,
@@ -329,8 +332,9 @@ function runPlainList(
   inScope: (s: AgentSession) => boolean,
   thresholdMs: number,
 ): void {
-  // One read of the marker file for the whole listing, not one per row.
-  const roles = orchestratorRoles();
+  // One read of the marker files for the whole listing, not one per row — the
+  // ids, and the cwds a Codex orchestrator is recorded by (see `recordedRole`).
+  const marks = { roles: orchestratorRoles(), cwdRoles: orchestratorCwdRoles() };
   // One read of the managed panes, shared by both buckets below — a paused
   // session and a running one are two disjoint views of the same tmux scan.
   const managed = liveManagedPaths();
@@ -340,12 +344,12 @@ function runPlainList(
   const rows: string[][] = [];
   const summary: OrchestratorSummaryRow[] = [];
   for (const listed of listedSessions(managed, index, inScope)) {
-    const role = roles.get(listed.s.id) ?? null;
+    const role = recordedRole(listed.s, marks) ?? null;
     summary.push({ shortId: shortId(listed.s.id), cwd: listed.s.cwd, role, running: true });
     rows.push(plainRow(listed, role, thresholdMs));
   }
   for (const s of pausedSessions(managed, index, inScope)) {
-    const role = roles.get(s.id) ?? null;
+    const role = recordedRole(s, marks) ?? null;
     // Honest ●/○ vocabulary downstream: a paused orchestrator is reported
     // `running: false`, same as a closed one — `printOrchestratorSummary`
     // never learns a third glyph exists.
@@ -359,7 +363,7 @@ function runPlainList(
   const rw = readyWidth(rows.map((r) => r[1]));
   for (const [dot, ready, ...rest] of rows) console.log([dot, ready.padEnd(rw), ...rest].join("  ").trimEnd());
   printOrchestratorSummary(
-    withRememberedOrchestrators(summary, index.all.filter(inScope), roles, shortId),
+    withRememberedOrchestrators(summary, index.all.filter(inScope), marks, shortId),
   );
 }
 

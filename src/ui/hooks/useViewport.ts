@@ -18,12 +18,15 @@ export function useViewport({
   view,
   searchFocus,
   filterRoot,
+  pinnedLines = 0,
 }: {
   rows: Row[];
   cursor: number;
   view: View;
   searchFocus: "input" | "list" | null;
   filterRoot: string | null;
+  /** Rows the pinned orchestrator block takes above the list (see `pinnedLineCount`). */
+  pinnedLines?: number;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
   const { stdout } = useStdout();
@@ -37,10 +40,8 @@ export function useViewport({
   // Non-sessions views also reserve a line for the "viewing as / filter" status.
   // The search box (shown while a search is active) takes one extra line, and a
   // path-scoped launcher shows one scope line.
-  const pageSize = Math.max(
-    3,
-    termRows - (view === "sessions" ? 6 : 8) - (searchFocus ? 1 : 0) - (filterRoot ? 1 : 0),
-  );
+  const chrome = (view === "sessions" ? 6 : 8) + (searchFocus ? 1 : 0) + (filterRoot ? 1 : 0);
+  const { pageSize, pinsShown } = pageLayout(termRows, chrome, pinnedLines);
   useEffect(() => {
     setScrollTop((prev) => {
       let next = prev;
@@ -54,5 +55,21 @@ export function useViewport({
   const moreAbove = scrollTop;
   const moreBelow = Math.max(0, rows.length - (scrollTop + pageSize));
 
-  return { scrollTop, visible, moreAbove, moreBelow };
+  return { scrollTop, visible, moreAbove, moreBelow, pinsShown };
+}
+
+/** The fewest list rows a page ever shows. */
+const MIN_PAGE = 3;
+
+/**
+ * How the page and the Sessions view's pinned orchestrator block share what the
+ * `chrome` lines leave of the terminal. The block sits outside the rows, so its
+ * lines come off the page — but it gives way first: on a terminal too short for
+ * both it shows only its first `pinsShown` lines (the header leads), rather than
+ * stacking on top of the page's floor and pushing the frame past the screen,
+ * which breaks Ink's redraw.
+ */
+export function pageLayout(termRows: number, chrome: number, pinnedLines: number): { pageSize: number; pinsShown: number } {
+  const pinsShown = Math.max(0, Math.min(pinnedLines, termRows - chrome - MIN_PAGE));
+  return { pageSize: Math.max(MIN_PAGE, termRows - chrome - pinsShown), pinsShown };
 }

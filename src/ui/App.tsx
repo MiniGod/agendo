@@ -24,6 +24,8 @@ import { useCloneFlow } from "./hooks/useCloneFlow.ts";
 import { useModelLoader } from "./hooks/useModelLoader.ts";
 import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
 import { useRepoScope } from "./hooks/useRepoScope.ts";
+import { useOrchestratorPins } from "./hooks/useOrchestratorPins.ts";
+import { shownPins } from "./models/orchestratorPins.ts";
 import { useViewport } from "./hooks/useViewport.ts";
 import { useRowModel } from "./hooks/useRowModel.ts";
 import { useSearch } from "./hooks/useSearch.ts";
@@ -31,6 +33,7 @@ import { useLocalRescan } from "./hooks/useLocalRescan.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { dispatchKey } from "./keys/chain.ts";
 import { ListScreen } from "./screens/ListScreen.tsx";
+import { pinnedLineCount } from "./screens/listLines.tsx";
 import { renderLoadState, renderMode } from "./screens/ModeScreens.tsx";
 import type { AgentSession, Identity, ProviderName } from "../shared/types.ts";
 
@@ -177,12 +180,14 @@ export default function App({
   const settingsItems: Array<"provider" | "identity" | "autoResume"> = ["provider", "identity", "autoResume"];
   const providerLabel = PROVIDER_INFO.find((p) => p.name === provider)?.label ?? provider;
 
-  const { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo } = useRepoScope({
+  const { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo, scopeRepo } = useRepoScope({
     model,
     filterRoot,
     globalView,
     cloned,
   });
+  // Who coordinates each repo in scope, pinned above the Sessions rows.
+  const pins = useOrchestratorPins({ model, scopeRepo, scoped, filterRoot, discoveredRepos });
 
   // The clone step's state, plus the cloning screen's elapsed-seconds ticker —
   // both in ./hooks/useCloneFlow.ts, called from the line the ticker occupied.
@@ -219,12 +224,13 @@ export default function App({
 
   const panes = useReadinessPoll({ model, autoResume });
 
-  const { scrollTop, visible, moreAbove, moreBelow } = useViewport({
+  const { scrollTop, visible, moreAbove, moreBelow, pinsShown } = useViewport({
     rows,
     cursor,
     view,
     searchFocus,
     filterRoot,
+    pinnedLines: pinnedLineCount(view, pins),
   });
 
   const move = (dir: 1 | -1) => {
@@ -289,7 +295,7 @@ export default function App({
     enterFresh, enterNewSession, enterOrchestrator, enterGlobalOrchestrator,
     proceedFresh, open, startFresh, openInBrowser, chooseRepo,
   } = makeSessionFlow({
-    model, scopedRepos, filterRoot, hostSession, cloneNoteRef, onOpen, exit, reload,
+    model, scopedRepos, filterRoot, scopeRepo, hostSession, cloneNoteRef, onOpen, exit, reload,
     setMode, setNotice, setBusy, setCloneNote,
   });
 
@@ -379,6 +385,7 @@ export default function App({
       panes={panes}
       loadState={modelLoadState}
       retrying={retrying}
+      pins={shownPins(pins, pinsShown)}
     />
   );
 }

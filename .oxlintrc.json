@@ -145,7 +145,11 @@
         // LOWERED 166 -> 153: the `send` section of `llmGuide` is now `sendGuide`,
         // and `llmGuide` is 138. The holder is src/ui/actions/sessionFlow.ts
         // `makeSessionFlow`.
-        "max-lines-per-function": ["error", { "max": 153, "skipBlankLines": false, "skipComments": false }], // src/ui/actions/sessionFlow.ts makeSessionFlow
+        // LOWERED 153 -> 149: `makeSessionFlow` is 142 (`makeLaunchRoutes` beside
+        // it 138) since one-orchestrator-per-repo reworked the flow. The holder is
+        // src/orchestration/index.ts `orchestratorSystemPrompt`; 148 fails against
+        // the current tree.
+        "max-lines-per-function": ["error", { "max": 149, "skipBlankLines": false, "skipComments": false }], // src/orchestration/index.ts orchestratorSystemPrompt
         // Was also src/cli/wait/index.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/sessions/activity/index.ts; both are now
         // walks over small per-record handlers under src/sessions/activity/, the worst of

@@ -191,12 +191,14 @@ function handleSessionStartKeys(
   if (input === "n") { ctx.enterNewSession(); return true; }
 
   // new REPO orchestrator — a session that delegates every unit of work in one
-  // repo to further background sessions instead of implementing.
+  // repo to further background sessions instead of implementing. Or that repo's
+  // existing one: a repo never gets a second (src/ui/actions/orchestratorFlow.ts).
   if (input === "O") { ctx.enterOrchestrator(); return true; }
 
   // the GLOBAL orchestrator — one level up again: it coordinates the per-repo
   // orchestrators and never touches a repo itself. Launches on the keystroke
-  // (no repo or worktree left to pick) beside this menu.
+  // (no repo or worktree left to pick) beside this menu. Scoped to ONE repo it
+  // is that repo's orchestrator instead, exactly as `O` (src/repositories/scopeRepo.ts).
   if (input === "G") { ctx.enterGlobalOrchestrator(); return true; }
 
   return false;

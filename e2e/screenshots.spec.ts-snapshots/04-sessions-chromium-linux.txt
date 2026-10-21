@@ -1,5 +1,7 @@
 agendo ⟨bold⟩[Azure DevOps]  ⟨cyan⟩ 1 Work items ⟨dim⟩  2 PRs ⟨dim⟩  3 Sessions ⟨black,bg:cyan,bold⟩
 ↑/↓ move · → expand · ⇥ view · g ungroup · s sort: updated · / search · n new · O orch · G global · enter resume · p/x/…⟨dim⟩
+▌ Orchestrators⟨magenta,bold⟩  – 3 none  ·  O start/open⟨bold,dim⟩
+  none in: applib, appweb, standalone⟨dim⟩
  ⟨dim⟩
 ＋ new session⟨black,bg:cyan,bold⟩
 ▌ Running now⟨blue,bold⟩  (1) — enter to attach⟨bold,dim⟩

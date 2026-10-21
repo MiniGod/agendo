@@ -4570,28 +4570,43 @@ test("an orchestrator launched from a subdirectory still runs at the repo root",
   expect(r.stdout).not.toContain(`(in ${sub})`);
 });
 
-test("--orchestrator --worktree opts into isolation, and a second one gets its OWN worktree", async ({ mock }) => {
-  // Worktree isolation is now opt-in for orchestrators. When taken, the role-named
-  // slug is identical for every unnamed one, and `createWorktree` treats an
-  // existing path as success — so without stepping past it the second would run in
-  // the first one's checkout on its branch.
+test("--orchestrator --worktree opts into isolation, and a second launch reuses the first rather than a second worktree", async ({ mock }) => {
+  // Worktree isolation is opt-in for orchestrators. Taking it does not buy a
+  // second one: a repo has ONE orchestrator, wherever it runs, so the next
+  // launch finds the first — live, but too new to have a transcript — and
+  // reports it instead of creating `worktree-orchestrator-2` beside it.
   const repo = mockRepo(mock.home);
   const first = agendoIn(repo, mock.env, "launch", "--orchestrator", "--worktree", "Goal A");
   expect(first.status).toBe(0);
+  expect(first.stdout).toMatch(/\(in .+\)/);
   const second = agendoIn(repo, mock.env, "launch", "--orchestrator", "--worktree", "Goal B");
   expect(second.status).toBe(0);
+  expect(second.stdout).toContain("▸ standalone already has an orchestrator (starting)");
+  expect(second.stdout).toContain("NOT delivered");
+  expect(second.stdout).not.toMatch(/\(in .+\)/);
 
-  // Distinct worktree directories…
-  const dirs = [first, second].map((r) => r.stdout.match(/\(in (.+?)\)/)?.[1]);
-  expect(dirs[0]).toBeTruthy();
-  expect(dirs[1]).toBeTruthy();
-  expect(dirs[0]).not.toBe(dirs[1]);
-  // …from distinct branches: the base slug, then the -2 suffix. Compared as parsed
-  // argv entries rather than substrings, since "worktree-orchestrator" is itself a
-  // prefix of "worktree-orchestrator-2".
+  // One worktree, one launch.
   const branches = new Set(gitArgv(await mock.callLog()).flat());
   expect(branches.has("worktree-orchestrator")).toBe(true);
+  expect(branches.has("worktree-orchestrator-2")).toBe(false);
+  expect((await mock.tmuxLog()).filter((a) => a[0] === "new-session" && a.includes("claude"))).toHaveLength(1);
+});
+
+test("an orchestrator worktree nobody is recorded in is stepped past, not reused", async ({ mock }) => {
+  // The role-named slug is identical for every unnamed orchestrator, and
+  // `createWorktree` treats an existing path as success — so a leftover
+  // `orchestrator` worktree (its session long gone and forgotten) would hand the
+  // new one somebody else's checkout and branch without the -2 step.
+  const repo = mockRepo(mock.home);
+  await mkdir(join(repo, ".claude", "worktrees", "orchestrator"), { recursive: true });
+  const r = agendoIn(repo, mock.env, "launch", "--orchestrator", "--worktree", "Goal B");
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain(`(in ${join(repo, ".claude", "worktrees", "orchestrator-2")})`);
+  // Compared as parsed argv entries rather than substrings, since
+  // "worktree-orchestrator" is itself a prefix of "worktree-orchestrator-2".
+  const branches = new Set(gitArgv(await mock.callLog()).flat());
   expect(branches.has("worktree-orchestrator-2")).toBe(true);
+  expect(branches.has("worktree-orchestrator")).toBe(false);
 });
 
 test("agendo launch --name overrides the orchestrator's default slug", async ({ mock }) => {

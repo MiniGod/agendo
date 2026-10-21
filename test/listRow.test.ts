@@ -97,6 +97,12 @@ describe("listRow", () => {
     expect(row).toMatchObject({ orchestrator: true, role: "global", repoRoot: null, repoName: null });
   });
 
+  test("a Codex orchestrator, recorded by its cwd, reads as one — and a Claude session in that cwd does not", () => {
+    const cwdRoles = new Map([["/w/repo", "repo" as const]]);
+    expect(listRow(session("cx", { source: "codex" }), ctxIn({ cwdRoles }))).toMatchObject({ orchestrator: true, role: "repo" });
+    expect(listRow(session("cl"), ctxIn({ cwdRoles }))).toMatchObject({ orchestrator: false, role: null });
+  });
+
   test("a paused row carries state alongside the unchanged running flag", () => {
     const s = session("abcdef123456-0000-0000-0000-000000000000");
     const canon = "cl-claude-abcdef123456";

@@ -4,8 +4,11 @@
 // and reads the table; it never sees an empty survey (both empty messages were
 // the lines no spec reached), never sorts two repos that differ only in idle
 // orchestrators, and never prints an idle orchestrator's row.
-import { describe, expect, test } from "bun:test";
-import { addSession, byNeed, emptyMessage, formatRepoRow, REPO_HEADER, type RepoRow } from "../src/cli/list/repositories.ts";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { addSession, byNeed, emptyMessage, formatRepoRow, REPO_HEADER, repoRowRoot, type RepoRow } from "../src/cli/list/repositories.ts";
 
 const row = (p: Partial<RepoRow> = {}): RepoRow => ({
   root: "/r/a", name: "a", sessions: 0, running: 0, orchestrators: [], hasOrchestrator: false, hasRunningOrchestrator: false, ...p,
@@ -22,6 +25,29 @@ describe("addSession", () => {
     addSession(r, { id: "orch-live-0002" }, true, "repo");
     expect(r).toMatchObject({ sessions: 4, running: 2, hasOrchestrator: true, hasRunningOrchestrator: true });
     expect(r.orchestrators.map((o) => [o.id, o.running])).toEqual([["orch-idle-0001", false], ["orch-live-0002", true]]);
+  });
+});
+
+describe("repoRowRoot", () => {
+  // Real checkouts: the fold reads `.git` pointers off the disk.
+  const scratch = mkdtempSync(join(tmpdir(), "agendo-rowroot-"));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const repo = join(scratch, "x");
+  mkdirSync(join(repo, ".git", "worktrees", "x-hotfix"), { recursive: true });
+  writeFileSync(join(repo, ".git", "worktrees", "x-hotfix", "commondir"), "../..\n");
+  const linked = join(scratch, "elsewhere", "x-hotfix");
+  mkdirSync(join(linked, "src"), { recursive: true });
+  writeFileSync(join(linked, ".git"), `gitdir: ${join(repo, ".git", "worktrees", "x-hotfix")}\n`);
+  const nested = join(repo, ".claude", "worktrees", "feat");
+  mkdirSync(nested, { recursive: true });
+
+  test("a session anywhere in a repo, or in any worktree of it, counts into the main checkout's row", () => {
+    expect(repoRowRoot(repo)).toBe(repo);
+    expect(repoRowRoot(nested)).toBe(repo);
+    // Outside `.claude/worktrees/` too — or an orchestrator running there would
+    // leave its repo reading as unmanaged, beside a phantom row of its own.
+    expect(repoRowRoot(linked)).toBe(repo);
+    expect(repoRowRoot(join(linked, "src"))).toBe(repo);
   });
 });
 

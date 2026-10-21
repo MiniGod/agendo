@@ -7,6 +7,7 @@ import {
   isGitCheckout,
   type RepoInfo,
 } from "../../repositories/index.ts";
+import { scopeRepoRoot } from "../../repositories/scopeRepo.ts";
 import { isUnderRoot, normalizeCwd } from "../../app/context.ts";
 import type { FreshTarget } from "../models/targets.ts";
 
@@ -152,7 +153,13 @@ export function useRepoScope({
   // stat the whole list per keypress.
   const anyHostableRepo = useMemo(() => worktreeRepos.some((r) => isGitCheckout(r.root)), [worktreeRepos]);
 
+  // The repo the scope IS, when it is one — a checkout's root, a directory in
+  // it, or a worktree of it; null for a folder of repos and for the global view.
+  // That one fact turns `G` into `O` and the pinned orchestrator block into a
+  // single line (see scopeRepo.ts). Memoized: it walks the disk.
+  const scopeRepo = useMemo(() => (scoped ? scopeRepoRoot(filterRoot!) : null), [scoped, filterRoot]);
+
   // `worktreeRepos` stays internal: reposForTarget and anyHostableRepo are the
   // two answers callers actually want, and App never destructured it.
-  return { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo };
+  return { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo, scopeRepo };
 }
