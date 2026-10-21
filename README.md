@@ -523,8 +523,10 @@ PR and work-item numbers are looked up in the backend agendo is currently using
 (Azure DevOps or GitHub), the same one `agendo list --pr` reads. A GitHub number can
 name PRs or issues in several repositories at once. When more than one of them has
 sessions, `focus` refuses rather than guess, and names them; use `focus <id>` then.
-Add `--repo <repo>` (`owner/name`, or a bare repo name) to narrow the lookup to that
-repository's sessions, the way `agendo list --repo` does. The user-script always does
+Add `--repo <repo>` (`owner/name`, or a bare repo name) to narrow the lookup to the PR
+or issue in that repository. It goes by the repository the PR or issue itself belongs to,
+not by where its sessions are checked out, so a clone under another directory name still
+matches. The user-script always does
 this from the page URL. It matters on GitHub, where every repository numbers its own
 PRs and issues; Azure DevOps PR ids are unique per organisation, so there it only
 breaks ties. A link from a GitHub page while agendo uses Azure DevOps, or the other

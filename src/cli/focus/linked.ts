@@ -9,6 +9,11 @@
 // the human to the wrong repo's agent. So the matches are grouped by the entity
 // they came from (its URL), and two different entities with sessions is a
 // refusal, not a choice.
+//
+// A link's `repo=` narrows by the ENTITY's own repo — read off its URL (or a
+// PR's repository name) — never by where its sessions' checkouts happen to sit:
+// a clone's directory name need not be the remote repo's name, and a link from
+// the PR's own page must not miss a session because of it.
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import type { FocusTarget } from "./url.ts";
@@ -16,18 +21,44 @@ import type { FocusTarget } from "./url.ts";
 /** One PR or work item the number matched, keyed by what makes it THAT one. */
 export interface LinkedMatch {
   key: string;
+  /** The entity's repo: `owner/name` on GitHub, the repo name on Azure DevOps; null when unknown. */
+  repo: string | null;
   sessions: AgentSession[];
 }
 
 type LinkedModel = Pick<LoadedModel, "linkedPrs" | "orphanPrs" | "reviewPrs" | "current" | "other" | "prLinked">;
 
 /**
- * The matches with only the sessions in `inRepo` — how a link's `repo=` narrows
- * the lookup, the same predicate `list --repo` filters by. A match left with no
- * sessions drops out of the ambiguity check with them.
+ * The matches whose entity is in `repo` — how a link's `repo=` narrows the
+ * lookup. Two slugs must match whole; a bare name on either side matches the
+ * other's name half. An entity whose repo is unknown is kept: nothing says it is in
+ * another repo, and the ambiguity check still guards the choice.
  */
-export function narrowToRepo(matches: LinkedMatch[], inRepo: (s: AgentSession) => boolean): LinkedMatch[] {
-  return matches.map((m) => ({ key: m.key, sessions: m.sessions.filter(inRepo) }));
+export function narrowToRepo(matches: LinkedMatch[], repo: string): LinkedMatch[] {
+  return matches.filter((m) => m.repo === null || sameRepo(m.repo, repo));
+}
+
+/** Whether entity repo `have` is the `want` a link or `--repo` named, case-insensitively. */
+export function sameRepo(have: string, want: string): boolean {
+  const h = have.toLowerCase();
+  const w = want.toLowerCase();
+  if (h.includes("/") && w.includes("/")) return h === w;
+  return nameOf(h) === nameOf(w);
+}
+
+/** The name half of an `owner/name`; a bare name is its own. */
+function nameOf(repo: string): string {
+  return repo.slice(repo.lastIndexOf("/") + 1);
+}
+
+/**
+ * The repo an entity URL names: the name after `_git/` in an Azure DevOps URL,
+ * else `owner/name` from a GitHub(-Enterprise) PR or issue URL; null otherwise.
+ */
+export function repoOfUrl(url: string): string | null {
+  const ado = /\/_git\/([^/]+)\//.exec(url);
+  if (ado) return ado[1];
+  return /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:pull|issues)\/\d+/.exec(url)?.[1] ?? null;
 }
 
 /** Every PR / work item in the model with this number, each with its sessions. */
@@ -35,11 +66,11 @@ export function linkedMatches(m: LinkedModel, target: Exclude<FocusTarget, { kin
   if (target.kind === "pr") {
     return [...m.linkedPrs, ...m.orphanPrs, ...m.reviewPrs]
       .filter((p) => p.id === target.id)
-      .map((p) => ({ key: p.url || `repo:${p.repositoryId}`, sessions: p.sessions }));
+      .map((p) => ({ key: p.url || `repo:${p.repositoryId}`, repo: repoOfUrl(p.url) ?? p.repositoryName ?? null, sessions: p.sessions }));
   }
   return [...m.current, ...m.other, ...m.prLinked]
     .filter((it) => it.id === target.id)
-    .map((it) => ({ key: it.url || `item:${it.id}`, sessions: it.sessions }));
+    .map((it) => ({ key: it.url || `item:${it.id}`, repo: repoOfUrl(it.url), sessions: it.sessions }));
 }
 
 export type LinkedSessions = { sessions: AgentSession[] } | { ambiguous: string[] };
@@ -49,7 +80,7 @@ export type LinkedSessions = { sessions: AgentSession[] } | { ambiguous: string[
  * or, when entities that differ both have sessions, the keys that collided.
  * The same entity listed twice (a PR both linked and awaiting review) is one.
  */
-export function resolveLinked(matches: LinkedMatch[]): LinkedSessions {
+export function resolveLinked(matches: Pick<LinkedMatch, "key" | "sessions">[]): LinkedSessions {
   const withSessions = matches.filter((m) => m.sessions.length > 0);
   const keys = [...new Set(withSessions.map((m) => m.key))];
   if (keys.length > 1) return { ambiguous: keys };

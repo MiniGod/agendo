@@ -375,7 +375,7 @@ test("url focuses through the same path as focus", async ({ mock }) => {
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
 });
 
-test("a link's repo narrows the lookup the way list --repo does", async ({ mock }) => {
+test("a link's repo narrows the lookup to the PR in that repo", async ({ mock }) => {
   await seed(mock);
   const elsewhere = await agendo(mock.env, "url", "agendo://focus?pr=5001&repo=acme/other");
   expect(elsewhere.code).not.toBe(0);

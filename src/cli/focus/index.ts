@@ -14,7 +14,7 @@ import {
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
-import { SessionIndex, repoScopeFilter } from "../../sessions/index.ts";
+import { SessionIndex } from "../../sessions/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import { currentModelOptions } from "../links.ts";
 import { flushWarnings } from "../warnings.ts";
@@ -53,7 +53,7 @@ async function loadFocusModel(target: FocusTarget): Promise<Awaited<ReturnType<t
 /** The sessions a PR / work item links to — refused when the number names more than one of them (see linked.ts). */
 async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>): Promise<AgentSession[]> {
   const matches = linkedMatches(await loadFocusModel(target), target);
-  const r = resolveLinked(target.repo ? narrowToRepo(matches, repoScopeFilter(target.repo)) : matches);
+  const r = resolveLinked(target.repo ? narrowToRepo(matches, target.repo) : matches);
   if ("sessions" in r) return r.sessions;
   return failLoudly(`${describeTarget(target)} is ambiguous — it matches ${r.ambiguous.join(" and ")}; name the repo (\`focus --repo <repo>\`) or the session (\`focus <session-id>\`)`);
 }

@@ -12,8 +12,8 @@
 // `repo` — a bare repo name (ADO) or one `owner/name` slug (GitHub) — is the one
 // optional extra, only after `pr` or `workItem` and only in that order. GitHub
 // numbers PRs and issues per repository, so without it `?pr=5` from repo A's
-// page could bring repo B's session forward. It narrows the lookup exactly as
-// `list --repo` does, and is shape-checked like everything else: a name that
+// page could bring repo B's session forward. It narrows the lookup to the PR or
+// issue in that repo (see linked.ts), and is shape-checked like everything else: a name that
 // starts with a letter, digit or `_` (never `.`/`-`, so no `..`, no flag), and
 // at most one `/`.
 //

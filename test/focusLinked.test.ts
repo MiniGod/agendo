@@ -2,7 +2,7 @@
 // throttle's arithmetic. A number is not always one entity — GitHub numbers per
 // repository — and the e2e fixtures never collide, so the refusal lives here.
 import { afterAll, describe, expect, test } from "bun:test";
-import { linkedMatches, narrowToRepo, resolveLinked } from "../src/cli/focus/linked.ts";
+import { linkedMatches, narrowToRepo, repoOfUrl, resolveLinked, sameRepo } from "../src/cli/focus/linked.ts";
 import { claimFloor, resumeWaitMs, STALE_LOCK_MS, URL_RESUME_GAP_MS } from "../src/cli/focus/throttle.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -40,13 +40,56 @@ describe("resolveLinked", () => {
 });
 
 describe("narrowToRepo", () => {
-  test("keeps only the sessions in the repo, so two repos' PR #5 stop being ambiguous", () => {
-    const a = { ...sess("a"), cwd: "/w/repo-a" } as AgentSession;
-    const b = { ...sess("b"), cwd: "/w/repo-b" } as AgentSession;
-    const matches = [{ key: "repo-a/5", sessions: [a] }, { key: "repo-b/5", sessions: [b] }];
-    expect(resolveLinked(matches)).toEqual({ ambiguous: ["repo-a/5", "repo-b/5"] });
-    expect(resolveLinked(narrowToRepo(matches, (s) => s.cwd === "/w/repo-b"))).toEqual({ sessions: [b] });
-    expect(resolveLinked(narrowToRepo(matches, () => false))).toEqual({ sessions: [] });
+  const a = sess("a");
+  const b = sess("b");
+  const matches = [
+    { key: "gh/acme/repo-a/5", repo: "acme/repo-a", sessions: [a] },
+    { key: "gh/acme/repo-b/5", repo: "acme/repo-b", sessions: [b] },
+  ];
+
+  test("keeps only the entity in the repo, so two repos' PR #5 stop being ambiguous", () => {
+    expect(resolveLinked(matches)).toEqual({ ambiguous: ["gh/acme/repo-a/5", "gh/acme/repo-b/5"] });
+    expect(resolveLinked(narrowToRepo(matches, "acme/repo-b"))).toEqual({ sessions: [b] });
+    expect(resolveLinked(narrowToRepo(matches, "Repo-B"))).toEqual({ sessions: [b] });
+    expect(resolveLinked(narrowToRepo(matches, "other/repo-b"))).toEqual({ sessions: [] });
+  });
+
+  test("goes by the entity's repo, not by where its sessions' checkouts sit", () => {
+    const ado = [{ key: "https://dev.azure.com/o/p/_git/MC.Web/pullrequest/9", repo: "MC.Web", sessions: [{ ...a, cwd: "/home/u/git/mcweb" } as AgentSession] }];
+    expect(resolveLinked(narrowToRepo(ado, "MC.Web"))).toEqual({ sessions: ado[0].sessions });
+  });
+
+  test("keeps an entity whose repo is unknown", () => {
+    const unknown = [{ key: "item:7", repo: null, sessions: [a] }];
+    expect(resolveLinked(narrowToRepo(unknown, "acme/repo-a"))).toEqual({ sessions: [a] });
+  });
+});
+
+describe("sameRepo", () => {
+  test.each([
+    ["acme/web", "acme/web", true],
+    ["acme/web", "ACME/Web", true],
+    ["acme/web", "web", true],
+    ["web", "acme/web", true],
+    ["acme/web", "other/web", false],
+    ["acme/web", "webx", false],
+    ["web", "web2", false],
+  ])("%s vs %s → %p", (have, want, ok) => {
+    expect(sameRepo(have, want)).toBe(ok);
+  });
+});
+
+describe("repoOfUrl", () => {
+  test.each([
+    ["https://github.com/acme/web/pull/5", "acme/web"],
+    ["https://github.com/acme/web/issues/5", "acme/web"],
+    ["https://ghe.example.com/acme/web/pull/5", "acme/web"],
+    ["https://dev.azure.com/org/Proj/_git/appweb/pullrequest/5001", "appweb"],
+    ["https://tfs.example.com/tfs/DefaultCollection/Widgets/_git/appweb/pullrequest/5001", "appweb"],
+    ["https://dev.azure.com/org/Proj/_workitems/edit/101", null],
+    ["", null],
+  ])("%s → %p", (url, repo) => {
+    expect(repoOfUrl(url)).toBe(repo);
   });
 });
 
@@ -61,6 +104,12 @@ describe("linkedMatches", () => {
     other: [],
     prLinked: [item(7, "", [sess("4")])],
   } as unknown as Parameters<typeof linkedMatches>[0];
+
+  test("each match carries its entity's repo: from the URL, else a PR's repository name", () => {
+    const named = { ...model, orphanPrs: [{ id: 5, url: "", repositoryId: "b", repositoryName: "bee", sessions: [] }] } as unknown as Parameters<typeof linkedMatches>[0];
+    expect(linkedMatches(named, { kind: "pr", id: 5 }).map((m) => m.repo)).toEqual([null, "bee", null]);
+    expect(linkedMatches(model, { kind: "workItem", id: 7 }).map((m) => m.repo)).toEqual([null]);
+  });
 
   test("PRs by number across all three lists, keyed by url or repository", () => {
     expect(linkedMatches(model, { kind: "pr", id: 5 }).map((m) => m.key)).toEqual([
