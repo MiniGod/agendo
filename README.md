@@ -506,6 +506,77 @@ Ignored files a worktree holds (a `.env`, local settings — build output like
 last five minutes that isn't running in agendo (paused, or with no window at all) is
 treated as possibly still in use: nothing starts ticked and anything deleted needs the second confirmation.
 
+### Jump to a session from the PR page
+
+`agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional `--repo`)
+or `agendo focus <id>` brings a
+session to the front. The attached tmux client you typed into last is switched to the
+session's window, and a paused or idle session is resumed first. On X11 the terminal
+window is raised too. When several sessions are linked, the latest running one wins;
+if none is running, the latest one wins. A paused session goes back into the tmux
+session its tab was parked in. An idle one opens in the agendo session the client is
+showing, else in the shared `agendo` session, else in a detached session of its own;
+never in a tmux session of yours. It never launches a new session. If nothing matches,
+or no tmux client is attached, it says so in a desktop notification.
+
+PR and work-item numbers are looked up in the backend agendo is currently using
+(Azure DevOps or GitHub), the same one `agendo list --pr` reads. A GitHub number can
+name PRs or issues in several repositories at once. When more than one of them has
+sessions, `focus` refuses rather than guess, and names them; use `focus <id>` then.
+Add `--repo <repo>` (`owner/name`, or a bare repo name) to narrow the lookup to the PR
+or issue in that repository. It goes by the repository the PR or issue itself belongs to,
+not by where its sessions are checked out, so a clone under another directory name still
+matches. The user-script always does
+this from the page URL. It matters on GitHub, where every repository numbers its own
+PRs and issues; Azure DevOps PR ids are unique per organisation, so there it only
+breaks ties. A link from a GitHub page while agendo uses Azure DevOps, or the other
+way round, still matches by number in the backend agendo is using.
+
+The same command sits behind an `agendo://` link, so a button on an Azure DevOps or
+GitHub page can run it. Setup on Linux:
+
+1. **Register the handler:** `agendo url-handler install`. This writes one `.desktop`
+   file to `${XDG_DATA_HOME:-~/.local/share}/applications/` and makes it the default
+   for `x-scheme-handler/agendo` through `xdg-mime`. It runs a global `agendo` install
+   if you have one (by `bun`'s absolute path, since a browser may start it without
+   your shell's `PATH`), otherwise `bunx agendo@<this version>`, so a link never runs code newer than what
+   you installed. Choose the command with
+   `--exec <command>`. Check the setup with `agendo url-handler status`, and remove
+   it with `agendo url-handler uninstall`.
+2. **Install the user-script:** open
+   [`extras/userscript/agendo.user.js`](extras/userscript/agendo.user.js) in
+   Tampermonkey or Violentmonkey. It adds an **Open in agendo** button to pull requests
+   and work items on `dev.azure.com`, `*.visualstudio.com` and `github.com`, including
+   pages reached by in-app navigation.
+3. **Click it once and allow the prompt:** the browser asks whether to open `agendo`
+   links with the registered app. Prefer allowing it per site (dev.azure.com,
+   github.com). Some browsers' "always" applies to every site, which lets any page
+   you visit fire `agendo://` links.
+
+Any web page can open an `agendo://` link, so the handler accepts exactly
+`agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
+and `?session=<id>`. It refuses anything
+else, such as other verbs, extra or encoded parameters, or overlong input, and says
+so in a notification. A link can only focus a session, or resume one and then focus
+it. Links are limited, so a page that fires them cannot do much with them:
+
+- A link never moves a terminal you typed into during the last three seconds. A page
+  firing links on a timer cannot switch your terminal while you type in it.
+- Links are handled at most once every two seconds. Links over that rate are
+  dropped without a notification.
+- A link resumes at most one session every 15 seconds.
+
+`agendo focus` typed in a terminal is not limited.
+
+With no tmux client attached, `focus` fails by default. To open a terminal instead,
+set a terminal command. It runs without a shell, and `{session}` is replaced with the
+session to attach to:
+
+```jsonc
+// ~/.agendo/config.json
+{ "focusTerminal": "x-terminal-emulator -e tmux attach -t {session}" }
+```
+
 ## Config
 
 Azure DevOps connection details live in `~/.agendo/config.json` — `org`, `project`,

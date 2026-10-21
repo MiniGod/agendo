@@ -166,6 +166,27 @@ Usage:
                                 compact, so the first \`send\` can time out waiting
                                 for an input box — retry rather than --force.
       --attach, -a              Switch/attach to it immediately (default: detached)
+  agendo focus --pr <n> | --work-item <n> | <id>
+                              Bring a session to the front of your terminal: the
+                              attached tmux client you used last is switched to
+                              its window (resumed first if paused or idle), and on
+                              X11 the terminal is raised. Several linked sessions:
+                              the latest running one, else the latest. Never
+                              launches a new session; with none, or no client
+                              attached, it says so in a desktop notification.
+                              "focusTerminal" in config.json opens a terminal
+                              when no client is attached (off by default).
+      --repo <repo>             Only the PR / work item in that repo (owner/name
+                                or a bare name): GitHub numbers per repo
+  agendo url-handler install|uninstall|status
+                              Register agendo as the handler for agendo:// links
+                              (agendo://focus?pr=<n>[&repo=<repo>], ?workItem=<n>
+                              [&repo=<repo>], ?session=<id>),
+                              which run focus — e.g. from the browser user-script
+                              in extras/userscript/. Writes one .desktop file under
+                              $XDG_DATA_HOME/applications and runs xdg-mime.
+      --exec <command>          Command the handler runs (default: a global agendo
+                                install, else bunx agendo@<this version>)
   agendo wait [id...]          Block until the target session(s) settle, then exit
                                 0; exit non-zero if they don't (timeout, exited,
                                 usage-limited). Run it in the background and use

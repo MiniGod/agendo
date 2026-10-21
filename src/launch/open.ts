@@ -13,6 +13,9 @@ import {
   hasSession,
   newDetached,
   newWindow,
+  newWindowIn,
+  windowTarget,
+  exactTarget,
   windowLocation,
   insideTmux,
   tmuxQuiet,
@@ -34,6 +37,8 @@ export interface OpenPlan {
   mode: "inline" | "handover";
   /** argv to run to hand over to / navigate to the target. */
   handover: string[];
+  /** The exact tmux target of the window just created, from the openers that know it without a scan. */
+  target?: string;
 }
 
 /**
@@ -160,6 +165,35 @@ export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan 
   // wants the name.
   const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
   return openTarget(target, s.cwd, resumeArgv(s), sessionTags(s));
+}
+
+/**
+ * Cold-resume a session as a window of tmux session `host`, wherever this
+ * process runs. `openSession` cannot do this from outside tmux — there it makes
+ * the agent its own detached session — which is right for a CLI `resume`, but
+ * wrong for `agendo focus` waking a paused tab: the tab should come back in the
+ * launcher session that held it, next to its siblings, not move out of it.
+ * The caller has already established that nothing is running for `s`.
+ */
+export function openSessionIn(s: AgentSession, host: string): OpenPlan {
+  const name = sessionName(s);
+  newWindowIn(host, name, s.cwd, resumeArgv(s));
+  stampNewTarget(name, sessionTags(s));
+  const target = windowTarget(host, name);
+  return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: ["tmux", "select-window", "-t", target], target };
+}
+
+/**
+ * Cold-resume a session as a detached tmux session of its own — even from inside
+ * tmux, where `openSession` would add it as a window of the CURRENT session,
+ * which for `agendo focus` may be a session of the user's own. The caller has
+ * already established that nothing is running for `s`.
+ */
+export function openSessionDetached(s: AgentSession): OpenPlan {
+  const name = sessionName(s);
+  newDetached(name, s.cwd, resumeArgv(s));
+  stampNewTarget(name, sessionTags(s));
+  return { alreadyRunning: false, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name], target: exactTarget(name) };
 }
 
 /**

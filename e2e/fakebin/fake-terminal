@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# A stand-in terminal emulator for `focusTerminal` — records how it was started
+# and opens nothing. Not a fake of a real tool: specs name it in config.json.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "fake-terminal $*" >> "$FAKE_CALL_LOG"; fi
+exit 0

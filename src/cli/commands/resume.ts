@@ -1,10 +1,10 @@
 import { spawnSync } from "child_process";
-import { SELF_CMD, openSession, type OpenPlan } from "../../launch/index.ts";
+import { SELF_CMD, openSession, openSessionDetached, openSessionIn, type OpenPlan } from "../../launch/index.ts";
 import { refreshLiveTmux } from "../../app/model/index.ts";
 import { findPeer, type PeerSession } from "../../orchestration/peer.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
 import { SessionIndex } from "../../sessions/index.ts";
-import { killWindow, sessionName, shortId } from "../../runtime/tmux/index.ts";
+import { hasSession, killWindow, liveTargetForShortId, sessionName, shortId } from "../../runtime/tmux/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 
 /** The session a token names: its full id, its short id, or its `cl-<agent>-<short>` window name. */
@@ -82,21 +82,78 @@ export async function runResume(token: string | undefined, attach: boolean): Pro
   const id = requireToken(token);
   const index = await SessionIndex.build();
   const s = requireSession(index.all, id);
-  const { liveWindows, livePlaceholders } = refreshLiveTmux(index.all);
-  const canon = sessionName(s);
-  const liveWindow = liveWindows.get(canon);
-  if (!liveWindow) {
-    const peer = await peerOf(s);
-    if (peer) refuseRunningElsewhere(s, peer);
-    // A dormant placeholder holds the canonical name but no live agent; drop it so
-    // the resume actually starts one instead of no-op'ing onto the idle bash pane.
-    if (livePlaceholders.has(canon)) killWindow(canon);
-  }
-  const plan = openSession(s, liveWindow);
+  const r = await resumeSession(s, index.all);
+  if ("peer" in r) refuseRunningElsewhere(s, r.peer);
   if (attach) {
-    const [cmd, ...args] = plan.handover;
+    const [cmd, ...args] = r.plan.handover;
     spawnSync(cmd, args, { stdio: "inherit" });
     return;
   }
-  reportResumed(s, plan);
+  reportResumed(s, r.plan);
+}
+
+/** Where a cold resume goes, for a caller that must not leave it to `openSession`. */
+export type ResumePlace = { host: string } | { detached: true };
+
+/** The placeholder's `host:name` when its host is known, else its bare name. */
+function placeholderLocation(canon: string, host: string | undefined): string {
+  return host ? `${host}:${canon}` : canon;
+}
+
+/**
+ * The part of `resume` that brings a session back, without the terminal
+ * handover or the report — shared with `focus`, which resumes a paused or idle
+ * session and then moves an attached client onto it instead. Hands back the
+ * peer instead of exiting when the session is live outside agendo, so each
+ * caller can refuse in its own words.
+ *
+ * `place` says where a COLD resume goes: into tmux session `host` (see
+ * `openSessionIn`), or a detached session of its own (`openSessionDetached`)
+ * whether or not this process runs inside tmux. Without it — `resume` itself —
+ * the window goes wherever `openSession` puts it, which inside tmux is the
+ * caller's current session.
+ */
+export async function resumeSession(
+  s: AgentSession,
+  all: AgentSession[],
+  place?: ResumePlace,
+): Promise<{ plan: OpenPlan } | { peer: PeerSession }> {
+  const live = refreshLiveTmux(all);
+  const liveWindow = live.liveWindows.get(sessionName(s));
+  if (!liveWindow) {
+    const peer = await clearForResume(s, live);
+    if (peer) return { peer };
+  }
+  // Only asked with a place: `resume` itself makes no extra tmux call.
+  if (place !== undefined && !liveWindow && !liveTargetForShortId(shortId(s.id))) return { plan: coldPlan(s, place) };
+  return { plan: openSession(s, liveWindow) };
+}
+
+/**
+ * Before resuming a session no window holds: hand back the peer if it is live
+ * outside agendo; else drop a dormant placeholder, which holds the canonical
+ * name but no live agent, so the resume actually starts one instead of
+ * no-op'ing onto the idle bash pane. Killed where it IS: a bare name resolves
+ * in tmux's current session first, which outside tmux need not be the
+ * placeholder's host.
+ */
+async function clearForResume(
+  s: AgentSession,
+  live: Pick<ReturnType<typeof refreshLiveTmux>, "livePlaceholders" | "placeholderWindows">,
+): Promise<PeerSession | null> {
+  const peer = await peerOf(s);
+  if (peer) return peer;
+  const canon = sessionName(s);
+  if (live.livePlaceholders.has(canon)) killWindow(placeholderLocation(canon, live.placeholderWindows.get(canon)?.session));
+  return null;
+}
+
+/**
+ * Open a session nothing is running for at `place`. The host is re-checked
+ * because killing the placeholder can have taken the session with it, if that
+ * was its last window; then the agent gets a session of its own, never the
+ * caller's current one.
+ */
+function coldPlan(s: AgentSession, place: ResumePlace): OpenPlan {
+  return "host" in place && hasSession(place.host) ? openSessionIn(s, place.host) : openSessionDetached(s);
 }

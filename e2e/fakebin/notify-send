@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake `notify-send` — records the call so a spec can assert it, and does nothing else.
+# Never let the real one run under test: it would act on the developer's desktop.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "notify-send $*" >> "$FAKE_CALL_LOG"; fi
+exit 0
