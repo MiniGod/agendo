@@ -514,7 +514,8 @@ session's window, and a paused or idle session is resumed first. On X11 the term
 window is raised too. When several sessions are linked, the latest running one wins;
 if none is running, the latest one wins. A paused session goes back into the tmux
 session its tab was parked in. An idle one opens in the agendo session the client is
-showing, else in the shared `agendo` session; never in a tmux session of your own. It never launches a new session. If nothing matches,
+showing, else in the shared `agendo` session, else in a detached session of its own;
+never in a tmux session of yours. It never launches a new session. If nothing matches,
 or no tmux client is attached, it says so in a desktop notification.
 
 PR and work-item numbers are looked up in the backend agendo is currently using
@@ -547,8 +548,9 @@ Any web page can open an `agendo://` link, so the handler accepts exactly
 else, such as other verbs, extra or encoded parameters, or overlong input, and says
 so in a notification. A link can only focus a session, or resume one and then focus
 it. A link may resume at most one session every 15 seconds, so a page cannot wake
-your agents one after another. Focusing a running session, and `agendo focus` typed
-in a terminal, are not limited.
+your agents one after another, and links at all are handled at most once every two
+seconds, so a page cannot keep moving the terminal you are typing in. `agendo focus`
+typed in a terminal is not limited.
 
 With no tmux client attached, `focus` fails by default. To open a terminal instead,
 set a terminal command. It runs without a shell, and `{session}` is replaced with the

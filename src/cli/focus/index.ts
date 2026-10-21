@@ -10,7 +10,7 @@
 // screen.
 import {
   LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, selectWindow,
-  sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
+  sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, windowTarget, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
@@ -26,7 +26,7 @@ import { linkedMatches, resolveLinked } from "./linked.ts";
 import { failLoudly } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
-import { claimUrlResume } from "./throttle.ts";
+import { URL_FOCUS_GAP_MS, claimUrlFocus, claimUrlResume } from "./throttle.ts";
 
 const NO_CLIENT = "no tmux client is attached — open a terminal and run `tmux attach` first";
 
@@ -109,8 +109,23 @@ function resumeHost(c: FocusCandidate, client: TmuxClient | null): string | unde
   return hasSession(LAUNCHER_SESSION) ? LAUNCHER_SESSION : undefined;
 }
 
-/** Resume the chosen session in `host` (see `resumeHost`) and return its window's target. */
-async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<string> {
+/** The session's window, and — when focus had to resume it — what to tell the human if the rest then fails. */
+interface Brought {
+  target: string;
+  resumed: string | null;
+}
+
+/**
+ * Where a just-resumed window is, when the fresh scan missed it: in `host` if
+ * `openSessionIn` put it there, else the detached session `openSession` made.
+ */
+function placedTarget(host: string | undefined, name: string): string {
+  const inHost = host === undefined ? null : windowTarget(host, name);
+  return inHost && windowIdentity(inHost) ? inHost : exactTarget(name);
+}
+
+/** Resume the chosen session in `host` (see `resumeHost`) and return its window. */
+async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string | undefined): Promise<Brought> {
   const r = await resumeSession(c.s, all, host);
   if ("peer" in r) {
     failLoudly(`session ${shortId(c.s.id)} is running outside agendo (pid ${r.peer.pid}); there is no window to focus`, 2);
@@ -123,7 +138,9 @@ async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string
     );
     console.error(`focus: resumed session ${shortId(c.s.id)} (was ${c.state})`);
   }
-  return runningTarget(c.s, all) ?? exactTarget(r.plan.tmuxName);
+  const target = runningTarget(c.s, all) ?? placedTarget(host, r.plan.tmuxName);
+  const resumed = r.plan.alreadyRunning ? null : `session ${shortId(c.s.id)} WAS resumed and is running in tmux window ${r.plan.tmuxName}`;
+  return { target, resumed };
 }
 
 /**
@@ -132,21 +149,24 @@ async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string
  * window the fresh scan missed goes through `resumeSession` too, but that only
  * navigates, and must not spend a link's resume.
  */
-async function bringUp(c: FocusCandidate, all: AgentSession[], client: TmuxClient | null, origin: FocusOrigin): Promise<string> {
+async function bringUp(c: FocusCandidate, all: AgentSession[], client: TmuxClient | null, origin: FocusOrigin): Promise<Brought> {
   const running = c.state === "running" ? runningTarget(c.s, all) : null;
-  if (running) return running;
+  if (running) return { target: running, resumed: null };
   if (c.state !== "running") throttleUrlResume(origin);
   return resumeChosen(c, all, resumeHost(c, client));
 }
 
+/** Fail, saying so when the session was resumed on the way: it is running, and the human should know where. */
+type Fail = (text: string) => never;
+
 /** No client to move: open the configured terminal on the session, showing the session's window, or fail. */
-function withoutClient(where: WindowIdentity, target: string, template: string | null): never {
+function withoutClient(where: WindowIdentity, target: string, template: string | null, fail: Fail): never {
   selectWindow(where, paneOf(target));
   if (template && openTerminal(template, where.session)) {
     console.log(`focus: no tmux client attached; opened a terminal on ${where.session}`);
     process.exit(0);
   }
-  failLoudly(NO_CLIENT);
+  fail(template ? `could not start the focusTerminal command (${template})` : NO_CLIENT);
 }
 
 /** The pane to focus inside the window, for a session parked in a pane rather than owning a window. */
@@ -155,9 +175,9 @@ function paneOf(target: string): string | undefined {
 }
 
 /** Move `client` onto the window and raise its terminal. */
-function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: AgentSession): never {
+function switchTo(client: TmuxClient, where: WindowIdentity, target: string, s: AgentSession, fail: Fail): never {
   if (!focusClientOn(client.name, where, paneOf(target))) {
-    failLoudly(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
+    fail(`tmux could not switch ${client.name} to session ${shortId(s.id)}`);
   }
   raiseTerminal(client.pid);
   console.log(`focused session ${shortId(s.id)} (window ${where.windowId} in ${where.session}) on ${client.name}`);
@@ -183,10 +203,11 @@ export async function runFocus(target: FocusTarget, origin: FocusOrigin = { from
   const client = pickClient(listClients());
   const template = client ? null : focusTerminalTemplate();
   if (!client && !template) failLoudly(NO_CLIENT);
-  const t = await bringUp(chosen, all, client, origin);
-  const where = windowIdentity(t) ?? failLoudly(`could not find the tmux window of session ${shortId(chosen.s.id)}`);
-  if (!client) withoutClient(where, t, template);
-  switchTo(client, where, t, chosen.s);
+  const up = await bringUp(chosen, all, client, origin);
+  const fail: Fail = (text) => failLoudly(up.resumed ? `${text} — ${up.resumed}` : text);
+  const where = windowIdentity(up.target) ?? fail(`could not find the tmux window of session ${shortId(chosen.s.id)}`);
+  if (!client) withoutClient(where, up.target, template, fail);
+  switchTo(client, where, up.target, chosen.s, fail);
 }
 
 /** `agendo focus <args>`. */
@@ -207,6 +228,12 @@ export async function urlCommand(argv: string[]): Promise<never> {
   if (!parsed.ok) {
     console.error(`url: refused ${JSON.stringify((argv[0] ?? "").slice(0, 200))}`);
     failLoudly(`refused an agendo:// link: ${parsed.reason}`);
+  }
+  const wait = claimUrlFocus();
+  if (wait > 0) {
+    // Quiet on purpose: a page firing links in a burst would otherwise also fire a burst of notifications.
+    console.error(`url: ignored — another agendo:// link was handled less than ${URL_FOCUS_GAP_MS / 1000}s ago`);
+    process.exit(1);
   }
   return runFocus(parsed.target, { fromUrl: true });
 }

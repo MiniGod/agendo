@@ -1,9 +1,12 @@
 // What a PR / work-item NUMBER resolves to for `agendo focus`, and the link
 // throttle's arithmetic. A number is not always one entity — GitHub numbers per
 // repository — and the e2e fixtures never collide, so the refusal lives here.
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { linkedMatches, resolveLinked } from "../src/cli/focus/linked.ts";
-import { resumeWaitMs, URL_RESUME_GAP_MS } from "../src/cli/focus/throttle.ts";
+import { claimFloor, resumeWaitMs, STALE_LOCK_MS, URL_RESUME_GAP_MS } from "../src/cli/focus/throttle.ts";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { AgentSession } from "../src/shared/types.ts";
 
 const sess = (id: string, source = "claude") => ({ id, source }) as AgentSession;
@@ -72,5 +75,70 @@ describe("resumeWaitMs", () => {
     expect(resumeWaitMs(10_000, 10_000)).toBe(URL_RESUME_GAP_MS);
     expect(resumeWaitMs(10_000, 14_000, 5_000)).toBe(1_000);
     expect(resumeWaitMs(10_000, 15_000, 5_000)).toBe(0);
+  });
+});
+
+describe("claimFloor", () => {
+  const T0 = 1_800_000_000_000;
+  const made: string[] = [];
+  const fresh = () => {
+    const dir = mkdtempSync(join(tmpdir(), "agendo-floor-"));
+    made.push(dir);
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of made) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the first claim goes and stamps; a second inside the gap waits it out; after it, goes again", () => {
+    const dir = fresh();
+    expect(claimFloor("f", 10_000, T0, dir)).toBe(0);
+    expect(existsSync(join(dir, "f.stamp"))).toBe(true);
+    // The stamp's mtime is the real clock's, so ask relative to it.
+    const stamped = Date.now();
+    expect(claimFloor("f", 10_000, stamped + 4_000, dir)).toBeGreaterThan(5_000);
+    expect(claimFloor("f", 10_000, stamped + 60_000, dir)).toBe(0);
+  });
+
+  test("the lock is released after every claim", () => {
+    const dir = fresh();
+    claimFloor("f", 10_000, T0, dir);
+    claimFloor("f", 10_000, T0, dir);
+    expect(existsSync(join(dir, "f.lock"))).toBe(false);
+  });
+
+  test("a held lock refuses: a concurrent claim is the burst the floor is for", () => {
+    const dir = fresh();
+    mkdirSync(join(dir, "f.lock"));
+    expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(10_000);
+    expect(existsSync(join(dir, "f.lock"))).toBe(true);
+    expect(existsSync(join(dir, "f.stamp"))).toBe(false);
+  });
+
+  test("a stale lock is cleared, but only the NEXT claim may take it", () => {
+    const dir = fresh();
+    const lockDir = join(dir, "f.lock");
+    mkdirSync(lockDir);
+    const old = (Date.now() - STALE_LOCK_MS - 60_000) / 1000;
+    utimesSync(lockDir, old, old);
+    expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(10_000);
+    expect(existsSync(lockDir)).toBe(false);
+    expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(0);
+  });
+
+  test.skipIf(process.getuid?.() === 0)("a directory it cannot write refuses rather than running unthrottled", () => {
+    const dir = fresh();
+    chmodSync(dir, 0o500);
+    try {
+      expect(claimFloor("f", 10_000, Date.now(), dir)).toBe(10_000);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  test("floors are independent by name", () => {
+    const dir = fresh();
+    expect(claimFloor("a", 10_000, Date.now(), dir)).toBe(0);
+    expect(claimFloor("b", 10_000, Date.now(), dir)).toBe(0);
   });
 });

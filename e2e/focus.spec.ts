@@ -106,6 +106,8 @@ test("focus --work-item resumes a paused session, then focuses it", async ({ moc
   const sw = log.findIndex((a) => a[0] === "switch-client");
   // The placeholder goes, the agent comes back, and only THEN is the client moved.
   expect(kill).toBeGreaterThanOrEqual(0);
+  // Killed at its host, not by a bare name tmux would resolve in its current session.
+  expect(log[kill]).toEqual(["kill-window", "-t", `=agendo:=${CRASH_TARGET}`]);
   expect(create).toBeGreaterThan(kill);
   expect(sw).toBeGreaterThan(create);
   expect(log.some((a) => a[0] === "new-session")).toBe(false);
@@ -202,6 +204,15 @@ test("focus fails loudly when tmux will not switch the client", async ({ mock })
   expect((await notifications(mock)).join("\n")).toContain("tmux could not switch /dev/pts/7");
 });
 
+test("a failure after a resume says the session is running, and where", async ({ mock }) => {
+  await seed(mock, { switchFails: true });
+  const r = await agendo(mock.env, "focus", "standalonese");
+  expect(r.code).not.toBe(0);
+  const said = (await notifications(mock)).join("\n");
+  expect(said).toContain("tmux could not switch /dev/pts/7");
+  expect(said).toContain(`WAS resumed and is running in tmux window ${STANDALONE_TARGET}`);
+});
+
 test("focus with no client opens the configured focusTerminal on the session, at its window", async ({ mock }) => {
   await seed(mock, { clients: [] });
   // Merged into the fixture config rather than replacing it: ~/.agendo/ is read first.
@@ -215,14 +226,31 @@ test("focus with no client opens the configured focusTerminal on the session, at
   await expect.poll(async () => mock.callLog()).toContain(`fake-terminal -e tmux attach -t =${RUNNING_TARGET}`);
 });
 
+/** Past the floor every link is held to (URL_FOCUS_GAP_MS), so a spec can reach the resume floor behind it. */
+const pastFocusFloor = () => new Promise((r) => setTimeout(r, 2_100));
+
+test("links are held to one per two seconds, quietly", async ({ mock }) => {
+  await seed(mock);
+  const first = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(first.code, first.stderr).toBe(0);
+  const burst = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(burst.code).not.toBe(0);
+  expect(burst.stderr).toContain("another agendo:// link was handled less than");
+  // A burst of links must not become a burst of notifications.
+  expect(await notifications(mock)).toEqual([]);
+  expect(await switches(mock)).toHaveLength(1);
+});
+
 test("url may resume only once in quick succession; focus typed by hand is not throttled", async ({ mock }) => {
   await seed(mock);
   const first = await agendo(mock.env, "url", "agendo://focus?session=standalonese");
   expect(first.code, first.stderr).toBe(0);
+  await pastFocusFloor();
   const second = await agendo(mock.env, "url", `agendo://focus?workItem=102`);
   expect(second.code).not.toBe(0);
   expect((await notifications(mock)).join("\n")).toContain("not resuming another session from a link so soon");
   // An already-running session is still focused through a link: only resumes are throttled.
+  await pastFocusFloor();
   const running = await agendo(mock.env, "url", "agendo://focus?pr=5001");
   expect(running.code, running.stderr).toBe(0);
   const typed = await agendo(mock.env, "focus", "--work-item", "102");

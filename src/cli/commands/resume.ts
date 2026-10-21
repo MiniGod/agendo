@@ -92,6 +92,11 @@ export async function runResume(token: string | undefined, attach: boolean): Pro
   reportResumed(s, r.plan);
 }
 
+/** The placeholder's `host:name` when its host is known, else its bare name. */
+function placeholderLocation(canon: string, host: string | undefined): string {
+  return host ? `${host}:${canon}` : canon;
+}
+
 /**
  * The part of `resume` that brings a session back, without the terminal
  * handover or the report — shared with `focus`, which resumes a paused or idle
@@ -107,7 +112,7 @@ export async function resumeSession(
   all: AgentSession[],
   host?: string,
 ): Promise<{ plan: OpenPlan } | { peer: PeerSession }> {
-  const { liveWindows, livePlaceholders } = refreshLiveTmux(all);
+  const { liveWindows, livePlaceholders, placeholderWindows } = refreshLiveTmux(all);
   const canon = sessionName(s);
   const liveWindow = liveWindows.get(canon);
   if (!liveWindow) {
@@ -115,7 +120,9 @@ export async function resumeSession(
     if (peer) return { peer };
     // A dormant placeholder holds the canonical name but no live agent; drop it so
     // the resume actually starts one instead of no-op'ing onto the idle bash pane.
-    if (livePlaceholders.has(canon)) killWindow(canon);
+    // Killed where it IS: a bare name resolves in tmux's current session first,
+    // which outside tmux need not be the placeholder's host.
+    if (livePlaceholders.has(canon)) killWindow(placeholderLocation(canon, placeholderWindows.get(canon)?.session));
   }
   // Only asked when there is a host: `resume` itself makes no extra tmux call.
   // The host is re-checked because killing the placeholder above can have taken
