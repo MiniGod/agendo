@@ -131,6 +131,35 @@ function endGuide(): string[] {
 }
 
 /**
+ * How to name a session to a human: as an agendo:// link that brings its window
+ * forward. Its own function, like `endGuide`, so `llmGuide` stays a table of
+ * contents. The orchestrator prompts (src/orchestration/) carry their own
+ * shorter copy of the link form; test/sessionLinks.test.ts keeps all three in step.
+ */
+function sessionLinkGuide(): string[] {
+  return [
+    "Name it as a link:",
+    "  Whenever you mention a session to the user, write it as a clickable markdown link,",
+    "  [<window name or short id>](agendo://focus?session=<short id>) — the short id is the",
+    "  12-character id `list` prints — so a click jumps to that session's tmux window.",
+    "  A new detached `launch` prints it ready-made, on its `link:` line. Use the short",
+    "  id whenever you have one: a link by window name (codex, before it has an id)",
+    "  reaches the session only while that window is open, where a short-id link also",
+    "  resumes a closed one. A short id finds nothing until the session is on disk, i.e.",
+    "  until `list` shows it; switch to it then. A window name goes by whichever session",
+    "  its window is attributed to, which in a directory other sessions share (a",
+    "  --no-worktree launch, the main checkout) can be NONE or the WRONG one, for as long",
+    "  as the window is open. Clicking needs the URL handler",
+    `  (\`${SELF_CMD} url-handler install\`) and, inside tmux (3.4+),`,
+    "  `set -as terminal-features 'xterm*:hyperlinks'` (`xterm*` matching the outer",
+    "  terminal's TERM; a client re-attach to apply) — the USER's one-time setup: tell",
+    "  them if a link does nothing, never run either yourself. (Unlike a PR / work-item URL",
+    "  above, this one you DO assemble yourself, from the short id.)",
+    "",
+  ];
+}
+
+/**
  * `send`: its two routes, claude's resume dialog, the not-running cases, and
  * codex's read-back delivery. Its own function, like `endGuide`, so `llmGuide`
  * stays a table of contents rather than growing past its length budget.
@@ -259,6 +288,7 @@ export function llmGuide(): string {
     `  bare number, and never hand-assemble one. \`${SELF_CMD} list --json\` carries the`,
     "  same links per session as prUrl / workItemUrl.",
     "",
+    ...sessionLinkGuide(),
     ...sendGuide(),
     `Be told when it needs you (DON'T poll):`,
     `              ${SELF_CMD} wait <id...> --any --json --timeout 30m`,

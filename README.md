@@ -509,7 +509,10 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 ### Jump to a session from the PR page
 
 `agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional
-`--repo`) or `agendo focus <id>` brings a session to the front. Typed in a terminal,
+`--repo`) or `agendo focus <id>` brings a session to the front. The id can also be
+the session's tmux window name (`cl-claude-…`, `cl-wi-…`); one that embeds no session
+id, such as `cl-wi-…`, `cl-pr-…` or a codex `cl-bg-codex-…`, means the session that
+live window is attributed to, as `list` shows it. Typed in a terminal,
 it switches the tmux client you typed into last. From a link, it switches a client
 already showing the tmux session that holds (or, once resumed, will hold) the
 session's window — the most recently used one, if several are. When no client is on
@@ -579,10 +582,28 @@ GitHub page can run it. Setup on Linux:
    github.com). Some browsers' "always" applies to every site, which lets any page
    you visit fire `agendo://` links.
 
+**Links in the terminal.** `agendo launch` prints each new detached session's link
+(`link:    agendo://focus?session=<short id>`), and `agendo --llm` and the
+orchestrator prompts tell agents to write any session they mention to you as a
+markdown link, `[<window name or short id>](agendo://focus?session=<short id>)`.
+Clicking one runs the same handler, so it needs step 1 above. Inside tmux, links
+are clickable only once tmux (3.4 or later) passes hyperlinks through to your
+terminal: `set -as terminal-features 'xterm*:hyperlinks'` in `~/.tmux.conf`, with
+`xterm*` replaced by a pattern matching your terminal's `TERM` if it is not an
+xterm (`alacritty`, `foot`, …), then re-attach. A link by short id also resumes a
+closed session; one by window name (what `launch` prints for a codex session,
+which has no id yet) reaches the session only while that window is open, and goes
+by the session that window is attributed to — in a directory other sessions share,
+such as a `--no-worktree` launch, that can be none or the wrong one.
+
 Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
-and `?session=<id>`. It refuses anything
-else, such as other verbs, extra or encoded parameters, or overlong input, and says
+and `?session=<id>`, where the id may also be one of agendo's own window names
+in the shapes agendo creates them: `cl-<kind>-` and a short id of up to 12 letters
+and digits (`cl-bg-` and `cl-new-` optionally with `codex-` before it, as in
+`cl-bg-codex-…`), or `cl-wi-`/`cl-pr-`, an optional lower-case scope slug and
+the item number, as in `cl-pr-acme-appweb-5`. It
+refuses anything else, such as other verbs, extra or encoded parameters, or overlong input, and says
 so in a notification. The repo can be a name or an Azure DevOps repository id. Some
 PR links, such as those in notifications, name the repo by its id. agendo maps a
 known id to its repo, and an id it does not know matches the PR number in every repo.

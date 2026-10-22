@@ -7,7 +7,7 @@
 //
 //     agendo://focus?pr=<digits>[&repo=<repo>]
 //     agendo://focus?workItem=<digits>[&repo=<repo>]
-//     agendo://focus?session=<session id or short id>
+//     agendo://focus?session=<session id, short id or agendo window name>
 //
 // `repo` — a bare repo name (ADO) or one `owner/name` slug (GitHub) — is the one
 // optional extra, only after `pr` or `workItem` and only in that order. GitHub
@@ -45,6 +45,23 @@ const ID_RE = /^[1-9]\d{0,9}$/;
  */
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
+/**
+ * One of agendo's own tmux window names, in exactly the shapes agendo mints
+ * them: `cl-<kind>-<short id>` (`sessionName`, `kindName`; a short id is 1–12
+ * letters and digits) — plus the legacy `cl-free-`, no longer minted, whose
+ * tail is taken to be the same short id (a guess: its shape predates the
+ * history, so a legacy name outside it is refused); for `cl-bg-`/`cl-new-` optionally with the `codex-` tag
+ * `kindName` puts before the id of the one agent that takes no preassigned id
+ * (`cl-bg-codex-…`, the same form as `CODEX_WINDOW_RE`); or `cl-wi-`/`cl-pr-`,
+ * an optional lower-case scope slug and the item id (`freshName`/`prFreshName`,
+ * src/launch/task.ts — `scopeTag` leaves single dashes between runs of letters
+ * and digits). Only those two fold in a whole GitHub `owner/name`; their 169
+ * keeps the longest URL this can match — `agendo://focus/?session=cl-pr-<169>`,
+ * with the tolerated empty path — at 199, under MAX_URL_LENGTH.
+ */
+const WINDOW_NAME_RE =
+  /^cl-(?:(?:wi|pr)-(?=[a-z0-9-]{1,169}$)(?:[a-z0-9]+-)*[1-9][0-9]{0,9}|(?:claude|copilot|codex|free)-[A-Za-z0-9]{1,12}|(?:bg|new)-(?:codex-)?[A-Za-z0-9]{1,12})$/;
+
 /** A repo name or `owner/name` slug: each segment opens with a letter, digit or `_`; 120 characters at most. */
 const REPO_RE = /^(?=.{1,120}$)[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)?$/;
 
@@ -65,9 +82,14 @@ export function isRepo(raw: string): boolean {
   return REPO_RE.test(raw);
 }
 
-/** Is `raw` a session token a URL may carry? */
+/** Is `raw` one of agendo's own window names (`cl-wi-102`, `cl-bg-codex-…`)? */
+export function isWindowName(raw: string): boolean {
+  return WINDOW_NAME_RE.test(raw);
+}
+
+/** Is `raw` a session token a URL may carry: a session id, a short id or a window name? */
 export function isSessionToken(raw: string): boolean {
-  return SESSION_RE.test(raw);
+  return SESSION_RE.test(raw) || isWindowName(raw);
 }
 
 /** The value checked against its key's own shape; `repo` only alongside an item id. */
@@ -96,7 +118,7 @@ export function parseFocusUrl(url: unknown): ParsedFocusUrl {
   if (url.length > MAX_URL_LENGTH) return refuse("URL too long");
   if (!url.startsWith("agendo://")) return refuse("not an agendo:// URL");
   const m = URL_RE.exec(url);
-  if (!m) return refuse("only agendo://focus?pr=<n>, ?workItem=<n> (each with an optional &repo=) or ?session=<id> is accepted");
+  if (!m) return refuse("only agendo://focus?pr=<n>, ?workItem=<n> (each with an optional &repo=) or ?session=<id or window name> is accepted");
   return targetFor(m[1], m[2], m[3]);
 }
 

@@ -2,7 +2,7 @@
 // session is up. Kept apart from the argv parsing and the launch itself so each
 // piece can be read — and, for the pure ones, tested — on its own.
 
-import { currentSessionName } from "../../runtime/tmux/index.ts";
+import { currentSessionName, shortId } from "../../runtime/tmux/index.ts";
 import { SELF_CMD, type GlobalLaunchResult, type GlobalLayout, type LaunchResult } from "../../launch/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
 import type { AgentSource } from "../../shared/types.ts";
@@ -87,6 +87,16 @@ export function recordLaunch(a: LaunchKind, prompt: string, landed: LandedSessio
 }
 
 /**
+ * The agendo:// link that brings the session's window forward (see
+ * src/cli/focus/url.ts): by short id, or by window name while codex has not
+ * assigned an id yet — that one resolves once the session has started and its
+ * window is attributed to it (src/cli/focus/windowName.ts).
+ */
+function focusLink(landed: Pick<LandedSession, "id" | "tmuxName">): string {
+  return `agendo://focus?session=${landed.id ? shortId(landed.id) : landed.tmuxName}`;
+}
+
+/**
  * The machine-readable next steps for the agent/human that launched it, one
  * line each. `status` is keyed by session id; codex assigns its own only once
  * the session starts, so send the caller to `list` to pick it up from there.
@@ -96,6 +106,7 @@ export function launchSummary(a: LaunchKind, landed: LandedSession, globalRes: G
   const lines = [
     `▸ launched ${sessionKind(a)} session ${id ?? `— ${a.agent} assigns its own id`}`,
     `  window:  ${tmuxName}   (in ${cwd})`,
+    `  link:    ${focusLink(landed)}`,
     id ? `  status:  ${SELF_CMD} status ${id}` : `  id:      ${SELF_CMD} list   (then: ${SELF_CMD} status <id>)`,
   ];
   if (globalRes) lines.push(`  layout:  ${LAYOUT_NOTE[globalRes.layout]}${globalRes.layoutNote ? ` — ${globalRes.layoutNote}` : ""}`);

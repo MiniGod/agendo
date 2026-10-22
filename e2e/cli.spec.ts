@@ -4043,6 +4043,16 @@ function agentBin(argv: string[]): string | undefined {
   return argv[i];
 }
 
+test("agendo launch prints the agendo:// link to its session, by the short id its window carries", async ({ mock }) => {
+  const r = agendo(mock.env, "launch", "--no-worktree", "do the thing");
+  expect(r.status).toBe(0);
+  const id = r.stdout.match(/launched background session (\S+)/)?.[1] ?? "";
+  const short = id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+  expect(short).not.toBe("");
+  expect(r.stdout).toContain(`window:  cl-bg-${short}`);
+  expect(r.stdout).toContain(`link:    agendo://focus?session=${short}`);
+});
+
 test("agendo launch forwards --model into the new claude's argv", async ({ mock }) => {
   const r = agendo(mock.env, "launch", "--no-worktree", "--model", "opus", "do the thing");
   expect(r.status).toBe(0);

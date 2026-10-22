@@ -104,6 +104,10 @@ export function reuseReport(repo: string, found: ExistingOrchestrator, prompt: s
   lines.push(...(found.kind === "session" ? found.status.stale : []).map(staleLine));
   if (ignored.length) lines.push(`  ignored: ${ignored.join(", ")} — they shape a new orchestrator, and none is started`);
   lines.push(sendLine(token, prompt));
+  // The same agendo:// link a fresh launch prints: a window too new to have a
+  // session goes by its window name, which resolves once the session starts.
+  const linked = found.kind === "session" ? shortId(found.primary.session.id) : found.target.name;
+  lines.push(`  link:    agendo://focus?session=${linked}`);
   return lines;
 }
 

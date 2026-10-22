@@ -3,7 +3,7 @@
 // string. The e2e suite proves a refusal reaches no tmux at all; this pins the
 // allowlist itself, input by input, including the injection shapes.
 import { describe, expect, test } from "bun:test";
-import { MAX_URL_LENGTH, describeLinkTarget, describeTarget, isRepo, isSessionToken, parseFocusUrl, parseItemId } from "../src/cli/focus/url.ts";
+import { MAX_URL_LENGTH, describeLinkTarget, describeTarget, isRepo, isSessionToken, isWindowName, parseFocusUrl, parseItemId } from "../src/cli/focus/url.ts";
 
 describe("parseFocusUrl accepts exactly the three forms", () => {
   const ACCEPT: [string, unknown][] = [
@@ -11,6 +11,13 @@ describe("parseFocusUrl accepts exactly the three forms", () => {
     ["agendo://focus?workItem=102", { kind: "workItem", id: 102 }],
     ["agendo://focus?session=standalonese", { kind: "session", token: "standalonese" }],
     ["agendo://focus?session=019cde00-1111-7000-8000-00000000cde0", { kind: "session", token: "019cde00-1111-7000-8000-00000000cde0" }],
+    // agendo's own window names, the long scoped ones included.
+    ["agendo://focus?session=cl-claude-019cde001111", { kind: "session", token: "cl-claude-019cde001111" }],
+    ["agendo://focus?session=cl-bg-codex-a1b2c3", { kind: "session", token: "cl-bg-codex-a1b2c3" }],
+    ["agendo://focus?session=cl-wi-102", { kind: "session", token: "cl-wi-102" }],
+    [`agendo://focus?session=cl-pr-${"a".repeat(60)}-${"b".repeat(30)}-5001`, { kind: "session", token: `cl-pr-${"a".repeat(60)}-${"b".repeat(30)}-5001` }],
+    // The longest a link can be: the empty path and the longest cl-pr- name, at 199.
+    [`agendo://focus/?session=cl-pr-${"a".repeat(167)}-1`, { kind: "session", token: `cl-pr-${"a".repeat(167)}-1` }],
     // Browsers differ on whether they add an empty path.
     ["agendo://focus/?pr=1", { kind: "pr", id: 1 }],
     ["agendo://focus?pr=2147483647", { kind: "pr", id: 2147483647 }],
@@ -124,6 +131,14 @@ describe("parseFocusUrl refuses everything else", () => {
     "agendo://focus?session=-x",
     "agendo://focus?session=--attach",
     `agendo://focus?session=a${"b".repeat(64)}`,
+    // a window name gets its extra length only under a known prefix, and no further
+    `agendo://focus?session=cl-evil-${"b".repeat(64)}`,
+    `agendo://focus?session=cl-wi-${"b".repeat(168)}-1`,
+    // ...and only for cl-wi-/cl-pr-: every other kind is a short id of at most 12
+    `agendo://focus?session=cl-copilot-${"b".repeat(65)}`,
+    `agendo://focus/?session=cl-copilot-${"b".repeat(160)}-x`,
+    "agendo://focus?session=cl-wi-a.b",
+    "agendo://focus?session=cl-wi-102&repo=acme",
     `agendo://focus?pr=${"1".repeat(MAX_URL_LENGTH)}`,
     `agendo://focus?pr=1${" ".repeat(MAX_URL_LENGTH)}`,
   ];
@@ -168,6 +183,16 @@ describe("the per-field shapes", () => {
     expect(isSessionToken("-f")).toBe(false);
     expect(isSessionToken("a b")).toBe(false);
     expect(isSessionToken("")).toBe(false);
+  });
+
+  test("isWindowName: a known cl-<kind>- prefix, only in the shapes agendo mints", () => {
+    for (const ok of ["cl-claude-abc", "cl-copilot-x", "cl-codex-1", "cl-bg-codex-a1", "cl-new-codex-z", "cl-free-q", "cl-wi-102", "cl-pr-acme-appweb-5", "cl-pr-2147483647", `cl-wi-${"a".repeat(167)}-1`]) {
+      expect(isWindowName(ok), ok).toBe(true);
+      expect(isSessionToken(ok), ok).toBe(true);
+    }
+    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(168)}-1`, `cl-bg-${"a".repeat(13)}`, "cl-wi-ACME-1", "cl-bg-Codex-x", "cl-bg-codex-", "cl-claude-codex-abc", "cl-free-codex-abc", "cl-bg-evil-abc", "cl-bg-claude-abc", "cl-new-copilot-abc", "cl-wi-abc", "cl-wi-a--1", "cl-wi-a-", "cl-wi-01", "cl-pr-a-1-"]) {
+      expect(isWindowName(bad), bad).toBe(false);
+    }
   });
 
   test("describeTarget", () => {

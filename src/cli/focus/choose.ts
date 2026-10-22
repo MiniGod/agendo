@@ -26,7 +26,7 @@ export function pickSession(cands: FocusCandidate[]): FocusCandidate | null {
 
 export type FocusArgs = { ok: true; target: FocusTarget } | { ok: false; error: string };
 
-const USAGE = "usage: focus --pr <n> [--repo <repo>] | --work-item <n> [--repo <repo>] | <session-id>";
+const USAGE = "usage: focus --pr <n> [--repo <repo>] | --work-item <n> [--repo <repo>] | <session-id | window>";
 
 /** The value after a `--pr`/`--work-item` flag as an item id, or the error saying why not. */
 function itemFlag(kind: "pr" | "workItem", flag: string, raw: string | undefined): FocusArgs {
@@ -49,7 +49,7 @@ function readToken(argv: string[], i: number): { args: FocusArgs; used: number }
   if (a === "--pr") return { args: itemFlag("pr", a, argv[i + 1]), used: 2 };
   if (a === "--work-item" || a === "--wi" || a === "--issue") return { args: itemFlag("workItem", a, argv[i + 1]), used: 2 };
   if (a.startsWith("-")) return { args: { ok: false, error: `unknown argument "${a}"` }, used: 1 };
-  if (!isSessionToken(a)) return { args: { ok: false, error: `"${a}" is not a session id` }, used: 1 };
+  if (!isSessionToken(a)) return { args: { ok: false, error: `"${a}" is not a session id or agendo window name` }, used: 1 };
   return { args: { ok: true, target: { kind: "session", token: a } }, used: 1 };
 }
 
