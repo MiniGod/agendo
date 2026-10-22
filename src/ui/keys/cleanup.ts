@@ -53,6 +53,8 @@ export interface CleanupState {
   query: string;
   /** Whether keys are being typed into the `/` filter. */
   typing: boolean;
+  /** Where in `query` the next typed text goes. */
+  caret: number;
   dialog: CleanupDialog | null;
   /** D's delete-everything-safe confirmation, run and summary. */
   bulk: BulkDialog | null;
@@ -86,7 +88,7 @@ export interface CleanupEnv {
 type Step = { state: CleanupState; effect: CleanupEffect };
 
 export const INITIAL_CLEANUP: CleanupState = {
-  cursor: 0, focus: null, sort: "updated", reversed: false, filter: "all", query: "", typing: false, dialog: null, bulk: null, note: null,
+  cursor: 0, focus: null, sort: "updated", reversed: false, filter: "all", query: "", typing: false, caret: 0, dialog: null, bulk: null, note: null,
 };
 
 const stay = (state: CleanupState): Step => ({ state, effect: "none" });
@@ -139,10 +141,10 @@ function moveCursor(state: CleanupState, dir: -1 | 1, env: CleanupEnv): Step {
  */
 function queryKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
   if (key.return) return stay({ ...state, typing: false });
-  if (key.escape) return stay({ ...state, typing: false, query: "" });
+  if (key.escape) return stay({ ...state, typing: false, query: "", caret: 0 });
   if (key.upArrow || key.downArrow) return moveCursor(state, key.upArrow ? -1 : 1, env);
-  const edit = editLine(input, key, state.query, state.query.length);
-  return edit ? stay({ ...state, query: edit.value }) : stay(state);
+  const edit = editLine(input, key, state.query, state.caret);
+  return edit ? stay({ ...state, query: edit.value, caret: edit.cursor }) : stay(state);
 }
 
 /** The session keys of the list: p pauses, x kills, X force-kills — the same actions as on the session rows. */
@@ -165,7 +167,7 @@ function viewKey(state: CleanupState, input: string): CleanupState | null {
   if (input === "s") return { ...state, sort: nextSort(state.sort) };
   if (input === "r") return { ...state, reversed: !state.reversed };
   if (input === "f") return { ...state, filter: nextFilter(state.filter) };
-  if (input === "/") return { ...state, typing: true };
+  if (input === "/") return { ...state, typing: true, caret: state.query.length };
   return null;
 }
 
@@ -173,7 +175,7 @@ function listKey(prev: CleanupState, input: string, key: Key, env: CleanupEnv): 
   const state = prev.note ? { ...prev, note: null } : prev;
   if (state.typing) return queryKey(state, input, key, env);
   // esc drops a `/` filter first, and only then leaves.
-  if (key.escape) return state.query ? stay({ ...state, query: "" }) : { state, effect: "back" };
+  if (key.escape) return state.query ? stay({ ...state, query: "", caret: 0 }) : { state, effect: "back" };
   if (input === "q") return { state, effect: "quit" };
   const dir = vertical(input, key);
   if (dir) return moveCursor(state, dir, env);
@@ -237,6 +239,8 @@ function confirmKey(state: CleanupState, d: CleanupDialog, input: string, env: C
 
 function bulkStep(state: CleanupState, b: BulkDialog, input: string, key: Key): Step {
   const r = bulkKey(b, input, key);
+  // A key the run ignores must not write this (possibly stale) state over the progress landing meanwhile.
+  if (r.bulk === b && r.effect === "none") return stay(state);
   if (r.effect === "cancel") return stay({ ...state, bulk: null, note: "nothing deleted" });
   return { state: { ...state, bulk: r.bulk }, effect: r.effect };
 }

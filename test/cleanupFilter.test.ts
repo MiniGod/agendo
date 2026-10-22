@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Key } from "ink";
 import { defaultSelection, offersFor, safeToRemove } from "../src/cleanup/classify.ts";
-import { filterLabel, filterRows, matchesQuery, nextFilter, verdictOf, type Verdict } from "../src/cleanup/filter.ts";
+import { filterLabel, filterRows, matchesQuery, nextFilter, shownVerdict, verdictOf, type Verdict } from "../src/cleanup/filter.ts";
 import type { CleanupRow, GitState } from "../src/cleanup/types.ts";
 import type { AgentSession } from "../src/shared/types.ts";
 import { endRowsOf } from "../src/ui/hooks/useCleanupEnd.ts";
@@ -56,6 +56,14 @@ describe("the verdict", () => {
   test("nothing to judge, or the main checkout, is neither", () => {
     expect(verdict(row("a"), null)).toBe("other");
     expect(verdict(row("a", { worktree: null }), { ...CLEAN, isMain: true, merged: false })).toBe("other");
+  });
+});
+
+describe("the verdict a row is shown by", () => {
+  test("a row being measured again keeps its last measured place; a measured one shows as it is", () => {
+    expect(shownVerdict("pending", "safe")).toBe("safe");
+    expect(shownVerdict("pending", undefined)).toBe("pending");
+    expect(shownVerdict("risk", "safe")).toBe("risk");
   });
 });
 
@@ -127,6 +135,17 @@ describe("the keys", () => {
     const cleared = press(kept, env, { escape: true });
     expect(cleared).toMatchObject({ effect: "none", state: { query: "" } });
     expect(press(cleared.state, env, { escape: true }).effect).toBe("back");
+  });
+
+  test("/ edits at the caret: ← and → move it, typing and backspace act there", () => {
+    const st = press(INITIAL_CLEANUP, env, "/", "a", "b", { leftArrow: true }, "x").state;
+    expect(st).toMatchObject({ query: "axb", caret: 2 });
+    expect(press(st, env, { backspace: true }).state).toMatchObject({ query: "ab", caret: 1 });
+    expect(press(st, env, { rightArrow: true }, "y").state).toMatchObject({ query: "axby", caret: 4 });
+    // Re-opening the prompt puts the caret at the end of what is kept.
+    const kept = press(st, env, { return: true }).state;
+    expect(press(kept, env, "/").state.caret).toBe(3);
+    expect(press(kept, env, { escape: true }).state).toMatchObject({ query: "", caret: 0 });
   });
 
   test("p, x and X ask the screen to pause, kill or force-kill; with ctrl or meta they do nothing", () => {

@@ -40,6 +40,16 @@ export function verdictOf(row: CleanupRow, git: GitState | null | undefined, off
   return "other";
 }
 
+/**
+ * The verdict a row is FILTERED by: a row being measured again (after a
+ * delete, or R) keeps the place its last measurement gave it until the new one
+ * lands, so it does not blink out of a filtered list and take the cursor with
+ * it. Only visibility: whether a row is safe to delete is always `now`.
+ */
+export function shownVerdict(now: Verdict, last: Verdict | undefined): Verdict {
+  return now === "pending" && last ? last : now;
+}
+
 /** Whether `query` (case-insensitive) is in the row's title, branch or path. An empty query matches all. */
 export function matchesQuery(row: CleanupRow, git: GitState | null | undefined, query: string): boolean {
   const q = query.trim().toLowerCase();

@@ -52,6 +52,8 @@ async function bulkCheck(key: string, title: string, rows: readonly CleanupRow[]
   const row = rows.find((r) => r.key === key);
   if (!row) return { title, skip: "skipped — the row is gone" };
   const git = await probeGit(row.repoRoot, row.path, row.branchHint);
+  // Another row of this run took the same worktree and branch with it.
+  if (git === null) return { title, skip: "skipped — its worktree and branch are already gone" };
   const offers = offersFor(row, git, othersRunningIn(row, rows, livePaneCwds()));
   if (verdictOf(row, git, offers) !== "safe") return { title, skip: "skipped — no longer safe to remove" };
   return { title, plan: planFor(row, rows, { sel: defaultSelection(offers, git, row.active), git, confirmed: false, activeConfirmed: false }) };

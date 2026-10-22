@@ -133,6 +133,12 @@ describe("the list's D, R and enter", () => {
     expect(press(st, envOf([]), "y")).toMatchObject({ effect: "runAll", state: { bulk: { stage: "running" } } });
   });
 
+  test("a key during the run leaves the state untouched, so it can't write over progress landing meanwhile", () => {
+    const st = press(INITIAL_CLEANUP, envOf([row("a")]), "D").state;
+    const running = press(st, envOf([]), "y").state;
+    for (const k of ["n", "D", "x"]) expect(press(running, envOf([]), k)).toEqual({ state: running, effect: "none" });
+  });
+
   test("D with nothing safe says so, and says when rows are still being checked", () => {
     expect(press(INITIAL_CLEANUP, envOf([row("b")]), "D").state).toMatchObject({ bulk: null, note: "nothing shown is safe to remove" });
     expect(press(INITIAL_CLEANUP, envOf([row("b"), row("p")]), "D").state.note).toContain("still being checked");

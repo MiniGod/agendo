@@ -1,18 +1,17 @@
 import { Box, Text, useInput, useStdout } from "ink";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { LoadedModel } from "../../app/model/index.ts";
 import { touchedBy } from "../../cleanup/bulk.ts";
-import { offersFor } from "../../cleanup/classify.ts";
-import { filterLabel, filterRows, verdictOf, type CleanupFilter } from "../../cleanup/filter.ts";
-import { othersRunningIn } from "../../cleanup/rows.ts";
-import { formatSize, sortRows, totalSize } from "../../cleanup/sort.ts";
+import { filterLabel, type CleanupFilter } from "../../cleanup/filter.ts";
+import { formatSize, totalSize } from "../../cleanup/sort.ts";
 import type { CleanupRow, GitState, RowSizes } from "../../cleanup/types.ts";
 import { fit, homeShort, timeAgo } from "../format/index.ts";
 import { openSession, type OpenPlan } from "../../launch/index.ts";
 import { sessionName } from "../../runtime/tmux/index.ts";
 import { useCleanupData } from "../hooks/useCleanupData.ts";
 import { useCleanupEnd } from "../hooks/useCleanupEnd.ts";
-import { livePaneCwds, useCleanupRuns } from "../hooks/useCleanupRuns.ts";
+import { useCleanupView } from "../hooks/useCleanupView.ts";
+import { useCleanupRuns } from "../hooks/useCleanupRuns.ts";
 import { cleanupKey, syncCursor, INITIAL_CLEANUP, type CleanupEnv, type CleanupState } from "../keys/cleanup.ts";
 import { gitCells, pageTop, runCell, sortLabel } from "../models/cleanupRow.ts";
 import { CleanupBulkView } from "./CleanupBulk.tsx";
@@ -92,7 +91,9 @@ function CleanupList({ rows, total, pending, state, gits, sizes, top, page, cols
         {`Cleanup — ${countLabel(rows.length, total, filtered)}`}
         <Text dimColor>{`${filterNote(state, pending)}  ·  sort: ${sortLabel(state.sort, state.reversed)}`}</Text>
       </Text>
-      {state.typing ? <Text>{`/ ${state.query}`}<Text color="cyan">{"▏"}</Text></Text> : null}
+      {state.typing ? (
+        <Text>{`/ ${state.query.slice(0, state.caret)}`}<Text color="cyan">{"▏"}</Text>{state.query.slice(state.caret)}</Text>
+      ) : null}
       <Text dimColor wrap="truncate">
         {`  ${"STATE".padEnd(RUN_W)}${"TITLE / PATH [BRANCH]".padEnd(titleW)}${"UPDATED".padEnd(TIME_W)}${"CREATED".padEnd(TIME_W)}${"SIZE".padStart(SIZE_W - 1).padEnd(SIZE_W)}GIT`}
       </Text>
@@ -149,18 +150,7 @@ export function CleanupScreen({
   useEffect(() => {
     rememberedFilter = stored.filter;
   }, [stored.filter]);
-  // Re-read with every model refresh; run() reads it afresh again before deleting.
-  const panes = useMemo(() => livePaneCwds(), [model]); // eslint-disable-line react-hooks/exhaustive-deps -- `model` is the refresh tick, not an input
-  const offers = useCallback((row: CleanupRow) => offersFor(row, gits.get(row.key), othersRunningIn(row, rows, panes)), [gits, rows, panes]);
-  const git = useCallback((row: CleanupRow) => gits.get(row.key), [gits]);
-  const sorted = useMemo(() => sortRows(rows, stored.sort, stored.reversed, sizes), [rows, stored.sort, stored.reversed, sizes]);
-  // The filter judges each row with the dialog's own offers and defaults (see `verdictOf`).
-  const verdicts = useMemo(() => new Map(sorted.map((r) => [r.key, verdictOf(r, git(r), offers(r))])), [sorted, git, offers]);
-  const visible = useMemo(
-    () => filterRows(sorted, stored.filter, stored.query, (r) => verdicts.get(r.key) ?? "pending", git),
-    [sorted, stored.filter, stored.query, verdicts, git],
-  );
-  const pending = [...verdicts.values()].filter((v) => v === "pending").length;
+  const { offers, git, sorted, verdict, visible, pending } = useCleanupView({ model, rows, gits, sizes, state: stored });
   // A filter that hides the focused row leaves the cursor at its index, on whatever row is there now.
   const state = syncCursor(stored, visible);
   // Keep the stored focus in step, so a re-sort before the next key moves the
@@ -169,7 +159,7 @@ export function CleanupScreen({
   useEffect(() => {
     if (state !== stored) setState((s) => syncCursor(s, visible));
   }, [state, stored, visible]);
-  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict: (r) => verdicts.get(r.key) ?? "pending" };
+  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict };
   const setNote = (note: string | null) => setState((s) => ({ ...s, note }));
   const end = useCleanupEnd({ model, setNote, reload, onQuit });
   const { run, runAll } = useCleanupRuns({ rows, setState });
@@ -200,7 +190,12 @@ export function CleanupScreen({
     else if (e === "switch") switchTo(visible[step.state.cursor]);
     else if (e === "run" && step.state.dialog) run(step.state.dialog);
     else if (e === "runAll" && step.state.bulk) runAll(step.state.bulk);
-    else if (e === "pause" || e === "kill" || e === "forceKill") end.start(e, visible[step.state.cursor]);
+    else if (e === "pause" || e === "kill" || e === "forceKill") {
+      // After App's own handler has counted this key (keySeq): the kill's "were keys pressed
+      // meanwhile?" check must not count the x that asked. The two listeners run in either order.
+      const row = visible[step.state.cursor];
+      queueMicrotask(() => end.start(e, row));
+    }
   });
 
   const { stdout } = useStdout();

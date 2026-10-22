@@ -588,3 +588,18 @@ test("after a delete only the deleted row is measured again; R re-measures every
   await expect.poll(async () => (await wt.screen()).includes("…"), { timeout: 45000 }).toBe(false);
   for (const name of ["orphan", "running"]) expect(probesOf((await mock.callLog()).slice(mark), fx.wt(name)).length).toBeGreaterThan(0);
 });
+
+test("x asks again right after the model reloads: a pause, then x on the paused tab, gets its y/n", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  await runningInHost(mock, fx);
+  const wt = await openCleanup(launch, fx);
+  await focus(wt, "Busy right now");
+  await wt.press("p");
+  await wt.waitForText("paused Busy right now", 20000);
+  // The reload re-renders App and the view together; the very next key must still be the one that asked.
+  await wt.waitForText(/◐ paused\s+Busy right now/, 20000);
+  await wt.press("x");
+  await wt.waitForText("Close Busy right now's paused tab for good? y/n", 20000);
+  await wt.press("n");
+  await wt.waitForText("Kill cancelled");
+});
