@@ -515,7 +515,8 @@ the header says how many are still being checked. (A row measured again after a 
 place until the new measurement lands; after `R` every row starts over.) A row with nothing to judge or nothing on
 offer only shows under "all": the main checkout, a session whose checkout and branch are
 both gone, and a row whose git shows nothing at risk but whose dialog would tick nothing —
-it is running, was written to moments ago, or is a checkout the dialog won't remove. `/` adds a text filter on
+it is running, was written to moments ago, another running session or agendo pane (this
+agendo included) is in its worktree, or it is a checkout the dialog won't remove. `/` adds a text filter on
 title, branch and path (enter keeps it, esc clears it). The header shows the filter
 and `shown of total`; sorting applies within the filter. The `f` filter (not the
 `/` text) is kept until agendo exits, so leaving the view and pressing `C` again keeps it.
@@ -543,7 +544,7 @@ with progress. Right before each one it is probed again: a row that is no longer
 written to moments ago, is skipped, a failure does not stop the run, and the summary says what happened to
 each. After a delete only the rows it could have changed (the row itself, and any row
 sharing its worktree or branch) are measured again; everything else keeps its
-measurements. `R` re-measures everything.
+measurements. `R` re-measures everything, sizes included.
 
 ### Jump to a session from the PR page
 

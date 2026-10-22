@@ -52,6 +52,11 @@ export function invalidateUsage(path: string): void {
   for (const key of cache.keys()) if (key === path || key.startsWith(`${path}/`)) cache.delete(key);
 }
 
+/** Forget every cached size: R measures everything afresh. */
+export function clearUsage(): void {
+  cache.clear();
+}
+
 /** Where Claude Code keeps per-session scratch dirs: `$CLAUDE_CODE_TMPDIR`, else the OS temp dir. */
 export function claudeTmpRoot(): string {
   return process.env.CLAUDE_CODE_TMPDIR || tmpdir();

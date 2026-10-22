@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from "fs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LoadedModel } from "../../app/model/index.ts";
-import { claudeTmpRoot, cachedUsage, listManagedWorktrees, usageOf } from "../../cleanup/disk.ts";
+import { claudeTmpRoot, cachedUsage, clearUsage, listManagedWorktrees, usageOf } from "../../cleanup/disk.ts";
 import { probeGit } from "../../cleanup/git.ts";
 import { activityPathsOf, buildCleanupRows, sessionRepoRoot, tmpDirOf, transcriptPathsOf, type WorktreeDir } from "../../cleanup/rows.ts";
 import type { CleanupRow, GitState, RowSizes } from "../../cleanup/types.ts";
@@ -144,6 +144,7 @@ export function useCleanupData({
       setGits(new Map());
       setSizes(new Map());
       setScan(scanKey);
+      clearUsage(); // or `du` would answer from its five-minute cache, and R would show the old sizes
     }
     const scan = queued.current;
     const fresh = rows.filter((r) => !scan.keys.has(r.key));
