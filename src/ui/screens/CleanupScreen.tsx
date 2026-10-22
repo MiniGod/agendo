@@ -71,7 +71,8 @@ function filterNote(state: CleanupState, pending: number): string {
 /**
  * How many rows fit: the list's two lines a row under eight of its own (header,
  * column header, ↑/↓ more, the note, three of hints); D's dialog one line a row
- * under nine of its own (title, three of explanation, ↑/↓ more, the y line, gaps).
+ * under nine of its own (title, three of explanation, ↑/↓ more, the y line, gaps),
+ * plus one spare.
  */
 function pagesFor(rows = 24): { page: number; bulkPage: number } {
   return { page: Math.max(2, Math.floor((rows - 8) / 2)), bulkPage: Math.max(2, rows - 10) };

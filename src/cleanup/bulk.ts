@@ -3,8 +3,10 @@
 // changed. The judging and the deleting are handed in, so the order, the
 // skip-and-carry-on and the summary are unit tested on their own
 // (test/cleanupBulk.test.ts) without a repository.
+import { riskGrew } from "./classify.ts";
 import type { CleanupPlan, CleanupResult } from "./execute.ts";
-import type { CleanupRow, GitState } from "./types.ts";
+import { verdictOf } from "./filter.ts";
+import type { CleanupRow, GitState, Offers } from "./types.ts";
 
 /** What happened to one row of a bulk run. */
 export interface BulkStep {
@@ -53,6 +55,18 @@ export async function runBulk(keys: readonly string[], deps: BulkDeps): Promise<
     deps.onStep(step);
   }
   return steps;
+}
+
+/**
+ * Why D must skip `row` now, from a `fresh` probe taken right before its turn,
+ * or null when it may go. Safe is not enough: like the dialog, D only deletes
+ * what was confirmed — another branch, or the same one on other commits, is not
+ * (a second row whose checkout went away falls back to its own branch hint).
+ */
+export function recheck(row: CleanupRow, confirmed: GitState | null | undefined, fresh: GitState, offers: Offers): string | null {
+  if (verdictOf(row, fresh, offers) !== "safe") return "skipped — no longer safe to remove";
+  if (!confirmed || riskGrew(confirmed, fresh)) return "skipped — changed since you confirmed";
+  return null;
 }
 
 /**

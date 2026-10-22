@@ -1,6 +1,6 @@
 import type { Key } from "ink";
 import type { BulkStep } from "../../cleanup/bulk.ts";
-import type { CleanupRow } from "../../cleanup/types.ts";
+import type { CleanupRow, GitState } from "../../cleanup/types.ts";
 
 // ── D in the cleanup view: delete everything that is safe to remove ──
 // One confirmation naming the count and the rows, then a sequential run that
@@ -15,13 +15,15 @@ export interface BulkDialog {
   top: number;
   /** One per row finished so far, in order. */
   steps: BulkStep[];
+  /** Each row's git state as the confirmation showed it: D deletes only that, never what the row turned into. */
+  confirmed: ReadonlyMap<string, GitState | null | undefined>;
 }
 
 /** What the screen must do after a key on the bulk dialog. */
 export type BulkEffect = "none" | "cancel" | "runAll" | "refresh";
 
-export function openBulk(rows: readonly CleanupRow[]): BulkDialog {
-  return { stage: "confirm", rows: [...rows], top: 0, steps: [] };
+export function openBulk(rows: readonly CleanupRow[], git: (row: CleanupRow) => GitState | null | undefined = () => undefined): BulkDialog {
+  return { stage: "confirm", rows: [...rows], top: 0, steps: [], confirmed: new Map(rows.map((r) => [r.key, git(r)])) };
 }
 
 /** How many lines the list or summary has, for clamping the scroll. */

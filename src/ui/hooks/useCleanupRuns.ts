@@ -1,12 +1,11 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
-import { pausedTabIn, runBulk, type BulkCheck } from "../../cleanup/bulk.ts";
+import { pausedTabIn, recheck, runBulk, type BulkCheck } from "../../cleanup/bulk.ts";
 import { defaultSelection, offersFor } from "../../cleanup/classify.ts";
 import { claudeTmpRoot } from "../../cleanup/disk.ts";
 import { executeCleanup, writtenJustNow, type CleanupPlan, type CleanupResult } from "../../cleanup/execute.ts";
-import { verdictOf } from "../../cleanup/filter.ts";
 import { probeGit } from "../../cleanup/git.ts";
 import { othersRunningIn, sharedActivityPaths } from "../../cleanup/rows.ts";
-import type { CleanupRow } from "../../cleanup/types.ts";
+import type { CleanupRow, GitState } from "../../cleanup/types.ts";
 import { liveManagedPaths } from "../../runtime/tmux/index.ts";
 import { finishRun, type CleanupDialog, type CleanupState } from "../keys/cleanup.ts";
 import { bulkDone, bulkStepped, type BulkDialog } from "../keys/cleanupBulk.ts";
@@ -55,18 +54,21 @@ function planFor(row: CleanupRow, rows: readonly CleanupRow[], choice: Choice): 
  * its own dialog would start ticked, unconfirmed — so the run-time checks in
  * execute.ts also refuse anything that turns risky between this probe and theirs.
  */
-async function bulkCheck(key: string, title: string, rows: readonly CleanupRow[]): Promise<BulkCheck> {
+async function bulkCheck(key: string, title: string, rows: readonly CleanupRow[], confirmed: GitState | null | undefined): Promise<BulkCheck> {
   const row = rows.find((r) => r.key === key);
   if (!row) return { title, skip: "skipped — the row is gone" };
   if (pausedTabIn(row, rows, pausedPaneCwds())) return { title, skip: "skipped — a paused tab uses this checkout; remove it from its own dialog" };
-  const git = await probeGit(row.repoRoot, row.path, row.branchHint);
+  const fresh = await probeGit(row.repoRoot, row.path, row.branchHint);
   // Another row of this run took the same worktree and branch with it.
-  if (git === null) return { title, skip: "skipped — its worktree and branch are already gone" };
-  const offers = offersFor(row, git, othersRunningIn(row, rows, livePaneCwds()));
-  if (verdictOf(row, git, offers) !== "safe") return { title, skip: "skipped — no longer safe to remove" };
+  if (fresh === null) return { title, skip: "skipped — its worktree and branch are already gone" };
+  const offers = offersFor(row, fresh, othersRunningIn(row, rows, livePaneCwds()));
+  const skip = recheck(row, confirmed, fresh, offers);
+  if (skip) return { title, skip };
   // The rows' `active` is only as fresh as the last model load; the disk says whether it was written since.
   if (await writtenJustNow(row, Date.now(), sharedActivityPaths(row, rows))) return { title, skip: "skipped — written to moments ago" };
-  return { title, plan: planFor(row, rows, { sel: defaultSelection(offers, git, row.active), git, confirmed: false, activeConfirmed: false }) };
+  // Planned against what was confirmed, so execute.ts's own re-probe also refuses anything that moved since.
+  const sel = defaultSelection(offers, fresh, row.active);
+  return { title, plan: planFor(row, rows, { sel, git: confirmed ?? fresh, confirmed: false, activeConfirmed: false }) };
 }
 
 const failed = (e: unknown): CleanupResult[] => [{ ok: false, text: String(e) }];
@@ -101,7 +103,7 @@ export function useCleanupRuns({
   const runAll = (b: BulkDialog) => {
     const titles = new Map(b.rows.map((r) => [r.key, r.title]));
     void runBulk([...titles.keys()], {
-      check: (key) => bulkCheck(key, titles.get(key) ?? key, latest.current.rows),
+      check: (key) => bulkCheck(key, titles.get(key) ?? key, latest.current.rows, b.confirmed.get(key)),
       execute: executeCleanup,
       onStep: (step) => onBulk((x) => bulkStepped(x, step)),
     }).then(() => onBulk(bulkDone));

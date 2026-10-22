@@ -169,7 +169,7 @@ const END_KEYS: Record<string, CleanupEffect> = { p: "pause", x: "kill", X: "for
 function deleteAllSafe(state: CleanupState, env: CleanupEnv): CleanupState {
   const safe = env.rows.filter((r) => env.verdict(r) === "safe");
   const bulk = safe.filter((r) => !pausedTabIn(r, env.all));
-  if (bulk.length > 0) return { ...state, bulk: openBulk(bulk) };
+  if (bulk.length > 0) return { ...state, bulk: openBulk(bulk, env.git) };
   if (safe.length > 0) return { ...state, note: "only rows a paused tab works in are safe here — D skips them; use space on one" };
   return { ...state, note: nothingSafe(state, env) };
 }

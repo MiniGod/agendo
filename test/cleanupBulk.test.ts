@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Key } from "ink";
-import { pausedTabIn, runBulk, touchedBy, type BulkCheck, type BulkStep } from "../src/cleanup/bulk.ts";
+import { pausedTabIn, recheck, runBulk, touchedBy, type BulkCheck, type BulkStep } from "../src/cleanup/bulk.ts";
 import { offersFor } from "../src/cleanup/classify.ts";
 import type { CleanupPlan, CleanupResult } from "../src/cleanup/execute.ts";
 import { verdictOf } from "../src/cleanup/filter.ts";
@@ -68,6 +68,20 @@ describe("runBulk", () => {
       onStep: () => {},
     });
     expect(steps.map((s) => [s.outcome, s.lines[0].text])).toEqual([["failed", "probe died"], ["removed", "removed worktree"]]);
+  });
+});
+
+describe("recheck", () => {
+  const r = row("a");
+  const check = (confirmed: GitState | null | undefined, fresh: GitState) => recheck(r, confirmed, fresh, offersFor(r, fresh));
+
+  test("lets a row go only while it is safe AND still what the confirmation showed", () => {
+    expect(check(CLEAN, CLEAN)).toBeNull();
+    expect(check(CLEAN, { ...CLEAN, dirty: 1 })).toBe("skipped — no longer safe to remove");
+    // Still safe, but another branch (a gone checkout falling back to its hint) or other commits: not what was confirmed.
+    expect(check(CLEAN, { ...CLEAN, worktreeExists: false, branch: "worktree-b-old" })).toBe("skipped — changed since you confirmed");
+    expect(check(CLEAN, { ...CLEAN, head: "h2" })).toBe("skipped — changed since you confirmed");
+    expect(check(undefined, CLEAN)).toBe("skipped — changed since you confirmed");
   });
 });
 
@@ -147,6 +161,8 @@ describe("the list's D, R and enter", () => {
   test("D asks about every shown row that is safe to remove, and only those", () => {
     const st = press(INITIAL_CLEANUP, envOf([row("a"), row("b"), row("c"), row("p")]), "D").state;
     expect(st.bulk?.rows.map((r) => r.key)).toEqual(["a", "c"]);
+    // It keeps the git state each row was confirmed with, so the run deletes only that.
+    expect([...(st.bulk?.confirmed ?? [])]).toEqual([["a", CLEAN], ["c", CLEAN]]);
     expect(st.bulk?.stage).toBe("confirm");
     const cancelled = press(st, envOf([]), "n");
     expect(cancelled).toMatchObject({ effect: "none", state: { bulk: null, note: "nothing deleted" } });

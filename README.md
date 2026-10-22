@@ -542,8 +542,9 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 tab uses, which would wake up in a deleted checkout, so it goes only from its own dialog — after one confirmation that names
 the count and lists the rows. Each goes with the boxes its own dialog would start
 ticked — worktree and branch; transcripts and tmp files are kept — one after another,
-with progress. Right before each one it is probed again: a row that is no longer safe, or that was
-written to moments ago, is skipped, a failure does not stop the run, and the summary says what happened to
+with progress. Right before each one it is probed again: a row that is no longer safe, whose branch
+or commits are no longer what the confirmation showed, that was written to moments ago, or
+that a paused tab is now in, is skipped, a failure does not stop the run, and the summary says what happened to
 each. After a delete only the rows it could have changed (the row itself, and any row
 sharing its worktree or branch) are measured again; everything else keeps its
 measurements. `R` re-measures everything, sizes included.
