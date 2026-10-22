@@ -145,12 +145,12 @@ export function CleanupScreen({
   open: (plan: OpenPlan) => void;
 }): ReactElement {
   const [scanKey, setScanKey] = useState(0);
-  const { rows, gits, sizes, remeasure } = useCleanupData({ model, inScope, extraRoots, scanKey });
+  const { rows, gits, sizes, scan, remeasure } = useCleanupData({ model, inScope, extraRoots, scanKey });
   const [stored, setState] = useState<CleanupState>(() => ({ ...INITIAL_CLEANUP, filter: rememberedFilter }));
   useEffect(() => {
     rememberedFilter = stored.filter;
   }, [stored.filter]);
-  const { offers, git, sorted, verdict, visible, pending } = useCleanupView({ model, rows, gits, sizes, state: stored });
+  const { offers, git, sorted, verdict, visible, pending } = useCleanupView({ model, rows, gits, sizes, state: stored, scan });
   // A filter that hides the focused row leaves the cursor at its index, on whatever row is there now.
   const state = syncCursor(stored, visible);
   // Keep the stored focus in step, so a re-sort before the next key moves the
@@ -159,7 +159,9 @@ export function CleanupScreen({
   useEffect(() => {
     if (state !== stored) setState((s) => syncCursor(s, visible));
   }, [state, stored, visible]);
-  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict };
+  const { stdout } = useStdout();
+  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 7) / 2));
+  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict, page };
   const setNote = (note: string | null) => setState((s) => ({ ...s, note }));
   const end = useCleanupEnd({ model, setNote, reload, onQuit });
   const { run, runAll } = useCleanupRuns({ rows, setState });
@@ -198,8 +200,6 @@ export function CleanupScreen({
     }
   });
 
-  const { stdout } = useStdout();
-  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 7) / 2));
   // The window only moves when the cursor would leave it. A ref, not state:
   // it is derived from the cursor each render and never drives one itself.
   const top = useRef(0);

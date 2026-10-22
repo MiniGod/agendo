@@ -131,14 +131,19 @@ export function useCleanupData({
 
   const [gits, setGits] = useState<Map<string, GitState | null>>(new Map());
   const [sizes, setSizes] = useState<Map<string, RowSizes>>(new Map());
+  // The scan `gits` and `sizes` belong to: for one render after R it is still the old one.
+  const [scan, setScan] = useState(scanKey);
   // Rows already queued in this scan, so a re-render never probes one twice.
   const queued = useRef<{ scan: number; keys: Set<string> }>({ scan: scanKey, keys: new Set() });
+  // Bumped per row by `remeasure`, so a probe started before it can't land over the one started after.
+  const generation = useRef(new Map<string, number>());
 
   useEffect(() => {
     if (queued.current.scan !== scanKey) {
       queued.current = { scan: scanKey, keys: new Set() };
       setGits(new Map());
       setSizes(new Map());
+      setScan(scanKey);
     }
     const scan = queued.current;
     const fresh = rows.filter((r) => !scan.keys.has(r.key));
@@ -151,9 +156,11 @@ export function useCleanupData({
     // Each half lands on its own: a slow `du` must not hold back the git state the dialog waits on.
     const jobs = fresh.map((row) => async () => {
       started.add(row.key);
+      const gen = generation.current.get(row.key) ?? 0;
+      const live = () => current() && (generation.current.get(row.key) ?? 0) === gen;
       await Promise.all([
-        probeGit(row.repoRoot, row.path, row.branchHint).then((git) => current() && setGits((m) => new Map(m).set(row.key, git))),
-        measureRow(row, tmpRoot, uid).then((size) => current() && setSizes((m) => new Map(m).set(row.key, size))),
+        probeGit(row.repoRoot, row.path, row.branchHint).then((git) => live() && setGits((m) => new Map(m).set(row.key, git))),
+        measureRow(row, tmpRoot, uid).then((size) => live() && setSizes((m) => new Map(m).set(row.key, size))),
       ]);
     });
     void runPool(jobs, PARALLEL, () => alive);
@@ -166,11 +173,14 @@ export function useCleanupData({
 
   /** Forget the measurements of `keys` and probe those rows again; every other row keeps its own. */
   const remeasure = useCallback((keys: readonly string[]) => {
-    for (const k of keys) queued.current.keys.delete(k);
+    for (const k of keys) {
+      queued.current.keys.delete(k);
+      generation.current.set(k, (generation.current.get(k) ?? 0) + 1);
+    }
     setGits((m) => without(m, keys));
     setSizes((m) => without(m, keys));
     setRelist((n) => n + 1);
   }, []);
 
-  return { rows, gits, sizes, remeasure };
+  return { rows, gits, sizes, scan, remeasure };
 }

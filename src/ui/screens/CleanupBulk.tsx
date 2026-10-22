@@ -2,7 +2,7 @@ import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import type { BulkStep } from "../../cleanup/bulk.ts";
 import { homeShort } from "../format/index.ts";
-import type { BulkDialog } from "../keys/cleanupBulk.ts";
+import { bulkScrolls, type BulkDialog } from "../keys/cleanupBulk.ts";
 
 /** `…and N more` under a window of a longer list, else nothing. */
 function More({ hidden }: { hidden: number }) {
@@ -18,7 +18,7 @@ function ConfirmView({ b, page }: { b: BulkDialog; page: number }) {
       <Text dimColor wrap="truncate">
         {"Each goes with the boxes its own dialog starts ticked (worktree and branch); transcripts and tmp files are kept."}
       </Text>
-      <Text dimColor wrap="truncate">{"Each row is checked again right before it goes; one that is no longer safe is skipped."}</Text>
+      <Text dimColor wrap="truncate">{"Each row is checked again right before it goes; one that is no longer safe is skipped. A paused tab's checkout is left alone."}</Text>
       <Box flexDirection="column" marginTop={1}>
         {b.top > 0 ? <Text dimColor>{`   ↑ ${b.top} more`}</Text> : null}
         {shown.map((r) => (
@@ -27,7 +27,7 @@ function ConfirmView({ b, page }: { b: BulkDialog; page: number }) {
         <More hidden={n - b.top - shown.length} />
       </Box>
       <Box marginTop={1}>
-        <Text bold>{`y delete all ${n} · ↑/↓ scroll · any other key cancels`}</Text>
+        <Text bold>{`y delete all ${n} · ${bulkScrolls(b, page) ? "↑/↓ scroll · " : ""}any other key cancels`}</Text>
       </Box>
     </Box>
   );
@@ -71,7 +71,7 @@ function DoneView({ b, page }: { b: BulkDialog; page: number }) {
       ))}
       <More hidden={b.steps.length - b.top - shown.length} />
       <Box marginTop={1}>
-        <Text dimColor>{"press any key to return to the list"}</Text>
+        <Text dimColor>{bulkScrolls(b, page) ? "↑/↓ scroll · any other key returns to the list" : "press any key to return to the list"}</Text>
       </Box>
     </Box>
   );

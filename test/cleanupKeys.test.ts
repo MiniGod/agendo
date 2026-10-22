@@ -152,6 +152,14 @@ describe("the dialog", () => {
     expect(syncCursor(INITIAL_CLEANUP, [a])).toMatchObject({ cursor: 0, focus: "a" });
     const st = { ...INITIAL_CLEANUP, cursor: 1, focus: "b" };
     expect(syncCursor(st, [a, b])).toBe(st);
+    // A filter that briefly shows nothing keeps the focus, and the cursor finds the row when it is back.
+    const empty = syncCursor(st, []);
+    expect(empty).toMatchObject({ cursor: 0, focus: "b" });
+    expect(syncCursor(empty, [a, c, b])).toMatchObject({ cursor: 2, focus: "b" });
+    // Nor does an arrow pressed on the empty list forget it.
+    const moved = press(empty, envOf([], {}), "j").state;
+    expect(moved).toMatchObject({ cursor: 0, focus: "b" });
+    expect(syncCursor(moved, [a, c, b])).toMatchObject({ cursor: 2, focus: "b" });
   });
 
   test("running swallows keys; done shows the summary until a key, then refreshes", () => {

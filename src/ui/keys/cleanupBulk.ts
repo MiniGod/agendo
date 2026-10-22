@@ -29,20 +29,26 @@ function length(b: BulkDialog): number {
   return b.stage === "done" ? b.steps.length : b.rows.length;
 }
 
-function scrolled(b: BulkDialog, input: string, key: Key): BulkDialog | null {
+/** Whether the list or summary is longer than the `page` rows on screen, so ↑/↓ scroll it. */
+export function bulkScrolls(b: BulkDialog, page: number): boolean {
+  return length(b) > page;
+}
+
+function scrolled(b: BulkDialog, input: string, key: Key, page: number): BulkDialog | null {
   const dir = key.upArrow || input === "k" ? -1 : key.downArrow || input === "j" ? 1 : 0;
-  if (!dir) return null;
-  return { ...b, top: Math.max(0, Math.min(b.top + dir, length(b) - 1)) };
+  if (!dir || !bulkScrolls(b, page)) return null;
+  return { ...b, top: Math.max(0, Math.min(b.top + dir, length(b) - page)) };
 }
 
 /**
- * One key on the bulk dialog. Confirm: only `y` runs, ↑/↓ scroll, anything
- * else cancels. Running: keys wait. Done: ↑/↓ scroll the summary, anything
- * else closes it and re-measures what was deleted.
+ * One key on the bulk dialog, `page` rows of it on screen. Confirm: only `y`
+ * runs, ↑/↓ scroll a list that does not fit, anything else cancels. Running:
+ * keys wait. Done: ↑/↓ scroll a summary that does not fit, anything else closes
+ * it and re-measures what was deleted.
  */
-export function bulkKey(b: BulkDialog, input: string, key: Key): { bulk: BulkDialog | null; effect: BulkEffect } {
+export function bulkKey(b: BulkDialog, input: string, key: Key, page = 1): { bulk: BulkDialog | null; effect: BulkEffect } {
   if (b.stage === "running") return { bulk: b, effect: "none" };
-  const scroll = scrolled(b, input, key);
+  const scroll = scrolled(b, input, key, page);
   if (scroll) return { bulk: scroll, effect: "none" };
   if (b.stage === "done") return { bulk: null, effect: "refresh" };
   if (input === "y" || input === "Y") return { bulk: { ...b, stage: "running", top: 0 }, effect: "runAll" };

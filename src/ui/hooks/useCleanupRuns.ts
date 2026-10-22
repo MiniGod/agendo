@@ -1,8 +1,8 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
-import { runBulk, type BulkCheck } from "../../cleanup/bulk.ts";
+import { pausedTabIn, runBulk, type BulkCheck } from "../../cleanup/bulk.ts";
 import { defaultSelection, offersFor } from "../../cleanup/classify.ts";
 import { claudeTmpRoot } from "../../cleanup/disk.ts";
-import { executeCleanup, type CleanupPlan, type CleanupResult } from "../../cleanup/execute.ts";
+import { executeCleanup, writtenJustNow, type CleanupPlan, type CleanupResult } from "../../cleanup/execute.ts";
 import { verdictOf } from "../../cleanup/filter.ts";
 import { probeGit } from "../../cleanup/git.ts";
 import { othersRunningIn, sharedActivityPaths } from "../../cleanup/rows.ts";
@@ -25,6 +25,13 @@ export function livePaneCwds(): string[] {
   } catch {
     return panes;
   }
+}
+
+/** Where every paused tab's (placeholder) pane is, as realpaths. */
+function pausedPaneCwds(): string[] {
+  return liveManagedPaths()
+    .filter((t) => t.placeholder)
+    .map((t) => canonical(t.cwd));
 }
 
 type Choice = Pick<CleanupPlan, "sel" | "git" | "confirmed" | "activeConfirmed">;
@@ -51,11 +58,14 @@ function planFor(row: CleanupRow, rows: readonly CleanupRow[], choice: Choice): 
 async function bulkCheck(key: string, title: string, rows: readonly CleanupRow[]): Promise<BulkCheck> {
   const row = rows.find((r) => r.key === key);
   if (!row) return { title, skip: "skipped — the row is gone" };
+  if (pausedTabIn(row, rows, pausedPaneCwds())) return { title, skip: "skipped — a paused tab uses this checkout; remove it from its own dialog" };
   const git = await probeGit(row.repoRoot, row.path, row.branchHint);
   // Another row of this run took the same worktree and branch with it.
   if (git === null) return { title, skip: "skipped — its worktree and branch are already gone" };
   const offers = offersFor(row, git, othersRunningIn(row, rows, livePaneCwds()));
   if (verdictOf(row, git, offers) !== "safe") return { title, skip: "skipped — no longer safe to remove" };
+  // The rows' `active` is only as fresh as the last model load; the disk says whether it was written since.
+  if (await writtenJustNow(row, Date.now(), sharedActivityPaths(row, rows))) return { title, skip: "skipped — written to moments ago" };
   return { title, plan: planFor(row, rows, { sel: defaultSelection(offers, git, row.active), git, confirmed: false, activeConfirmed: false }) };
 }
 

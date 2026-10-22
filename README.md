@@ -511,11 +511,12 @@ nothing unpushed, merged, no ignored files, not running and not written to in th
 five minutes. "Has something to lose" is a row with dirty files, unpushed commits, an
 unmerged branch, ignored files, checked-out submodules or an unreadable `git status`.
 A row whose git state is still being measured is in neither until it is; the header
-says how many are still being checked. The main checkout, and a session whose
+says how many are still being checked. (A row measured again after a delete keeps its
+place until the new measurement lands; after `R` every row starts over.) The main checkout, and a session whose
 checkout and branch are both gone, only show under "all". `/` adds a text filter on
 title, branch and path (enter keeps it, esc clears it). The header shows the filter
-and `shown of total`; sorting applies within the filter. The filter is kept until
-agendo exits, so leaving the view and pressing `C` again keeps it.
+and `shown of total`; sorting applies within the filter. The `f` filter (not the
+`/` text) is kept until agendo exits, so leaving the view and pressing `C` again keeps it.
 
 Space on a row opens a dialog with four boxes: worktree, branch, session
 transcript and tmp/scratch files. Enter does the same, except on a row whose session
@@ -532,11 +533,12 @@ Ignored files a worktree holds (a `.env`, local settings — build output like
 last five minutes that isn't running in agendo (paused, or with no window at all) is
 treated as possibly still in use: nothing starts ticked and anything deleted needs the second confirmation.
 
-`D` deletes every shown row that is safe to remove, after one confirmation that names
+`D` deletes every shown row that is safe to remove — except one whose worktree a paused
+tab uses, which would wake up in a deleted checkout, so it goes only from its own dialog — after one confirmation that names
 the count and lists the rows. Each goes with the boxes its own dialog would start
 ticked — worktree and branch; transcripts and tmp files are kept — one after another,
-with progress. Right before each one it is probed again: a row that is no longer safe
-is skipped, a failure does not stop the run, and the summary says what happened to
+with progress. Right before each one it is probed again: a row that is no longer safe, or that was
+written to moments ago, is skipped, a failure does not stop the run, and the summary says what happened to
 each. After a delete only the rows it could have changed (the row itself, and any row
 sharing its worktree or branch) are measured again; everything else keeps its
 measurements. `R` re-measures everything.

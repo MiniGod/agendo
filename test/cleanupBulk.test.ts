@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { Key } from "ink";
-import { runBulk, touchedBy, type BulkCheck, type BulkStep } from "../src/cleanup/bulk.ts";
+import { pausedTabIn, runBulk, touchedBy, type BulkCheck, type BulkStep } from "../src/cleanup/bulk.ts";
 import { offersFor } from "../src/cleanup/classify.ts";
 import type { CleanupPlan, CleanupResult } from "../src/cleanup/execute.ts";
 import { verdictOf } from "../src/cleanup/filter.ts";
 import type { CleanupRow, GitState } from "../src/cleanup/types.ts";
 import type { AgentSession } from "../src/shared/types.ts";
 import { cleanupKey, INITIAL_CLEANUP, type CleanupEnv, type CleanupState } from "../src/ui/keys/cleanup.ts";
-import { bulkDone, bulkKey, bulkStepped, openBulk } from "../src/ui/keys/cleanupBulk.ts";
+import { bulkDone, bulkKey, bulkScrolls, bulkStepped, openBulk } from "../src/ui/keys/cleanupBulk.ts";
 
 const NONE = {} as Key;
 const session = { id: "s1", source: "claude", cwd: "/r/.claude/worktrees/a", title: "t", lastUsed: new Date(0), logPath: "/p/s1.jsonl" } as AgentSession;
@@ -71,6 +71,21 @@ describe("runBulk", () => {
   });
 });
 
+describe("pausedTabIn", () => {
+  test("is the row itself paused, or a paused row of the same repo in its worktree", () => {
+    const paused = row("a", { run: "paused" });
+    const mate = row("b", { worktree: paused.worktree });
+    expect(pausedTabIn(paused, [paused])).toBe(true);
+    expect(pausedTabIn(mate, [paused, mate])).toBe(true);
+    expect(pausedTabIn(mate, [mate, row("c", { run: "paused" })])).toBe(false);
+    expect(pausedTabIn(mate, [{ ...paused, repoRoot: "/other" }, mate])).toBe(false);
+    expect(pausedTabIn(row("d", { worktree: null }), [row("e", { worktree: null, run: "paused" })])).toBe(false);
+    // A paused pane in the checkout, whose session is no row, counts too.
+    expect(pausedTabIn(mate, [mate], ["/r/.claude/worktrees/a/sub"])).toBe(true);
+    expect(pausedTabIn(mate, [mate], ["/r/.claude/worktrees/ab"])).toBe(false);
+  });
+});
+
 describe("touchedBy", () => {
   test("is the deleted rows and the rows of the same repo sharing a checkout or a branch — nothing else", () => {
     const gone = row("a");
@@ -93,15 +108,18 @@ describe("touchedBy", () => {
 describe("the bulk dialog", () => {
   const rows = [row("a"), row("b"), row("c")];
 
-  test("y runs; ↑/↓ scroll the list; any other key cancels", () => {
+  test("y runs; ↑/↓ scroll a list that does not fit, only as far as its last page; any other key cancels", () => {
     const b = openBulk(rows);
-    expect(bulkKey(b, "y", NONE)).toMatchObject({ effect: "runAll", bulk: { stage: "running" } });
-    expect(bulkKey(b, "Y", NONE).effect).toBe("runAll");
-    expect(bulkKey(b, "j", NONE).bulk?.top).toBe(1);
-    expect(bulkKey({ ...b, top: 2 }, "", { downArrow: true } as Key).bulk?.top).toBe(2);
-    expect(bulkKey({ ...b, top: 1 }, "k", NONE).bulk?.top).toBe(0);
-    expect(bulkKey(b, "", { upArrow: true } as Key).bulk?.top).toBe(0);
-    expect(bulkKey(b, "n", NONE)).toEqual({ bulk: null, effect: "cancel" });
+    expect(bulkKey(b, "y", NONE, 2)).toMatchObject({ effect: "runAll", bulk: { stage: "running" } });
+    expect(bulkKey(b, "Y", NONE, 2).effect).toBe("runAll");
+    expect(bulkKey(b, "j", NONE, 2).bulk?.top).toBe(1);
+    expect(bulkKey({ ...b, top: 1 }, "", { downArrow: true } as Key, 2).bulk?.top).toBe(1);
+    expect(bulkKey({ ...b, top: 1 }, "k", NONE, 2).bulk?.top).toBe(0);
+    expect(bulkKey(b, "", { upArrow: true } as Key, 2).bulk?.top).toBe(0);
+    expect(bulkKey(b, "n", NONE, 2)).toEqual({ bulk: null, effect: "cancel" });
+    // A list that fits has nothing to scroll: an arrow is any other key.
+    expect(bulkScrolls(b, 3)).toBe(false);
+    expect(bulkKey(b, "j", NONE, 3)).toEqual({ bulk: null, effect: "cancel" });
   });
 
   test("running swallows keys; done scrolls, then any key closes and re-measures", () => {
@@ -114,6 +132,8 @@ describe("the bulk dialog", () => {
     expect(done).toMatchObject({ stage: "done", top: 0 });
     expect(bulkKey(done, "j", NONE).bulk?.top).toBe(1);
     expect(bulkKey(done, "x", NONE)).toEqual({ bulk: null, effect: "refresh" });
+    // A summary that fits closes on an arrow too, as its "press any key" says.
+    expect(bulkKey(done, "j", NONE, 2)).toEqual({ bulk: null, effect: "refresh" });
   });
 });
 
@@ -142,6 +162,16 @@ describe("the list's D, R and enter", () => {
   test("D with nothing safe says so, and says when rows are still being checked", () => {
     expect(press(INITIAL_CLEANUP, envOf([row("b")]), "D").state).toMatchObject({ bulk: null, note: "nothing shown is safe to remove" });
     expect(press(INITIAL_CLEANUP, envOf([row("b"), row("p")]), "D").state.note).toContain("still being checked");
+  });
+
+  test("D leaves paused tabs out, and says so when they are all that is safe", () => {
+    const st = press(INITIAL_CLEANUP, envOf([row("a", { run: "paused" }), row("c")]), "D").state;
+    expect(st.bulk?.rows.map((r) => r.key)).toEqual(["c"]);
+    const only = press(INITIAL_CLEANUP, envOf([row("a", { run: "paused" })]), "D").state;
+    expect(only).toMatchObject({ bulk: null, note: expect.stringContaining("paused") });
+    // An idle row in the worktree a paused tab uses is left out too.
+    const shared = [row("a", { run: "paused" }), row("b", { worktree: "/r/.claude/worktrees/a" }), row("c")];
+    expect(press(INITIAL_CLEANUP, envOf(shared), "D").state.bulk?.rows.map((r) => r.key)).toEqual(["c"]);
   });
 
   test("R re-scans everything", () => {

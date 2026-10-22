@@ -19,12 +19,15 @@ export function useCleanupView({
   gits,
   sizes,
   state,
+  scan,
 }: {
   model: LoadedModel;
   rows: readonly CleanupRow[];
   gits: ReadonlyMap<string, GitState | null>;
   sizes: ReadonlyMap<string, RowSizes>;
   state: CleanupState;
+  /** The scan `gits` came from (not the one asked for), so R's last render of old results isn't kept. */
+  scan: number;
 }) {
   // Re-read with every model refresh; run() reads it afresh again before deleting.
   const panes = useMemo(() => livePaneCwds(), [model]); // eslint-disable-line react-hooks/exhaustive-deps -- `model` is the refresh tick, not an input
@@ -34,11 +37,13 @@ export function useCleanupView({
   // The filter judges each row with the dialog's own offers and defaults (see `verdictOf`).
   const verdicts = useMemo(() => new Map(sorted.map((r) => [r.key, verdictOf(r, git(r), offers(r))])), [sorted, git, offers]);
   const verdict = useCallback((r: CleanupRow): Verdict => verdicts.get(r.key) ?? "pending", [verdicts]);
-  // Each row's last measured verdict, so one being measured again keeps its place in the list (see `shownVerdict`).
-  const measured = useRef(new Map<string, Verdict>());
-  for (const [k, v] of verdicts) if (v !== "pending") measured.current.set(k, v);
+  // Each row's last measured verdict, so one being measured again after a delete keeps its place in the
+  // list (see `shownVerdict`). A full re-scan (R) starts over: every row is pending until measured anew.
+  const measured = useRef({ scan, verdicts: new Map<string, Verdict>() });
+  if (measured.current.scan !== scan) measured.current = { scan, verdicts: new Map() };
+  for (const [k, v] of verdicts) if (v !== "pending") measured.current.verdicts.set(k, v);
   const visible = useMemo(
-    () => filterRows(sorted, state.filter, state.query, (r) => shownVerdict(verdict(r), measured.current.get(r.key)), git),
+    () => filterRows(sorted, state.filter, state.query, (r) => shownVerdict(verdict(r), measured.current.verdicts.get(r.key)), git),
     [sorted, state.filter, state.query, verdict, git],
   );
   // Of the rows the `/` text matches, those not yet judged.

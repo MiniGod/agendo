@@ -56,6 +56,18 @@ export async function runBulk(keys: readonly string[], deps: BulkDeps): Promise<
 }
 
 /**
+ * Whether a paused tab would wake up in `row`'s checkout: the row is one,
+ * another row of the same repo in the same worktree is, or one of `pausedCwds`
+ * (the paused tabs' panes, as realpaths — a tab whose session is no row at all)
+ * is in it. D leaves such a row to its own dialog.
+ */
+export function pausedTabIn(row: CleanupRow, rows: readonly CleanupRow[], pausedCwds: readonly string[] = []): boolean {
+  const wt = row.worktree;
+  if (wt && pausedCwds.some((c) => c === wt || c.startsWith(`${wt}/`))) return true;
+  return rows.some((r) => r.run === "paused" && (r.key === row.key || (!!wt && r.repoRoot === row.repoRoot && r.worktree === wt)));
+}
+
+/**
  * The rows whose measurements a cleanup of `done` can have changed: those rows
  * themselves, and every row of the same repo sharing one's checkout or its
  * branch. Everything else keeps the size and git state it was measured with.

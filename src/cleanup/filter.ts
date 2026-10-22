@@ -41,9 +41,9 @@ export function verdictOf(row: CleanupRow, git: GitState | null | undefined, off
 }
 
 /**
- * The verdict a row is FILTERED by: a row being measured again (after a
- * delete, or R) keeps the place its last measurement gave it until the new one
- * lands, so it does not blink out of a filtered list and take the cursor with
+ * The verdict a row is FILTERED by: a row being measured again after a delete
+ * keeps the place its last measurement gave it until the new one lands (not
+ * after R: a re-scan starts every row over), so it does not blink out of a filtered list and take the cursor with
  * it. Only visibility: whether a row is safe to delete is always `now`.
  */
 export function shownVerdict(now: Verdict, last: Verdict | undefined): Verdict {

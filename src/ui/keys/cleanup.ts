@@ -1,4 +1,5 @@
 import type { Key } from "ink";
+import { pausedTabIn } from "../../cleanup/bulk.ts";
 import { defaultSelection, needsConfirm, selectionProblem } from "../../cleanup/classify.ts";
 import type { CleanupResult } from "../../cleanup/execute.ts";
 import { nextFilter, type CleanupFilter, type Verdict } from "../../cleanup/filter.ts";
@@ -83,6 +84,8 @@ export interface CleanupEnv {
   git: (row: CleanupRow) => GitState | null | undefined;
   /** Where the filter puts a row; D deletes the shown rows it calls `safe`. */
   verdict: (row: CleanupRow) => Verdict;
+  /** How many rows the D dialog shows at once, so it scrolls only what does not fit. */
+  page?: number;
 }
 
 type Step = { state: CleanupState; effect: CleanupEffect };
@@ -110,7 +113,8 @@ const clamp = (n: number, len: number) => Math.max(0, Math.min(n, len - 1));
 export function syncCursor(state: CleanupState, rows: readonly CleanupRow[]): CleanupState {
   const at = state.focus === null ? -1 : rows.findIndex((r) => r.key === state.focus);
   const cursor = at >= 0 ? at : clamp(state.cursor, rows.length);
-  const focus = rows[cursor]?.key ?? null;
+  // An empty list (a filter that matches nothing, for now) keeps the focus, so the row is found again when it is back.
+  const focus = rows[cursor]?.key ?? state.focus;
   return cursor === state.cursor && focus === state.focus ? state : { ...state, cursor, focus };
 }
 
@@ -132,7 +136,7 @@ export function openDialog(row: CleanupRow, env: CleanupEnv): CleanupDialog {
 
 function moveCursor(state: CleanupState, dir: -1 | 1, env: CleanupEnv): Step {
   const cursor = clamp(state.cursor + dir, env.rows.length);
-  return stay({ ...state, cursor, focus: env.rows[cursor]?.key ?? null });
+  return stay({ ...state, cursor, focus: env.rows[cursor]?.key ?? state.focus });
 }
 
 /**
@@ -150,10 +154,17 @@ function queryKey(state: CleanupState, input: string, key: Key, env: CleanupEnv)
 /** The session keys of the list: p pauses, x kills, X force-kills — the same actions as on the session rows. */
 const END_KEYS: Record<string, CleanupEffect> = { p: "pause", x: "kill", X: "forceKill" };
 
-/** D: the confirmation for every shown row that is safe to remove, or a note saying there is none. */
+/**
+ * D's rows: every shown row that is safe to remove — except one whose checkout
+ * a paused tab would wake up in; that one goes only from its own dialog — or,
+ * when there is none, a note saying so. A paused pane whose session is no row
+ * at all is caught by the check right before each row's turn.
+ */
 function deleteAllSafe(state: CleanupState, env: CleanupEnv): CleanupState {
   const safe = env.rows.filter((r) => env.verdict(r) === "safe");
-  if (safe.length > 0) return { ...state, bulk: openBulk(safe) };
+  const bulk = safe.filter((r) => !pausedTabIn(r, env.all));
+  if (bulk.length > 0) return { ...state, bulk: openBulk(bulk) };
+  if (safe.length > 0) return { ...state, note: "only paused tabs' checkouts are safe to remove here — D leaves them; use space on one" };
   const checking = env.rows.some((r) => env.verdict(r) === "pending");
   return { ...state, note: checking ? "nothing shown is safe to remove yet — some rows are still being checked" : "nothing shown is safe to remove" };
 }
@@ -237,8 +248,8 @@ function confirmKey(state: CleanupState, d: CleanupDialog, input: string, env: C
   return { state: { ...state, dialog: { ...d, stage: "running", confirmed: true } }, effect: "run" };
 }
 
-function bulkStep(state: CleanupState, b: BulkDialog, input: string, key: Key): Step {
-  const r = bulkKey(b, input, key);
+function bulkStep(state: CleanupState, b: BulkDialog, input: string, key: Key, page?: number): Step {
+  const r = bulkKey(b, input, key, page);
   // A key the run ignores must not write this (possibly stale) state over the progress landing meanwhile.
   if (r.bulk === b && r.effect === "none") return stay(state);
   if (r.effect === "cancel") return stay({ ...state, bulk: null, note: "nothing deleted" });
@@ -247,7 +258,7 @@ function bulkStep(state: CleanupState, b: BulkDialog, input: string, key: Key): 
 
 /** Apply one key to the cleanup screen. */
 export function cleanupKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
-  if (state.bulk) return bulkStep(state, state.bulk, input, key);
+  if (state.bulk) return bulkStep(state, state.bulk, input, key, env.page);
   const d = state.dialog;
   if (!d) return listKey(state, input, key, env);
   if (d.stage === "edit") return editKey(state, d, input, key, env);

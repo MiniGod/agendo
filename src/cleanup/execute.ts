@@ -151,7 +151,7 @@ async function cleanCheckout(plan: CleanupPlan): Promise<CleanupResult[]> {
  * worktree-only row. A session resumed in a plain terminal while the dialog sat
  * open shows up here.
  */
-async function writtenJustNow(row: CleanupRow, now: number, shared: readonly string[] = []): Promise<boolean> {
+export async function writtenJustNow(row: CleanupRow, now: number, shared: readonly string[] = []): Promise<boolean> {
   const own = row.session ? activityPathsOf(row.session) : row.worktree ? [row.worktree] : [];
   const paths = [...own, ...shared];
   const stats = await Promise.all(paths.map((p) => stat(p).catch(() => null)));
