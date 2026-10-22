@@ -165,14 +165,16 @@ describe("the list's D, R and enter", () => {
     // Under a filter the pending rows are hidden; the view's count of them still says so.
     expect(press(INITIAL_CLEANUP, { ...envOf([row("b")]), pending: 2 }, "D").state.note).toContain("still being checked");
     // Under "has something to lose" no row can be safe, so waiting would not help: it says how to get there.
-    expect(press({ ...INITIAL_CLEANUP, filter: "risk" }, { ...envOf([row("b")]), pending: 2 }, "D").state.note).toContain("f switches");
+    expect(press({ ...INITIAL_CLEANUP, filter: "risk" }, { ...envOf([row("b")]), pending: 2 }, "D").state.note).toBe(
+      "nothing at risk is safe to remove — press f for all, where D finds the safe rows",
+    );
   });
 
   test("D leaves paused tabs out, and says so when they are all that is safe", () => {
     const st = press(INITIAL_CLEANUP, envOf([row("a", { run: "paused" }), row("c")]), "D").state;
     expect(st.bulk?.rows.map((r) => r.key)).toEqual(["c"]);
     const only = press(INITIAL_CLEANUP, envOf([row("a", { run: "paused" })]), "D").state;
-    expect(only).toMatchObject({ bulk: null, note: expect.stringContaining("paused") });
+    expect(only).toMatchObject({ bulk: null, note: "only rows a paused tab works in are safe here — D skips them; use space on one" });
     // An idle row in the worktree a paused tab uses is left out too.
     const shared = [row("a", { run: "paused" }), row("b", { worktree: "/r/.claude/worktrees/a" }), row("c")];
     expect(press(INITIAL_CLEANUP, envOf(shared), "D").state.bulk?.rows.map((r) => r.key)).toEqual(["c"]);
