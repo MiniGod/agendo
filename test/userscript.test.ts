@@ -1,10 +1,13 @@
 // The browser user-script (extras/userscript/agendo.user.js). There is no
 // browser in either suite, so what is pinned here is what can be without one:
-// the link it builds from a page URL, and that a click hands the link over from
-// a hidden iframe rather than navigating the page — the navigation is what made
-// Azure DevOps drop its live-update connection. That the iframe really keeps
-// the page from unloading in Firefox/Chromium is NOT tested here.
-import { afterEach, describe, expect, test } from "bun:test";
+// the link it builds from a page URL, that a click lets the browser follow the
+// link with a one-shot beforeunload guard armed, and what that guard does with
+// the events it is handed. NOT tested here: that a real browser hands the guard
+// beforeunload ahead of the page's handlers (Firefox runs a window's capture
+// listeners first; Chromium runs them in the order they were added, so there it
+// depends on the script manager injecting at document-start), and that the link
+// then reaches the OS handler.
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -12,9 +15,6 @@ const PATH = join(import.meta.dir, "..", "extras", "userscript", "agendo.user.js
 const script = require(PATH);
 
 const loc = (url: string) => new URL(url);
-
-// The script keeps its pending launch between calls; no test inherits another's.
-afterEach(() => script.reset());
 
 describe("linkFor / hrefFor", () => {
   const href = (url: string) => {
@@ -40,124 +40,169 @@ describe("linkFor / hrefFor", () => {
   });
 });
 
-/** Just enough of a document for `launch`: elements, a body, and listeners. */
-function fakeDoc() {
-  const listeners = new Map<string, (e: unknown) => void>();
-  const body: { children: Record<string, unknown>[] } = { children: [] };
+/** Just enough of a window for `guard`: listeners, and events that record what was done to them. */
+function fakeWin() {
+  const listeners: { type: string; fn: (e: unknown) => void; capture: unknown }[] = [];
   return {
-    body: {
-      ...body,
-      appendChild: (el: Record<string, unknown>) => body.children.push(el),
-    },
-    children: body.children,
     listeners,
-    createElement: (tag: string) => {
-      const el: Record<string, unknown> = { tag, style: {}, removed: false };
-      el.remove = () => (el.removed = true);
-      return el;
-    },
-    addEventListener: (type: string, fn: (e: unknown) => void) => listeners.set(type, fn),
-    removeEventListener: (type: string, fn: (e: unknown) => void) => {
-      if (listeners.get(type) === fn) listeners.delete(type);
+    addEventListener: (type: string, fn: (e: unknown) => void, capture: unknown) => listeners.push({ type, fn, capture }),
+    /** Fire a beforeunload at the guard; returns what it did to the event. */
+    unload: () => {
+      const e = { stopped: false, prevented: false, returnValue: "" };
+      const ev = { ...e, stopImmediatePropagation: () => (e.stopped = true), preventDefault: () => (e.prevented = true) };
+      for (const l of listeners) if (l.type === "beforeunload") l.fn(ev);
+      return { ...e, returnValue: ev.returnValue };
     },
   };
 }
 
-describe("launch", () => {
-  test("a hidden iframe carries the link, and is removed again after FRAME_MS", () => {
-    const doc = fakeDoc();
-    const timers: [() => void, number][] = [];
-    let fellBack = false;
-    script.launch("agendo://focus?pr=1", () => (fellBack = true), doc, (fn: () => void, ms: number) => timers.push([fn, ms]));
-    expect(doc.children).toHaveLength(1);
-    const frame = doc.children[0];
-    expect(frame.tag).toBe("iframe");
-    expect(frame.src).toBe("agendo://focus?pr=1");
-    expect(frame.style).toEqual({ display: "none" });
-    expect(timers.map(([, ms]) => ms)).toEqual([script.FRAME_MS]);
-    // Long enough for the browser's first-use "open this link?" prompt, which belongs to the frame.
-    expect(script.FRAME_MS).toBeGreaterThanOrEqual(60_000);
+/** A guard on a fake window, with its timers held and its log captured. */
+function armed() {
+  const win = fakeWin();
+  const timers: [() => void, number][] = [];
+  const logs: string[] = [];
+  const arm = script.guard(win, (fn: () => void, ms: number) => timers.push([fn, ms]), (args: string[]) => logs.push(args.join(" ")));
+  return { win, timers, logs, arm };
+}
+
+describe("guard", () => {
+  test("it listens for beforeunload in the capture phase, so in Firefox it runs before every bubble handler", () => {
+    const { win } = armed();
+    expect(win.listeners.map((l) => [l.type, l.capture])).toEqual([["beforeunload", true]]);
+  });
+
+  test("unarmed, a beforeunload passes untouched: closing the tab still reaches the page", () => {
+    const { win } = armed();
+    expect(win.unload()).toEqual({ stopped: false, prevented: false, returnValue: "" });
+  });
+
+  test("armed, it swallows exactly one beforeunload, without raising the leave-page prompt", () => {
+    const { win, arm, logs } = armed();
+    arm();
+    expect(win.unload()).toEqual({ stopped: true, prevented: false, returnValue: "" });
+    expect(logs).toEqual(["stopped beforeunload: page listeners added after the guard were skipped"]);
+    expect(win.unload().stopped).toBe(false);
+  });
+
+  test("it disarms after GUARD_MS when no beforeunload came", () => {
+    const { win, arm, timers, logs } = armed();
+    arm();
+    expect(timers.map(([, ms]) => ms)).toEqual([script.GUARD_MS]);
+    // Long enough for the browser's async link-follow; short enough that closing the tab later is not swallowed.
+    expect(script.GUARD_MS).toBeGreaterThanOrEqual(1000);
+    expect(script.GUARD_MS).toBeLessThanOrEqual(5000);
     timers[0][0]();
-    expect(frame.removed).toBe(true);
-    expect(doc.listeners.has("securitypolicyviolation")).toBe(false);
-    expect(fellBack).toBe(false);
+    expect(logs).toEqual([`no beforeunload within ${script.GUARD_MS}ms; guard disarmed`]);
+    expect(win.unload().stopped).toBe(false);
   });
 
-  test("an enforced CSP that blocks the agendo: frame falls back to the link, once; other violations are ignored", () => {
-    const doc = fakeDoc();
-    let fellBack = 0;
-    script.launch("agendo://focus?pr=1", () => fellBack++, doc, () => {});
-    const report = doc.listeners.get("securitypolicyviolation")!;
-    report({ blockedURI: "https://ads.example", disposition: "enforce" });
-    expect(fellBack).toBe(0);
-    report({ blockedURI: "agendo", disposition: "enforce" });
-    expect(fellBack).toBe(1);
-    expect(doc.listeners.has("securitypolicyviolation")).toBe(false);
-    expect(doc.children[0].removed).toBe(true);
+  test("a late timer from an earlier click leaves the current arming alone", () => {
+    const { win, arm, timers } = armed();
+    arm();
+    arm();
+    timers[0][0]();
+    expect(win.unload().stopped).toBe(true);
   });
 
-  test("a report-only CSP blocked nothing: no fallback, so the link is not launched twice", () => {
-    const doc = fakeDoc();
-    let fellBack = 0;
-    script.launch("agendo://focus?pr=1", () => fellBack++, doc, () => {});
-    doc.listeners.get("securitypolicyviolation")!({ blockedURI: "agendo", disposition: "report" });
-    expect(fellBack).toBe(0);
-    expect(doc.children[0].removed).toBe(false);
+  test("disarm undoes its own arming only, not a later click's", () => {
+    const { win, arm } = armed();
+    const disarm = arm();
+    disarm();
+    expect(win.unload().stopped).toBe(false);
+    const stale = arm();
+    arm();
+    stale();
+    expect(win.unload().stopped).toBe(true);
   });
 
-  test("a second click tears the first launch down: one frame, one listener, one fallback", () => {
-    const doc = fakeDoc();
-    let fellBack = 0;
-    script.launch("agendo://focus?pr=1", () => fellBack++, doc, () => {});
-    script.launch("agendo://focus?pr=2", () => fellBack++, doc, () => {});
-    expect(doc.children.map((f) => [f.src, f.removed])).toEqual([["agendo://focus?pr=1", true], ["agendo://focus?pr=2", false]]);
-    doc.listeners.get("securitypolicyviolation")!({ blockedURI: "agendo", disposition: "enforce" });
-    expect(fellBack).toBe(1);
-  });
-
-  test("a late timer from an earlier launch leaves the current one alone", () => {
-    const doc = fakeDoc();
-    const timers: (() => void)[] = [];
-    script.launch("agendo://focus?pr=1", () => {}, doc, (fn: () => void) => timers.push(fn));
-    script.launch("agendo://focus?pr=2", () => {}, doc, (fn: () => void) => timers.push(fn));
-    timers[0]();
-    expect(doc.children[1].removed).toBe(false);
-    expect(doc.listeners.has("securitypolicyviolation")).toBe(true);
+  test("a timer that fires after its beforeunload was swallowed logs nothing", () => {
+    const { win, arm, timers, logs } = armed();
+    arm();
+    win.unload();
+    timers[0][0]();
+    expect(logs).toHaveLength(1);
   });
 });
 
 describe("onClick", () => {
-  test("a plain click is cancelled — the page is never navigated", () => {
-    let prevented = false;
-    const doc = fakeDoc();
-    const realDocument = (globalThis as { document?: unknown }).document;
-    (globalThis as { document?: unknown }).document = doc;
-    try {
-      script.onClick({
-        button: 0, preventDefault: () => (prevented = true),
-        currentTarget: { getAttribute: () => "agendo://focus?pr=1" },
-      }, () => {});
-    } finally {
-      (globalThis as { document?: unknown }).document = realDocument;
-    }
-    expect(prevented).toBe(true);
-    expect(doc.children.map((el) => [el.tag, el.src])).toEqual([["iframe", "agendo://focus?pr=1"]]);
+  const link = { getAttribute: () => "agendo://focus?pr=1" };
+
+  /** A click on `link`, its arming and its deferred check held, its log captured. */
+  function click(e: Record<string, unknown>) {
+    const ev: Record<string, unknown> = { defaultPrevented: false, currentTarget: link, ...e };
+    ev.preventDefault = () => (ev.defaultPrevented = true);
+    const seen = { arms: 0, disarms: 0, logs: [] as string[], later: [] as [() => void, number][] };
+    script.onClick(ev, () => (seen.arms++, () => seen.disarms++), (fn: () => void, ms: number) => seen.later.push([fn, ms]), (a: string[]) => seen.logs.push(a.join(" ")));
+    return { ev, seen };
+  }
+
+  test("a plain click arms the guard and is NOT cancelled: the browser follows the link itself", () => {
+    const { ev, seen } = click({ button: 0 });
+    expect(ev.defaultPrevented).toBe(false);
+    expect(seen.arms).toBe(1);
+    expect(seen.logs).toEqual([`following agendo://focus?pr=1; beforeunload guard armed for ${script.GUARD_MS}ms`]);
+    // The check waits a task, for every other click listener to have run.
+    expect(seen.later.map(([, ms]) => ms)).toEqual([0]);
+    seen.later[0][0]();
+    expect(seen.disarms).toBe(0);
+    expect(seen.logs).toHaveLength(1);
   });
 
-  test("a middle or modified click is left to the browser", () => {
-    const clicks = [{ button: 1 }, { button: 0, ctrlKey: true }, { button: 0, metaKey: true }, { button: 0, shiftKey: true }, { button: 0, altKey: true }];
-    for (const e of clicks) {
-      let prevented = false;
-      script.onClick({ ...e, preventDefault: () => (prevented = true) });
-      expect(prevented).toBe(false);
+  test("a click the page cancels after us disarms the guard, so a later real unload is not swallowed", () => {
+    const { ev, seen } = click({ button: 0 });
+    (ev.preventDefault as () => void)();
+    seen.later[0][0]();
+    expect(seen.disarms).toBe(1);
+    expect(seen.logs[1]).toBe("the page cancelled the click, so the link was not followed; guard disarmed");
+  });
+
+  test("a middle or modified click is left to the browser, unguarded", () => {
+    for (const e of [{ button: 1 }, { button: 0, ctrlKey: true }, { button: 0, metaKey: true }, { button: 0, shiftKey: true }, { button: 0, altKey: true }]) {
+      const { ev, seen } = click(e);
+      expect([ev.defaultPrevented, seen.arms, seen.later.length]).toEqual([false, 0, 0]);
     }
   });
 });
 
-// The CSP fallback does follow the link (a click on a throwaway <a>), by design; what is pinned is no direct navigation.
-test("no window.location assignment, location.assign()/replace() or window.open()", () => {
+describe("debug", () => {
+  const storage = (value: string | null) => () => ({ getItem: (k: string) => (k === script.DEBUG_KEY ? value : null) });
+  const capture = () => {
+    const lines: unknown[][] = [];
+    return { lines, out: { info: (...a: unknown[]) => lines.push(a) } };
+  };
+
+  test("logs to console.info (which Chromium shows by default) only when localStorage says \"1\"", () => {
+    for (const [value, logged] of [["1", true], ["0", false], [null, false], ["true", false]] as const) {
+      const { lines, out } = capture();
+      script.debug(["hello", 2], storage(value), out);
+      expect(lines).toEqual(logged ? [["[agendo]", "hello", 2]] : []);
+    }
+  });
+
+  test("storage that throws, from getItem or on access to localStorage itself, means off rather than an error", () => {
+    const { lines, out } = capture();
+    script.debug(["x"], () => ({ getItem: () => { throw new Error("SecurityError"); } }), out);
+    script.debug(["x"], () => { throw new Error("SecurityError"); }, out);
+    expect(lines).toEqual([]);
+  });
+});
+
+// The link is followed by the browser's own default action; nothing navigates
+// the page from script, opens a window, or hands the link to a frame (which
+// Azure DevOps' and GitHub's CSP frame-src both refuse).
+test("no window.location assignment, location.assign()/replace(), window.open() or iframe", () => {
   const code = readFileSync(PATH, "utf-8").split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
   expect(code).not.toMatch(/location(\.href)?\s*=[^=]/);
   expect(code).not.toMatch(/location\.(assign|replace)\s*\(/);
   expect(code).not.toMatch(/window\.open\s*\(/);
+  expect(code).not.toMatch(/iframe/i);
+});
+
+// Chromium runs a window's listeners in the order they were added, so the
+// guard beats only the page listeners added after it: document-start is what
+// makes that all of them.
+test("the script runs at document-start, in the top window only", () => {
+  const code = readFileSync(PATH, "utf-8");
+  expect(code).toMatch(/^\/\/ @run-at\s+document-start$/m);
+  expect(code).toMatch(/^\/\/ @noframes$/m);
 });

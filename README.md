@@ -563,9 +563,12 @@ GitHub page can run it. Setup on Linux:
    [`extras/userscript/agendo.user.js`](extras/userscript/agendo.user.js) in
    Tampermonkey or Violentmonkey. It adds an **Open in agendo** button to pull requests
    and work items on `dev.azure.com`, `*.visualstudio.com` and `github.com`, including
-   pages reached by in-app navigation. A click hands the link over from a hidden
-   iframe rather than navigating the page, so Azure DevOps keeps its live updates
-   instead of warning that they were paused.
+   pages reached by in-app navigation. A click follows the link, which leaves the
+   page where it is, and hides the `beforeunload` the browser fires first from the
+   page's listeners (in Chromium, from those added after the script, which runs at
+   document-start), so Azure DevOps keeps its live updates instead of warning that
+   they were paused. If a click does nothing, run `localStorage["agendo.debug"] = "1"`
+   in the page's devtools console, and each click then logs what it did.
 3. **Click it once and allow the prompt:** the browser asks whether to open `agendo`
    links with the registered app. Prefer allowing it per site (dev.azure.com,
    github.com). Some browsers' "always" applies to every site, which lets any page
