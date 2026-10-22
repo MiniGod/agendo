@@ -29,7 +29,7 @@ describe("reuseReport", () => {
     const [head, prompt, ...rest] = reuseReport("agendo", found(cand(ID, "orch-agendo", "running")), "do the thing");
     expect(head).toBe("▸ agendo already has an orchestrator (running): orch-agendo (claude) — not starting a second");
     expect(prompt).toMatch(/^ {2}prompt: {2}NOT delivered — send it with `.* send c9eee429ff60 "<prompt>"`$/);
-    expect(rest).toEqual([]);
+    expect(rest).toEqual(["  link:    agendo://focus?session=c9eee429ff60"]);
   });
 
   test("idle with a stale extra: resumed, the extra named and left alone, and no prompt to warn about", () => {
@@ -37,7 +37,8 @@ describe("reuseReport", () => {
     expect(lines[0]).toBe("▸ agendo already has an orchestrator (idle): orch-agendo (claude) — resuming it instead of starting a second");
     expect(lines[1]).toBe("  stale:   0e6e29414a1b  agendo-orchestrator (paused) — left alone");
     expect(lines[2]).toMatch(/^ {2}send: {4}`.* send c9eee429ff60 "<prompt>"`$/);
-    expect(lines).toHaveLength(3);
+    expect(lines[3]).toBe("  link:    agendo://focus?session=c9eee429ff60");
+    expect(lines).toHaveLength(4);
   });
 
   test("a paused one is resumed too", () => {
@@ -62,6 +63,8 @@ describe("reuseReport", () => {
     const lines = reuseReport("agendo", { kind: "pending", target }, "");
     expect(lines[1]).not.toContain("cl-bg-codex-c9eee429ff60");
     expect(lines[1]).toMatch(/^ {2}send: {4}`.* send <id> "<prompt>"` once `.* list` shows its id$/);
+    // ...but a link can name the window: it resolves once the session has started.
+    expect(lines[2]).toBe("  link:    agendo://focus?session=cl-bg-codex-c9eee429ff60");
   });
 });
 

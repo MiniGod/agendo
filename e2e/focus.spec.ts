@@ -431,7 +431,8 @@ test("a link to no session names it in the notification only by what agendo chos
 });
 
 test("a link by an id-less window name focuses the session that window is tagged with", async ({ mock }) => {
-  // `cl-wi-…` embeds a work-item id, not a session id: only the window's own tag says whose it is.
+  // `cl-wi-…` embeds a work-item id, not a session id. Where the window carries a tag it wins over
+  // the cwd fallback — here the cwd matches no session at all, so only the tag can resolve it.
   const name = "cl-wi-acme-appweb-777";
   await seed(mock, {
     windows: [{ session: "agendo", index: 1, name }],

@@ -134,7 +134,7 @@ describe("parseFocusUrl refuses everything else", () => {
     // a window name gets its extra length only under a known prefix, and no further
     `agendo://focus?session=cl-evil-${"b".repeat(64)}`,
     `agendo://focus?session=cl-wi-${"b".repeat(170)}`,
-    // ...and only for cl-wi-/cl-pr-: every other kind gets 64 after its prefix
+    // ...and only for cl-wi-/cl-pr-: every other kind is a short id of at most 12
     `agendo://focus?session=cl-copilot-${"b".repeat(65)}`,
     "agendo://focus?session=cl-wi-a.b",
     "agendo://focus?session=cl-wi-102&repo=acme",
@@ -184,12 +184,12 @@ describe("the per-field shapes", () => {
     expect(isSessionToken("")).toBe(false);
   });
 
-  test("isWindowName: a known cl-<kind>- prefix, then up to 169 more for cl-wi-/cl-pr- and 64 for the rest", () => {
+  test("isWindowName: a known cl-<kind>- prefix, only in the shapes agendo mints", () => {
     for (const ok of ["cl-claude-abc", "cl-copilot-x", "cl-codex-1", "cl-bg-codex-a1", "cl-new-codex-z", "cl-free-q", "cl-wi-102", "cl-pr-acme-appweb-5", `cl-wi-${"a".repeat(169)}`]) {
       expect(isWindowName(ok), ok).toBe(true);
       expect(isSessionToken(ok), ok).toBe(true);
     }
-    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(170)}`, `cl-bg-${"a".repeat(65)}`]) {
+    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(170)}`, `cl-bg-${"a".repeat(13)}`, "cl-wi-ACME-1", "cl-bg-Codex-x", "cl-bg-codex-"]) {
       expect(isWindowName(bad), bad).toBe(false);
     }
   });
