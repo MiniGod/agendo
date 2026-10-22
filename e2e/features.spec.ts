@@ -292,7 +292,7 @@ test("a session under a legacy tmux window attaches to it without duplicating", 
   // than spawn a duplicate cl-claude-<id> (the regression 5cadb58 guards against).
   const loginCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "login");
   await mock.setTmuxState({
-    sessions: [],
+    sessions: ["claude-launcher"], // the window's host — tmux has no window without one
     windows: [{ session: "claude-launcher", index: 1, name: "cl-wi-101" }],
     panes: [{ session: "claude-launcher", window: "cl-wi-101", cwd: loginCwd, placeholder: false }],
     captures: {},
@@ -310,11 +310,14 @@ test("a session under a legacy tmux window attaches to it without duplicating", 
   await wt.press(KEY.down); // ＋ new session → the running login session
   await wt.press(KEY.enter); // resume → attach
 
-  // It attaches to the existing cl-wi-101 window; no cl-claude-… duplicate is spawned.
+  // It attaches to the existing cl-wi-101 window — by the exact `=host:=window`
+  // target the scan attributed it to, since `attach-session -t cl-wi-101` names
+  // a SESSION and real tmux has none by that name — and no cl-claude-…
+  // duplicate is spawned.
   const canonical = sessionName("claude", LOGIN_SESSION_ID); // cl-claude-loginsession
   await waitUntil(async () => {
     const log = await mock.tmuxLog();
-    return log.some((argv) => argv[0] === "attach-session" && argv.includes("cl-wi-101"));
+    return log.some((argv) => argv[0] === "attach-session" && argv.includes("=claude-launcher:=cl-wi-101"));
   });
   const log = await mock.tmuxLog();
   expect(log.some((argv) => argv[0] === "new-session" && argv.includes(canonical))).toBe(false);

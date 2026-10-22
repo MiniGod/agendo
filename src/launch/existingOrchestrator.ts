@@ -20,7 +20,6 @@ import {
 } from "../orchestration/repoOrchestrator.ts";
 import {
   ID_BEARING_NAME,
-  insideTmux,
   isPlaceholderWindow,
   liveManagedPaths,
   sessionName,
@@ -30,7 +29,7 @@ import {
   type ManagedTarget,
 } from "../runtime/tmux/index.ts";
 import type { AgentSession, AgentSource } from "../shared/types.ts";
-import { openSession, type OpenPlan } from "./open.ts";
+import { navigatePlan, openSession, type OpenPlan } from "./open.ts";
 
 /** The slice of reconciled live state the rule reads (a `LoadedModel`, or `refreshLiveTmux`). */
 export interface OrchestratorLive {
@@ -144,10 +143,8 @@ export function hasUnmatchedMarker(sessions: readonly AgentSession[], f: Pick<Or
  * placeholder or a not-yet-attributed window there is no command it could
  * honestly create it with.
  */
-function navigatePlan(t: LiveTarget): OpenPlan {
-  return insideTmux()
-    ? { alreadyRunning: true, tmuxName: t.name, mode: "inline", handover: ["tmux", "switch-client", "-t", t.target] }
-    : { alreadyRunning: true, tmuxName: t.name, mode: "handover", handover: ["tmux", "attach-session", "-t", t.target] };
+function navigateTo(t: LiveTarget): OpenPlan {
+  return navigatePlan(t.name, t.target);
 }
 
 /**
@@ -166,24 +163,24 @@ export function wakePlaceholder(t: LiveTarget): void {
  * wake it in its own tab when it is paused, resume it when it is idle, and
  * switch to the window of one too new to have a session.
  *
- * A running one is reached by the exact target of the window it was attributed
- * to. `openSession` would look it up by name instead, and outside tmux that
- * lookup only knows tmux SESSIONS — so a window inside the launcher's host
- * session reads as absent, and it starts a second agent on the same
- * transcript. A pane-hosted one (a `%N` target) is left to `openSession`,
- * whose pane lookup is what reaches it.
+ * A running one is reached by the exact target of the window it was
+ * attributed to, through `navigateTo`, which creates nothing. `openSession`
+ * prefers that same target too, but when it and every window of its name have
+ * vanished since the scan it goes on to create one, and a running orchestrator
+ * is never something to start here. A pane-hosted one (a `%N` target) is left
+ * to `openSession`, whose pane lookup is what reaches it.
  */
 export function openExistingOrchestrator(found: ExistingOrchestrator, l: OrchestratorLive): OpenPlan {
-  if (found.kind === "pending") return navigatePlan(found.target);
+  if (found.kind === "pending") return navigateTo(found.target);
   const { session, state } = found.primary;
   const canon = sessionName(session);
   const parked = state === "paused" ? l.placeholderWindows.get(canon) : undefined;
   if (parked) {
     wakePlaceholder(parked);
-    return navigatePlan(parked);
+    return navigateTo(parked);
   }
   const win = state === "running" ? l.windows.get(canon) : undefined;
-  if (win && !win.target.startsWith("%")) return navigatePlan(win);
+  if (win && !win.target.startsWith("%")) return navigateTo(win);
   return openSession(session, l.windows.get(canon));
 }
 

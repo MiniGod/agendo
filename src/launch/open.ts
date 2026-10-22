@@ -20,6 +20,7 @@ import {
   insideTmux,
   tmuxQuiet,
   stampManagedWindow,
+  windowIdentity,
   type WindowTags,
 } from "../runtime/tmux/index.ts";
 import { resumeArgv } from "./argv.ts";
@@ -81,37 +82,73 @@ function panePlan(name: string, pane: string): OpenPlan {
  * - Outside tmux: the agent is its own detached session that we attach to
  *   (attach blocks until you detach, then control returns to the menu).
  *
- * Either way, a session the launcher parked in a PANE of somebody else's window
- * (the global orchestrator, beside the menu) carries no window or session of its
- * own, so the name lookups above cannot see it — `paneLocation` is what stops us
- * starting a second copy of a session that is running perfectly well.
+ * Whether it already exists is asked the same three ways on BOTH sides (see
+ * `livePlan`), because where a live agent sits says nothing about where this
+ * process runs: a window inside the launcher's host session is just as live to
+ * an `agendo resume` typed in a bare terminal as to the menu beside it.
+ *
+ * `known` is the exact target of `name` the caller has just confirmed is live
+ * (see `openSession`). It wins outright, because a lookup by name can land on
+ * the wrong window of that name.
  */
-export function openTarget(name: string, cwd: string, argv: string[], tags?: WindowTags): OpenPlan {
+export function openTarget(name: string, cwd: string, argv: string[], tags?: WindowTags, known?: string): OpenPlan {
+  const live = livePlan(name, known);
+  if (live) return live;
   if (insideTmux()) {
-    const loc = windowLocation(name);
-    if (loc) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", loc] };
-    const pane = paneLocation(name);
-    if (pane) return panePlan(name, pane);
-    // A session by this name may exist from an earlier outside-tmux launch.
-    if (hasSession(name)) return { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", name] };
     newWindow(name, cwd, argv);
     stampNewTarget(name, tags);
     return { alreadyRunning: false, tmuxName: name, mode: "inline", handover: ["tmux", "select-window", "-t", name] };
   }
+  newDetached(name, cwd, argv);
+  stampNewTarget(name, tags);
+  return { alreadyRunning: false, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name] };
+}
+
+/**
+ * How to reach a target `name` that is already live, or null if nothing is.
+ *
+ * A `known` target wins outright. tmux allows duplicate window names and
+ * agendo creates them (see `windowLocations`), so the FIRST window called
+ * `name` can be a restore placeholder in another host session while the agent
+ * runs in this one. Navigating there and pressing a key would wake the
+ * placeholder into a second agent on the same transcript.
+ *
+ * Otherwise three places, in this order: a WINDOW of that name in any
+ * session; a PANE the launcher parked in somebody else's window (the global
+ * orchestrator, beside the menu), which carries no window or session of its
+ * own; a SESSION of that name, from an earlier outside-tmux launch. Missing any
+ * one of them starts a second agent on a transcript one is already writing —
+ * `has-session` resolves session names only, so outside tmux the window lookup
+ * is the only thing that sees a tab in the launcher's host session.
+ *
+ * Inside tmux the client is moved (the menu stays mounted); outside, the
+ * terminal is handed over by attaching, which for a `session:index` or a pane
+ * id lands on that window or pane.
+ */
+function livePlan(name: string, known?: string): OpenPlan | null {
+  if (known) return known.startsWith("%") ? panePlan(name, known) : navigatePlan(name, known);
+  const loc = windowLocation(name);
+  if (loc) return navigatePlan(name, loc);
   const pane = paneLocation(name);
   if (pane) return panePlan(name, pane);
-  const alreadyRunning = hasSession(name);
-  if (!alreadyRunning) {
-    newDetached(name, cwd, argv);
-    stampNewTarget(name, tags);
-  }
-  return { alreadyRunning, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", name] };
+  return hasSession(name) ? navigatePlan(name, name) : null;
+}
+
+/**
+ * A plan that navigates to live window or session `target` and creates
+ * nothing: switch the client inside tmux, attach outside. Exposed for callers
+ * that must never start what they navigate to (see existingOrchestrator.ts).
+ */
+export function navigatePlan(name: string, target: string): OpenPlan {
+  return insideTmux()
+    ? { alreadyRunning: true, tmuxName: name, mode: "inline", handover: ["tmux", "switch-client", "-t", target] }
+    : { alreadyRunning: true, tmuxName: name, mode: "handover", handover: ["tmux", "attach-session", "-t", target] };
 }
 
 /**
  * Tag a target this call has just CREATED (see `stampManagedWindow`).
  *
- * Only on creation, never on the already-running branches above. Re-stamping a
+ * Only on creation, never on a target `livePlan` found. Re-stamping a
  * live window would overwrite whatever its tag says now with what this caller
  * happens to believe — and the field that matters is `acquired`: a window agendo
  * later adopts is stamped `adopted`, and navigating to it must not quietly
@@ -160,11 +197,15 @@ export function runInline(plan: OpenPlan): void {
  * duplicate instead of attaching.
  */
 export function openSession(s: AgentSession, liveWindow?: LiveTarget): OpenPlan {
-  // The NAME half: `openTarget` re-resolves the location itself (via
-  // `windowLocation`, then `paneLocation`), so it is already host-agnostic and
-  // wants the name.
-  const target = liveWindow?.name ?? liveTargetForShortId(shortId(s.id))?.name ?? sessionName(s);
-  return openTarget(target, s.cwd, resumeArgv(s), sessionTags(s));
+  // The exact target to navigate to, if one is live: the scan's, while tmux
+  // still resolves it, else a fresh lookup by id. `liveWindow` comes from the
+  // menu's model, up to a poll old, and its window may have closed since while
+  // the session went on under its canonical name — which only the id lookup
+  // finds. With neither, `openTarget` looks the name up itself.
+  const fresh = liveWindow && windowIdentity(liveWindow.target) ? liveWindow : null;
+  const hit = fresh ?? liveTargetForShortId(shortId(s.id));
+  const name = hit?.name ?? liveWindow?.name ?? sessionName(s);
+  return openTarget(name, s.cwd, resumeArgv(s), sessionTags(s), hit?.target);
 }
 
 /**

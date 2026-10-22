@@ -209,7 +209,8 @@ function emit(fmt, record) {
     .replace(/#\{window_index\}/g, () => String(record.index ?? windowIndexOf(record)))
     // Window records are written either way round — a pane carries `window`, a
     // window record its `name` — and both stand for the window's name (the
-    // has-session/kill-window target lookups accept both too).
+    // kill-window target lookup accepts both too; has-session, like tmux,
+    // resolves session names only).
     .replace(/#\{window_name\}/g, record.window ?? record.name ?? "")
     .replace(/#\{pane_current_path\}/g, record.cwd ?? "")
     .replace(/#\{pane_dead\}/g, record.dead ? "1" : "0")
@@ -534,11 +535,13 @@ switch (cmd) {
     // fnmatch; a leading `=` pins it to an exact match only. Managed names are
     // prefixes of each other (`cl-pr-5`⊂`cl-pr-50`), so bare resolution would
     // bind the shorter name to the longer live target — the T1 bug.
-    const names = [...state.sessions, ...state.windows.flatMap((w) => [w.name, w.window].filter(Boolean))];
-    // Historically this lookup ignores window names a fixture spells only on a
-    // pane, so it stays on the narrower set the has-session callers were written
-    // against (kill-window uses the full one — see windowNames).
-    process.exit(resolveTarget(flag("-t"), names) !== undefined ? 0 : 1);
+    //
+    // SESSION names only. `-t` is a target-SESSION, and real tmux never looks
+    // at window names to resolve one: with a window `cl-claude-x` inside host
+    // session `agendo`, `has-session -t =cl-claude-x` exits 1 ("can't find
+    // session"). This stub used to answer 0 there, which hid `openTarget`
+    // cold-starting a second agent beside a live window outside tmux.
+    process.exit(resolveTarget(flag("-t"), state.sessions) !== undefined ? 0 : 1);
   }
   case "kill-window":
   case "kill-session": {
