@@ -24,6 +24,21 @@ export interface OrchestratorPins {
   /** The scope is ONE repo, so `G` means the same thing as `O` (see scopeRepo.ts). */
   repoScope: boolean;
   lines: PinLine[];
+  /**
+   * What `K` kills: the repo scope's open extras (`openExtras`), never its
+   * primary. Empty over several repos — `K` is offered on the one-repo ⚠ line only.
+   */
+  killable: OrchestratorCandidate[];
+  /** The repo `killable` belongs to, so `K` can re-read who its primary is before killing; null over several. */
+  killRoot: string | null;
+  /** The repo has no recorded orchestrator, so `killable` are look-alikes, not extras (see `extras`). */
+  killLookAlikes: boolean;
+  /**
+   * Why `K` must not run now, or null. Set while the repo's orchestrator is
+   * STARTING: it has no session yet, so nothing can tell its window from a
+   * look-alike's in the same checkout (see `primaryNow` in staleKill.ts).
+   */
+  killBlocked: string | null;
 }
 
 /** How many repos with an orchestrator get a line of their own in a multi-repo scope. */
@@ -74,19 +89,68 @@ function keyHint(text: string): PinSeg {
   return { text: `  ·  ${text}`, dim: true };
 }
 
-/** `agendo-orchestrator (⏸ paused), orch-old (○ idle)` — what the stale label names. */
+/** `agendo-orchestrator (⏸ paused), orch-old (● running)` — what the ⚠ line names. */
 export function staleList(stale: readonly OrchestratorCandidate[]): string {
   return stale.map((c) => `${titleOf(c)} (${GLYPH[c.state]} ${c.state})`).join(", ");
 }
 
-/** The block for a scope that IS one repo: one line, plus one more naming any stale extras. */
+/**
+ * The stale candidates that still have a window — running, or parked as a paused
+ * tab. An idle one is a transcript on disk: it coordinates nothing, and `x` has
+ * no window to end, so a warning about it could never be acted on or cleared.
+ * The primary is filtered out by id as well as by construction, so nothing that
+ * reads this can ever reach the session `O`/`G` opens.
+ */
+export function openExtras(s: RepoOrchestratorStatus): OrchestratorCandidate[] {
+  return s.stale.filter((c) => c.state !== "idle" && c.session.id !== s.primary?.session.id);
+}
+
+/** Why `K` refuses while the repo's orchestrator is starting (`OrchestratorPins.killBlocked`). */
+export const STARTING_BLOCK = "An orchestrator is starting in this repo — press K again once it is up, so it can't be mistaken for one of these.";
+
+/**
+ * `2 extra orchestrators` — or, in a repo with no recorded orchestrator,
+ * `2 orchestrator look-alikes`, since beside "none" nothing is extra. The one
+ * noun the ⚠ line, `K`'s y/n and its notice share.
+ */
+export function extras(n: number, lookAlikes = false): string {
+  return `${n} ${lookAlikes ? "orchestrator look-alike" : "extra orchestrator"}${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * What the ⚠ line says after the `K` hint: what `O`/`G` opens instead, then the
+ * names. `label` is the primary's title — or a starting one's window — and null
+ * when the repo has none, in which case the extras are all look-alikes nothing
+ * ever recorded.
+ */
+export function extrasExplained(extrasOpen: readonly OrchestratorCandidate[], label: string | null, lookAlikes: boolean): string {
+  const one = extrasOpen.length === 1;
+  const these = one ? "not this one" : "not these";
+  const opens = label === null ? `so O/G starts a new one, ${these}` : `O/G opens "${label}", ${these}`;
+  const never = one ? "never recorded as an orchestrator" : "never recorded as orchestrators";
+  const lead = lookAlikes ? `${never}${label === null ? ", " : "; "}` : "";
+  return `${lead}${opens}: ${staleList(extrasOpen)}`;
+}
+
+/**
+ * The block for a scope that IS one repo: one line, plus one more for any open
+ * extras — `⚠ 2 extra orchestrators open  ·  K kill them  ·  O/G opens "…", not
+ * these: …`. The count and the key come first, short enough for an 80-column
+ * terminal, so a narrow one cuts the explanation and the names (the line
+ * truncates at its end) and keeps the key.
+ */
 function repoScopeLines(v: PinView): PinLine[] {
   const head: PinLine = [{ text: "▌ Orchestrator", bold: true, color: "magenta" }, { text: `  ${v.status.name}  ` }, badge(v.state)];
   if (v.label) head.push({ text: `  ${v.label}` });
   head.push(keyHint(`O/G ${VERB[v.state]}`));
-  if (v.status.stale.length === 0) return [head];
-  const label = v.state !== "none" ? "stale, not what O/G opens" : "looks like an orchestrator, never recorded as one";
-  return [head, [{ text: `  ⚠ ${label}: `, color: "yellow" }, { text: staleList(v.status.stale), dim: true }]];
+  const open = openExtras(v.status);
+  if (open.length === 0) return [head];
+  return [head, [
+    { text: `  ⚠ ${extras(open.length, !v.status.primary)} open`, color: "yellow" },
+    // No K while one is starting: `K` refuses then (`STARTING_BLOCK`), so it is not offered.
+    ...(v.state === "starting" ? [] : [keyHint(`K kill ${open.length === 1 ? "it" : "them"}`)]),
+    { text: `  ·  ${extrasExplained(open, v.label, !v.status.primary)}`, dim: true },
+  ]];
 }
 
 /** `● 1 running · ⏸ 1 paused · – 3 none`, skipping the states nobody is in. */
@@ -104,14 +168,26 @@ function byState(a: PinView, b: PinView): number {
   return RANK[a.state] - RANK[b.state] || b.lastUsed - a.lastUsed || a.status.name.localeCompare(b.status.name);
 }
 
+/**
+ * `⚠ 2 extra open`, or `⚠ 1 look-alike open` in a repo with nothing recorded:
+ * its open extras, for the lines too narrow to name them.
+ */
+function extrasCount(v: PinView): string | null {
+  const n = openExtras(v.status).length;
+  if (n === 0) return null;
+  return v.status.primary ? `⚠ ${n} extra open` : `⚠ ${n} look-alike${n === 1 ? "" : "s"} open`;
+}
+
 function staleMark(v: PinView): string {
-  return v.status.stale.length > 0 ? ` (⚠ ${v.status.stale.length} stale)` : "";
+  const mark = extrasCount(v);
+  return mark ? ` (${mark})` : "";
 }
 
 /** One line for a repo that has an orchestrator. */
 function repoLine(v: PinView): PinLine {
   const line: PinLine = [{ text: `  ${GLYPH[v.state]} `, color: COLOR[v.state] }, { text: v.status.name, bold: true }, { text: `  ${v.label}`, dim: true }];
-  if (v.status.stale.length > 0) line.push({ text: `  ⚠ ${v.status.stale.length} stale`, color: "yellow" });
+  const mark = extrasCount(v);
+  if (mark) line.push({ text: `  ${mark}`, color: "yellow" });
   return line;
 }
 
@@ -149,8 +225,15 @@ export function orchestratorPins(
 ): OrchestratorPins | null {
   if (statuses.length === 0) return null;
   const views = statuses.map((s) => viewOf(s, pending));
-  const lines = repoScope ? repoScopeLines(views[0]) : multiRepoLines(views);
-  return { repoScope, lines };
+  if (!repoScope) return { repoScope, lines: multiRepoLines(views), killable: [], killRoot: null, killLookAlikes: false, killBlocked: null };
+  return {
+    repoScope,
+    lines: repoScopeLines(views[0]),
+    killable: openExtras(statuses[0]),
+    killRoot: statuses[0].root,
+    killLookAlikes: !statuses[0].primary,
+    killBlocked: views[0].state === "starting" ? STARTING_BLOCK : null,
+  };
 }
 
 /**

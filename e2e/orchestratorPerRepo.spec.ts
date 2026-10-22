@@ -12,10 +12,12 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect, KEY } from "./harness/test.ts";
-import { CODEX_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, sessionName } from "./harness/fixtures.ts";
+import { CODEX_SESSION_ID, CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, sessionName, tmuxState } from "./harness/fixtures.ts";
 import { REPO_ROOT, type MockEnv } from "./harness/mockEnv.ts";
 
 const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
+const LEGACY_SESSION_ID = "0e6e2941-1111-4222-8333-444455556666";
+const LEGACY_TARGET = sessionName("claude", LEGACY_SESSION_ID);
 const appweb = (home: string) => join(home, "repos", "appweb");
 
 /** Mark fixture sessions as orchestrators of the given roles, as a launch would. */
@@ -120,8 +122,9 @@ test("scoped to a repo: the pinned row names its orchestrator, and O switches to
   const wt = await sessionsIn(launch, appweb(mock.home));
   const screen = await wt.waitForText("▌ Orchestrator");
   expect(screen).toContain("▌ Orchestrator  appweb  ● running  Implement login form  ·  O/G switch to it");
-  // The look-alike is named, and named as NOT what the key opens.
-  expect(screen).toContain("⚠ stale, not what O/G opens: appweb-orchestrator (○ idle)");
+  // The look-alike is idle — a transcript, no window — so there is nothing to
+  // warn about or kill: no ⚠ line (the K tests below give it a window).
+  expect(screen).not.toContain("⚠");
   // One repo, so the two coordinator keys share one hint.
   expect(screen).toContain("O/G orch");
   expect(screen).not.toContain("G global");
@@ -193,6 +196,89 @@ test("a repo with none: O asks only for the agent, then where to run it — the 
   const { ids } = JSON.parse(await readFile(join(mock.home, ".agendo", "orchestrators.json"), "utf-8")) as { ids: string[] };
   expect(ids).toHaveLength(1);
   expect(started).toContain(`cl-new-${ids[0].replace(/-/g, "").slice(0, 12)}`);
+});
+
+// ── K: kill the stale ones ────────────────────────────────────────────────────
+
+/**
+ * appweb with three orchestrators open: the login session (recorded, running in
+ * a tmux session of its own — THE one), the crash session (recorded too, parked
+ * as a paused tab) and the legacy look-alike (never recorded, running in a tab).
+ * The two extras sit in the `agendo` host beside the launcher window, so killing
+ * either leaves the host standing. All on the fake tmux.
+ */
+async function threeOrchestrators(mock: MockEnv): Promise<void> {
+  await markOrchestrators(mock.home, { [LOGIN_SESSION_ID]: "repo", [CRASH_SESSION_ID]: "repo" });
+  await legacyLookalike(mock.home);
+  await mock.setTmuxState({
+    sessions: [RUNNING_TARGET, "agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 2, name: CRASH_TARGET, placeholder: true },
+      { session: "agendo", index: 3, name: LEGACY_TARGET },
+    ],
+    panes: [
+      ...tmuxState.panes,
+      { session: "agendo", window: "launcher", cwd: "/repos", placeholder: false },
+      { session: "agendo", window: CRASH_TARGET, cwd: "/run/crash", placeholder: true },
+      { session: "agendo", window: LEGACY_TARGET, cwd: appweb(mock.home), placeholder: false },
+    ],
+    captures: { ...tmuxState.captures, [LEGACY_TARGET]: tmuxState.captures[RUNNING_TARGET] },
+  });
+}
+
+const killsIn = (log: string[][]) => log.filter((a) => a[0] === "kill-window" || a[0] === "kill-session" || a[0] === "kill-pane");
+
+/** Wide enough that the ⚠ line is not cut, so every name on it can be read. */
+async function wideSessionsIn(launch: (o?: { args?: string[]; cols?: number; rows?: number }) => Promise<any>, dir: string) {
+  const wt = await launch({ args: [dir], cols: 240, rows: 40 });
+  await wt.waitForText("Current sprint", 20000);
+  await wt.waitForStable();
+  wt.write("3");
+  await wt.waitForText("Running now");
+  return wt;
+}
+
+const WARNING =
+  '⚠ 2 extra orchestrators open  ·  K kill them  ·  O/G opens "Implement login form", not these: ' +
+  "Investigate startup crash (⏸ paused), appweb-orchestrator (● running)";
+const QUESTION = "Kill 2 extra orchestrators — Investigate startup crash (⏸ paused), appweb-orchestrator (● running)? y/n";
+
+test("the ⚠ line counts the open extras, says what O/G opens instead, and K asks before killing them", async ({ launch, mock }) => {
+  await threeOrchestrators(mock);
+  const wt = await wideSessionsIn(launch, appweb(mock.home));
+  expect(await wt.waitForText("⚠ 2 extra")).toContain(WARNING);
+
+  // n: the question goes, and nothing was ended.
+  wt.write("K");
+  expect(await wt.waitForText(QUESTION, 20000)).toContain("the one O/G opens is not among them");
+  wt.write("n");
+  await wt.waitForText("Kill cancelled — nothing was ended.");
+  expect(killsIn(await mock.tmuxLog())).toEqual([]);
+  expect(await wt.screen()).toContain(WARNING);
+});
+
+test("K then y kills exactly the stale ones — the primary keeps running — and the ⚠ line goes", async ({ launch, mock }) => {
+  await threeOrchestrators(mock);
+  const wt = await wideSessionsIn(launch, appweb(mock.home));
+  await wt.waitForText("⚠ 2 extra");
+
+  wt.write("K");
+  await wt.waitForText(QUESTION, 20000);
+  wt.write("y");
+  await wt.waitForText("killed 2 extra orchestrators: Investigate startup crash, appweb-orchestrator", 20000);
+
+  // The two extras' windows went; the login session's tmux session never was a target.
+  const kills = killsIn(await mock.tmuxLog());
+  expect(kills).toHaveLength(2);
+  expect(kills.flat().some((t) => t.includes(RUNNING_TARGET))).toBe(false);
+  const state = await mock.getTmuxState();
+  expect(state.windows.map((w: { name: string }) => w.name)).toEqual(["launcher"]);
+  expect(state.sessions).toContain(RUNNING_TARGET);
+
+  // Reloaded: both extras are idle now, nothing open to warn about.
+  await waitUntil(async () => !(await wt.screen()).includes("⚠"), 20000);
+  expect(await wt.screen()).toContain("▌ Orchestrator  appweb  ● running  Implement login form");
 });
 
 // ── the TUI over several repos ────────────────────────────────────────────────
@@ -301,7 +387,7 @@ test("launch --orchestrator where only a look-alike exists starts one, and names
   const r = await agendoIn(appweb(mock.home), mock.env, "launch", "--orchestrator", "Ship the release");
   expect(r.code).toBe(0);
   expect(r.stderr).toContain("▸ appweb has no recorded orchestrator, so this starts one");
-  expect(r.stderr).toMatch(/stale: {3}0e6e29411111 {2}appweb-orchestrator \(idle\) — left alone/);
+  expect(r.stderr).toMatch(/look-alike: 0e6e29411111 {2}appweb-orchestrator \(idle\) — left alone/);
   expect((await mock.tmuxLog()).filter((a) => a[0] === "new-session" && a.some((t) => t.startsWith("cl-bg-")))).toHaveLength(1);
 });
 

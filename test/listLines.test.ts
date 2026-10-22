@@ -58,7 +58,7 @@ describe("the scope line", () => {
 
 describe("pinnedLineCount", () => {
   test("the pinned block's height on the Sessions view, and nothing anywhere else or without one", () => {
-    const pins = { repoScope: true, lines: [[{ text: "a" }], [{ text: "b" }]] };
+    const pins = { repoScope: true, lines: [[{ text: "a" }], [{ text: "b" }]], killable: [], killRoot: null, killLookAlikes: false, killBlocked: null };
     expect(pinnedLineCount("sessions", pins)).toBe(2);
     expect(pinnedLineCount("prs", pins)).toBe(0);
     expect(pinnedLineCount("sessions", null)).toBe(0);

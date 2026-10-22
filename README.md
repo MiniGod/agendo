@@ -363,15 +363,24 @@ shape a new one (`--worktree`, `--model`, …) are named as ignored.
 Which session is "the" orchestrator is decided the same way everywhere, `agendo list
 repos` included: one recorded as an orchestrator beats a legacy look-alike, then running
 beats paused beats idle, then the most recently used wins. Anything else that looks like
-an orchestrator of that repo is shown as **stale** and left alone — never killed or
-deleted. A look-alike on its own is not reused: a repo whose only candidate was never
+an orchestrator of that repo is an **extra** (or, if none was ever recorded, a
+**look-alike**) and is left alone — agendo never kills or deletes one on its own; `K`
+(below) or `x` on its row does the killing, and nothing deletes it. A look-alike on its own is not reused: a repo whose only candidate was never
 recorded as an orchestrator gets a new one, with the look-alike named beside it.
 
 The Sessions view pins this above the list, so it stays put however long the list gets.
 Scoped to one repo (`agendo ~/src/myrepo`, a subfolder of it, or one of its worktrees) it
 is one line — the orchestrator, its state (`●` running · `◌` starting, launched a moment
-ago · `⏸` paused · `○` idle · `–` none), and what the key will do — plus a ⚠ line naming
-any stale extras. Scoped to a folder of repos — or unscoped, over every repo with
+ago · `⏸` paused · `○` idle · `–` none), and what the key will do — plus, when other
+orchestrators of that repo still have a window open, a ⚠ line counting and naming them
+and saying which one `O`/`G` opens instead (in a repo with none recorded, it calls them
+look-alikes and says `O`/`G` starts a new one). `K` on that line kills them all after one
+y/n that names each, with the same guards as `x` on its row: one mid-turn, holding an
+open question or running background agents is skipped and named, and the one `O`/`G`
+opens is never among them — while a new one is still starting, `K` refuses (press it
+again once that one is up), since its window has no session yet to tell it from a
+look-alike's. Idle extras — a transcript on disk, no window — have nothing
+to kill and stay off the warning. Scoped to a folder of repos — or unscoped, over every repo with
 sessions — it is a count by state, the busiest few, and the repos with none. On a
 terminal too short for all of it, the block shows only its first lines rather than
 squeeze the list below three rows.

@@ -334,6 +334,9 @@ In the menu, on a session row: p pauses it (refused while work is in flight), x
 kills it the way close does (asks y/n first, and refuses while work is in
 flight), X force-kills (still asks, saying what is in flight). x on a paused tab
 closes it for good. None of them touch the session's worktree, branch or transcript.
+Scoped to one repo, K in the Sessions view kills every extra orchestrator (or
+look-alike) with a window open — never the one O/G opens — after one y/n naming
+them, skipping (and naming) any that x would refuse.
 
 The messaging socket \`send\` prefers is an internal, undocumented claude channel,
 so there is a switch for turning it off without waiting for a release:

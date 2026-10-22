@@ -28,6 +28,7 @@ function ctxIn(view: View, filterRoot: string | null = "/w") {
     enterNewSession: mock(), enterOrchestrator: mock(), enterGlobalOrchestrator: mock(),
     setSearchFocus: mock(), enterSettings: mock(), enterIdentity: mock(), setMode: mock(),
     setNotice: mock(), setActivity: mock(), requested: { current: new Set<string>(["x"]) }, setRescanKey: mock(), reload: mock(),
+    pins: null,
   };
 }
 
@@ -122,5 +123,13 @@ describe("screen keys and refresh", () => {
     expect(handleListViewKeys("n", NONE, c)).toBe(true);
     expect(c.enterNewSession).toHaveBeenCalled();
     expect(handleListViewKeys("q", NONE, c)).toBe(false);
+  });
+
+  test("K is the sessions view's: outside a repo scope it only says why, and on other views it is unbound", () => {
+    const c = ctxIn("sessions");
+    expect(handleListViewKeys("K", NONE, c)).toBe(true);
+    expect(c.setNotice).toHaveBeenLastCalledWith("K kills a repo's extra orchestrators — scope agendo to one repo to use it.");
+    expect(c.setMode).not.toHaveBeenCalled();
+    expect(handleListViewKeys("K", NONE, ctxIn("items"))).toBe(false);
   });
 });

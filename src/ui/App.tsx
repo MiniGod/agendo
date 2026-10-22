@@ -326,7 +326,7 @@ export default function App({
   // always see this pass's state. Each handler narrows it to a `Pick` of the
   // members it actually touches, so a module's signature documents its reach.
   const ctx: KeyContext = {
-    exit, model, filterRoot,
+    exit, model, filterRoot, pins,
     mode, setMode, view, switchView, cursor, setCursor, rows, selectableIdx, move,
     toggleExpand, toggleSection, ensureActivity,
     searchFocus, setSearchFocus, search, editSearch, clearSearch,

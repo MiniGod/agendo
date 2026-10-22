@@ -8,6 +8,8 @@ import type { AgentSession, AgentSource, Identity, ProviderName, TeamMember } fr
 import type { Activity } from "../format/index.ts";
 import type { FreshTarget, OpenTargets } from "../models/targets.ts";
 import type { PrSort, Row, SessionSort } from "../models/rows.ts";
+import type { OrchestratorPins } from "../models/orchestratorPins.ts";
+import type { Skipped } from "../actions/staleKill.ts";
 
 // ── top-level views & fresh-session flow state ────────────────────────────────
 export type View = "items" | "prs" | "sessions";
@@ -50,6 +52,11 @@ export type Mode =
   // (src/ui/actions/sessionEnd.ts). `prompt` says what is, or is not, in flight;
   // `waived` is every refusal it names, all a `y` to `X` may force past.
   | { kind: "confirmEnd"; session: AgentSession; force: boolean; prompt: string; waived: readonly string[] }
+  // The same y/n for the Sessions view's `K` (src/ui/actions/staleKill.ts):
+  // every extra orchestrator that passed `x`'s guards, and the ones that did
+  // not, named with why. `root` is the repo, read again on `y` for its primary;
+  // `lookAlikes` that it has none, so what is killed is named as look-alikes.
+  | { kind: "confirmEndStale"; root: string; lookAlikes: boolean; sessions: readonly AgentSession[]; prompt: string; skipped: readonly Skipped[] }
   // The cleanup view (C). It keeps its own state and keys (CleanupScreen.tsx).
   | { kind: "cleanup" };
 
@@ -69,6 +76,8 @@ export type KeyContext = {
   exit: () => void;
   model: LoadedModel | null;
   filterRoot: string | null;
+  /** The pinned orchestrator block, whole (not cut to the terminal) — what `K` kills comes from it. */
+  pins: OrchestratorPins | null;
 
   // ── mode / navigation state ──
   mode: Mode;

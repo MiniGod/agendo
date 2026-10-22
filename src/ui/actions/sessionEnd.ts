@@ -23,7 +23,12 @@ export type EndCtx = Pick<KeyContext, "rows" | "cursor" | "setNotice" | "setMode
  * landing mid-check would race the first to put its question up.
  */
 let inFlight = false;
-const WAIT = "Still working on the last one — a moment.";
+export const WAIT = "Still working on the last one — a moment.";
+
+/** Whether a check or an end is under way (see `inFlight`). */
+export function endInFlight(): boolean {
+  return inFlight;
+}
 
 /** How a non-session row is named in the notice that says why the key did nothing. */
 export function rowLabel(row: Row | undefined): string {
@@ -103,7 +108,7 @@ function hoveredRefusal(ctx: Pick<EndCtx, "model">, row: Row | undefined, verb: 
 }
 
 /** Hold the one-at-a-time guard for the length of `work`. */
-async function exclusively(work: () => Promise<void>): Promise<void> {
+export async function exclusively(work: () => Promise<void>): Promise<void> {
   inFlight = true;
   try {
     await work();
