@@ -417,7 +417,7 @@ test("f filters to what is safe to remove, then to what has something to lose, w
   expect(risk).toMatch(/pushed.*clean · unmerged/);
   expect(risk).toMatch(/ignored.*1 ignored · merged/);
   expect(risk).toMatch(/dirtyonly.*1 dirty · merged/);
-  // Running and the main checkout have nothing on offer to lose; neither is listed.
+  // The main checkout is never judged, and the running row's checkout is clean: neither is listed.
   for (const t of ["Merged feature", "spare", "Busy right now", "Main checkout chat"]) expect(listed(risk, t)).toBe(false);
   // A cursor whose row the next filter hides lands on a row that is shown.
   await focus(wt, "Half-done work");

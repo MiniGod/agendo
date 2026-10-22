@@ -86,9 +86,11 @@ export interface CleanupEnv {
   verdict: (row: CleanupRow) => Verdict;
   /** How many rows the D dialog shows at once, so it scrolls only what does not fit. */
   page?: number;
+  /** How many rows the `/` text matches that are still being checked, shown or hidden by `f`. */
+  pending?: number;
 }
 
-type Step = { state: CleanupState; effect: CleanupEffect };
+export type Step = { state: CleanupState; effect: CleanupEffect };
 
 export const INITIAL_CLEANUP: CleanupState = {
   cursor: 0, focus: null, sort: "updated", reversed: false, filter: "all", query: "", typing: false, caret: 0, dialog: null, bulk: null, note: null,
@@ -165,7 +167,8 @@ function deleteAllSafe(state: CleanupState, env: CleanupEnv): CleanupState {
   const bulk = safe.filter((r) => !pausedTabIn(r, env.all));
   if (bulk.length > 0) return { ...state, bulk: openBulk(bulk) };
   if (safe.length > 0) return { ...state, note: "only paused tabs' checkouts are safe to remove here — D leaves them; use space on one" };
-  const checking = env.rows.some((r) => env.verdict(r) === "pending");
+  // Under a filter the rows still being checked are hidden, so the view says how many there are.
+  const checking = (env.pending ?? 0) > 0 || env.rows.some((r) => env.verdict(r) === "pending");
   return { ...state, note: checking ? "nothing shown is safe to remove yet — some rows are still being checked" : "nothing shown is safe to remove" };
 }
 
@@ -182,26 +185,40 @@ function viewKey(state: CleanupState, input: string): CleanupState | null {
   return null;
 }
 
-function listKey(prev: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
-  const state = prev.note ? { ...prev, note: null } : prev;
-  if (state.typing) return queryKey(state, input, key, env);
+/** Leaving, moving, and the view keys. Null for any other key. */
+function navKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step | null {
   // esc drops a `/` filter first, and only then leaves.
   if (key.escape) return state.query ? stay({ ...state, query: "", caret: 0 }) : { state, effect: "back" };
   if (input === "q") return { state, effect: "quit" };
   const dir = vertical(input, key);
   if (dir) return moveCursor(state, dir, env);
   const view = viewKey(state, input);
-  if (view) return stay(view);
+  return view ? stay(view) : null;
+}
+
+/** The keys that act: on the session (p/x/X), on every safe row (D), on the scan (R). Null for any other key. */
+function actionKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step | null {
   const end = key.ctrl || key.meta ? undefined : END_KEYS[input];
   if (end) return { state, effect: end };
   if (input === "D") return stay(deleteAllSafe(state, env));
   if (input === "R") return { state, effect: "rescan" };
+  return null;
+}
+
+/** Enter and space on the focused row: switch to its live session, or open its dialog. */
+function rowKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
   const row = env.rows[state.cursor];
   if (key.return && isLive(row)) return { state, effect: "switch" };
   if (!(key.return || input === " ") || !row) return stay(state);
   // The defaults are decided from the git state, so the dialog waits for it.
   if (env.git(row) === undefined) return stay({ ...state, note: "still checking git state…" });
   return stay({ ...state, dialog: openDialog(row, env) });
+}
+
+function listKey(prev: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
+  const state = prev.note ? { ...prev, note: null } : prev;
+  if (state.typing) return queryKey(state, input, key, env);
+  return navKey(state, input, key, env) ?? actionKey(state, input, key, env) ?? rowKey(state, input, key, env);
 }
 
 function toggle(d: CleanupDialog, offers: Offers): CleanupDialog {

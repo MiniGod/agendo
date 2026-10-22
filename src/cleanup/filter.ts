@@ -28,8 +28,9 @@ export function filterLabel(f: CleanupFilter): string {
  * Where a row stands for the filter. `pending` while its git state is still
  * being probed: such a row is in neither the safe nor the at-risk list until
  * it is measured. `other` is everything with nothing to judge or nothing on
- * offer: the main checkout, a session whose checkout and branch are gone, a
- * running session, a row written to moments ago.
+ * offer: the main checkout, a session whose checkout and branch are gone, and
+ * a running or just-written row whose git shows nothing at risk (one that does
+ * is `risk`).
  */
 export type Verdict = "pending" | "safe" | "risk" | "other";
 

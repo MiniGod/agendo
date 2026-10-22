@@ -162,6 +162,8 @@ describe("the list's D, R and enter", () => {
   test("D with nothing safe says so, and says when rows are still being checked", () => {
     expect(press(INITIAL_CLEANUP, envOf([row("b")]), "D").state).toMatchObject({ bulk: null, note: "nothing shown is safe to remove" });
     expect(press(INITIAL_CLEANUP, envOf([row("b"), row("p")]), "D").state.note).toContain("still being checked");
+    // Under a filter the pending rows are hidden; the view's count of them still says so.
+    expect(press(INITIAL_CLEANUP, { ...envOf([row("b")]), pending: 2 }, "D").state.note).toContain("still being checked");
   });
 
   test("D leaves paused tabs out, and says so when they are all that is safe", () => {

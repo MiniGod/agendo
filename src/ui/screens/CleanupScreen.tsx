@@ -1,4 +1,4 @@
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useInput, useStdout, type Key } from "ink";
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { LoadedModel } from "../../app/model/index.ts";
 import { touchedBy } from "../../cleanup/bulk.ts";
@@ -12,7 +12,7 @@ import { useCleanupData } from "../hooks/useCleanupData.ts";
 import { useCleanupEnd } from "../hooks/useCleanupEnd.ts";
 import { useCleanupView } from "../hooks/useCleanupView.ts";
 import { useCleanupRuns } from "../hooks/useCleanupRuns.ts";
-import { cleanupKey, syncCursor, INITIAL_CLEANUP, type CleanupEnv, type CleanupState } from "../keys/cleanup.ts";
+import { cleanupKey, syncCursor, INITIAL_CLEANUP, type CleanupEffect, type CleanupEnv, type CleanupState, type Step } from "../keys/cleanup.ts";
 import { gitCells, pageTop, runCell, sortLabel } from "../models/cleanupRow.ts";
 import { CleanupBulkView } from "./CleanupBulk.tsx";
 import { CleanupDialogView, StyledCells } from "./CleanupDialog.tsx";
@@ -68,15 +68,14 @@ function filterNote(state: CleanupState, pending: number): string {
   return parts.map((p) => `  ·  ${p}`).join("");
 }
 
-/** The key hints, two lines so that both fit a normal terminal untruncated. */
+/** The key hints, three lines so that each fits an 80-column terminal untruncated. */
 function Footer({ state }: { state: CleanupState }) {
   if (state.typing) return <Text dimColor wrap="truncate">{"type to filter by title, branch or path · enter keep · esc clear"}</Text>;
   return (
     <Box flexDirection="column">
-      <Text dimColor wrap="truncate">{"↑/↓ move · enter switch to it if live, else clean up · space clean up · D delete all safe · p/x/X pause/kill"}</Text>
-      <Text dimColor wrap="truncate">
-        {`f filter: ${filterLabel(state.filter)} · / search · s sort: ${state.sort} · r reverse · R re-scan · esc back · q quit`}
-      </Text>
+      <Text dimColor wrap="truncate">{"↑/↓ move · enter switch to it if live, else clean up · space clean up"}</Text>
+      <Text dimColor wrap="truncate">{"D delete all safe · p/x/X pause/kill/force-kill · R re-scan · esc back · q quit"}</Text>
+      <Text dimColor wrap="truncate">{`f filter: ${filterLabel(state.filter)} · / search · s sort: ${state.sort} · r reverse`}</Text>
     </Box>
   );
 }
@@ -160,8 +159,8 @@ export function CleanupScreen({
     if (state !== stored) setState((s) => syncCursor(s, visible));
   }, [state, stored, visible]);
   const { stdout } = useStdout();
-  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 7) / 2));
-  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict, page };
+  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 8) / 2));
+  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict, page, pending };
   const setNote = (note: string | null) => setState((s) => ({ ...s, note }));
   const end = useCleanupEnd({ model, setNote, reload, onQuit });
   const { run, runAll } = useCleanupRuns({ rows, setState });
@@ -179,26 +178,32 @@ export function CleanupScreen({
     remeasure(touchedBy(done, rows, git));
   };
 
-  useInput((input, key) => {
+  // After App's own handler has counted this key (keySeq): the kill's "were keys pressed
+  // meanwhile?" check must not count the x that asked. The two listeners run in either order.
+  const endLater = (e: "pause" | "kill" | "forceKill", row: CleanupRow | undefined) => queueMicrotask(() => end.start(e, row));
+
+  // What each effect of a key does here; "none" and the dialog's own effects need nothing.
+  const effects: Partial<Record<CleanupEffect, (step: Step) => void>> = {
+    back: onBack,
+    quit: onQuit,
+    refresh: () => settle(state),
+    rescan: () => setScanKey((k) => k + 1),
+    switch: (step) => switchTo(visible[step.state.cursor]),
+    run: (step) => step.state.dialog && run(step.state.dialog),
+    runAll: (step) => step.state.bulk && runAll(step.state.bulk),
+    pause: (step) => endLater("pause", visible[step.state.cursor]),
+    kill: (step) => endLater("kill", visible[step.state.cursor]),
+    forceKill: (step) => endLater("forceKill", visible[step.state.cursor]),
+  };
+
+  function onKey(input: string, key: Key) {
     if (end.answer(input, key)) return;
     const step = cleanupKey(state, input, key, env);
     // A key it ignored must not write its (possibly stale) state back over a run that just finished.
     if (step.state !== state) setState(step.state);
-    const e = step.effect;
-    if (e === "back") onBack();
-    else if (e === "quit") onQuit();
-    else if (e === "refresh") settle(state);
-    else if (e === "rescan") setScanKey((k) => k + 1);
-    else if (e === "switch") switchTo(visible[step.state.cursor]);
-    else if (e === "run" && step.state.dialog) run(step.state.dialog);
-    else if (e === "runAll" && step.state.bulk) runAll(step.state.bulk);
-    else if (e === "pause" || e === "kill" || e === "forceKill") {
-      // After App's own handler has counted this key (keySeq): the kill's "were keys pressed
-      // meanwhile?" check must not count the x that asked. The two listeners run in either order.
-      const row = visible[step.state.cursor];
-      queueMicrotask(() => end.start(e, row));
-    }
-  });
+    effects[step.effect]?.(step);
+  }
+  useInput(onKey);
 
   // The window only moves when the cursor would leave it. A ref, not state:
   // it is derived from the cursor each render and never drives one itself.
