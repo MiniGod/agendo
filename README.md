@@ -597,8 +597,9 @@ Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
 and `?session=<id>`, where the id may also be one of agendo's own window names
 in the shapes agendo creates them: `cl-<kind>-` and a short id of up to 12 letters
-and digits (`cl-bg-` and `cl-new-` optionally with the agent before it, as in
-`cl-bg-codex-…`), or `cl-wi-`/`cl-pr-` and lower-case letters, digits and dashes. It
+and digits (`cl-bg-` and `cl-new-` optionally with `codex-` before it, as in
+`cl-bg-codex-…`), or `cl-wi-`/`cl-pr-`, an optional lower-case scope slug and
+the item number, as in `cl-pr-acme-appweb-5`. It
 refuses anything else, such as other verbs, extra or encoded parameters, or overlong input, and says
 so in a notification. The repo can be a name or an Azure DevOps repository id. Some
 PR links, such as those in notifications, name the repo by its id. agendo maps a
