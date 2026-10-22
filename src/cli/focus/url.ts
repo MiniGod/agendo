@@ -50,11 +50,12 @@ const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
  * src/launch/task.ts): a known `cl-<kind>-` prefix, then the same letters,
  * digits and dashes as SESSION_RE. Only `cl-wi-`/`cl-pr-` get more than
  * SESSION_RE's 64 after the prefix, because only they fold a whole GitHub
- * `owner/name` slug in; their 170 keeps the longest URL this can match at 199,
- * inside MAX_URL_LENGTH.
+ * `owner/name` slug in; their 169 keeps the longest URL this can match —
+ * `agendo://focus/?session=cl-pr-<169>`, with the tolerated empty path — at 199,
+ * under MAX_URL_LENGTH.
  */
 const WINDOW_NAME_RE =
-  /^cl-(?:(?:wi|pr)-[A-Za-z0-9][A-Za-z0-9-]{0,169}|(?:claude|copilot|codex|bg|new|free)-[A-Za-z0-9][A-Za-z0-9-]{0,63})$/;
+  /^cl-(?:(?:wi|pr)-[A-Za-z0-9][A-Za-z0-9-]{0,168}|(?:claude|copilot|codex|bg|new|free)-[A-Za-z0-9][A-Za-z0-9-]{0,63})$/;
 
 /** A repo name or `owner/name` slug: each segment opens with a letter, digit or `_`; 120 characters at most. */
 const REPO_RE = /^(?=.{1,120}$)[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)?$/;

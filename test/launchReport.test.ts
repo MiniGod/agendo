@@ -31,12 +31,12 @@ describe("launchSummary", () => {
   });
 
   test("no id yet sends the caller to list; a global launch reports its layout and why", () => {
-    const landed = { cwd: "/w", tmuxName: "cl-bg-x" };
+    const landed = { cwd: "/w", tmuxName: "cl-bg-codex-x" };
     const withNote = { cwd: "/w", layout: "window" as const, layoutNote: "no pane: not inside the TUI" };
     expect(launchSummary(kind(true, false, "codex"), landed, withNote)).toEqual([
       "▸ launched global orchestrator session — codex assigns its own id",
-      "  window:  cl-bg-x   (in /w)",
-      "  link:    agendo://focus?session=cl-bg-x",
+      "  window:  cl-bg-codex-x   (in /w)",
+      "  link:    agendo://focus?session=cl-bg-codex-x",
       `  id:      ${SELF_CMD} list   (then: ${SELF_CMD} status <id>)`,
       "  layout:  its own tmux window — no pane: not inside the TUI",
       "  attach:  open agendo and pick it (running → attach), or rerun with --attach",
