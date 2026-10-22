@@ -1,6 +1,7 @@
 // `focus` by window name (src/cli/focus/windowName.ts): an id-bearing name is
-// its short id, an id-less one (`cl-wi-`, `cl-pr-`, `cl-bg-codex-`) is whichever
-// session its live window is attributed to. e2e/focus.spec.ts drives the real
+// its short id, an id-less one (`cl-wi-`, `cl-pr-`, `cl-bg-codex-`,
+// `cl-new-codex-`, `cl-free-`) is whichever session its live window is
+// attributed to. e2e/focus.spec.ts drives the real
 // attribution end to end; this pins the lookup over it.
 import { describe, expect, test } from "bun:test";
 import { sessionsForToken } from "../src/cli/focus/windowName.ts";
@@ -47,6 +48,9 @@ describe("sessionsForToken", () => {
 
   test("a window attributed to nobody, or to a session not on disk, resolves to nothing", () => {
     expect(sessionsForToken(ALL, "cl-wi-102", attributed())).toEqual([]);
+    // Two windows fell to A and the map kept cl-wi-101: the loser is refused, never
+    // resolved to A — focus would then move the client to A's OTHER window.
+    expect(sessionsForToken(ALL, "cl-wi-102", attributed([A, "cl-wi-101"]))).toEqual([]);
     expect(sessionsForToken([A], "cl-wi-102", attributed([B, "cl-wi-102"]))).toEqual([]);
   });
 

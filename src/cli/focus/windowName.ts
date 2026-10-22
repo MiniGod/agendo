@@ -4,17 +4,26 @@
 //
 // A window name that embeds a short id (`cl-claude-`, `cl-copilot-`,
 // `cl-codex-`, `cl-bg-`, `cl-new-`; see `ID_BEARING_NAME`) is that short id and
-// nothing more. The rest — `cl-wi-…`, `cl-pr-…`, `cl-bg-codex-…` — say nothing
-// about the session, so they go by whichever session the live window of exactly
-// that name is ATTRIBUTED to: the session id in the window's own tag
+// nothing more. The rest — `cl-wi-…`, `cl-pr-…`, `cl-bg-codex-…`,
+// `cl-new-codex-…`, legacy `cl-free-…` — say nothing about the session, so
+// they go by whichever session the live window of exactly that name is
+// ATTRIBUTED to: the session id in the window's own tag
 // (`@cl_session_id`, see names.ts) where it carries one, else the cwd + most
 // recently used fallback (`reconcileLive`). That is the same answer the TUI's
 // row and `list` give for the window, which matters because the fallback is the
 // common case — a `cl-wi-`/`cl-pr-` window is launched with no id to tag, and
-// nothing completes the tag later. The heuristic can name the wrong session of
-// two sharing a cwd; here that only changes which of them is reported, since the
-// window focus then brings forward is the attributed one, i.e. this window.
-// Placeholders are never attributed (they hold no agent), so never match.
+// nothing completes the tag later.
+//
+// The match is deliberately against the session → window map focus itself
+// moves the client by, never against the named window on its own. Attribution
+// gives each session ONE window, so when two windows fall to the same session —
+// two id-less windows in one cwd, or one beside that cwd's newest session's own
+// window — the one that lost resolves to nothing and the link says so. Resolving
+// it anyway would be worse: focus would then bring forward the session's OTHER
+// window, or, finding the session it picked not running, resume it a second
+// time onto the same transcript. A refusal is the only honest answer until
+// these windows carry their session id. Placeholders are never attributed (they
+// hold no agent), so never match.
 //
 // Read-only: the only tmux calls it can lead to are the window and pane
 // listings behind `attributed`, and it returns sessions that already exist —

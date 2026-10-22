@@ -48,12 +48,13 @@ const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 /**
  * One of agendo's own tmux window names (src/runtime/tmux/names.ts,
  * src/launch/task.ts): a known `cl-<kind>-` prefix, then the same letters,
- * digits and dashes. Its own pattern only because a `cl-wi-`/`cl-pr-` name can
- * fold a whole GitHub `owner/name` slug in and outgrow SESSION_RE's 64 — the
- * prefix list is the price of the extra length, so nothing else gets it. 170
- * after the prefix is what MAX_URL_LENGTH leaves room for behind `?session=cl-pr-`.
+ * digits and dashes as SESSION_RE. Only `cl-wi-`/`cl-pr-` get more than
+ * SESSION_RE's 64 after the prefix, because only they fold a whole GitHub
+ * `owner/name` slug in; their 170 keeps the longest URL this can match at 199,
+ * inside MAX_URL_LENGTH.
  */
-const WINDOW_NAME_RE = /^cl-(?:claude|copilot|codex|bg|new|free|wi|pr)-[A-Za-z0-9][A-Za-z0-9-]{0,169}$/;
+const WINDOW_NAME_RE =
+  /^cl-(?:(?:wi|pr)-[A-Za-z0-9][A-Za-z0-9-]{0,169}|(?:claude|copilot|codex|bg|new|free)-[A-Za-z0-9][A-Za-z0-9-]{0,63})$/;
 
 /** A repo name or `owner/name` slug: each segment opens with a letter, digit or `_`; 120 characters at most. */
 const REPO_RE = /^(?=.{1,120}$)[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)?$/;

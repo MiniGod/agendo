@@ -92,7 +92,7 @@ export function recordLaunch(a: LaunchKind, prompt: string, landed: LandedSessio
  * assigned an id yet — that one resolves once the session has started and its
  * window is attributed to it (src/cli/focus/windowName.ts).
  */
-export function focusLink(landed: Pick<LandedSession, "id" | "tmuxName">): string {
+function focusLink(landed: Pick<LandedSession, "id" | "tmuxName">): string {
   return `agendo://focus?session=${landed.id ? shortId(landed.id) : landed.tmuxName}`;
 }
 

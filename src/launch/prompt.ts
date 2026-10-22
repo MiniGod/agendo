@@ -136,14 +136,15 @@ function endGuide(): string[] {
  * contents. The orchestrator prompts (src/orchestration/) carry their own
  * shorter copy of the link form; test/sessionLinks.test.ts keeps all three in step.
  */
-export function sessionLinkGuide(): string[] {
+function sessionLinkGuide(): string[] {
   return [
     "Name it as a link:",
     "  Whenever you mention a session to the user, write it as a clickable markdown link,",
     "  [<window name or short id>](agendo://focus?session=<short id>) — the short id is the",
     "  12-character id `list` prints — so a click jumps to that session's tmux window. Use",
     "  the short id whenever you have one; a window name (the `window:` line `launch`",
-    "  prints) also works, but only once that session has started. Clicking needs the URL",
+    "  prints) also works. Either resolves only once the session is on disk, i.e. once",
+    "  `list` shows it — not the instant `launch` returns. Clicking needs the URL",
     `  handler (\`${SELF_CMD} url-handler install\`) and, inside tmux,`,
     "  `set -as terminal-features 'xterm*:hyperlinks'`.",
     "",
