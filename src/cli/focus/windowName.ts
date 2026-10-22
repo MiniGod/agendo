@@ -22,7 +22,11 @@
 // it anyway would be worse: focus would then bring forward the session's OTHER
 // window, or, finding the session it picked not running, resume it a second
 // time onto the same transcript. A refusal is the only honest answer until
-// these windows carry their session id. Placeholders are never attributed (they
+// these windows carry their session id. (That holds per snapshot: focus reads
+// the map again to judge running vs idle, so attribution flipping in between —
+// a new transcript landing in the same cwd — can still mislead it, exactly as
+// it already could for a short id resolved by cwd. Closing that means focus
+// reading tmux once, which is the lookup rework, not this file.) Placeholders are never attributed (they
 // hold no agent), so never match.
 //
 // Read-only: the only tmux calls it can lead to are the window and pane

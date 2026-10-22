@@ -464,6 +464,20 @@ test("an untagged id-less window name goes by the window's attribution, as list 
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
 });
 
+test("a codex fresh-launch window name goes by its cwd, the link `launch` prints for codex", async ({ mock }) => {
+  // `cl-bg-codex-…` carries a uniquifier, not codex's id: the window is attributed by cwd.
+  const name = "cl-bg-codex-x1";
+  const codexCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "codex-tidy");
+  await seed(mock, {
+    windows: [{ session: "agendo", index: 1, name }],
+    panes: [{ session: "agendo", window: name, cwd: codexCwd, placeholder: false }],
+  });
+  const r = await agendo(mock.env, "url", `agendo://focus?session=${name}`);
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", name)]]);
+  expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
+});
+
 test("a window name no live window carries focuses nothing and resumes nothing", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "url", "agendo://focus?session=cl-wi-102");
