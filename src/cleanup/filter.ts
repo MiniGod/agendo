@@ -51,12 +51,18 @@ export function shownVerdict(now: Verdict, last: Verdict | undefined): Verdict {
   return now === "pending" && last ? last : now;
 }
 
-/** Whether `query` (case-insensitive) is in the row's title, branch or path. An empty query matches all. */
-export function matchesQuery(row: CleanupRow, git: GitState | null | undefined, query: string): boolean {
+/** How the view prints a path (`~/…`), so text typed from the screen matches too. */
+type ShownPath = (path: string) => string;
+
+/**
+ * Whether `query` (case-insensitive) is in the row's title, branch or path —
+ * the path as stored or as `shownPath` prints it. An empty query matches all.
+ */
+export function matchesQuery(row: CleanupRow, git: GitState | null | undefined, query: string, shownPath: ShownPath = (p) => p): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   const branch = git?.branch ?? row.branchHint ?? "";
-  return [row.title, branch, row.path].some((s) => s.toLowerCase().includes(q));
+  return [row.title, branch, row.path, shownPath(row.path)].some((s) => s.toLowerCase().includes(q));
 }
 
 /** The rows `filter` and `query` keep, in the order given. */
@@ -66,6 +72,7 @@ export function filterRows(
   query: string,
   verdict: (row: CleanupRow) => Verdict,
   git: (row: CleanupRow) => GitState | null | undefined,
+  shownPath?: ShownPath,
 ): CleanupRow[] {
-  return rows.filter((r) => (filter === "all" || verdict(r) === filter) && matchesQuery(r, git(r), query));
+  return rows.filter((r) => (filter === "all" || verdict(r) === filter) && matchesQuery(r, git(r), query, shownPath));
 }

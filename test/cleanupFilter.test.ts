@@ -84,6 +84,10 @@ describe("the filter", () => {
     expect(matchesQuery(r, CLEAN, "worktrees/a")).toBe(true);
     expect(matchesQuery(r, CLEAN, "nope")).toBe(false);
     expect(matchesQuery(row("b", { title: "x" }), null, "worktree-")).toBe(false);
+    // The path as the list prints it matches as well.
+    const home = row("h", { path: "/home/someone/git/app" });
+    expect(matchesQuery(home, null, "~/git/app")).toBe(false);
+    expect(matchesQuery(home, null, "~/git/app", (p) => p.replace("/home/someone/", "~/"))).toBe(true);
   });
 
   test("keeps the rows of the chosen verdict that match the text, in order", () => {

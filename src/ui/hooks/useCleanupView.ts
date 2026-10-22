@@ -5,6 +5,7 @@ import { filterRows, shownVerdict, verdictOf, type Verdict } from "../../cleanup
 import { othersRunningIn } from "../../cleanup/rows.ts";
 import { sortRows } from "../../cleanup/sort.ts";
 import type { CleanupRow, GitState, RowSizes } from "../../cleanup/types.ts";
+import { homeShort } from "../format/index.ts";
 import type { CleanupState } from "../keys/cleanup.ts";
 import { livePaneCwds } from "./useCleanupRuns.ts";
 
@@ -43,12 +44,12 @@ export function useCleanupView({
   if (measured.current.scan !== scan) measured.current = { scan, verdicts: new Map() };
   for (const [k, v] of verdicts) if (v !== "pending") measured.current.verdicts.set(k, v);
   const visible = useMemo(
-    () => filterRows(sorted, state.filter, state.query, (r) => shownVerdict(verdict(r), measured.current.verdicts.get(r.key)), git),
+    () => filterRows(sorted, state.filter, state.query, (r) => shownVerdict(verdict(r), measured.current.verdicts.get(r.key)), git, homeShort),
     [sorted, state.filter, state.query, verdict, git],
   );
   // Of the rows the `/` text matches, those not yet judged.
   const pending = useMemo(
-    () => filterRows(sorted, "all", state.query, verdict, git).filter((r) => verdict(r) === "pending").length,
+    () => filterRows(sorted, "all", state.query, verdict, git, homeShort).filter((r) => verdict(r) === "pending").length,
     [sorted, state.query, verdict, git],
   );
   return { offers, git, sorted, verdict, visible, pending };

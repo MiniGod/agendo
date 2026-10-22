@@ -510,8 +510,8 @@ ticked (below), so a row is listed there only when deleting it loses nothing —
 nothing unpushed, merged, no ignored files, not running and not written to in the last
 five minutes. "Has something to lose" is a row with dirty files, unpushed commits, an
 unmerged branch, ignored files, checked-out submodules or an unreadable `git status`.
-A row whose git state is still being measured is in neither until it is; the header
-says how many are still being checked. (A row measured again after a delete keeps its
+A row whose git state is still being measured is in neither until it is; under a filter
+the header says how many are still being checked. (A row measured again after a delete keeps its
 place until the new measurement lands; after `R` every row starts over.) A row with nothing to judge or nothing on
 offer only shows under "all": the main checkout, a session whose checkout and branch are
 both gone, and a row whose git shows nothing at risk but whose dialog would tick nothing —

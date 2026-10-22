@@ -68,6 +68,15 @@ function filterNote(state: CleanupState, pending: number): string {
   return parts.map((p) => `  ·  ${p}`).join("");
 }
 
+/**
+ * How many rows fit: the list's two lines a row under eight of its own (header,
+ * column header, ↑/↓ more, the note, three of hints); D's dialog one line a row
+ * under nine of its own (title, three of explanation, ↑/↓ more, the y line, gaps).
+ */
+function pagesFor(rows = 24): { page: number; bulkPage: number } {
+  return { page: Math.max(2, Math.floor((rows - 8) / 2)), bulkPage: Math.max(2, rows - 10) };
+}
+
 /** The key hints, three lines so that each fits an 80-column terminal untruncated. */
 function Footer({ state }: { state: CleanupState }) {
   if (state.typing) return <Text dimColor wrap="truncate">{"type to filter by title, branch or path · enter keep · esc clear"}</Text>;
@@ -86,7 +95,7 @@ function CleanupList({ rows, total, pending, state, gits, sizes, top, page, cols
   const filtered = state.filter !== "all" || state.query !== "";
   return (
     <Box flexDirection="column">
-      <Text bold>
+      <Text bold wrap="truncate">
         {`Cleanup — ${countLabel(rows.length, total, filtered)}`}
         <Text dimColor>{`${filterNote(state, pending)}  ·  sort: ${sortLabel(state.sort, state.reversed)}`}</Text>
       </Text>
@@ -159,9 +168,7 @@ export function CleanupScreen({
     if (state !== stored) setState((s) => syncCursor(s, visible));
   }, [state, stored, visible]);
   const { stdout } = useStdout();
-  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 8) / 2));
-  // D's dialog is one line a row, under nine lines of its own (title, three of explanation, ↑/↓ more, the y line and gaps).
-  const bulkPage = Math.max(2, (stdout?.rows ?? 24) - 10);
+  const { page, bulkPage } = pagesFor(stdout?.rows);
   const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict, page: bulkPage, pending };
   const setNote = (note: string | null) => setState((s) => ({ ...s, note }));
   const end = useCleanupEnd({ model, setNote, reload, onQuit });
@@ -170,8 +177,10 @@ export function CleanupScreen({
   // Enter on a live row: the session rows' own enter, so a running session is switched to, never started again.
   const switchTo = (row: CleanupRow | undefined) => {
     if (!row?.session) return;
-    open(openSession(row.session, model.liveWindows.get(sessionName(row.session))));
-    setNote(`▸ switched to ${row.title} — switch back to this window for more`);
+    const plan = openSession(row.session, model.liveWindows.get(sessionName(row.session)));
+    open(plan);
+    // The list can be a poll behind: a window that closed meanwhile is resumed, not switched to.
+    setNote(`▸ ${plan.alreadyRunning ? "switched to" : "opened"} ${row.title} — switch back to this window for more`);
   };
 
   // After a cleanup only what it could have changed is measured again; R measures everything.

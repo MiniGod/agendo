@@ -82,7 +82,11 @@ export interface CleanupEnv {
   all: readonly CleanupRow[];
   offers: (row: CleanupRow) => Offers;
   git: (row: CleanupRow) => GitState | null | undefined;
-  /** Where the filter puts a row; D deletes the shown rows it calls `safe`. */
+  /**
+   * A row's CURRENT verdict — `pending` while it is measured again, even though
+   * the filter still lists it by its last one (`shownVerdict`). D deletes only
+   * shown rows whose current verdict is `safe`.
+   */
   verdict: (row: CleanupRow) => Verdict;
   /** How many rows the D dialog shows at once, so it scrolls only what does not fit. */
   page?: number;
