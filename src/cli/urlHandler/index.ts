@@ -7,15 +7,16 @@
 // to make it the scheme's default. Uninstall removes that file, refreshes the
 // database again, and drops the one mimeapps.list line pointing at it. Nothing
 // else is touched beyond what `update-desktop-database` rewrites in that dir.
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { spawnSync } from "child_process";
 import { readVersion } from "../version.ts";
 import {
-  DESKTOP_FILE, MIMEINFO_CACHE, SCHEME_MIME, applicationsDir, cacheListsUs, defaultCommand, defaultSpec, desktopEntry, execProgram, findOnPath, isOurs, isVolatile,
+  DESKTOP_FILE, MIMEINFO_CACHE, SCHEME_MIME, applicationsDir, cacheListsUs, defaultCommand, defaultSpec, desktopEntry, execWords, findOnPath, isOurs, isVolatile,
   mimeappsPath, parseExec, readExec, withoutOurDefault, type Resolved,
 } from "./desktop.ts";
+import { DESKTOP_SESSION_PATH, bunBinary, execTarget, launchPath, launchProblem, withPath } from "./launchPath.ts";
 import { refreshCommand, refreshDesktopDatabase } from "./desktopDb.ts";
 
 const USAGE = "usage: url-handler install [--exec <command>] | uninstall | status";
@@ -37,17 +38,18 @@ function realpathOr(p: string): string {
 function resolveAgendo(pathEnv: string): Resolved | null {
   const p = findOnPath("agendo", pathEnv, existsSync);
   if (!p) return null;
-  const real = realpathOr(p);
-  return { path: p, real, volatile: isVolatile(real) };
+  return { path: p, volatile: isVolatile(realpathOr(p)) };
 }
 
-/** The command words for the Exec line: `--exec`'s, or the detected default. */
+/** The command words for the Exec line — `--exec`'s, or the detected default — run under a PATH that has bun. */
 function execCommand(execArg: string | undefined): string[] {
-  if (execArg !== undefined) return parseExec(execArg) ?? fail("--exec needs a command (and may not contain %)");
   const pathEnv = process.env.PATH ?? "";
   const onPath = (cmd: string) => findOnPath(cmd, pathEnv, existsSync);
-  return defaultCommand(resolveAgendo(pathEnv), onPath("bun"), onPath("bunx"), defaultSpec(readVersion()))
-    ?? fail("found neither a global agendo install nor bunx on PATH; pass --exec <command>");
+  const command = execArg !== undefined
+    ? parseExec(execArg) ?? fail("--exec needs a command (and may not contain %)")
+    : defaultCommand(resolveAgendo(pathEnv), onPath("bunx"), defaultSpec(readVersion()))
+      ?? fail("found neither a global agendo install nor bunx on PATH; pass --exec <command>");
+  return withPath(command, launchPath(bunBinary(process.execPath, onPath), pathEnv));
 }
 
 /** `xdg-mime …`, or null when it could not run or failed. */
@@ -127,11 +129,34 @@ function status(): void {
   process.exitCode = registered && isOurs(handler ?? "") ? 0 : 1;
 }
 
-/** Say so when the program the entry starts is gone — a cleared bunx cache, an uninstalled bun. */
+/**
+ * Say so when the entry would not start from a link: a program it names is gone
+ * (a cleared bunx cache, an uninstalled bun), or it needs bun and the PATH it
+ * runs under — its own `env PATH=`, else the desktop session's — has none.
+ */
 function warnIfMissing(exec: string | null): void {
-  const program = exec === null ? null : execProgram(exec);
-  if (program?.startsWith("/") && !existsSync(program)) {
-    console.log(`  warning: ${program} does not exist; re-run \`url-handler install\``);
+  const words = exec === null ? null : execWords(exec);
+  const target = words ? execTarget(words) : null;
+  if (!words || !target) return;
+  for (const program of new Set([words[0], target.program])) {
+    if (program.startsWith("/") && !existsSync(program)) console.log(`  warning: ${program} does not exist; re-run \`url-handler install\``);
+  }
+  const problem = launchProblem(target, target.path ?? DESKTOP_SESSION_PATH, existsSync, readHead);
+  if (problem) console.log(`  warning: ${problem}; re-run \`url-handler install\``);
+}
+
+/** The first 64 KiB of a file — enough for a shebang or a wrapper's `bun x` line — or null. */
+function readHead(path: string): string | null {
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(65_536);
+      return buf.toString("utf-8", 0, readSync(fd, buf, 0, buf.length, 0));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
   }
 }
 

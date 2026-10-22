@@ -545,11 +545,15 @@ GitHub page can run it. Setup on Linux:
    file to `${XDG_DATA_HOME:-~/.local/share}/applications/` and makes it the default
    for `x-scheme-handler/agendo` through `xdg-mime`, after refreshing that directory's
    desktop database with `update-desktop-database`. It runs a global `agendo` install
-   if you have one (by `bun`'s absolute path, since a browser may start it without
-   your shell's `PATH`), otherwise `bunx agendo@<this version>`, so a link never runs code newer than what
+   if you have one, otherwise `bunx agendo@<this version>`, so a link never runs code newer than what
    you installed. Choose the command with
-   `--exec <command>`. Check the setup with `agendo url-handler status`, and remove
-   it with `agendo url-handler uninstall`.
+   `--exec <command>`. Either way the entry runs it through
+   `/usr/bin/env PATH=<bun's directory>:<your shell's PATH> …`, because a browser
+   starts the handler with the desktop session's `PATH`, which usually lacks
+   `~/.bun/bin`, and every way of running agendo needs `bun`. Re-run `install`
+   after moving bun. Check the setup with `agendo url-handler status`, which also
+   warns when the entry would not find `bun`, and remove it with
+   `agendo url-handler uninstall`.
 
    **Flatpak and Snap browsers** (Zen, Firefox or Chromium from Flathub or the Snap
    store) open links through the desktop portal, which offers only handlers listed

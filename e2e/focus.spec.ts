@@ -619,7 +619,8 @@ test("url-handler install, status and uninstall stay inside XDG_DATA_HOME / XDG_
   expect(inst.code, inst.stderr).toBe(0);
   expect(inst.stdout).toContain(file);
   const text = readFileSync(file, "utf-8");
-  expect(text).toContain("Exec=/opt/agendo/bin/agendo url %u");
+  // Run under a PATH with bun on it: the desktop session's own has no ~/.bun/bin.
+  expect(text).toMatch(/^Exec=\/usr\/bin\/env "?PATH=\/\S* \/opt\/agendo\/bin\/agendo url %u$/m);
   expect(text).toContain("MimeType=x-scheme-handler/agendo;");
   expect(text).toContain("NoDisplay=true");
   expect(await mock.callLog()).toContain("xdg-mime default agendo-url-handler.desktop x-scheme-handler/agendo");
@@ -722,9 +723,55 @@ test("url-handler status warns when the program its entry starts is gone", async
   const inst = await agendo(env, "url-handler", "install", "--exec=/nonexistent/agendo-bin --flag");
   expect(inst.code, inst.stderr).toBe(0);
   expect(readFileSync(join(mock.tmpDir, "data", "applications", "agendo-url-handler.desktop"), "utf-8"))
-    .toContain("Exec=/nonexistent/agendo-bin --flag url %u");
+    .toContain(" /nonexistent/agendo-bin --flag url %u");
   const st = await agendo(env, "url-handler", "status");
   expect(st.stdout).toContain("warning: /nonexistent/agendo-bin does not exist");
+});
+
+test("url-handler reinstall is idempotent, and its entry finds bun under its own PATH", async ({ mock }) => {
+  const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+  const file = join(mock.tmpDir, "data", "applications", "agendo-url-handler.desktop");
+  const wrapper = join(mock.tmpDir, "agendo-wrapper");
+  writeFileSync(wrapper, '#!/bin/bash\nexec bun x agendo "$@"\n', { mode: 0o755 });
+  const first = await agendo(env, "url-handler", "install", "--exec", wrapper);
+  expect(first.code, first.stderr).toBe(0);
+  const text = readFileSync(file, "utf-8");
+  const again = await agendo(env, "url-handler", "install", "--exec", wrapper);
+  expect(again.code, again.stderr).toBe(0);
+  expect(readFileSync(file, "utf-8")).toBe(text);
+  expect(text.match(/^Exec=.*$/gm)).toHaveLength(1);
+  expect(text.match(/PATH=/g)).toHaveLength(1);
+  const st = await agendo(env, "url-handler", "status");
+  expect(st.code, st.stdout).toBe(0);
+  expect(st.stdout).not.toContain("warning");
+});
+
+test("url-handler status warns when its entry runs bun without a PATH that has it", async ({ mock }) => {
+  // The desktop session's PATH is systemd's default; a machine with bun in one of those dirs cannot show the bug.
+  test.skip(["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"].some((d) => existsSync(join(d, "bun"))));
+  const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+  const apps = join(mock.tmpDir, "data", "applications");
+  const wrapper = join(mock.tmpDir, "agendo-wrapper");
+  writeFileSync(wrapper, '#!/bin/bash\nexec bun x agendo "$@"\n', { mode: 0o755 });
+  // An entry from before install baked a PATH in: what the reported link ran, and silently failed.
+  mkdirSync(apps, { recursive: true });
+  writeFileSync(join(apps, "agendo-url-handler.desktop"), `[Desktop Entry]\nType=Application\nExec=${wrapper} url %u\n`);
+  const st = await agendo(env, "url-handler", "status");
+  expect(st.stdout).toContain(`warning: ${wrapper} runs bun, which is not on the desktop session's PATH`);
+  expect(st.stdout).toContain("re-run `url-handler install`");
+});
+
+test("url-handler status warns about an entry from before the fix that runs bunx without bun on PATH", async ({ mock }) => {
+  test.skip(["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"].some((d) => existsSync(join(d, "bun"))));
+  const env = { ...mock.env, XDG_DATA_HOME: join(mock.tmpDir, "data"), XDG_CONFIG_HOME: join(mock.tmpDir, "config") };
+  const apps = join(mock.tmpDir, "data", "applications");
+  // bunx by absolute path still runs agendo's `#!/usr/bin/env bun` bin, which asks PATH for bun.
+  const bunx = join(mock.tmpDir, "bunx");
+  writeFileSync(bunx, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  mkdirSync(apps, { recursive: true });
+  writeFileSync(join(apps, "agendo-url-handler.desktop"), `[Desktop Entry]\nType=Application\nExec=${bunx} agendo@0.3.0 url %u\n`);
+  const st = await agendo(env, "url-handler", "status");
+  expect(st.stdout).toContain(`warning: ${bunx} runs bun, which is not on the desktop session's PATH`);
 });
 
 const BAD_HANDLER_ARGS: string[][] = [

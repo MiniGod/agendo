@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 import {
-  applicationsDir, cacheListsUs, defaultCommand, defaultSpec, desktopEntry, execLine, execProgram, findOnPath, isOurs, isVolatile, mimeappsPath,
+  applicationsDir, cacheListsUs, defaultCommand, defaultSpec, desktopEntry, execLine, execProgram, execWords, findOnPath, isOurs, isVolatile, mimeappsPath,
   parseExec, quoteExecArg, readExec, shellQuote, withoutOurDefault,
 } from "../src/cli/urlHandler/desktop.ts";
 import { refreshCommand, refreshDesktopDatabase } from "../src/cli/urlHandler/desktopDb.ts";
@@ -61,22 +61,17 @@ describe("paths", () => {
 });
 
 describe("defaultCommand", () => {
-  const global = { path: "/usr/local/bin/agendo", real: "/home/me/.bun/install/global/node_modules/agendo/src/index.tsx", volatile: false };
-
-  test("a stable global install runs its script by bun's absolute path, not through the shebang's PATH lookup", () => {
-    expect(defaultCommand(global, "/u/bun", "/u/bunx", "agendo@1.2.3")).toEqual(["/u/bun", global.real]);
+  test("a stable global install runs its own bin — a bun script or a wrapper alike finds bun on the baked PATH", () => {
+    const global = { path: "/usr/local/bin/agendo", volatile: false };
+    expect(defaultCommand(global, "/u/bunx", "agendo@1.2.3")).toEqual(["/usr/local/bin/agendo"]);
   });
 
-  test("without bun found, the global bin itself", () => {
-    expect(defaultCommand(global, null, "/u/bunx", "agendo@1.2.3")).toEqual(["/usr/local/bin/agendo"]);
+  test("a runner's /tmp copy is skipped for bunx with a pinned spec", () => {
+    const tmp = { path: "/tmp/bunx-1000-agendo/agendo", volatile: true };
+    expect(defaultCommand(tmp, "/u/bunx", "agendo@1.2.3")).toEqual(["/u/bunx", "agendo@1.2.3"]);
   });
 
-  test("a runner's /tmp copy is skipped for bunx with an unpinned spec", () => {
-    const tmp = { path: "/tmp/bunx-1000-agendo/agendo", real: "/tmp/bunx-1000-agendo/agendo", volatile: true };
-    expect(defaultCommand(tmp, "/u/bun", "/u/bunx", "agendo@1.2.3")).toEqual(["/u/bunx", "agendo@1.2.3"]);
-  });
-
-  test("neither available", () => expect(defaultCommand(null, "/u/bun", null, "agendo@1.2.3")).toBeNull());
+  test("neither available", () => expect(defaultCommand(null, null, "agendo@1.2.3")).toBeNull());
 
   test("defaultSpec pins the npm release, never a git ref", () => {
     expect(defaultSpec("0.2.3")).toBe("agendo@0.2.3");
@@ -121,14 +116,26 @@ test("isOurs", () => {
 
 describe("execProgram", () => {
   test("reads back the first word of every Exec line execLine writes", () => {
-    for (const cmd of [["/u/bun", "/x/index.tsx"], ["/with space/bun"], ['/q"uo`te$/b\\s'], ["/pct%/bun"]]) {
+    for (const cmd of [["/u/bun", "/x/index.tsx"], ["/with space/bun"], ['/q"uo`te$/b\\s'], ["/pct%/bun"], ["/pct% space/bun"]]) {
       expect(execProgram(execLine(cmd))).toBe(cmd[0]);
     }
   });
 
-  test("empty or unterminated", () => {
+  test("execWords inverts execLine for every word, the field code included", () => {
+    const cmd = ["/usr/bin/env", "PATH=/home/my dir/.bun/bin:/usr/bin", "/a;b/x", 'q"$`\\', "50%", "\\s", "tab\there"];
+    expect(execWords(execLine(cmd))).toEqual([...cmd, "url", "%u"]);
+  });
+
+  test("execWords undoes the desktop-file value escapes", () => {
+    // `\s` is a space before the line is split into words, `\\` one backslash, and an unknown escape stays as it is.
+    expect(execWords('"/a\\sb" /c\\\\d /e\\qf url %u')).toEqual(["/a b", "/c\\d", "/e\\qf", "url", "%u"]);
+  });
+
+  test("empty, unterminated or malformed", () => {
     expect(execProgram("")).toBeNull();
     expect(execProgram('"/never/closed url %u')).toBeNull();
+    expect(execWords('/a"b" url')).toBeNull();
+    expect(execWords("   ")).toEqual([]);
   });
 });
 
