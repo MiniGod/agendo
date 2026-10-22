@@ -29,8 +29,10 @@ export function filterLabel(f: CleanupFilter): string {
  * being probed: such a row is in neither the safe nor the at-risk list until
  * it is measured. `other` is everything with nothing to judge or nothing on
  * offer: the main checkout, a session whose checkout and branch are gone, and
- * a running or just-written row whose git shows nothing at risk (one that does
- * is `risk`).
+ * a row whose git shows nothing at risk but whose dialog would tick nothing —
+ * it is running or just written, another running session or pane is in its
+ * worktree, or it is a checkout the dialog won't remove. (Any of those whose
+ * git DOES show something at risk is `risk`.)
  */
 export type Verdict = "pending" | "safe" | "risk" | "other";
 

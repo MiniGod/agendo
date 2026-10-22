@@ -111,7 +111,8 @@ function CleanupList({ rows, total, pending, state, gits, sizes, top, page, cols
         <RowLines key={r.key} row={r} focused={top + i === state.cursor} git={gits.get(r.key)} sizes={sizes.get(r.key)} titleW={titleW} />
       ))}
       {top + page < rows.length ? <Text dimColor>{`  ↓ ${rows.length - top - page} more`}</Text> : null}
-      {state.note ? <Text color="yellow">{state.note}</Text> : null}
+      {/* One line, as pagesFor counts it: a longer note must not push the header off screen. */}
+      {state.note ? <Text color="yellow" wrap="truncate">{state.note}</Text> : null}
       <Footer state={state} />
     </Box>
   );
