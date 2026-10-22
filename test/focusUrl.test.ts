@@ -134,7 +134,7 @@ describe("parseFocusUrl refuses everything else", () => {
     // a window name gets its extra length only under a known prefix, and no further
     `agendo://focus?session=cl-evil-${"b".repeat(64)}`,
     `agendo://focus?session=cl-wi-${"b".repeat(170)}`,
-    // ...and only for cl-wi-/cl-pr-: an id-bearing kind stays at SESSION_RE's 64
+    // ...and only for cl-wi-/cl-pr-: every other kind gets 64 after its prefix
     `agendo://focus?session=cl-copilot-${"b".repeat(65)}`,
     "agendo://focus?session=cl-wi-a.b",
     "agendo://focus?session=cl-wi-102&repo=acme",

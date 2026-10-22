@@ -19,10 +19,11 @@ describe("session links", () => {
     expect(g).toContain("`set -as terminal-features 'xterm*:hyperlinks'`");
   });
 
-  test("both orchestrator prompts say it too, and point at --llm for the rest", () => {
+  test("both orchestrator prompts say it too, with the codex case, and point at --llm for the rest", () => {
     for (const p of [orchestratorSystemPrompt("x", "claude"), globalOrchestratorSystemPrompt("x", "claude")]) {
       expect(flat(p)).toContain(LINK);
-      expect(flat(p)).toContain("`x --llm` says what clicking needs");
+      expect(flat(p)).toContain("`x --llm` has the rest");
+      expect(flat(p)).toContain("A codex session with no id yet: use the `link:` line");
     }
   });
 });

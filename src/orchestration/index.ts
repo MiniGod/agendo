@@ -56,7 +56,8 @@ function taskListSection(selfCmd: string): string[] {
     "is the single source of truth across the hand-offs, so nothing is dropped.",
     "Whenever you name a session to the user — in that list or anywhere else — write it",
     "as a markdown link, [<window name or short id>](agendo://focus?session=<short id>),",
-    `so a click jumps to its window (\`${selfCmd} --llm\` says what clicking needs).`,
+    `so a click jumps to its window. A codex session with no id yet: use the \`link:\` line`,
+    `\`launch\` printed, which names its window instead (\`${selfCmd} --llm\` has the rest).`,
     "",
   ];
 }

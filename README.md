@@ -509,7 +509,10 @@ treated as possibly still in use: nothing starts ticked and anything deleted nee
 ### Jump to a session from the PR page
 
 `agendo focus --pr <n>`, `agendo focus --work-item <n>` (each with an optional
-`--repo`) or `agendo focus <id>` brings a session to the front. Typed in a terminal,
+`--repo`) or `agendo focus <id>` brings a session to the front. The id can also be
+the session's tmux window name (`cl-claude-…`, `cl-wi-…`); one that embeds no session
+id, such as `cl-wi-…`, `cl-pr-…` or a codex `cl-bg-codex-…`, means the session that
+live window is attributed to, as `list` shows it. Typed in a terminal,
 it switches the tmux client you typed into last. From a link, it switches a client
 already showing the tmux session that holds (or, once resumed, will hold) the
 session's window — the most recently used one, if several are. When no client is on
@@ -581,7 +584,8 @@ GitHub page can run it. Setup on Linux:
 
 Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
-and `?session=<id>`. It refuses anything
+and `?session=<id>`, where the id may also be one of agendo's own window names
+(a `cl-<kind>-` prefix, then letters, digits and dashes). It refuses anything
 else, such as other verbs, extra or encoded parameters, or overlong input, and says
 so in a notification. The repo can be a name or an Azure DevOps repository id. Some
 PR links, such as those in notifications, name the repo by its id. agendo maps a

@@ -9,7 +9,7 @@
 // they go by whichever session the live window of exactly that name is
 // ATTRIBUTED to: the session id in the window's own tag
 // (`@cl_session_id`, see names.ts) where it carries one, else the cwd + most
-// recently used fallback (`reconcileLive`). That is the same answer the TUI's
+// recently used fallback (`resolveWindowSession`, src/runtime/restore/). That is the same answer the TUI's
 // row and `list` give for the window, which matters because the fallback is the
 // common case — a `cl-wi-`/`cl-pr-` window is launched with no id to tag, and
 // nothing completes the tag later.
@@ -26,8 +26,8 @@
 // the map again to judge running vs idle, so attribution flipping in between —
 // a new transcript landing in the same cwd — can still mislead it, exactly as
 // it already could for a short id resolved by cwd. Closing that means focus
-// reading tmux once, which is the lookup rework, not this file.) Placeholders are never attributed (they
-// hold no agent), so never match.
+// reading tmux once, which is the lookup rework, not this file.)
+// Placeholders are never attributed (they hold no agent), so never match.
 //
 // Read-only: the only tmux calls it can lead to are the window and pane
 // listings behind `attributed`, and it returns sessions that already exist —
