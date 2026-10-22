@@ -2,7 +2,7 @@
 // throttle's arithmetic. A number is not always one entity — GitHub numbers per
 // repository — and the e2e fixtures never collide, so the refusal lives here.
 import { afterAll, describe, expect, test } from "bun:test";
-import { linkedMatches, narrowToRepo, repoOfUrl, resolveLinked, sameRepo } from "../src/cli/focus/linked.ts";
+import { isRepoGuid, linkedMatches, narrowToLinkRepo, knowsRepoId, narrowToRepo, repoOfUrl, resolveLinked, sameRepo } from "../src/cli/focus/linked.ts";
 import { claimFloor, resumeWaitMs, STALE_LOCK_MS, URL_RESUME_GAP_MS } from "../src/cli/focus/throttle.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -62,6 +62,83 @@ describe("narrowToRepo", () => {
   test("keeps an entity whose repo is unknown", () => {
     const unknown = [{ key: "item:7", repo: null, sessions: [a] }];
     expect(resolveLinked(narrowToRepo(unknown, "acme/repo-a"))).toEqual({ sessions: [a] });
+  });
+});
+
+describe("narrowToLinkRepo", () => {
+  const A_ID = "4b12fdea-5ae3-48d4-a2cd-1f47d10700ce";
+  const B_ID = "0f6a1c2e-9d1b-4c3a-8e5f-123456789abc";
+  const a = sess("a");
+  const b = sess("b");
+  const adoPr = (id: number, repo: string, repositoryId: string, sessions: AgentSession[]) =>
+    ({ id, url: `https://dev.azure.com/o/p/_git/${repo}/pullrequest/${id}`, repositoryId, repositoryName: repo, sessions });
+  const model = {
+    linkedPrs: [adoPr(81276, "mc-applications", A_ID, [a])],
+    orphanPrs: [adoPr(81276, "other-repo", B_ID, [b]), adoPr(900, "mc-web", "c-id", [])],
+    reviewPrs: [],
+    current: [],
+    other: [],
+    prLinked: [],
+  } as unknown as Parameters<typeof narrowToLinkRepo>[0];
+  const matches = linkedMatches(model, { kind: "pr", id: 81276 });
+
+  test("a known repository id matches its own PR's repo", () => {
+    expect(resolveLinked(narrowToLinkRepo(model, matches, A_ID))).toEqual({ sessions: [a] });
+    expect(resolveLinked(narrowToLinkRepo(model, matches, A_ID.toUpperCase()))).toEqual({ sessions: [a] });
+    expect(resolveLinked(narrowToLinkRepo(model, matches, B_ID))).toEqual({ sessions: [b] });
+  });
+
+  test("a known id is matched exactly, never turned into a name: same-named repos in two projects stay apart", () => {
+    const inProject = (project: string, repositoryId: string, sessions: AgentSession[]) =>
+      ({ id: 42, url: `https://dev.azure.com/o/${project}/_git/web/pullrequest/42`, repositoryId, repositoryName: "web", sessions });
+    const two = { ...model, linkedPrs: [inProject("p1", A_ID, [a])], orphanPrs: [inProject("p2", B_ID, [b])] } as unknown as Parameters<typeof narrowToLinkRepo>[0];
+    const ms = linkedMatches(two, { kind: "pr", id: 42 });
+    expect(resolveLinked(narrowToLinkRepo(two, ms, A_ID))).toEqual({ sessions: [a] });
+    expect(resolveLinked(narrowToLinkRepo(two, ms, B_ID))).toEqual({ sessions: [b] });
+  });
+
+  test("a GitHub slug keeps its owner: acme/web's page never focuses other/web's PR #5", () => {
+    const gh = (owner: string, sessions: AgentSession[]) =>
+      ({ id: 5, url: `https://github.com/${owner}/web/pull/5`, repositoryId: `${owner}/web`, repositoryName: "web", sessions });
+    const ghModel = { ...model, linkedPrs: [gh("acme", [])], orphanPrs: [gh("other", [b])] } as unknown as Parameters<typeof narrowToLinkRepo>[0];
+    const ms = linkedMatches(ghModel, { kind: "pr", id: 5 });
+    expect(resolveLinked(narrowToLinkRepo(ghModel, ms, "acme/web"))).toEqual({ sessions: [] });
+    expect(resolveLinked(narrowToLinkRepo(ghModel, ms, "other/web"))).toEqual({ sessions: [b] });
+  });
+
+  test("a name still narrows by name", () => {
+    expect(resolveLinked(narrowToLinkRepo(model, matches, "mc-applications"))).toEqual({ sessions: [a] });
+    expect(resolveLinked(narrowToLinkRepo(model, matches, "acme/other"))).toEqual({ sessions: [] });
+  });
+
+  test("an unknown GUID narrows nothing: the number is matched in every repo, ambiguity still refused", () => {
+    const unknown = "11111111-2222-3333-4444-555555555555";
+    expect(narrowToLinkRepo(model, matches, unknown)).toEqual(matches);
+    expect(resolveLinked(narrowToLinkRepo(model, matches.slice(0, 1), unknown))).toEqual({ sessions: [a] });
+    expect("ambiguous" in resolveLinked(narrowToLinkRepo(model, matches, unknown))).toBe(true);
+  });
+});
+
+describe("knowsRepoId / isRepoGuid", () => {
+  test("looks across all three PR lists, case-insensitively", () => {
+    const m = {
+      linkedPrs: [],
+      orphanPrs: [{ repositoryId: "x-id" }],
+      reviewPrs: [{ repositoryId: "AB-ID" }],
+    } as unknown as Parameters<typeof knowsRepoId>[0];
+    expect(knowsRepoId(m, "ab-id")).toBe(true);
+    expect(knowsRepoId(m, "X-ID")).toBe(true);
+    expect(knowsRepoId(m, "nope")).toBe(false);
+  });
+
+  test.each([
+    ["4b12fdea-5ae3-48d4-a2cd-1f47d10700ce", true],
+    ["4B12FDEA-5AE3-48D4-A2CD-1F47D10700CE", true],
+    ["4b12fdea5ae348d4a2cd1f47d10700ce", false],
+    ["mc-applications", false],
+    ["acme/4b12fdea-5ae3-48d4-a2cd-1f47d10700ce", false],
+  ])("%s → %p", (repo, ok) => {
+    expect(isRepoGuid(repo)).toBe(ok);
   });
 });
 

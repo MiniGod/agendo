@@ -26,7 +26,7 @@ import { sessionState } from "../list/rows.ts";
 import { findSession, resumeSession } from "../commands/resume.ts";
 import { describeLinkTarget, describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { launcherForCwd, parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
-import { linkedMatches, narrowToRepo, resolveLinked } from "./linked.ts";
+import { linkedMatches, narrowToLinkRepo, resolveLinked } from "./linked.ts";
 import { failLoudly, notify, onNotify } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
@@ -56,8 +56,9 @@ async function loadFocusModel(label: string): Promise<Awaited<ReturnType<typeof 
 
 /** The sessions a PR / work item links to — refused when the number names more than one of them (see linked.ts). */
 async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>, label: string): Promise<AgentSession[]> {
-  const matches = linkedMatches(await loadFocusModel(label), target);
-  const r = resolveLinked(target.repo ? narrowToRepo(matches, target.repo) : matches);
+  const model = await loadFocusModel(label);
+  const matches = linkedMatches(model, target);
+  const r = resolveLinked(target.repo ? narrowToLinkRepo(model, matches, target.repo) : matches);
   if ("sessions" in r) return r.sessions;
   return failLoudly(`${label} is ambiguous — it matches ${r.ambiguous.join(" and ")}; name the repo (\`focus --repo <repo>\`) or the session (\`focus <session-id>\`)`);
 }

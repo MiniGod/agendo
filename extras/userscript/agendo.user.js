@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Open in agendo
 // @namespace    https://github.com/MiniGod/agendo
-// @version      1.3.0
+// @version      1.4.0
 // @description  Adds an "Open in agendo" button to Azure DevOps and GitHub pull requests and work items. It focuses the agendo session for that PR or work item, resuming it first if it is paused or idle.
 // @match        https://dev.azure.com/*
 // @match        https://*.visualstudio.com/*
@@ -20,6 +20,14 @@
 // link a run of digits from the page URL, and a repo from the page URL only when
 // it already has exactly the shape agendo accepts — otherwise it leaves the repo
 // out rather than mangle it.
+//
+// An Azure DevOps PR URL can name the repo by its id instead of its name
+// (`/_git/<guid>/pullrequest/N`, as notifications and the PR hub link it). Then
+// the script looks for the name on the page — a canonical link or breadcrumb
+// link to this same PR by name — and sends the GUID only when the page does not
+// say, which agendo resolves itself (src/cli/focus/linked.ts). The breadcrumb
+// renders after the URL changes, so while the link still carries a GUID the poll
+// keeps looking, for ten seconds at most.
 //
 // Azure DevOps and GitHub are both single-page apps: moving from one PR to
 // another changes the URL without loading a page. So the script re-reads the
@@ -67,13 +75,76 @@
     return REPO_RE.test(repo) ? repo : undefined;
   }
 
-  /** The agendo:// link for the page at `loc`, or null when it is not a PR or work item. */
-  function linkFor(loc) {
+  /** An Azure DevOps repository id, as a PR URL may carry in place of the repo name. */
+  const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /**
+   * Where the page may name this PR's repo. Only links to the PR itself count:
+   * a repo-root link (the left nav's "Files", or the previous PR's breadcrumb
+   * still in the DOM) can name another repo, and a wrong name is worse than the
+   * id, which agendo can still resolve. ADO numbers PRs across the whole
+   * collection, so `/_git/<name>/pullrequest/<id>` within this page's
+   * collection names this PR's repo wherever it stands.
+   */
+  const PR_LINKS = 'link[rel="canonical"][href], .bolt-breadcrumb a[href*="/pullrequest/"]';
+
+  /** How long after a URL change the poll keeps looking for a repo id's name before settling for the id. */
+  const NAME_WAIT_MS = 10000;
+
+  /** The collection a URL is in: its origin, plus the organization on dev.azure.com. */
+  function collectionOf(url) {
+    return url.hostname === "dev.azure.com" ? `${url.origin}/${url.pathname.split("/")[1]}` : url.origin;
+  }
+
+  /**
+   * The repo name an href to PR `id` (resolved against `base`) names, if it is a
+   * name rather than an id and the href is in `base`'s collection.
+   */
+  function nameInHref(href, base, id) {
+    let path;
+    try {
+      const url = new URL(href, base);
+      if (collectionOf(url) !== collectionOf(new URL(base))) return undefined;
+      path = url.pathname;
+    } catch {
+      return undefined;
+    }
+    const m = new RegExp(`/_git/([^/]+)/pullrequest/${id}(?:/|$)`, "i").exec(path);
+    const repo = m ? repoOf(m[1]) : undefined;
+    return repo && !GUID_RE.test(repo) ? repo : undefined;
+  }
+
+  /**
+   * The repo name `doc` shows for PR `id` at `loc`, read off its canonical link
+   * or breadcrumb links to that PR — only when they all name the same one.
+   * Undefined when the page does not say.
+   */
+  function repoNameOnPage(doc, loc, id) {
+    const names = new Set();
+    for (const el of doc.querySelectorAll(PR_LINKS)) {
+      const n = nameInHref(el.getAttribute("href") || "", loc.href, id);
+      if (n) names.add(n);
+    }
+    return names.size === 1 ? [...names][0] : undefined;
+  }
+
+  /** An Azure DevOps PR's repo: the URL's, unless that is an id and `doc` shows the name. */
+  function adoPrRepo(raw, id, loc, doc) {
+    const repo = repoOf(raw);
+    if (!repo || !GUID_RE.test(repo) || !doc) return repo;
+    return repoNameOnPage(doc, loc, id) || repo;
+  }
+
+  /**
+   * The agendo:// link for the page at `loc`, or null when it is not a PR or
+   * work item. `doc` is where a repo id's name is looked for; without it, the id is used.
+   */
+  function linkFor(loc, doc) {
     const host = loc.hostname;
     const path = loc.pathname;
     let m;
     if (host === "dev.azure.com" || host.endsWith(".visualstudio.com")) {
-      if ((m = /\/_git\/([^/]+)\/pullrequest\/(\d+)(?:\/|$)/i.exec(path))) return { kind: "pr", id: m[2], repo: repoOf(m[1]) };
+      if ((m = /\/_git\/([^/]+)\/pullrequest\/(\d+)(?:\/|$)/i.exec(path))) return { kind: "pr", id: m[2], repo: adoPrRepo(m[1], m[2], loc, doc) };
       if ((m = /\/_workitems\/edit\/(\d+)(?:\/|$)/i.exec(path))) return { kind: "workItem", id: m[1] };
       // A work item opened as a dialog over a board, backlog or query.
       const wi = new URLSearchParams(loc.search).get("workitem");
@@ -85,6 +156,17 @@
       if ((m = /^\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/|$)/.exec(path))) return { kind: "workItem", id: m[2], repo: repoOf(m[1]) };
     }
     return null;
+  }
+
+  /**
+   * Whether the poll must re-render: the URL changed, the button is gone, or the
+   * link still carries a repo id and the page has had less than NAME_WAIT_MS
+   * since the URL changed (`since`) to show the name.
+   */
+  function needsRender(href, last, buttonHref, since, now) {
+    if (href !== last || buttonHref === null) return true;
+    const repo = new URLSearchParams(buttonHref.split("?")[1] || "").get("repo") || "";
+    return GUID_RE.test(repo) && now - since < NAME_WAIT_MS;
   }
 
   /** The href for a `linkFor` result. */
@@ -182,7 +264,7 @@
   }
 
   function render() {
-    const target = linkFor(window.location);
+    const target = linkFor(window.location, document);
     let button = document.getElementById(BUTTON_ID);
     if (!target) {
       if (button) button.remove();
@@ -223,7 +305,7 @@
   // whose GM_info every one of them (Tampermonkey, Violentmonkey,
   // Greasemonkey 4) defines even then.
   if (typeof GM_info === "undefined" && typeof module === "object" && module && module.exports) {
-    module.exports = { linkFor, hrefFor, debug, guard, onClick, GUARD_MS, DEBUG_KEY };
+    module.exports = { linkFor, hrefFor, needsRender, NAME_WAIT_MS, debug, guard, onClick, GUARD_MS, DEBUG_KEY };
     return;
   }
 
@@ -235,10 +317,14 @@
   debug([`guard installed at readyState ${document.readyState}`]);
 
   let last = "";
+  let since = 0;
   function check() {
     // At document-start there is no body yet; the poll comes back for it.
     if (!document.body) return;
-    if (window.location.href === last && document.getElementById(BUTTON_ID)) return;
+    const button = document.getElementById(BUTTON_ID);
+    const now = Date.now();
+    if (!needsRender(window.location.href, last, button ? button.getAttribute("href") || "" : null, since, now)) return;
+    if (window.location.href !== last) since = now;
     last = window.location.href;
     render();
   }
