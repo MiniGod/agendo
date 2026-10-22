@@ -86,7 +86,7 @@ fixtures `mock` + `launch`):
 | `tmux` | the user's tmux server | Fake `tmux` shim — answers `list-*`/`has-session` from a JSON state file and logs every call; **starts nothing**. Live "running" state is just fixture data. |
 | `git worktree add` / `list` / `status` | real repos | Fake `git` shim — `worktree add` `mkdir`s the target path and records it in a JSON registry (`FAKE_GIT_STATE`, seeded via `mock.setGitState`); `worktree list --porcelain` and `status --porcelain` answer from that registry, so an adopt-an-existing-worktree test can stage a dirty tree, a drifted branch or a bare directory. Logs every call; never touches a repo. |
 | `claude` launch / `xdg-open` | spawning agents / a browser | Fake shims that only record the invocation. |
-| `notify-send` / `wmctrl` / `xdotool` / `xdg-mime` / `update-desktop-database` | the desktop (`agendo focus`, `agendo url-handler`) | Fake shims that record the invocation; `wmctrl -lp` lists `$FAKE_WMCTRL_LIST`, `xdotool search --pid $FAKE_XDOTOOL_PID` finds `$FAKE_XDOTOOL_WID`, `xdg-mime` keeps its defaults in a `mimeapps.list` under the test's own `$XDG_CONFIG_HOME` / `$HOME`, and `update-desktop-database <dir>` writes a minimal `mimeinfo.cache` into the one dir it is handed. |
+| `notify-send` / `wmctrl` / `xdotool` / `i3-msg` / `swaymsg` / `xdg-mime` / `update-desktop-database` | the desktop (`agendo focus`, `agendo url-handler`) | Fake shims that record the invocation; `wmctrl -lp` lists `$FAKE_WMCTRL_LIST`, `xdotool search --pid $FAKE_XDOTOOL_PID` finds `$FAKE_XDOTOOL_WID`, `i3-msg --get-socketpath` prints `$FAKE_I3_SOCKET` (and exits 1 without it, so i3 reads as absent) while any other `i3-msg` command exits 2 when `$FAKE_I3_FAIL` is set, every `swaymsg` call exits 1, `xdg-mime` keeps its defaults in a `mimeapps.list` under the test's own `$XDG_CONFIG_HOME` / `$HOME`, and `update-desktop-database <dir>` writes a minimal `mimeinfo.cache` into the one dir it is handed. |
 
 The shims live in `e2e/fakebin/` and are placed **first on `PATH`**. `TMUX` is
 deliberately left unset so the launcher takes its outside-tmux code path. Tests
@@ -118,7 +118,7 @@ e2e/
     adoServer.ts   mock Azure DevOps REST server
     fixtures.ts    fake HOME tree + ADO payloads + initial tmux state
     test.ts        Playwright fixtures (`mock`, `launch`)
-  fakebin/         fake az / tmux / git / claude / xdg-open / notify-send / wmctrl / xdotool / xdg-mime / fake-terminal executables
+  fakebin/         fake az / tmux / git / claude / xdg-open / notify-send / wmctrl / xdotool / i3-msg / swaymsg / xdg-mime / fake-terminal executables
   fixtures/        verbatim `tmux capture-pane -p -e` panes (+ their cursor
                    readouts) from real Claude and Codex sessions, used by
                    detection.spec.ts to pin the readiness classifiers against

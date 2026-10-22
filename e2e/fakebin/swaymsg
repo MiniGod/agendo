@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake `swaymsg` — records the call and acts on nothing. Never let the real one
+# run under test: it would move focus on the developer's desktop. Every call
+# fails, so sway reads as unreachable even if a spec ever sets SWAYSOCK.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "swaymsg $*" >> "$FAKE_CALL_LOG"; fi
+exit 1
