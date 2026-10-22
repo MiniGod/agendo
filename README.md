@@ -504,8 +504,25 @@ files, commits no remote has, and whether the branch is merged into the origin
 default branch (squash merges included, judged offline by tree and patch-id). `s`
 cycles the sort between updated, created and size; `r` reverses it.
 
-Enter (or space) on a row opens a dialog with four boxes: worktree, branch, session
-transcript and tmp/scratch files. The session is kept by default; the worktree and
+`f` filters the list: all → **safe to remove** → **has something to lose** → all.
+"Safe to remove" is exactly the rule the dialog uses to start the worktree and branch
+ticked (below), so a row is listed there only when deleting it loses nothing — clean,
+nothing unpushed, merged, no ignored files, not running and not written to in the last
+five minutes. "Has something to lose" is a row with dirty files, unpushed commits, an
+unmerged branch, ignored files, checked-out submodules or an unreadable `git status`.
+A row whose git state is still being measured is in neither until it is; the header
+says how many are still being checked. The main checkout, and a session whose
+checkout and branch are both gone, only show under "all". `/` adds a text filter on
+title, branch and path (enter keeps it, esc clears it). The header shows the filter
+and `shown of total`; sorting applies within the filter. The filter is kept until
+agendo exits, so leaving the view and pressing `C` again keeps it.
+
+Space on a row opens a dialog with four boxes: worktree, branch, session
+transcript and tmp/scratch files. Enter does the same, except on a row whose session
+is live (running, or a paused tab): there it switches to the session exactly as enter
+does on the session rows. `p`, `x` and `X` pause, kill and force-kill the row's session,
+the same actions (and y/n questions) as on the session rows; once it no longer runs,
+its worktree and branch can be cleaned up. The session is kept by default; the worktree and
 branch start ticked only when deleting them loses nothing, and otherwise the dialog
 says exactly what would be lost and asks a second time before `git worktree remove
 --force` / `git branch -D`. It never offers the main checkout, its branch, or a
@@ -514,6 +531,15 @@ Ignored files a worktree holds (a `.env`, local settings — build output like
 `node_modules/` aside) count as something to lose, and a session written to in the
 last five minutes that isn't running in agendo (paused, or with no window at all) is
 treated as possibly still in use: nothing starts ticked and anything deleted needs the second confirmation.
+
+`D` deletes every shown row that is safe to remove, after one confirmation that names
+the count and lists the rows. Each goes with the boxes its own dialog would start
+ticked — worktree and branch; transcripts and tmp files are kept — one after another,
+with progress. Right before each one it is probed again: a row that is no longer safe
+is skipped, a failure does not stop the run, and the summary says what happened to
+each. After a delete only the rows it could have changed (the row itself, and any row
+sharing its worktree or branch) are measured again; everything else keeps its
+measurements. `R` re-measures everything.
 
 ### Jump to a session from the PR page
 

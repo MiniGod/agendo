@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from "fs";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LoadedModel } from "../../app/model/index.ts";
 import { claudeTmpRoot, cachedUsage, listManagedWorktrees, usageOf } from "../../cleanup/disk.ts";
 import { probeGit } from "../../cleanup/git.ts";
@@ -61,11 +61,22 @@ export async function measureRow(row: CleanupRow, tmpRoot: string, uid: number):
   return { worktree, transcript, tmp: tmpBytes };
 }
 
+/** Drop `keys` from a measurement map; the same map when none of them is in it. */
+function without<V>(m: Map<string, V>, keys: readonly string[]): Map<string, V> {
+  if (!keys.some((k) => m.has(k))) return m;
+  const next = new Map(m);
+  for (const k of keys) next.delete(k);
+  return next;
+}
+
 /**
  * The cleanup view's data: its rows, and — filled in asynchronously, a few rows
  * at a time — each row's git state and on-disk sizes. Bumping `scanKey`
- * re-lists the worktrees and re-probes every row (after a cleanup); sizes come
- * from the disk module's cache, which a deletion has already invalidated.
+ * re-lists the worktrees and re-probes every row (R, a full re-scan).
+ * `remeasure(keys)` is what a cleanup uses instead: it re-lists the worktrees
+ * and re-probes only those rows, keeping every other measurement as it was.
+ * Sizes come from the disk module's cache, which a deletion has already
+ * invalidated for what it removed.
  */
 export function useCleanupData({
   model,
@@ -82,6 +93,8 @@ export function useCleanupData({
   const sessions = useMemo(() => all.filter((s) => inScope(s.cwd)), [all, inScope]);
   const claimers = useMemo(() => all.filter((s) => !inScope(s.cwd)), [all, inScope]);
   const [worktrees, setWorktrees] = useState<WorktreeDir[]>([]);
+  // Bumped by `remeasure`: re-lists the worktrees and re-runs the probe pass for the rows it dropped.
+  const [relist, setRelist] = useState(0);
   const rows = useMemo(
     () =>
       buildCleanupRows({
@@ -114,7 +127,7 @@ export function useCleanupData({
     return () => {
       alive = false;
     };
-  }, [rootsSig, scanKey]);
+  }, [rootsSig, scanKey, relist]);
 
   const [gits, setGits] = useState<Map<string, GitState | null>>(new Map());
   const [sizes, setSizes] = useState<Map<string, RowSizes>>(new Map());
@@ -149,7 +162,15 @@ export function useCleanupData({
       // Rows this run never started are queued again by the next one; one in flight still lands.
       for (const r of fresh) if (!started.has(r.key)) scan.keys.delete(r.key);
     };
-  }, [rows, scanKey]);
+  }, [rows, scanKey, relist]);
 
-  return { rows, gits, sizes };
+  /** Forget the measurements of `keys` and probe those rows again; every other row keeps its own. */
+  const remeasure = useCallback((keys: readonly string[]) => {
+    for (const k of keys) queued.current.keys.delete(k);
+    setGits((m) => without(m, keys));
+    setSizes((m) => without(m, keys));
+    setRelist((n) => n + 1);
+  }, []);
+
+  return { rows, gits, sizes, remeasure };
 }

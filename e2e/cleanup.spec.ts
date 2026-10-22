@@ -13,6 +13,7 @@ import { mkdir, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { RUNNING_TARGET, sessionName, tmuxState } from "./harness/fixtures.ts";
 import { REPO_ROOT, type MockEnv } from "./harness/mockEnv.ts";
+import { windowTarget } from "../src/runtime/tmux/index.ts";
 import { expect, KEY, test } from "./harness/test.ts";
 import type { WebTerminal } from "./harness/wterm.ts";
 
@@ -234,7 +235,8 @@ test("a running session's worktree and branch are refused, with a notice to paus
   const fx = await buildFixture(mock);
   const wt = await openCleanup(launch, fx);
   await focus(wt, "Busy right now");
-  await wt.press(KEY.enter);
+  // Space: enter on a running row switches to it instead (see the attach spec below).
+  await wt.press(" ");
   const dialog = await wt.waitForText("This session is running");
   expect(dialog).toContain("Pause or kill it first");
   await wt.press(" ");
@@ -458,19 +460,7 @@ test("the filter is kept for the rest of the run: leaving the view and pressing 
 
 test("x on a running row asks, kills it the way close does, and the row can then be cleaned up", async ({ launch, mock }) => {
   const fx = await buildFixture(mock);
-  const running = sessionName("claude", IDS.running);
-  await mock.setTmuxState({
-    sessions: ["agendo"],
-    windows: [
-      { session: "agendo", index: 0, name: "launcher" },
-      { session: "agendo", index: 4, name: running },
-    ],
-    panes: [
-      { session: "agendo", window: "launcher", cwd: mock.tmpDir, placeholder: false },
-      { session: "agendo", window: running, cwd: fx.wt("running"), placeholder: false },
-    ],
-    captures: { [running]: tmuxState.captures[RUNNING_TARGET] },
-  });
+  await runningInHost(mock, fx);
   const wt = await openCleanup(launch, fx);
   await focus(wt, "Busy right now");
   await wt.waitForText(/● running\s+Busy right now/);
@@ -503,4 +493,98 @@ test("p and x on a row with no session say why and do nothing", async ({ launch,
   await wt.press("p");
   await wt.waitForText("p pauses a running session — this row is not a session.");
   expect((await mock.tmuxLog()).filter((a) => a[0].startsWith("kill-"))).toEqual([]);
+});
+
+/** The running session as tab 4 of an `agendo` host session, its pane idle — the shape x and enter act on. */
+async function runningInHost(mock: MockEnv, fx: Fx, extra: Record<string, unknown> = {}): Promise<string> {
+  const running = sessionName("claude", IDS.running);
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 4, name: running },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: mock.tmpDir, placeholder: false },
+      { session: "agendo", window: running, cwd: fx.wt("running"), placeholder: false },
+    ],
+    captures: { [running]: tmuxState.captures[RUNNING_TARGET] },
+    ...extra,
+  });
+  return running;
+}
+
+test("enter on a running row switches to its window, as on the session rows, starting nothing", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  const running = await runningInHost(mock, fx, { currentSession: "agendo" });
+  mock.env.TMUX = "/tmp/fake-tmux,1,0";
+  const wt = await openCleanup(launch, fx);
+  await focus(wt, "Busy right now");
+  await wt.press(KEY.enter);
+  await wt.waitForText("switched to Busy right now", 20000);
+  const log = await mock.tmuxLog();
+  expect(log.filter((a) => a[0] === "switch-client")).toEqual([["switch-client", "-t", windowTarget("agendo", running)]]);
+  expect(log.filter((a) => ["new-session", "new-window", "split-window", "respawn-pane"].includes(a[0]))).toEqual([]);
+  // Still the cleanup view, with no dialog opened.
+  expect(await wt.screen()).toContain("Cleanup —");
+  expect(await wt.screen()).not.toContain("Clean up — Busy right now");
+});
+
+/** The `git status` calls the git probe made in `dir` — one per measurement of that row. */
+const probesOf = (log: string[], dir: string) => log.filter((l) => l.startsWith("git ") && l.includes("--ignored") && l.includes(JSON.stringify(dir)));
+
+test("D deletes every safe row after one confirmation, skips one that stopped being safe, and touches nothing else", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  await addFilterCases(fx);
+  const wt = await openCleanup(launch, fx);
+  await wt.press("D");
+  const confirm = await wt.waitForText("Delete everything safe to remove — 2 rows?");
+  expect(confirm).toContain("• Merged feature");
+  expect(confirm).toContain("• spare");
+  expect(confirm).not.toContain("• Half-done work");
+  await wt.press("n");
+  await wt.waitForText("nothing deleted");
+  expect(existsSync(fx.wt("merged"))).toBe(true);
+
+  // Between the measurement and the run, the spare worktree picks up work: it is re-checked and skipped.
+  await wt.press("D");
+  await wt.waitForText("Delete everything safe to remove — 2 rows?");
+  await writeFile(join(fx.wt("spare"), "late.txt"), "written after it was measured\n");
+  await wt.press("y");
+  const done = await wt.waitForText("Cleanup finished: 1 removed, 0 failed, 1 skipped", 30000);
+  expect(done).toMatch(/✓ Merged feature — removed worktree .*; deleted branch worktree-merged/);
+  expect(done).toContain("– spare — skipped — no longer safe to remove");
+  expect(existsSync(fx.wt("merged"))).toBe(false);
+  expect(branchExists(fx, "worktree-merged")).toBe(false);
+  for (const name of ["spare", "dirty", "orphan", "running", "pushed", "ignored", "dirtyonly"]) expect(existsSync(fx.wt(name))).toBe(true);
+  for (const name of ["spare", "dirty", "orphan", "running", "pushed", "ignored", "dirtyonly"]) expect(branchExists(fx, `worktree-${name}`)).toBe(true);
+  // The session itself is kept: its transcript is still there.
+  const slug = fx.wt("merged").replace(/[^a-zA-Z0-9]/g, "-");
+  expect(existsSync(join(mock.home, ".claude", "projects", slug, `${IDS.merged}.jsonl`))).toBe(true);
+  await wt.press("x");
+  await wt.waitForText(/Merged feature.*no checkout or branch/);
+});
+
+test("after a delete only the deleted row is measured again; R re-measures everything", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  const wt = await openCleanup(launch, fx);
+  await focus(wt, "Merged feature");
+  await wt.press(KEY.enter);
+  await wt.waitForText("Clean up — Merged feature");
+  await wt.press(KEY.enter);
+  await wt.waitForText("Cleanup finished");
+  const before = (await mock.callLog()).length;
+  await wt.press("x");
+  await wt.waitForText(/Merged feature.*no checkout or branch/);
+  await expect.poll(async () => (await wt.screen()).includes("…"), { timeout: 45000 }).toBe(false);
+  const after = (await mock.callLog()).slice(before);
+  // The rows the delete could not have changed keep their measurements: no probe ran in them.
+  for (const name of ["dirty", "orphan", "running"]) expect(probesOf(after, fx.wt(name))).toEqual([]);
+  expect(probesOf(after, fx.repo)).toEqual([]);
+
+  const mark = (await mock.callLog()).length;
+  await wt.press("R");
+  await expect.poll(async () => probesOf((await mock.callLog()).slice(mark), fx.wt("dirty")).length, { timeout: 45000 }).toBeGreaterThan(0);
+  await expect.poll(async () => (await wt.screen()).includes("…"), { timeout: 45000 }).toBe(false);
+  for (const name of ["orphan", "running"]) expect(probesOf((await mock.callLog()).slice(mark), fx.wt(name)).length).toBeGreaterThan(0);
 });

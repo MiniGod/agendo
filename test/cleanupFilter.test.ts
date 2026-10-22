@@ -91,7 +91,7 @@ describe("the filter", () => {
 });
 
 function envOf(rows: CleanupRow[], all = rows): CleanupEnv {
-  return { rows, all, offers: (r) => offersFor(r, CLEAN), git: () => CLEAN };
+  return { rows, all, offers: (r) => offersFor(r, CLEAN), git: () => CLEAN, verdict: (r) => verdict(r, CLEAN) };
 }
 
 function press(state: CleanupState, env: CleanupEnv, ...keys: Array<string | Partial<Key>>) {

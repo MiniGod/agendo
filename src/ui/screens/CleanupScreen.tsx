@@ -1,36 +1,23 @@
 import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { LoadedModel } from "../../app/model/index.ts";
+import { touchedBy } from "../../cleanup/bulk.ts";
 import { offersFor } from "../../cleanup/classify.ts";
-import { claudeTmpRoot } from "../../cleanup/disk.ts";
-import { executeCleanup } from "../../cleanup/execute.ts";
 import { filterLabel, filterRows, verdictOf, type CleanupFilter } from "../../cleanup/filter.ts";
-import { othersRunningIn, sharedActivityPaths } from "../../cleanup/rows.ts";
+import { othersRunningIn } from "../../cleanup/rows.ts";
 import { formatSize, sortRows, totalSize } from "../../cleanup/sort.ts";
 import type { CleanupRow, GitState, RowSizes } from "../../cleanup/types.ts";
 import { fit, homeShort, timeAgo } from "../format/index.ts";
-import { liveManagedPaths } from "../../runtime/tmux/index.ts";
-import { canonical, useCleanupData } from "../hooks/useCleanupData.ts";
+import { openSession, type OpenPlan } from "../../launch/index.ts";
+import { sessionName } from "../../runtime/tmux/index.ts";
+import { useCleanupData } from "../hooks/useCleanupData.ts";
 import { useCleanupEnd } from "../hooks/useCleanupEnd.ts";
-import { cleanupKey, finishRun, syncCursor, INITIAL_CLEANUP, type CleanupDialog, type CleanupEnv, type CleanupState } from "../keys/cleanup.ts";
+import { livePaneCwds, useCleanupRuns } from "../hooks/useCleanupRuns.ts";
+import { cleanupKey, syncCursor, INITIAL_CLEANUP, type CleanupEnv, type CleanupState } from "../keys/cleanup.ts";
 import { gitCells, pageTop, runCell, sortLabel } from "../models/cleanupRow.ts";
+import { CleanupBulkView } from "./CleanupBulk.tsx";
 import { CleanupDialogView, StyledCells } from "./CleanupDialog.tsx";
 import { ConfirmEndScreen } from "./ConfirmEndScreen.tsx";
-
-/**
- * Where every live (non-placeholder) agendo pane is working, as realpaths —
- * and this TUI itself, whose own cwd vanishing under it would crash it later.
- */
-function livePaneCwds(): string[] {
-  const panes = liveManagedPaths()
-    .filter((t) => !t.placeholder)
-    .map((t) => canonical(t.cwd));
-  try {
-    return [...panes, canonical(process.cwd())];
-  } catch {
-    return panes;
-  }
-}
 
 const RUN_W = 13;
 const TIME_W = 10;
@@ -82,12 +69,16 @@ function filterNote(state: CleanupState, pending: number): string {
   return parts.map((p) => `  ·  ${p}`).join("");
 }
 
+/** The key hints, two lines so that both fit a normal terminal untruncated. */
 function Footer({ state }: { state: CleanupState }) {
   if (state.typing) return <Text dimColor wrap="truncate">{"type to filter by title, branch or path · enter keep · esc clear"}</Text>;
   return (
-    <Text dimColor wrap="truncate">
-      {`↑/↓ move · enter/space clean up · f filter: ${filterLabel(state.filter)} · / search · s sort: ${state.sort} · r reverse · p pause · x/X kill · esc back · q quit`}
-    </Text>
+    <Box flexDirection="column">
+      <Text dimColor wrap="truncate">{"↑/↓ move · enter switch to it if live, else clean up · space clean up · D delete all safe · p/x/X pause/kill"}</Text>
+      <Text dimColor wrap="truncate">
+        {`f filter: ${filterLabel(state.filter)} · / search · s sort: ${state.sort} · r reverse · R re-scan · esc back · q quit`}
+      </Text>
+    </Box>
   );
 }
 
@@ -140,6 +131,7 @@ export function CleanupScreen({
   onBack,
   onQuit,
   reload,
+  open,
 }: {
   model: LoadedModel;
   inScope: (cwd: string) => boolean;
@@ -148,9 +140,11 @@ export function CleanupScreen({
   onQuit: () => void;
   /** Re-read the model, so a session paused or killed here shows it. */
   reload: () => void;
+  /** Switch to a session, exactly as enter on a session row does. */
+  open: (plan: OpenPlan) => void;
 }): ReactElement {
   const [scanKey, setScanKey] = useState(0);
-  const { rows, gits, sizes } = useCleanupData({ model, inScope, extraRoots, scanKey });
+  const { rows, gits, sizes, remeasure } = useCleanupData({ model, inScope, extraRoots, scanKey });
   const [stored, setState] = useState<CleanupState>(() => ({ ...INITIAL_CLEANUP, filter: rememberedFilter }));
   useEffect(() => {
     rememberedFilter = stored.filter;
@@ -175,32 +169,22 @@ export function CleanupScreen({
   useEffect(() => {
     if (state !== stored) setState((s) => syncCursor(s, visible));
   }, [state, stored, visible]);
-  const env: CleanupEnv = { rows: visible, all: sorted, offers, git };
-  const end = useCleanupEnd({ model, setNote: (note) => setState((s) => ({ ...s, note })), reload, onQuit });
+  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict: (r) => verdicts.get(r.key) ?? "pending" };
+  const setNote = (note: string | null) => setState((s) => ({ ...s, note }));
+  const end = useCleanupEnd({ model, setNote, reload, onQuit });
+  const { run, runAll } = useCleanupRuns({ rows, setState });
 
-  // The plan is built from the row as it is NOW, not the dialog's snapshot: a
-  // session that started running while the dialog was open must be refused.
-  const run = (d: CleanupDialog) => {
-    const live = rows.find((r) => r.key === d.key);
-    if (!live) {
-      setState((s) => finishRun(s, [{ ok: false, text: "refused — the row is gone; nothing was deleted" }]));
-      return;
-    }
-    const plan = {
-      row: live,
-      sel: d.sel,
-      git: d.git,
-      confirmed: d.confirmed,
-      activeConfirmed: d.confirmed && d.activeShown,
-      othersRunning: othersRunningIn(live, rows, livePaneCwds()),
-      tmpRoot: claudeTmpRoot(),
-      uid: process.getuid?.() ?? 0,
-      now: Date.now(),
-      shared: sharedActivityPaths(live, rows),
-    };
-    executeCleanup(plan)
-      .catch((e: unknown) => [{ ok: false, text: String(e) }])
-      .then((results) => setState((s) => finishRun(s, results)));
+  // Enter on a live row: the session rows' own enter, so a running session is switched to, never started again.
+  const switchTo = (row: CleanupRow | undefined) => {
+    if (!row?.session) return;
+    open(openSession(row.session, model.liveWindows.get(sessionName(row.session))));
+    setNote(`▸ switched to ${row.title} — switch back to this window for more`);
+  };
+
+  // After a cleanup only what it could have changed is measured again; R measures everything.
+  const settle = (prev: CleanupState) => {
+    const done = prev.bulk?.rows ?? (prev.dialog ? [prev.dialog.row] : []);
+    remeasure(touchedBy(done, rows, git));
   };
 
   useInput((input, key) => {
@@ -208,20 +192,25 @@ export function CleanupScreen({
     const step = cleanupKey(state, input, key, env);
     // A key it ignored must not write its (possibly stale) state back over a run that just finished.
     if (step.state !== state) setState(step.state);
-    if (step.effect === "back") onBack();
-    else if (step.effect === "quit") onQuit();
-    else if (step.effect === "refresh") setScanKey((k) => k + 1);
-    else if (step.effect === "run" && step.state.dialog) run(step.state.dialog);
-    else if (step.effect !== "none") end.start(step.effect, visible[step.state.cursor]);
+    const e = step.effect;
+    if (e === "back") onBack();
+    else if (e === "quit") onQuit();
+    else if (e === "refresh") settle(state);
+    else if (e === "rescan") setScanKey((k) => k + 1);
+    else if (e === "switch") switchTo(visible[step.state.cursor]);
+    else if (e === "run" && step.state.dialog) run(step.state.dialog);
+    else if (e === "runAll" && step.state.bulk) runAll(step.state.bulk);
+    else if (e === "pause" || e === "kill" || e === "forceKill") end.start(e, visible[step.state.cursor]);
   });
 
   const { stdout } = useStdout();
-  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 6) / 2));
+  const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 7) / 2));
   // The window only moves when the cursor would leave it. A ref, not state:
   // it is derived from the cursor each render and never drives one itself.
   const top = useRef(0);
   top.current = pageTop(state.cursor, visible.length, page, top.current);
 
+  if (state.bulk) return <CleanupBulkView b={state.bulk} page={page} />;
   if (end.confirm) return <ConfirmEndScreen title={end.confirm.session.title} prompt={end.confirm.prompt} force={end.confirm.force} />;
   const d = state.dialog;
   if (d) {

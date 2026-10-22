@@ -1,10 +1,11 @@
 import type { Key } from "ink";
 import { defaultSelection, needsConfirm, selectionProblem } from "../../cleanup/classify.ts";
 import type { CleanupResult } from "../../cleanup/execute.ts";
-import { nextFilter, type CleanupFilter } from "../../cleanup/filter.ts";
+import { nextFilter, type CleanupFilter, type Verdict } from "../../cleanup/filter.ts";
 import { nextSort, type CleanupSort } from "../../cleanup/sort.ts";
 import { BOXES, type CleanupRow, type GitState, type Offers, type Selection } from "../../cleanup/types.ts";
 import type { KeyContext } from "./context.ts";
+import { bulkKey, openBulk, type BulkDialog } from "./cleanupBulk.ts";
 import { editLine } from "./lineEdit.ts";
 
 // ── cleanup view (C from the list) ──
@@ -53,15 +54,19 @@ export interface CleanupState {
   /** Whether keys are being typed into the `/` filter. */
   typing: boolean;
   dialog: CleanupDialog | null;
+  /** D's delete-everything-safe confirmation, run and summary. */
+  bulk: BulkDialog | null;
   /** A one-line answer to the last list key. */
   note: string | null;
 }
 
 /**
  * What the screen must do after a key: nothing, leave, quit, run the dialog's
- * plan, re-probe, or pause / kill / force-kill the focused row's session.
+ * plan, re-measure what a finished cleanup touched, re-scan everything (R),
+ * switch to the focused row's live session, pause / kill / force-kill it, or
+ * run D's delete-everything-safe.
  */
-export type CleanupEffect = "none" | "back" | "quit" | "run" | "refresh" | "pause" | "kill" | "forceKill";
+export type CleanupEffect = "none" | "back" | "quit" | "run" | "refresh" | "rescan" | "switch" | "pause" | "kill" | "forceKill" | "runAll";
 
 export interface CleanupEnv {
   /** The rows on screen: sorted, then filtered. The list's cursor moves over these. */
@@ -74,12 +79,14 @@ export interface CleanupEnv {
   all: readonly CleanupRow[];
   offers: (row: CleanupRow) => Offers;
   git: (row: CleanupRow) => GitState | null | undefined;
+  /** Where the filter puts a row; D deletes the shown rows it calls `safe`. */
+  verdict: (row: CleanupRow) => Verdict;
 }
 
 type Step = { state: CleanupState; effect: CleanupEffect };
 
 export const INITIAL_CLEANUP: CleanupState = {
-  cursor: 0, focus: null, sort: "updated", reversed: false, filter: "all", query: "", typing: false, dialog: null, note: null,
+  cursor: 0, focus: null, sort: "updated", reversed: false, filter: "all", query: "", typing: false, dialog: null, bulk: null, note: null,
 };
 
 const stay = (state: CleanupState): Step => ({ state, effect: "none" });
@@ -141,6 +148,17 @@ function queryKey(state: CleanupState, input: string, key: Key, env: CleanupEnv)
 /** The session keys of the list: p pauses, x kills, X force-kills — the same actions as on the session rows. */
 const END_KEYS: Record<string, CleanupEffect> = { p: "pause", x: "kill", X: "forceKill" };
 
+/** D: the confirmation for every shown row that is safe to remove, or a note saying there is none. */
+function deleteAllSafe(state: CleanupState, env: CleanupEnv): CleanupState {
+  const safe = env.rows.filter((r) => env.verdict(r) === "safe");
+  if (safe.length > 0) return { ...state, bulk: openBulk(safe) };
+  const checking = env.rows.some((r) => env.verdict(r) === "pending");
+  return { ...state, note: checking ? "nothing shown is safe to remove yet — some rows are still being checked" : "nothing shown is safe to remove" };
+}
+
+/** Enter on a row whose session is live (running, or a paused tab) switches to it, as on the session rows. */
+const isLive = (row: CleanupRow | undefined) => !!row?.session && row.run !== "idle";
+
 /** The list's view keys: sort, reverse, filter, and the `/` prompt. Null for any other key. */
 function viewKey(state: CleanupState, input: string): CleanupState | null {
   // A new order or filter keeps the focused row where it can; syncCursor finds it in the new rows.
@@ -163,7 +181,10 @@ function listKey(prev: CleanupState, input: string, key: Key, env: CleanupEnv): 
   if (view) return stay(view);
   const end = key.ctrl || key.meta ? undefined : END_KEYS[input];
   if (end) return { state, effect: end };
+  if (input === "D") return stay(deleteAllSafe(state, env));
+  if (input === "R") return { state, effect: "rescan" };
   const row = env.rows[state.cursor];
+  if (key.return && isLive(row)) return { state, effect: "switch" };
   if (!(key.return || input === " ") || !row) return stay(state);
   // The defaults are decided from the git state, so the dialog waits for it.
   if (env.git(row) === undefined) return stay({ ...state, note: "still checking git state…" });
@@ -214,8 +235,15 @@ function confirmKey(state: CleanupState, d: CleanupDialog, input: string, env: C
   return { state: { ...state, dialog: { ...d, stage: "running", confirmed: true } }, effect: "run" };
 }
 
+function bulkStep(state: CleanupState, b: BulkDialog, input: string, key: Key): Step {
+  const r = bulkKey(b, input, key);
+  if (r.effect === "cancel") return stay({ ...state, bulk: null, note: "nothing deleted" });
+  return { state: { ...state, bulk: r.bulk }, effect: r.effect };
+}
+
 /** Apply one key to the cleanup screen. */
 export function cleanupKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
+  if (state.bulk) return bulkStep(state, state.bulk, input, key);
   const d = state.dialog;
   if (!d) return listKey(state, input, key, env);
   if (d.stage === "edit") return editKey(state, d, input, key, env);
