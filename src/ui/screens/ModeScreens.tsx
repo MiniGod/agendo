@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import type { OpenPlan } from "../../launch/index.ts";
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
@@ -90,8 +91,8 @@ export interface ModeProps {
   canClone: boolean;
   anyHostableRepo: boolean;
   reposForTarget: (t: FreshTarget) => RepoInfo[];
-  /** What the cleanup view (C) needs from App: the scope, the path context's repos, and the way out. */
-  cleanup: { inScope: (cwd: string) => boolean; extraRoots: readonly string[]; onBack: () => void; onQuit: () => void };
+  /** What the cleanup view (C) needs from App: the scope, the path context's repos, the way out, a model reload, and the session rows' open. */
+  cleanup: { inScope: (cwd: string) => boolean; extraRoots: readonly string[]; onBack: () => void; onQuit: () => void; reload: () => void; open: (plan: OpenPlan) => void };
 }
 
 export function renderMode(p: ModeProps): ReactElement | null {

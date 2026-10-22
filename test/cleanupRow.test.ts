@@ -3,7 +3,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cachedUsage, claudeTmpRoot, diskUsage, invalidateUsage, listManagedWorktrees, usageOf } from "../src/cleanup/disk.ts";
+import { cachedUsage, claudeTmpRoot, clearUsage, diskUsage, invalidateUsage, listManagedWorktrees, usageOf } from "../src/cleanup/disk.ts";
 import type { CleanupRow, GitState } from "../src/cleanup/types.ts";
 import { measureRow, runPool } from "../src/ui/hooks/useCleanupData.ts";
 import { gitCells, pageTop, runCell, sortLabel } from "../src/ui/models/cleanupRow.ts";
@@ -65,6 +65,28 @@ describe("disk", () => {
     rmSync(join(d, "big"));
     invalidateUsage(tmp);
     expect(await cachedUsage(d)).toBeLessThan(200_000);
+  });
+
+  test("clearUsage forgets every cached size, so R measures afresh", async () => {
+    const d = join(tmp, "cleared");
+    mkdirSync(d, { recursive: true });
+    const first = await cachedUsage(d, 1_000);
+    writeFileSync(join(d, "big"), "x".repeat(200_000));
+    expect(await cachedUsage(d, 2_000)).toBe(first);
+    clearUsage();
+    expect(await cachedUsage(d, 2_000)).toBeGreaterThan(first ?? 0);
+  });
+
+  test("a du still walking when the cache is invalidated or cleared does not write its answer back", async () => {
+    for (const forget of [(d: string) => invalidateUsage(d), () => clearUsage()]) {
+      const d = join(tmp, `racing-${Math.random()}`);
+      mkdirSync(d, { recursive: true });
+      const walking = cachedUsage(d, 1_000);
+      forget(d);
+      const stale = await walking;
+      writeFileSync(join(d, "big"), "x".repeat(200_000));
+      expect(await cachedUsage(d, 2_000)).toBeGreaterThan(stale ?? 0);
+    }
   });
 
   test("usageOf sums what exists, null when nothing does", async () => {

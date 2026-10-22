@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Key } from "ink";
 import { offersFor } from "../src/cleanup/classify.ts";
+import { verdictOf } from "../src/cleanup/filter.ts";
 import type { CleanupRow, GitState } from "../src/cleanup/types.ts";
 import { cleanupKey, syncCursor, finishRun, handleCleanupModeKeys, INITIAL_CLEANUP, type CleanupEnv, type CleanupState } from "../src/ui/keys/cleanup.ts";
 import type { AgentSession } from "../src/shared/types.ts";
@@ -15,7 +16,7 @@ const row = (key: string, over: Partial<CleanupRow> = {}): CleanupRow => ({
 const CLEAN: GitState = { worktreeExists: true, isMain: false, branch: "worktree-a", mainBranch: "master", head: "h1", dirty: 0, ignored: [], changed: [], submodules: 0, unpushed: 0, merged: true, base: "origin/master" };
 
 function envOf(rows: CleanupRow[], gits: Record<string, GitState | null | undefined>): CleanupEnv {
-  return { rows, offers: (r) => offersFor(r, gits[r.key]), git: (r) => gits[r.key] };
+  return { rows, all: rows, offers: (r) => offersFor(r, gits[r.key]), git: (r) => gits[r.key], verdict: (r) => verdictOf(r, gits[r.key], offersFor(r, gits[r.key])) };
 }
 
 function press(state: CleanupState, env: CleanupEnv, ...keys: Array<string | Partial<Key>>) {
@@ -151,6 +152,14 @@ describe("the dialog", () => {
     expect(syncCursor(INITIAL_CLEANUP, [a])).toMatchObject({ cursor: 0, focus: "a" });
     const st = { ...INITIAL_CLEANUP, cursor: 1, focus: "b" };
     expect(syncCursor(st, [a, b])).toBe(st);
+    // A filter that briefly shows nothing keeps the focus, and the cursor finds the row when it is back.
+    const empty = syncCursor(st, []);
+    expect(empty).toMatchObject({ cursor: 0, focus: "b" });
+    expect(syncCursor(empty, [a, c, b])).toMatchObject({ cursor: 2, focus: "b" });
+    // Nor does an arrow pressed on the empty list forget it.
+    const moved = press(empty, envOf([], {}), "j").state;
+    expect(moved).toMatchObject({ cursor: 0, focus: "b" });
+    expect(syncCursor(moved, [a, c, b])).toMatchObject({ cursor: 2, focus: "b" });
   });
 
   test("running swallows keys; done shows the summary until a key, then refreshes", () => {

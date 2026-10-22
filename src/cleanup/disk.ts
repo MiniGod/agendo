@@ -14,6 +14,8 @@ import type { WorktreeDir } from "./rows.ts";
 
 const TTL_MS = 5 * 60_000;
 const cache = new Map<string, { bytes: number | null; at: number }>();
+// Bumped by every invalidation, so a `du` started before one does not write its stale answer back.
+let epoch = 0;
 
 /** Bytes used on disk under `path` (`du -sk`), or null when it does not exist or cannot be measured. */
 export function diskUsage(path: string): Promise<number | null> {
@@ -35,8 +37,11 @@ export function diskUsage(path: string): Promise<number | null> {
 export async function cachedUsage(path: string, now = Date.now()): Promise<number | null> {
   const hit = cache.get(path);
   if (hit && now - hit.at < TTL_MS) return hit.bytes;
+  const asked = epoch;
   const bytes = await diskUsage(path);
-  cache.set(path, { bytes, at: now });
+  // A `du` that was walking when the cache was cleared or invalidated (a delete, R) measured
+  // what is gone now: its caller gets the number, the cache must not keep it.
+  if (epoch === asked) cache.set(path, { bytes, at: now });
   return bytes;
 }
 
@@ -49,7 +54,14 @@ export async function usageOf(paths: readonly string[]): Promise<number | null> 
 
 /** Forget every cached size at or under `path`. */
 export function invalidateUsage(path: string): void {
+  epoch++;
   for (const key of cache.keys()) if (key === path || key.startsWith(`${path}/`)) cache.delete(key);
+}
+
+/** Forget every cached size: R measures everything afresh. */
+export function clearUsage(): void {
+  epoch++;
+  cache.clear();
 }
 
 /** Where Claude Code keeps per-session scratch dirs: `$CLAUDE_CODE_TMPDIR`, else the OS temp dir. */

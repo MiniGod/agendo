@@ -1,0 +1,100 @@
+// Deleting every row that is safe to remove, one after another (D in the
+// cleanup view), and working out which measurements a deletion can have
+// changed. The judging and the deleting are handed in, so the order, the
+// skip-and-carry-on and the summary are unit tested on their own
+// (test/cleanupBulk.test.ts) without a repository.
+import { riskGrew } from "./classify.ts";
+import type { CleanupPlan, CleanupResult } from "./execute.ts";
+import { verdictOf } from "./filter.ts";
+import type { CleanupRow, GitState, Offers } from "./types.ts";
+
+/** What happened to one row of a bulk run. */
+export interface BulkStep {
+  key: string;
+  title: string;
+  outcome: "removed" | "failed" | "skipped";
+  lines: CleanupResult[];
+}
+
+/** A row judged again right before it goes: its plan, or why it is skipped. */
+export type BulkCheck = { title: string; plan: CleanupPlan } | { title: string; skip: string };
+
+export interface BulkDeps {
+  /** Judge the row as it is NOW (a fresh git probe) — it may have changed since the confirmation was asked. */
+  check: (key: string) => Promise<BulkCheck>;
+  execute: (plan: CleanupPlan) => Promise<CleanupResult[]>;
+  /** Called once per row, in order, as soon as it is done. */
+  onStep: (step: BulkStep) => void;
+}
+
+async function oneRow(key: string, deps: BulkDeps): Promise<BulkStep> {
+  let c: BulkCheck;
+  try {
+    c = await deps.check(key);
+  } catch (e) {
+    return { key, title: key, outcome: "failed", lines: [{ ok: false, text: e instanceof Error ? e.message : String(e) }] };
+  }
+  if ("skip" in c) return { key, title: c.title, outcome: "skipped", lines: [{ ok: false, text: c.skip }] };
+  try {
+    const lines = await deps.execute(c.plan);
+    return { key, title: c.title, outcome: lines.every((l) => l.ok) ? "removed" : "failed", lines };
+  } catch (e) {
+    return { key, title: c.title, outcome: "failed", lines: [{ ok: false, text: e instanceof Error ? e.message : String(e) }] };
+  }
+}
+
+/**
+ * Run the rows one at a time, in the order given. A skipped or failed row does
+ * not stop the run: every row is tried and reported.
+ */
+export async function runBulk(keys: readonly string[], deps: BulkDeps): Promise<BulkStep[]> {
+  const steps: BulkStep[] = [];
+  for (const key of keys) {
+    const step = await oneRow(key, deps);
+    steps.push(step);
+    deps.onStep(step);
+  }
+  return steps;
+}
+
+/**
+ * Why D must skip `row` now, from a `fresh` probe taken right before its turn,
+ * or null when it may go. Safe is not enough: like the dialog, D only deletes
+ * what was confirmed — another branch, or the same one on other commits, is not
+ * (a second row whose checkout went away falls back to its own branch hint).
+ */
+export function recheck(row: CleanupRow, confirmed: GitState | null | undefined, fresh: GitState, offers: Offers): string | null {
+  if (verdictOf(row, fresh, offers) !== "safe") return "skipped — no longer safe to remove";
+  if (!confirmed || riskGrew(confirmed, fresh)) return "skipped — changed since you confirmed";
+  return null;
+}
+
+/**
+ * Whether a paused tab would wake up in `row`'s checkout: the row is one,
+ * another row of the same repo in the same worktree is, or one of `pausedCwds`
+ * (the paused tabs' panes, as realpaths — a tab whose session is no row at all)
+ * is in it. D leaves such a row to its own dialog.
+ */
+export function pausedTabIn(row: CleanupRow, rows: readonly CleanupRow[], pausedCwds: readonly string[] = []): boolean {
+  const wt = row.worktree;
+  if (wt && pausedCwds.some((c) => c === wt || c.startsWith(`${wt}/`))) return true;
+  return rows.some((r) => r.run === "paused" && (r.key === row.key || (!!wt && r.repoRoot === row.repoRoot && r.worktree === wt)));
+}
+
+/**
+ * The rows whose measurements a cleanup of `done` can have changed: those rows
+ * themselves, and every row of the same repo sharing one's checkout or its
+ * branch. Everything else keeps the size and git state it was measured with.
+ */
+export function touchedBy(
+  done: readonly CleanupRow[],
+  rows: readonly CleanupRow[],
+  git: (row: CleanupRow) => GitState | null | undefined,
+): string[] {
+  const branchOf = (r: CleanupRow) => git(r)?.branch ?? r.branchHint;
+  const shares = (r: CleanupRow, d: CleanupRow) =>
+    r.repoRoot === d.repoRoot && ((!!d.worktree && r.worktree === d.worktree) || (!!branchOf(d) && branchOf(r) === branchOf(d)));
+  const keys = new Set(done.map((d) => d.key));
+  for (const r of rows) if (done.some((d) => shares(r, d))) keys.add(r.key);
+  return [...keys];
+}
