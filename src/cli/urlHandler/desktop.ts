@@ -85,9 +85,7 @@ export function withoutOurDefault(text: string): string {
 /** Where a command was found on PATH, and whether that place survives a reboot. */
 export interface Resolved {
   path: string;
-  /** `path` with its symlinks resolved — the script itself, for a global install's bin link. */
-  real: string;
-  /** A package runner's staging copy (`/tmp/bunx-…`, `_npx`) — gone the next time its cache is cleared. */
+  /** A package runner's staging copy (`/tmp/bunx-…`, `_npx`), judged with symlinks resolved — gone the next time its cache is cleared. */
   volatile: boolean;
 }
 
@@ -108,33 +106,48 @@ export function isVolatile(realPath: string): boolean {
  * The command the Exec line runs, when `--exec` did not name one. A browser
  * starts it with the desktop session's environment — often without the PATH
  * entries a shell profile adds — so every word that names a program is an
- * ABSOLUTE path:
+ * ABSOLUTE path, and install runs it under a PATH that has bun (launchPath.ts):
  *
  *  1. a global install of `agendo` (anything on PATH that is not a runner's
- *     temporary copy), run by bun's absolute path. Its bin is a
- *     `#!/usr/bin/env bun` script, and the shebang would look bun up on that
- *     same thin PATH. Without bun found, the bin itself is the best there is;
+ *     temporary copy), the bin itself. Whatever it is — a `#!/usr/bin/env bun`
+ *     script, a wrapper running `bun x …` — it finds bun on that baked PATH;
  *  2. else `bunx agendo@<this version>` (see `defaultSpec`), by bunx's
  *     absolute path.
  *
  * Null when neither is available; the caller then asks for `--exec`.
  */
-export function defaultCommand(agendo: Resolved | null, bun: string | null, bunx: string | null, spec: string): string[] | null {
-  if (agendo && !agendo.volatile) return bun ? [bun, agendo.real] : [agendo.path];
+export function defaultCommand(agendo: Resolved | null, bunx: string | null, spec: string): string[] | null {
+  if (agendo && !agendo.volatile) return [agendo.path];
   if (bunx) return [bunx, spec];
   return null;
 }
 
+// The desktop-file string escapes, undone before the Exec value is split.
+const VALUE_ESCAPES: Record<string, string> = { s: " ", n: "\n", t: "\t", r: "\r", "\\": "\\" };
+
+// One Exec word: a double-quoted string, or a run with no quote or space in it.
+const EXEC_WORD = /^\s*(?:"((?:[^"\\]|\\.)*)"|([^"\s]+))(?=\s|$)/;
+
 /**
- * The program an Exec value starts — its first word, with the desktop-file and
- * Exec quoting undone — so `status` can say when it has gone missing. Null for
- * an empty or unterminated value.
+ * An Exec value split into its words, with the desktop-file and Exec quoting
+ * undone and `%%` back to `%` — the inverse of `execLine` — so `status` can
+ * read what the entry runs. Null for an unterminated or malformed value.
  */
+export function execWords(exec: string): string[] | null {
+  let rest = exec.replace(/\\(.)/g, (m, c: string) => VALUE_ESCAPES[c] ?? m);
+  const words: string[] = [];
+  while (rest.trim()) {
+    const m = EXEC_WORD.exec(rest);
+    if (!m) return null;
+    words.push((m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2]).replace(/%%/g, "%"));
+    rest = rest.slice(m[0].length);
+  }
+  return words;
+}
+
+/** The program an Exec value starts — its first word — or null for an empty or malformed value. */
 export function execProgram(exec: string): string | null {
-  const value = exec.replace(/\\\\/g, "\\").trimStart();
-  const m = /^"((?:[^"\\]|\\.)*)"|^([^"\s]\S*)/.exec(value);
-  if (!m) return null;
-  return m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2].replace(/%%/g, "%");
+  return execWords(exec)?.[0] ?? null;
 }
 
 /** `--exec` split into words; refused when it already carries the URL slot or is empty. */
