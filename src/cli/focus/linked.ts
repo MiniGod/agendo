@@ -36,7 +36,7 @@ export interface LinkedMatch {
   sessions: AgentSession[];
 }
 
-type LinkedModel = Pick<LoadedModel, "linkedPrs" | "orphanPrs" | "reviewPrs" | "current" | "other" | "prLinked">;
+export type LinkedModel = Pick<LoadedModel, "linkedPrs" | "orphanPrs" | "reviewPrs" | "current" | "other" | "prLinked">;
 
 /** A repo given by its Azure DevOps repository id rather than its name. */
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

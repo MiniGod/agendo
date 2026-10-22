@@ -17,10 +17,10 @@
 // adoGet/adoPost) are not promoted into the public surface.
 import { API, cfg } from "./env.ts";
 import { adoGet, adoPost } from "./http.ts";
-import { getPullRequest, getPullRequestWorkItems, parsePrArtifact } from "./pr.ts";
+import { fetchPullRequestWorkItems, getPullRequest, getPullRequestWorkItems, getRawPullRequest, mapPr, parsePrArtifact } from "./pr.ts";
 import { mapLimit } from "./policy.ts";
 import { attachSurfacingPrs, groupPrsByWorkItem, surfacedPrIdsOf } from "./prWorkItems.ts";
-import type { PullRequest, WorkItem } from "../../shared/types.ts";
+import type { FocusEntity, Identity, PullRequest, WorkItem } from "../../shared/types.ts";
 
 import { urls } from "./urls.ts";
 export { adoWorkItemUrl, adoPullRequestUrl, urls } from "./urls.ts";
@@ -114,6 +114,71 @@ export async function mapRawWorkItem(
     prs,
     url: urls.workItem({ id }) ?? "",
   };
+}
+
+/**
+ * The one PR or work item a focus link names, fetched directly instead of
+ * through the whole model (see Provider.fetchFocusTarget) — and only when the
+ * model for `identity` would provably list it where a number finds it (see
+ * `listsPr`, and `getOpenWorkItemIds` for an item: assigned to them, not
+ * closed). Anything else, and any failure, is null: the full lookup decides.
+ */
+export async function fetchFocusTarget(kind: "pr" | "workItem", id: number, identity: Promise<Identity>): Promise<FocusEntity | null> {
+  if (kind === "pr") {
+    const raw = await getRawPullRequest(id);
+    return raw && (await listsPr(raw, await identity)) ? { pr: mapPr(raw) } : null;
+  }
+  const [raw] = await getWorkItemBatch([id]).catch(() => []);
+  return raw && ownOpenItem(raw, await identity) ? { item: await mapRawWorkItem(raw, null) } : null;
+}
+
+/**
+ * Would the model list this raw PR among `linkedPrs`, `orphanPrs` or
+ * `reviewPrs` — the lists a PR number is looked up in? Only an active PR in the
+ * configured project, and then:
+ *   • one they did not create but are asked to review in person
+ *     (`fetchReviewPRs`; a team's request needs the team roster, so it is left
+ *     to the full lookup);
+ *   • one they created, which `fetchActivePRs` lists — unless a work item it
+ *     links to surfaces it under that item (`fetchWorkItemsForPRs`), where the
+ *     PR lists no longer hold it. Certain only when it links no item at all,
+ *     or links one of their own open items, which lists it as a linked PR.
+ * "Would list" ignores the `$top` caps on those list queries: past 200 active
+ * PRs of their own, or 100 review requests, the model drops some that this
+ * still vouches for — a link then finds a session the full lookup would miss.
+ */
+async function listsPr(raw: any, identity: Identity): Promise<boolean> {
+  if (raw.status !== "active" || !inProject(raw)) return false;
+  if (raw.createdBy?.id !== identity.id) return prReviewedBy(raw, identity);
+  const linked = await fetchPullRequestWorkItems(raw.repository?.id ?? "", raw.pullRequestId).catch(() => null);
+  if (!linked) return false;
+  if (linked.length === 0) return true;
+  const items = await getWorkItemBatch(linked).catch(() => []);
+  return items.some((w) => ownOpenItem(w, identity));
+}
+
+/** Is this raw PR in the configured project — the only one the model's PR lists query? */
+export function inProject(raw: any): boolean {
+  const p = raw.repository?.project;
+  const want = cfg.project.toLowerCase();
+  return [p?.name, p?.id].some((v) => typeof v === "string" && v.toLowerCase() === want);
+}
+
+/** Is `identity` asked to review this raw PR in person? */
+export function prReviewedBy(raw: any, identity: Identity): boolean {
+  return (raw.reviewers ?? []).some((r: any) => r?.id === identity.id);
+}
+
+/**
+ * Is this raw work item one the model lists as theirs: assigned to `identity`
+ * (by unique name, case-insensitively, as WIQL matches) and not in a closed
+ * state (case-insensitively, as WIQL's `NOT IN` compares)?
+ */
+export function ownOpenItem(raw: any, identity: Identity): boolean {
+  const who = raw.fields?.["System.AssignedTo"]?.uniqueName;
+  const state = String(raw.fields?.["System.State"] ?? "").toLowerCase();
+  if (typeof who !== "string" || who === "" || who.toLowerCase() !== identity.uniqueName.toLowerCase()) return false;
+  return !cfg.closedStates.some((c) => c.toLowerCase() === state);
 }
 
 export async function fetchWorkItems(

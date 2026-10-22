@@ -13,6 +13,7 @@ import {
   resolveWorkItems,
   resolvePullRequests,
   resolveSinglePr,
+  resolvePrById,
   resolvePolicy,
   resolvePrIterations,
   resolvePrWorkItems,
@@ -150,6 +151,15 @@ export async function startAdoServer(): Promise<AdoServer> {
     const prMatch = path.match(/_apis\/git\/repositories\/([^/]+)\/pullRequests\/(\d+)$/i);
     if (prMatch) {
       const pr = withOverride(resolveSinglePr(prMatch[1], Number(prMatch[2])));
+      if (pr) return json(pr);
+      res.writeHead(404).end("no such PR");
+      return;
+    }
+    // A PR by id alone, project-scoped — what `agendo focus` asks before it
+    // would load the whole model.
+    const prById = path.match(/_apis\/git\/pullrequests\/(\d+)$/i);
+    if (prById) {
+      const pr = withOverride(resolvePrById(Number(prById[1])));
       if (pr) return json(pr);
       res.writeHead(404).end("no such PR");
       return;

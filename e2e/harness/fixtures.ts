@@ -643,10 +643,20 @@ export function resolveWiql(query: string): { workItems: { id: number }[] } {
   return { workItems: ids.map((id) => ({ id })) };
 }
 
-/** workitems?ids=… → the raw WI objects for those ids (order preserved). */
+/** Who a work item is assigned to, as ADO's `System.AssignedTo` carries it (see `ASSIGNED`). */
+function assignee(id: number): { uniqueName: string } | undefined {
+  const who = Object.keys(ASSIGNED).find((name) => ASSIGNED[name]?.includes(id));
+  return who ? { uniqueName: who } : undefined;
+}
+
+/** workitems?ids=… → the raw WI objects for those ids (order preserved), with their assignee. */
 export function resolveWorkItems(idsParam: string | null): { value: any[] } {
   const ids = (idsParam ?? "").split(",").map((s) => Number(s.trim())).filter(Number.isFinite);
-  return { value: ids.map((id) => WI_RAW[id]).filter(Boolean) };
+  return {
+    value: ids
+      .map((id) => WI_RAW[id] && { ...WI_RAW[id], fields: { ...WI_RAW[id].fields, "System.AssignedTo": assignee(id) } })
+      .filter(Boolean),
+  };
 }
 
 /** /pullrequests?searchCriteria.{creatorId,reviewerId}=… → the matching PRs. */
@@ -663,6 +673,15 @@ export function resolvePullRequests(search: URLSearchParams): { value: any[] } {
 export function resolveSinglePr(repoId: string, prId: number): any | null {
   const pr = PR_BY_ID[prId];
   return pr && pr.repository?.id === repoId ? pr : null;
+}
+
+/**
+ * A PR by its id alone, as ADO's project-scoped `pullrequests/{id}` answers — no
+ * repo needed — with the project its repository belongs to, which ADO includes.
+ */
+export function resolvePrById(prId: number): any | null {
+  const pr = PR_BY_ID[prId];
+  return pr ? { ...pr, repository: { ...pr.repository, project: ADO.project } } : null;
 }
 
 /** Branch-policy evaluations for the PR named in a CodeReviewId artifactId. */

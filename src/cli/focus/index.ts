@@ -13,8 +13,8 @@
 // any web page can trigger must not be able to do more than change what is on
 // screen.
 import {
-  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, pickClientFor, selectWindow,
-  sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
+  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, livePanes, pickClient, pickClientFor, selectWindow,
+  sessionRoot, shortId, tmuxAvailable, windowIdentity, type LivePane, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
 import { recordLaunchedSession } from "../../runtime/restore/index.ts";
@@ -22,12 +22,13 @@ import { SessionIndex } from "../../sessions/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import { currentModelOptions } from "../links.ts";
 import { flushWarnings } from "../warnings.ts";
-import { sessionState } from "../list/rows.ts";
 import { resumeSession } from "../commands/resume.ts";
 import { describeLinkTarget, describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { launcherForCwd, parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
 import { linkedMatches, narrowToLinkRepo, resolveLinked } from "./linked.ts";
 import { sessionsForToken } from "./windowName.ts";
+import { liveLookup } from "./fast.ts";
+import { runningLanding, runningTarget, withStates, type Landing } from "./landing.ts";
 import { failLoudly, notify, onNotify } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
@@ -64,33 +65,31 @@ async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>,
   return failLoudly(`${label} is ambiguous — it matches ${r.ambiguous.join(" and ")}; name the repo (\`focus --repo <repo>\`) or the session (\`focus <session-id>\`)`);
 }
 
-/** Every session the target could mean. */
-async function candidates(target: FocusTarget, label: string, index: SessionIndex): Promise<AgentSession[]> {
-  if (target.kind !== "session") return linkedSessions(target, label);
-  return sessionsForToken(index.all, target.token, () => refreshLiveTmux(index.all).liveWindows);
+/**
+ * Every session the target could mean, and the pane listing their live state
+ * is to be read from: for a window name, the very one it was attributed from,
+ * so attribution cannot flip between the two reads (see windowName.ts); for a
+ * linked target, one read after the model load.
+ */
+async function candidates(target: FocusTarget, label: string, index: SessionIndex): Promise<{ sessions: AgentSession[]; panes: LivePane[] }> {
+  if (target.kind !== "session") {
+    const sessions = await linkedSessions(target, label);
+    return { sessions, panes: livePanes() };
+  }
+  const panes = livePanes();
+  return { sessions: sessionsForToken(index.all, target.token, () => refreshLiveTmux(index.all, panes).liveWindows), panes };
 }
 
-/** The candidates with their live state, as `list` would report it, and where a paused one's tab sits. */
-function withStates(sessions: AgentSession[], all: AgentSession[]): FocusCandidate[] {
-  const { live, livePlaceholders, placeholderWindows } = refreshLiveTmux(all);
-  return sessions.map((s) => {
-    const canon = sessionName(s);
-    return { s, state: sessionState(live.has(canon), canon, livePlaceholders), host: placeholderWindows.get(canon)?.session };
-  });
-}
-
-/** Say which session won when there was a choice to make. */
-function reportChoice(chosen: FocusCandidate, all: FocusCandidate[], target: FocusTarget): void {
+/**
+ * Say which session won when there was a choice to make. The live-window
+ * shortcut saw only the running candidates, so it counts those (`what`).
+ */
+function reportChoice(chosen: FocusCandidate, all: FocusCandidate[], target: FocusTarget, what = "sessions"): void {
   if (all.length < 2) return;
   console.error(
-    `focus: ${all.length} sessions are linked to ${describeTarget(target)}; ` +
+    `focus: ${all.length} ${what} are linked to ${describeTarget(target)}; ` +
       `focusing ${shortId(chosen.s.id)} (${chosen.state}, last active ${chosen.s.lastUsed.toISOString()})`,
   );
-}
-
-/** The tmux target of a running session's window, freshly read. */
-function runningTarget(s: AgentSession, all: AgentSession[]): string | null {
-  return refreshLiveTmux(all).liveWindows.get(sessionName(s))?.target ?? liveTargetForShortId(shortId(s.id))?.target ?? null;
 }
 
 /** A link may not resume twice in quick succession (see throttle.ts). */
@@ -164,19 +163,10 @@ async function resumeChosen(c: FocusCandidate, all: AgentSession[], host: string
   return { target, resumed };
 }
 
-/** Where the chosen session will be on screen, worked out before anything is resumed. */
-interface Landing {
-  /** A running session's window, freshly read; null when it has to be resumed. */
-  running: string | null;
-  /** The tmux session that window is in — or a resume will open it in; undefined for a detached session of its own. */
-  session: string | undefined;
-}
-
 /** Where `c` is, or where a resume will put it (see `resumeHost`). */
-function landing(c: FocusCandidate, all: AgentSession[], clients: TmuxClient[]): Landing {
-  const running = c.state === "running" ? runningTarget(c.s, all) : null;
-  if (running) return { running, session: windowIdentity(running)?.session };
-  return { running: null, session: resumeHost(c, clients) };
+function landing(c: FocusCandidate, all: AgentSession[], clients: TmuxClient[], panes: LivePane[]): Landing {
+  const running = c.state === "running" ? runningLanding(c.s, all, panes) : null;
+  return running ?? { running: null, session: resumeHost(c, clients) };
 }
 
 /**
@@ -311,26 +301,65 @@ function clientOrTerminal(
   return template ? { client: null, template } : failLoudly(NO_CLIENT);
 }
 
+/** A chosen session, the candidates it was chosen from, and every session the lookup indexed. */
+interface Choice {
+  chosen: FocusCandidate;
+  found: FocusCandidate[];
+  all: AgentSession[];
+  /** The pane listing the choice was made from, which it lands by (see `runningLanding`). */
+  panes: LivePane[];
+}
+
 /**
- * The session to focus, its candidates' states read live; fails when there is
- * none. A link's failures name its target by `describeLinkTarget` only.
+ * The live-window shortcut (see fast.ts): the most recently active RUNNING
+ * session the target could mean, or null to take the full path.
  */
-async function chooseSession(target: FocusTarget, origin: FocusOrigin): Promise<{ chosen: FocusCandidate; all: AgentSession[] }> {
+async function chooseLive(target: FocusTarget): Promise<Choice | null> {
+  const live = await liveLookup(target);
+  if (!live) return null;
+  const found = withStates(live.sessions, live.index.all, live.panes).filter((c) => c.state === "running");
+  const chosen = pickSession(found);
+  return chosen ? { chosen, found, all: live.index.all, panes: live.panes } : null;
+}
+
+/**
+ * The session to focus, from the full index, its candidates' states read live;
+ * fails when there is none. A link's failures name its target by
+ * `describeLinkTarget` only.
+ */
+async function chooseSession(target: FocusTarget, origin: FocusOrigin): Promise<Choice> {
   const label = origin.fromUrl ? describeLinkTarget(target) : describeTarget(target);
   const index = await SessionIndex.build();
-  const found = withStates(await candidates(target, label, index), index.all);
+  const { sessions, panes } = await candidates(target, label, index);
+  const found = withStates(sessions, index.all, panes);
   const chosen = pickSession(found);
   if (!chosen) failLoudly(`No agendo session for ${label}`);
-  reportChoice(chosen, found, target);
-  return { chosen, all: index.all };
+  return { chosen, found, all: index.all, panes };
+}
+
+/**
+ * The session to focus, the attached clients, and where the session lands.
+ * Tries the live-window shortcut first, and keeps its choice only while that
+ * session's window is still there to land on: only the full path may resume a
+ * session. Clients are listed once, after the choice — as a link reads them
+ * again after the switch's target exists (see `finalClient`).
+ */
+async function settle(target: FocusTarget, origin: FocusOrigin): Promise<Choice & { clients: TmuxClient[]; land: Landing }> {
+  const live = await chooseLive(target);
+  const liveLand = live && runningLanding(live.chosen.s, live.all, live.panes);
+  // As the model load it stands in for would; a session target never loaded one.
+  if (liveLand && target.kind !== "session") flushWarnings("focus");
+  const pick = live && liveLand ? live : await chooseSession(target, origin);
+  reportChoice(pick.chosen, pick.found, target, pick === live ? "running sessions" : "sessions");
+  const clients = listClients();
+  const land = liveLand || landing(pick.chosen, pick.all, clients, pick.panes);
+  return { ...pick, clients, land };
 }
 
 /** Focus what `target` names; see the header. Always exits. */
 export async function runFocus(target: FocusTarget, origin: FocusOrigin = { fromUrl: false }): Promise<never> {
   if (!tmuxAvailable()) failLoudly("tmux was not found on PATH");
-  const { chosen, all } = await chooseSession(target, origin);
-  const clients = listClients();
-  const land = landing(chosen, all, clients);
+  const { chosen, all, clients, land } = await settle(target, origin);
   const { client, template } = clientOrTerminal(clients, land.session, origin);
   const up = await bringUp(chosen, all, land, origin);
   const fail: Fail = (text) => failLoudly(up.resumed ? `${text} — ${up.resumed}` : text);

@@ -5,6 +5,7 @@
 import { spawnSync } from "child_process";
 import type { RepoInfo } from "../repositories/index.ts";
 import type {
+  FocusEntity,
   Identity,
   ProviderName,
   PullRequest,
@@ -89,6 +90,17 @@ export interface Provider {
     prs: PullRequest[],
     opts: { excludeWorkItemIds: Set<number>; currentIterationPath: string | null },
   ): Promise<{ items: Omit<WorkItem, "sessions">[]; surfacedPrIds: Set<number> }>;
+  /**
+   * The one PR / work item numbered `id`, looked up directly — `agendo focus`'s
+   * shortcut past the whole model load. Answers only for an entity the model
+   * for `identity` would certainly list, and null for anything else (an id that
+   * names nothing, an entity the model may not list, a failed request), which
+   * sends focus down the full path. Optional: a backend whose numbers are not
+   * unique without a repo (GitHub) leaves it out, and focus always takes the
+   * full path there. `identity` is a promise so the entity's own request need
+   * not wait on it: who the user is matters only once the entity is in hand.
+   */
+  fetchFocusTarget?(kind: "pr" | "workItem", id: number, identity: Promise<Identity>): Promise<FocusEntity | null>;
 }
 
 // ADO's functions predate the FetchContext shape, so adapt them here rather than
@@ -104,6 +116,7 @@ const adoProvider: Provider = {
   fetchReviewPRs: (ctx) => ado.fetchReviewPRs(ctx.identity),
   enrichPrCI: ado.enrichPrCI,
   fetchWorkItemsForPRs: ado.fetchWorkItemsForPRs,
+  fetchFocusTarget: ado.fetchFocusTarget,
 };
 
 // github.ts already speaks FetchContext, so its namespace is a Provider as-is.

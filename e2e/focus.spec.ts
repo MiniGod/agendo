@@ -12,7 +12,7 @@ import { createServer } from "node:net";
 import { delimiter, join } from "node:path";
 import { test, expect } from "./harness/test.ts";
 import { REPO_ROOT, type MockEnv } from "./harness/mockEnv.ts";
-import { CRASH_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, sessionName, tmuxState } from "./harness/fixtures.ts";
+import { CRASH_SESSION_ID, LOGIN_SESSION_ID, RUNNING_TARGET, STANDALONE_SESSION_ID, sessionName, tmuxState } from "./harness/fixtures.ts";
 
 const FAKE_TMUX = join(REPO_ROOT, "e2e", "fakebin", "tmux");
 const CRASH_TARGET = sessionName("claude", CRASH_SESSION_ID);
@@ -130,6 +130,112 @@ test("focus --pr switches the most recently active client to the running session
   // Already running: nothing was resumed.
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
   expect(await notifications(mock)).toEqual([]);
+});
+
+/**
+ * ADO requests only a full model load makes: the work-item query and the PR
+ * lists. (Who the user is may be asked either way — the shortcut needs it too.)
+ */
+const MODEL_LOAD = /_apis\/wit\/wiql$|_apis\/git\/pullrequests$/i;
+
+test("a PR link to a running session is answered from its live window, without loading the model", async ({ mock }) => {
+  await seed(mock);
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+  // The one PR, asked for by id — and nothing the whole model would have needed.
+  expect(mock.ado.requests.filter((q) => /_apis\/git\/pullrequests\/5001$/i.test(q))).toHaveLength(1);
+  expect(mock.ado.requests.filter((q) => MODEL_LOAD.test(q))).toEqual([]);
+});
+
+test("a window's session-id tag is enough for the live-window answer, whatever the window is named", async ({ mock }) => {
+  // An id-less name in a directory no session lives in: only the tag says whose it is.
+  await mock.setTmuxState({
+    ...tmuxState,
+    switchFails: false,
+    options: {},
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }, { session: "agendo", index: 1, name: "cl-pr-5001" }],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/menu", placeholder: false },
+      { session: "agendo", window: "cl-pr-5001", cwd: "/nowhere", placeholder: false, tags: { "@cl_session_id": LOGIN_SESSION_ID } },
+    ],
+    clients: CLIENTS,
+  });
+  const r = await agendo(mock.env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", "cl-pr-5001")]]);
+  expect(mock.ado.requests.filter((q) => MODEL_LOAD.test(q))).toEqual([]);
+});
+
+/** PR 5001's own work-item links, as ADO answers them from the PR's side. */
+const PR_5001_ITEMS = /_apis\/git\/repositories\/[^/]+\/pullRequests\/5001\/workitems$/i;
+
+test("an own PR linked to an own open work item is answered from its live window too", async ({ mock }) => {
+  await seed(mock);
+  mock.ado.setResponse(PR_5001_ITEMS, { body: { value: [{ id: 101 }] } });
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+  expect(mock.ado.requests.some((q) => PR_5001_ITEMS.test(q))).toBe(true);
+  expect(mock.ado.requests.filter((q) => MODEL_LOAD.test(q))).toEqual([]);
+});
+
+test("an own PR linked only to someone else's work item is left to the full lookup", async ({ mock }) => {
+  // The model files such a PR under that item, where a PR number is not looked up.
+  await seed(mock);
+  mock.ado.setResponse(PR_5001_ITEMS, { body: { value: [{ id: 201 }] } });
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(mock.ado.requests.some((q) => MODEL_LOAD.test(q))).toBe(true);
+});
+
+test("someone else's PR the user is not asked to review is left to the full lookup", async ({ mock }) => {
+  await seed(mock);
+  mock.ado.setPr(5001, { createdBy: { id: "grace-guid" }, reviewers: [] });
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001");
+  expect(mock.ado.requests.some((q) => /_apis\/git\/pullrequests\/5001$/i.test(q))).toBe(true);
+  expect(mock.ado.requests.some((q) => MODEL_LOAD.test(q))).toBe(true);
+  // The full lookup still finds it, through the user's own work item 101.
+  expect(r.code, r.stderr).toBe(0);
+});
+
+test("a work-item link to a running session is answered from its live window, without loading the model", async ({ mock }) => {
+  await seed(mock);
+  const r = await agendo(mock.env, "url", "agendo://focus?workItem=101");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+  expect(mock.ado.requests.filter((q) => MODEL_LOAD.test(q))).toEqual([]);
+});
+
+test("a link's repo id that is not the PR's own leaves the answer to the full lookup", async ({ mock }) => {
+  // An unknown GUID-shaped repo matches every repo there — a judgement over the
+  // whole model that one PR cannot stand in for.
+  await seed(mock);
+  const r = await agendo(mock.env, "url", "agendo://focus?pr=5001&repo=00000000-0000-4000-8000-000000000000");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+  expect(mock.ado.requests.some((q) => MODEL_LOAD.test(q))).toBe(true);
+});
+
+test("a link whose session is not running takes the full lookup, and resumes it", async ({ mock }) => {
+  // PR 5001's session parked as a placeholder: no live window answers, so the model is loaded.
+  await mock.setTmuxState({
+    ...tmuxState,
+    switchFails: false,
+    options: {},
+    sessions: ["agendo"],
+    windows: [{ session: "agendo", index: 0, name: "launcher" }, { session: "agendo", index: 1, name: RUNNING_TARGET }],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: "/menu", placeholder: false },
+      { session: "agendo", window: RUNNING_TARGET, cwd: "/run/login", placeholder: true },
+    ],
+    clients: CLIENTS,
+  });
+  const r = await agendo(mock.env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(r.stderr).toContain("resumed session");
+  expect(mock.ado.requests.some((q) => MODEL_LOAD.test(q))).toBe(true);
 });
 
 test("focus --work-item resumes a paused session, then focuses it", async ({ mock }) => {
@@ -462,6 +568,24 @@ test("an untagged id-less window name goes by the window's attribution, as list 
   const r = await agendo(mock.env, "focus", "cl-wi-102");
   expect(r.code, r.stderr).toBe(0);
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", "cl-wi-102")]]);
+  expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
+});
+
+test("a window name every live window answers for is resolved from the live windows alone", async ({ mock }) => {
+  // Two tagged windows of that name, each its own running session: only the
+  // live-window lookup counts its candidates as "running sessions".
+  await seed(mock, {
+    sessions: ["work"],
+    windows: [{ session: "agendo", index: 1, name: "cl-wi-102" }, { session: "work", index: 0, name: "cl-wi-102" }],
+    panes: [
+      { session: "agendo", window: "cl-wi-102", cwd: "/nowhere", placeholder: false, tags: { "@cl_session_id": CRASH_SESSION_ID } },
+      { session: "work", window: "cl-wi-102", cwd: "/elsewhere", placeholder: false, tags: { "@cl_session_id": STANDALONE_SESSION_ID } },
+    ],
+  });
+  const r = await agendo(mock.env, "url", "agendo://focus?session=cl-wi-102");
+  expect(r.code, r.stderr).toBe(0);
+  expect(r.stderr).toContain("2 running sessions are linked to");
+  expect(await switches(mock)).toHaveLength(1);
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
 });
 

@@ -289,6 +289,9 @@ export interface WorkItem {
   url: string;
 }
 
+/** The one PR or work item a focus link names, as the backend returned it — before sessions are joined on. */
+export type FocusEntity = { pr: PullRequest } | { item: Omit<WorkItem, "sessions"> };
+
 // Local-vs-tracked state of one checkout, derived from its ref files.
 //
 // The shape lives here rather than in src/repositories/gitRefs.ts, which produces it,
