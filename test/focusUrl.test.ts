@@ -136,6 +136,7 @@ describe("parseFocusUrl refuses everything else", () => {
     `agendo://focus?session=cl-wi-${"b".repeat(170)}`,
     // ...and only for cl-wi-/cl-pr-: every other kind is a short id of at most 12
     `agendo://focus?session=cl-copilot-${"b".repeat(65)}`,
+    `agendo://focus/?session=cl-copilot-${"b".repeat(160)}-x`,
     "agendo://focus?session=cl-wi-a.b",
     "agendo://focus?session=cl-wi-102&repo=acme",
     `agendo://focus?pr=${"1".repeat(MAX_URL_LENGTH)}`,
@@ -189,7 +190,7 @@ describe("the per-field shapes", () => {
       expect(isWindowName(ok), ok).toBe(true);
       expect(isSessionToken(ok), ok).toBe(true);
     }
-    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(170)}`, `cl-bg-${"a".repeat(13)}`, "cl-wi-ACME-1", "cl-bg-Codex-x", "cl-bg-codex-"]) {
+    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(170)}`, `cl-bg-${"a".repeat(13)}`, "cl-wi-ACME-1", "cl-bg-Codex-x", "cl-bg-codex-", "cl-claude-codex-abc", "cl-free-codex-abc", "cl-bg-evil-abc"]) {
       expect(isWindowName(bad), bad).toBe(false);
     }
   });

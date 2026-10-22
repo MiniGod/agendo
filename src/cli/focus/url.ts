@@ -48,15 +48,15 @@ const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 /**
  * One of agendo's own tmux window names, in exactly the shapes agendo mints
  * them: `cl-<kind>-<short id>` (`sessionName`, `kindName`; a short id is 1–12
- * letters and digits), optionally with one lower-case `<agent>-` tag before the
- * id (`cl-bg-codex-…`), or `cl-wi-`/`cl-pr-` and a lower-case scope slug plus
+ * letters and digits), for `cl-bg-`/`cl-new-` optionally with the agent tag
+ * `kindName` puts before the id (`cl-bg-codex-…`), or `cl-wi-`/`cl-pr-` and a lower-case scope slug plus
  * the item id (`freshName`/`prFreshName`, src/launch/task.ts). Only those two
  * fold in a whole GitHub `owner/name`; their 169 keeps the longest URL this can
  * match — `agendo://focus/?session=cl-pr-<169>`, with the tolerated empty
  * path — at 199, under MAX_URL_LENGTH.
  */
 const WINDOW_NAME_RE =
-  /^cl-(?:(?:wi|pr)-[a-z0-9][a-z0-9-]{0,168}|(?:claude|copilot|codex|bg|new|free)-(?:[a-z]+-)?[A-Za-z0-9]{1,12})$/;
+  /^cl-(?:(?:wi|pr)-[a-z0-9][a-z0-9-]{0,168}|(?:claude|copilot|codex|free)-[A-Za-z0-9]{1,12}|(?:bg|new)-(?:(?:claude|copilot|codex)-)?[A-Za-z0-9]{1,12})$/;
 
 /** A repo name or `owner/name` slug: each segment opens with a letter, digit or `_`; 120 characters at most. */
 const REPO_RE = /^(?=.{1,120}$)[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)?$/;
