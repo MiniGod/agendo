@@ -580,6 +580,20 @@ test("a link's repo narrows the lookup to the PR in that repo", async ({ mock })
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
 });
 
+test("a link's repo may be the ADO repository id: a known one narrows, an unknown GUID-shaped one matches every repo", async ({ mock }) => {
+  await seed(mock);
+  // PR 5001 lives in appweb (repository id repoA-guid). A known id is matched as
+  // it is, whatever its shape; only an unknown GUID widens.
+  // The one link (links are throttled) is the reported case: a real GUID agendo does not know.
+  const link = await agendo(mock.env, "url", "agendo://focus?pr=5001&repo=4b12fdea-5ae3-48d4-a2cd-1f47d10700ce");
+  expect(link.code, link.stderr).toBe(0);
+  const to = ["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)];
+  expect(await switches(mock)).toEqual([to]);
+  const own = await agendo(mock.env, "focus", "--pr", "5001", "--repo", "repoA-guid");
+  expect(own.code, own.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([to, to]);
+});
+
 const MALICIOUS = [
   "agendo://launch?prompt=rm%20-rf",
   "agendo://focus?pr=5001&session=x",

@@ -14,6 +14,14 @@
 // PR's repository name) — never by where its sessions' checkouts happen to sit:
 // a clone's directory name need not be the remote repo's name, and a link from
 // the PR's own page must not miss a session because of it.
+//
+// Azure DevOps PR URLs can name the repo by its id instead
+// (`/_git/<guid>/pullrequest/N`, as notifications and the PR hub link them), so a
+// `repo=` also matches a PR whose repository id it is, exactly — never by turning
+// the id into a name, which would let a bare name match a same-named repo of
+// another owner or project. A GUID no PR in the model answers to narrows nothing:
+// ADO numbers PRs per collection, not per repo, and the ambiguity check still
+// guards the choice.
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import type { FocusTarget } from "./url.ts";
@@ -23,19 +31,46 @@ export interface LinkedMatch {
   key: string;
   /** The entity's repo: `owner/name` on GitHub, the repo name on Azure DevOps; null when unknown. */
   repo: string | null;
+  /** A PR's repository id (the ADO GUID; the `owner/name` slug on GitHub); null for a work item. */
+  repoId?: string | null;
   sessions: AgentSession[];
 }
 
 type LinkedModel = Pick<LoadedModel, "linkedPrs" | "orphanPrs" | "reviewPrs" | "current" | "other" | "prLinked">;
 
+/** A repo given by its Azure DevOps repository id rather than its name. */
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Is `repo` shaped like an Azure DevOps repository id? */
+export function isRepoGuid(repo: string): boolean {
+  return GUID_RE.test(repo);
+}
+
+/** Does any PR in the model sit in the repo whose repository id is `id`? */
+export function knowsRepoId(m: Pick<LinkedModel, "linkedPrs" | "orphanPrs" | "reviewPrs">, id: string): boolean {
+  const want = id.toLowerCase();
+  return [...m.linkedPrs, ...m.orphanPrs, ...m.reviewPrs].some((p) => p.repositoryId.toLowerCase() === want);
+}
+
+/**
+ * `matches` narrowed to the repo a link or `--repo` named, by name or by
+ * repository id (see the header). A GUID the model does not know narrows
+ * nothing, so the PR is matched across every repo.
+ */
+export function narrowToLinkRepo(m: LinkedModel, matches: LinkedMatch[], repo: string): LinkedMatch[] {
+  if (isRepoGuid(repo) && !knowsRepoId(m, repo)) return matches;
+  return narrowToRepo(matches, repo);
+}
+
 /**
  * The matches whose entity is in `repo` — how a link's `repo=` narrows the
  * lookup. Two slugs must match whole; a bare name on either side matches the
- * other's name half. An entity whose repo is unknown is kept: nothing says it is in
+ * other's name half, and a PR also matches by its repository id, exactly. An entity whose repo is unknown is kept: nothing says it is in
  * another repo, and the ambiguity check still guards the choice.
  */
 export function narrowToRepo(matches: LinkedMatch[], repo: string): LinkedMatch[] {
-  return matches.filter((m) => m.repo === null || sameRepo(m.repo, repo));
+  const id = repo.toLowerCase();
+  return matches.filter((m) => m.repo === null || sameRepo(m.repo, repo) || m.repoId?.toLowerCase() === id);
 }
 
 /** Whether entity repo `have` is the `want` a link or `--repo` named, case-insensitively. */
@@ -66,7 +101,7 @@ export function linkedMatches(m: LinkedModel, target: Exclude<FocusTarget, { kin
   if (target.kind === "pr") {
     return [...m.linkedPrs, ...m.orphanPrs, ...m.reviewPrs]
       .filter((p) => p.id === target.id)
-      .map((p) => ({ key: p.url || `repo:${p.repositoryId}`, repo: repoOfUrl(p.url) ?? p.repositoryName ?? null, sessions: p.sessions }));
+      .map((p) => ({ key: p.url || `repo:${p.repositoryId}`, repo: repoOfUrl(p.url) ?? p.repositoryName ?? null, repoId: p.repositoryId || null, sessions: p.sessions }));
   }
   return [...m.current, ...m.other, ...m.prLinked]
     .filter((it) => it.id === target.id)

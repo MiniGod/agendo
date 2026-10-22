@@ -578,7 +578,10 @@ Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
 and `?session=<id>`. It refuses anything
 else, such as other verbs, extra or encoded parameters, or overlong input, and says
-so in a notification. A link can only focus a session, or resume one and then focus
+so in a notification. The repo can be a name or an Azure DevOps repository id. Some
+PR links, such as those in notifications, name the repo by its id. agendo maps a
+known id to its repo, and an id it does not know matches the PR number in every repo.
+A link can only focus a session, or resume one and then focus
 it. Links are limited, so a page that fires them cannot do much with them:
 
 - A link never moves a terminal you typed into during the last three seconds. A page

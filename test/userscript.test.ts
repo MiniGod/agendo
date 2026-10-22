@@ -40,6 +40,82 @@ describe("linkFor / hrefFor", () => {
   });
 });
 
+describe("an Azure DevOps PR URL that names the repo by its id", () => {
+  const GUID = "4b12fdea-5ae3-48d4-a2cd-1f47d10700ce";
+  const URL_BY_ID = `https://dev.azure.com/org/proj/_git/${GUID}/pullrequest/81276`;
+  const el = (href: string | null) => ({ getAttribute: (n: string) => (n === "href" ? href : null) });
+  /** A page with an optional canonical link and the breadcrumb's links (all that `PR_LINKS` selects). */
+  const page = (canonical: string | null, crumbs: string[] = []) => ({
+    querySelectorAll: () => [...(canonical === null ? [] : [canonical]), ...crumbs].map(el),
+  });
+  const href = (doc?: unknown) => {
+    const t = script.linkFor(loc(URL_BY_ID), doc);
+    return t ? script.hrefFor(t) : null;
+  };
+
+  test("with no page to read, or a page that does not say, the id goes in the link", () => {
+    expect(href()).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+    expect(href(page(null))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+  });
+
+  test("a canonical link to the same PR gives the name", () => {
+    expect(href(page("https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/81276"))).toBe("agendo://focus?pr=81276&repo=mc-applications");
+  });
+
+  test("a canonical link to another PR, or one that is itself an id, is not used", () => {
+    expect(href(page("https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/1"))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+    expect(href(page(URL_BY_ID))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+  });
+
+  test("a breadcrumb link to the same PR gives the name, relative hrefs included", () => {
+    expect(href(page(null, ["/org/proj/_git/mc-applications", "/org/proj/_git/mc-applications/pullrequest/81276"]))).toBe(
+      "agendo://focus?pr=81276&repo=mc-applications",
+    );
+  });
+
+  test("links to a repo's root, or to another PR, never name it: the previous PR's breadcrumb may still be on the page", () => {
+    expect(href(page(null, ["/org/proj/_git/mc-web", "/org/proj/_git/mc-web/pullrequests"]))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+    expect(href(page(null, ["/org/proj/_git/mc-web/pullrequest/9"]))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+  });
+
+  test("links naming two repos for the PR, or a name agendo would refuse, say nothing", () => {
+    expect(href(page(null, ["/org/proj/_git/a-repo/pullrequest/81276", "/org/proj/_git/b-repo/pullrequest/81276"]))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+    expect(href(page(null, ["/org/proj/_git/bad%20name/pullrequest/81276"]))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+  });
+
+  test("a link to the same PR number in another collection is not this PR", () => {
+    expect(href(page("https://dev.azure.com/other-org/proj/_git/mc-applications/pullrequest/81276"))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+    expect(href(page("https://example.visualstudio.com/proj/_git/mc-applications/pullrequest/81276"))).toBe(`agendo://focus?pr=81276&repo=${GUID}`);
+    expect(href(page("https://dev.azure.com/org/other-proj/_git/mc-applications/pullrequest/81276"))).toBe("agendo://focus?pr=81276&repo=mc-applications");
+  });
+
+  test("a URL that already names the repo is not second-guessed by the page", () => {
+    const t = script.linkFor(loc("https://dev.azure.com/org/proj/_git/mc-web/pullrequest/9"), page("https://dev.azure.com/org/proj/_git/other/pullrequest/9"));
+    expect(script.hrefFor(t)).toBe("agendo://focus?pr=9&repo=mc-web");
+  });
+});
+
+describe("needsRender", () => {
+  const PAGE = "https://dev.azure.com/org/proj/_git/x/pullrequest/1";
+  const BY_ID = "agendo://focus?pr=1&repo=4b12fdea-5ae3-48d4-a2cd-1f47d10700ce";
+  const r = (href: string, last: string, buttonHref: string | null, since: number, now: number) => script.needsRender(href, last, buttonHref, since, now);
+
+  test("a new URL, or a missing button, always renders", () => {
+    expect(r(PAGE, "", "agendo://focus?pr=1&repo=x", 0, 0)).toBe(true);
+    expect(r(PAGE, PAGE, null, 0, 0)).toBe(true);
+  });
+
+  test("a link with a repo name, or none, is settled", () => {
+    expect(r(PAGE, PAGE, "agendo://focus?pr=1&repo=mc-web", 0, 1)).toBe(false);
+    expect(r(PAGE, PAGE, "agendo://focus?workItem=1", 0, 1)).toBe(false);
+  });
+
+  test("a link with a repo id keeps looking for the name, then settles for the id", () => {
+    expect(r(PAGE, PAGE, BY_ID, 1000, 1000 + script.NAME_WAIT_MS - 1)).toBe(true);
+    expect(r(PAGE, PAGE, BY_ID, 1000, 1000 + script.NAME_WAIT_MS)).toBe(false);
+  });
+});
+
 /** Just enough of a window for `guard`: listeners, and events that record what was done to them. */
 function fakeWin() {
   const listeners: { type: string; fn: (e: unknown) => void; capture: unknown }[] = [];
