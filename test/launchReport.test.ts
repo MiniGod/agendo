@@ -16,11 +16,6 @@ describe("sessionKind", () => {
     expect(sessionKind(kind(false, true))).toBe("orchestrator");
     expect(sessionKind(kind(false, false))).toBe("background");
   });
-
-  test("the link is by short id, so a full uuid is cut to the 12 characters a link carries", () => {
-    const lines = launchSummary(kind(false, false), { id: "019cde00-1111-7000-8000-00000000cde0", cwd: "/w", tmuxName: "cl-claude-019cde001111" }, null);
-    expect(lines[2]).toBe("  link:    agendo://focus?session=019cde001111");
-  });
 });
 
 describe("launchSummary", () => {

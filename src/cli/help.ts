@@ -175,8 +175,8 @@ Usage:
                               Never launches a new session; with none, or no
                               client attached, it says so in a desktop
                               notification. <window> is its tmux window name
-                              (cl-claude-…, cl-wi-…); a cl-wi-/cl-pr- name goes
-                              by the session id its live window is tagged with.
+                              (cl-claude-…, cl-wi-…); a cl-wi-/cl-pr- name means
+                              the session that live window is attributed to.
                               "focusTerminal" in config.json opens a terminal
                               when no client is attached (off by default).
       --repo <repo>             Only the PR / work item in that repo (owner/name

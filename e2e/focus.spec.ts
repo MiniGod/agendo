@@ -451,12 +451,21 @@ test("focus by an id-bearing window name is focus by the short id it embeds", as
   expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
 });
 
-test("a window name with no tagged live window focuses nothing and resumes nothing", async ({ mock }) => {
-  // Untagged: the cwd heuristic may attribute it for display, but never for a link.
+test("an untagged id-less window name goes by the window's attribution, as list shows it", async ({ mock }) => {
+  // How a `cl-wi-` window really runs: launched with no id to tag, attributed by its cwd.
+  const crashCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "fix-crash-102");
   await seed(mock, {
     windows: [{ session: "agendo", index: 1, name: "cl-wi-102" }],
-    panes: [{ session: "agendo", window: "cl-wi-102", cwd: "/crash", placeholder: false }],
+    panes: [{ session: "agendo", window: "cl-wi-102", cwd: crashCwd, placeholder: false }],
   });
+  const r = await agendo(mock.env, "focus", "cl-wi-102");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", "cl-wi-102")]]);
+  expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
+});
+
+test("a window name no live window carries focuses nothing and resumes nothing", async ({ mock }) => {
+  await seed(mock);
   const r = await agendo(mock.env, "url", "agendo://focus?session=cl-wi-102");
   expect(r.code).not.toBe(0);
   expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for the linked session"]);

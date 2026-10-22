@@ -13,7 +13,7 @@
 // any web page can trigger must not be able to do more than change what is on
 // screen.
 import {
-  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveManagedPaths, liveTargetForShortId, pickClient, pickClientFor, selectWindow,
+  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, pickClientFor, selectWindow,
   sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
@@ -67,7 +67,7 @@ async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>,
 /** Every session the target could mean. */
 async function candidates(target: FocusTarget, label: string, index: SessionIndex): Promise<AgentSession[]> {
   if (target.kind !== "session") return linkedSessions(target, label);
-  return sessionsForToken(index.all, target.token, liveManagedPaths);
+  return sessionsForToken(index.all, target.token, () => refreshLiveTmux(index.all).liveWindows);
 }
 
 /** The candidates with their live state, as `list` would report it, and where a paused one's tab sits. */

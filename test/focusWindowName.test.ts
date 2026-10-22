@@ -1,23 +1,23 @@
 // `focus` by window name (src/cli/focus/windowName.ts): an id-bearing name is
-// its short id, an id-less one (`cl-wi-`, `cl-pr-`, `cl-bg-codex-`) goes by the
-// session id its LIVE window is tagged with — never by cwd, never through a
-// placeholder. e2e/focus.spec.ts drives one tagged window end to end; this pins
-// the cases a fixture would need a server's worth of windows for.
+// its short id, an id-less one (`cl-wi-`, `cl-pr-`, `cl-bg-codex-`) is whichever
+// session its live window is attributed to. e2e/focus.spec.ts drives the real
+// attribution end to end; this pins the lookup over it.
 import { describe, expect, test } from "bun:test";
 import { sessionsForToken } from "../src/cli/focus/windowName.ts";
-import type { ManagedTarget } from "../src/runtime/tmux/index.ts";
+import { sessionName, type LiveTarget } from "../src/runtime/tmux/index.ts";
 import type { AgentSession } from "../src/shared/types.ts";
 
-const session = (id: string, cwd = "/w") => ({ id, source: "claude", cwd }) as AgentSession;
+const session = (id: string, source: AgentSession["source"] = "claude") => ({ id, source, cwd: "/w" }) as AgentSession;
 const A = session("aaaa1111-2222-3333-4444-555566667777");
-const B = session("bbbb1111-2222-3333-4444-555566667777");
+const B = session("bbbb1111-2222-3333-4444-555566667777", "codex");
 const ALL = [A, B];
 
-const win = (name: string, sessionId: string | undefined, placeholder = false): ManagedTarget =>
-  ({ name, target: `=agendo:=${name}`, cwd: "/w", placeholder, ...(sessionId ? { tags: { sessionId } } : {}) });
+/** `liveWindows` as `refreshLiveTmux` returns it: canonical session name → the window it runs in. */
+const attributed = (...pairs: [AgentSession, string][]) => () =>
+  new Map<string, LiveTarget>(pairs.map(([s, name]) => [sessionName(s), { name, target: `=agendo:=${name}` }]));
 
-/** A `managed` that fails the test if it is read: ids and id-bearing names never need tmux. */
-const noTmux = (): ManagedTarget[] => {
+/** An `attributed` that fails the test if it is read: ids and id-bearing names never need tmux. */
+const noTmux = (): Map<string, LiveTarget> => {
   throw new Error("read tmux for a token that names its session outright");
 };
 
@@ -35,25 +35,22 @@ describe("sessionsForToken", () => {
     expect(sessionsForToken(ALL, "cl-bg-cccc11112222", noTmux)).toEqual([]);
   });
 
-  test("an id-less window name goes by the live window's session tag", () => {
-    const managed = () => [win("cl-wi-102", B.id), win("cl-pr-acme-appweb-5", A.id), win("cl-bg-codex-x1", A.id)];
-    expect(sessionsForToken(ALL, "cl-wi-102", managed)).toEqual([B]);
-    expect(sessionsForToken(ALL, "cl-pr-acme-appweb-5", managed)).toEqual([A]);
-    expect(sessionsForToken(ALL, "cl-bg-codex-x1", managed)).toEqual([A]);
+  test("an id-less window name is the session its live window is attributed to", () => {
+    const live = attributed([A, "cl-pr-acme-appweb-5"], [B, "cl-bg-codex-x1"]);
+    expect(sessionsForToken(ALL, "cl-pr-acme-appweb-5", live)).toEqual([A]);
+    expect(sessionsForToken(ALL, "cl-bg-codex-x1", live)).toEqual([B]);
   });
 
   test("the name must match exactly: no prefix of a longer window", () => {
-    expect(sessionsForToken(ALL, "cl-pr-5", () => [win("cl-pr-50", A.id)])).toEqual([]);
+    expect(sessionsForToken(ALL, "cl-pr-5", attributed([A, "cl-pr-50"]))).toEqual([]);
   });
 
-  test("an untagged window, a placeholder, or a tag naming no known session resolves to nothing", () => {
-    expect(sessionsForToken(ALL, "cl-wi-102", () => [win("cl-wi-102", undefined)])).toEqual([]);
-    expect(sessionsForToken(ALL, "cl-wi-102", () => [win("cl-wi-102", A.id, true)])).toEqual([]);
-    expect(sessionsForToken(ALL, "cl-wi-102", () => [win("cl-wi-102", "gone-session")])).toEqual([]);
+  test("a window attributed to nobody, or to a session not on disk, resolves to nothing", () => {
+    expect(sessionsForToken(ALL, "cl-wi-102", attributed())).toEqual([]);
+    expect(sessionsForToken([A], "cl-wi-102", attributed([B, "cl-wi-102"]))).toEqual([]);
   });
 
-  test("two live windows of one name tagged differently give both, for focus to choose between", () => {
-    const managed = () => [win("cl-wi-102", A.id), win("cl-wi-102", B.id), win("cl-wi-102", B.id)];
-    expect(sessionsForToken(ALL, "cl-wi-102", managed)).toEqual([A, B]);
+  test("two sessions in same-named windows (in two hosts) give both, for focus to choose between", () => {
+    expect(sessionsForToken(ALL, "cl-wi-102", attributed([A, "cl-wi-102"], [B, "cl-wi-102"]))).toEqual([A, B]);
   });
 });
