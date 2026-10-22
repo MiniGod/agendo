@@ -31,7 +31,9 @@ import { getProvider, type Provider } from "../../providers/index.ts";
 import { SessionIndex, type TranscriptFilter } from "../../sessions/index.ts";
 import type { AgentSession, FocusEntity, Identity } from "../../shared/types.ts";
 import { currentModelOptions } from "../links.ts";
-import { findSession, tokenNames } from "../commands/resume.ts";
+import { tokenNames } from "../commands/resume.ts";
+import { refreshLiveTmux } from "../../app/model/index.ts";
+import { sessionsForToken } from "./windowName.ts";
 import { isRepoGuid, linkedMatches, narrowToRepo, resolveLinked, type LinkedModel } from "./linked.ts";
 import type { FocusTarget } from "./url.ts";
 
@@ -164,14 +166,21 @@ async function liveLinked(target: ItemTarget): Promise<LiveLookup | null> {
   return "sessions" in r ? { sessions: r.sessions, index, panes } : null;
 }
 
-/** The session a session id names, from the narrowed index (which also admits what the id names); null when it is not there. */
+/**
+ * The sessions a session token names (see `sessionsForToken`), from the
+ * narrowed index, which also admits what an id names. A window name is
+ * attributed from the same fresh listing the caller judges running by. Every
+ * live window here names its session, so that attribution is by tag or name
+ * alone, as on the full path. Null when nothing is found.
+ */
 async function liveNamed(token: string): Promise<LiveLookup | null> {
   const snap = snapshot();
   if (!snap) return null;
   const index = await narrowedIndex(snap, tokenNames(token));
-  const s = findSession(index.all, token);
-  const panes = s && recheck(snap);
-  return s && panes ? { sessions: [s], index, panes } : null;
+  const panes = recheck(snap);
+  if (!panes) return null;
+  const sessions = sessionsForToken(index.all, token, () => refreshLiveTmux(index.all, panes).liveWindows);
+  return sessions.length ? { sessions, index, panes } : null;
 }
 
 /**
