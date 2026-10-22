@@ -32,10 +32,10 @@ describe("reuseReport", () => {
     expect(rest).toEqual(["  link:    agendo://focus?session=c9eee429ff60"]);
   });
 
-  test("idle with a stale extra: resumed, the extra named and left alone, and no prompt to warn about", () => {
+  test("idle with an extra beside it: resumed, the extra named and left alone, and no prompt to warn about", () => {
     const lines = reuseReport("agendo", found(cand(ID, "orch-agendo", "idle"), [cand(OLD, "agendo-orchestrator", "paused", false)]), "");
     expect(lines[0]).toBe("▸ agendo already has an orchestrator (idle): orch-agendo (claude) — resuming it instead of starting a second");
-    expect(lines[1]).toBe("  stale:   0e6e29414a1b  agendo-orchestrator (paused) — left alone");
+    expect(lines[1]).toBe("  extra:   0e6e29414a1b  agendo-orchestrator (paused) — left alone");
     expect(lines[2]).toMatch(/^ {2}send: {4}`.* send c9eee429ff60 "<prompt>"`$/);
     expect(lines[3]).toBe("  link:    agendo://focus?session=c9eee429ff60");
     expect(lines).toHaveLength(4);
@@ -113,6 +113,6 @@ describe("lookAlikeReport", () => {
   test("a look-alike is named and left alone, and the launch says why it starts one anyway", () => {
     const lines = lookAlikeReport("agendo", [cand(OLD, "agendo-orchestrator\n(old)", "paused", false)]);
     expect(lines[0]).toBe("▸ agendo has no recorded orchestrator, so this starts one — only LOOKING like one is not enough to be reused:");
-    expect(lines[1]).toBe("  stale:   0e6e29414a1b  agendo-orchestrator (old) (paused) — left alone");
+    expect(lines[1]).toBe("  look-alike: 0e6e29414a1b  agendo-orchestrator (old) (paused) — left alone");
   });
 });

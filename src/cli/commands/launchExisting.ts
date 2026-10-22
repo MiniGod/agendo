@@ -76,9 +76,13 @@ export function ignoredFlags(a: NewOnlyFlags, found: ExistingOrchestrator): stri
   return out;
 }
 
-/** One stale candidate, named and promised to be left alone. */
-function staleLine(c: OrchestratorCandidate): string {
-  return `  stale:   ${shortId(c.session.id)}  ${flatTitle(c.session.title)} (${c.state}) — left alone`;
+/**
+ * One candidate that is not the orchestrator, named and promised to be left
+ * alone — an `extra` beside the one reused, or a `look-alike` in a repo with
+ * none recorded: the words the TUI's ⚠ line uses for them.
+ */
+function candidateLine(label: "extra" | "look-alike", c: OrchestratorCandidate): string {
+  return `  ${`${label}:`.padEnd(8)} ${shortId(c.session.id)}  ${flatTitle(c.session.title)} (${c.state}) — left alone`;
 }
 
 /**
@@ -88,7 +92,7 @@ function staleLine(c: OrchestratorCandidate): string {
  */
 export function lookAlikeReport(repo: string, lookAlikes: readonly OrchestratorCandidate[]): string[] {
   if (lookAlikes.length === 0) return [];
-  return [`▸ ${repo} has no recorded orchestrator, so this starts one — only LOOKING like one is not enough to be reused:`, ...lookAlikes.map(staleLine)];
+  return [`▸ ${repo} has no recorded orchestrator, so this starts one — only LOOKING like one is not enough to be reused:`, ...lookAlikes.map((c) => candidateLine("look-alike", c))];
 }
 
 /** The lines the reuse prints: what was found, what was done, and where an undelivered prompt goes. */
@@ -100,8 +104,8 @@ export function reuseReport(repo: string, found: ExistingOrchestrator, prompt: s
     `▸ ${repo} already has an orchestrator (${state}): ${existingLabel(found)} — ${running ? "not starting a second" : "resuming it instead of starting a second"}`,
   ];
   // Named here rather than pointed at: `list repos` only knows the recorded
-  // ones, and a legacy look-alike is exactly the stale session worth seeing.
-  lines.push(...(found.kind === "session" ? found.status.stale : []).map(staleLine));
+  // ones, and a legacy look-alike is exactly the extra session worth seeing.
+  lines.push(...(found.kind === "session" ? found.status.stale : []).map((c) => candidateLine("extra", c)));
   if (ignored.length) lines.push(`  ignored: ${ignored.join(", ")} — they shape a new orchestrator, and none is started`);
   lines.push(sendLine(token, prompt));
   // The same agendo:// link a fresh launch prints: a window too new to have a

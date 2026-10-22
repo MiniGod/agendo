@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pinRoots } from "../src/ui/hooks/useOrchestratorPins.ts";
 import type { RepoInfo } from "../src/repositories/index.ts";
-import { MAX_PINNED_REPOS, orchestratorPins, pinText, shownPins, staleList } from "../src/ui/models/orchestratorPins.ts";
+import { MAX_PINNED_REPOS, orchestratorPins, pinText, shownPins, staleList, STARTING_BLOCK } from "../src/ui/models/orchestratorPins.ts";
 import type { OrchestratorCandidate, OrchestratorState, RepoOrchestratorStatus } from "../src/orchestration/repoOrchestrator.ts";
 
 const cand = (title: string, state: OrchestratorState, day = 1, recorded = true): OrchestratorCandidate => ({
@@ -43,18 +43,50 @@ describe("orchestratorPins — a scope that IS one repo", () => {
     expect(texts([status("agendo", null)], true)).toEqual(["▌ Orchestrator  agendo  – none  ·  O/G start one"]);
   });
 
-  test("the real duplicate: a second line names the stale one and says O/G will not open it", () => {
+  test("the real duplicate: a second line counts it, offers K, says what O/G opens instead, then names it", () => {
     const got = texts([status("agendo", cand("orch-agendo", "running"), [cand("agendo-orchestrator", "paused", 1, false)])], true);
     expect(got).toEqual([
       "▌ Orchestrator  agendo  ● running  orch-agendo  ·  O/G switch to it",
-      "  ⚠ stale, not what O/G opens: agendo-orchestrator (⏸ paused)",
+      '  ⚠ 1 extra orchestrator open  ·  K kill it  ·  O/G opens "orch-agendo", not this one: agendo-orchestrator (⏸ paused)',
     ]);
   });
 
+  test("several: the count is real, and the count and K fit in 80 columns whatever follows", () => {
+    const stale = [cand("PR 81909 e2e test sharding", "paused"), cand("master-orch", "running", 1, false)];
+    const got = texts([status("mc", cand("mc orchestrator", "running"), stale)], true);
+    expect(got?.[1]).toBe(
+      '  ⚠ 2 extra orchestrators open  ·  K kill them  ·  O/G opens "mc orchestrator", not these: PR 81909 e2e test sharding (⏸ paused), master-orch (● running)',
+    );
+    const noPrimary = texts([status("mc", null, stale)], true);
+    for (const line of [got![1], noPrimary![1]]) expect(line.indexOf("K kill them") + "K kill them".length).toBeLessThanOrEqual(80);
+  });
+
+  test("idle extras have no window to kill: they drop off the warning, and with only them there is no ⚠ line", () => {
+    const got = texts([status("agendo", cand("orch-agendo", "running"), [cand("orch-old", "idle"), cand("orch-older", "paused")])], true);
+    expect(got?.[1]).toContain("⚠ 1 extra orchestrator open");
+    expect(got?.[1]).not.toContain("orch-old (");
+    expect(texts([status("agendo", cand("orch-agendo", "running"), [cand("orch-old", "idle")])], true)).toHaveLength(1);
+  });
+
   test("only an unrecorded look-alike: none, and the look-alike is named for what it is", () => {
-    const got = texts([status("agendo", null, [cand("orch-old", "idle", 1, false)])], true);
+    const got = texts([status("agendo", null, [cand("orch-old", "running", 1, false)])], true);
     expect(got?.[0]).toContain("– none");
-    expect(got?.[1]).toBe("  ⚠ looks like an orchestrator, never recorded as one: orch-old (○ idle)");
+    expect(got?.[1]).toBe(
+      "  ⚠ 1 orchestrator look-alike open  ·  K kill it  ·  never recorded as an orchestrator, so O/G starts a new one, not this one: orch-old (● running)",
+    );
+    const two = texts([status("agendo", null, [cand("orch-a", "running", 1, false), cand("orch-b", "paused", 1, false)])], true);
+    expect(two?.[1]).toContain("⚠ 2 orchestrator look-alikes open  ·  K kill them  ·  never recorded as orchestrators, so O/G starts a new one, not these: orch-a");
+    expect(orchestratorPins([status("agendo", null, [cand("orch-a", "running", 1, false)])], true)!.killLookAlikes).toBe(true);
+  });
+
+  test("what K kills: the open extras, never the primary, and nothing over several repos", () => {
+    const primary = cand("orch-agendo", "running");
+    const s = status("agendo", primary, [cand("a", "paused"), cand("b", "idle"), cand("c", "running"), primary]);
+    expect(orchestratorPins([s], true)!.killable.map((c) => c.session.id)).toEqual(["a", "c"]);
+    expect(orchestratorPins([s], true)!.killRoot).toBe("/git/agendo");
+    expect(orchestratorPins([s], true)!.killLookAlikes).toBe(false);
+    expect(orchestratorPins([s], false)!.killable).toEqual([]);
+    expect(orchestratorPins([s], false)!.killRoot).toBeNull();
   });
 
   test("titles are flattened and capped so the line stays one line", () => {
@@ -72,17 +104,17 @@ describe("orchestratorPins — a scope over several repos", () => {
         status("zeta", cand("orch-zeta", "idle")),
         status("blip", null),
         status("agendo", cand("orch-agendo", "running"), [cand("agendo-orchestrator", "paused", 1, false)]),
-        status("applib", cand("orch-applib", "paused")),
-        status("appweb", null, [cand("orch-old", "idle", 1, false)]),
+        status("applib", cand("orch-applib", "paused"), [cand("orch-gone", "idle")]),
+        status("appweb", null, [cand("orch-old", "running", 1, false)]),
       ],
       false,
     );
     expect(got).toEqual([
       "▌ Orchestrators  ● 1 running · ⏸ 1 paused · ○ 1 idle · – 2 none  ·  O start/open",
-      "  ● agendo  orch-agendo  ⚠ 1 stale",
+      "  ● agendo  orch-agendo  ⚠ 1 extra open",
       "  ⏸ applib  orch-applib",
       "  ○ zeta  orch-zeta",
-      "  none in: appweb (⚠ 1 stale), blip",
+      "  none in: appweb (⚠ 1 look-alike open), blip",
     ]);
   });
 
@@ -126,9 +158,18 @@ describe("orchestratorPins — one launched a moment ago", () => {
     ]);
   });
 
-  test("a look-alike beside it is stale, not merely unrecorded", () => {
-    const got = texts([status("agendo", null, [cand("agendo-orchestrator", "idle", 1, false)])], true, [["/git/agendo", "cl-new-abc123"]]);
-    expect(got?.[1]).toBe("  ⚠ stale, not what O/G opens: agendo-orchestrator (○ idle)");
+  test("a look-alike beside it is an extra O/G does not open, not merely unrecorded", () => {
+    const got = texts([status("agendo", null, [cand("agendo-orchestrator", "paused", 1, false)])], true, [["/git/agendo", "cl-new-abc123"]]);
+    expect(got?.[1]).toBe(
+      '  ⚠ 1 orchestrator look-alike open  ·  never recorded as an orchestrator; O/G opens "cl-new-abc123", not this one: agendo-orchestrator (⏸ paused)',
+    );
+  });
+
+  test("K is not offered while it starts, and refuses with why: its window could pass for the look-alike's", () => {
+    const pins = orchestratorPins([status("agendo", null, [cand("agendo-orchestrator", "running", 1, false)])], true, new Map([["/git/agendo", "cl-new-abc123"]]))!;
+    expect(pins.lines.map(pinText)[1]).not.toContain("K kill");
+    expect(pins.killBlocked).toBe(STARTING_BLOCK);
+    expect(orchestratorPins([status("agendo", null, [cand("orch-a", "running", 1, false)])], true)!.killBlocked).toBeNull();
   });
 
   test("several repos: counted and listed between running and paused", () => {

@@ -4,6 +4,7 @@ import { sessionName } from "../../runtime/tmux/index.ts";
 import type { Row } from "../models/rows.ts";
 import type { KeyContext, View } from "./context.ts";
 import { handleListRowActionKeys, type RowActionCtx } from "./rowActions.ts";
+import { killStale, type StaleKillCtx } from "../actions/staleKill.ts";
 import { ancestorIndex, expandKeyOf, firstChildIndex, isExpandable, isOpen } from "./rowTree.ts";
 
 type ViewCtx = Pick<
@@ -19,6 +20,7 @@ type ViewCtx = Pick<
   | "enterNewSession"
   | "enterOrchestrator"
   | "enterGlobalOrchestrator"
+  | "pins"
   | "setSearchFocus"
   | "setPrSort"
   | "setSessionSort"
@@ -171,7 +173,8 @@ export function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boole
 }
 
 /**
- * The three "start something new" keys of the sessions view.
+ * The three "start something new" keys of the sessions view, and `K`, which
+ * clears out the stale orchestrators the pinned ⚠ line names.
  *
  * Split out of `handleListViewKeys` rather than left inline because they are one
  * group — a plain session and the two coordinator levels above it — and because
@@ -183,7 +186,7 @@ export function handleListViewKeys(input: string, key: Key, ctx: ViewCtx): boole
  */
 function handleSessionStartKeys(
   input: string,
-  ctx: Pick<KeyContext, "view" | "enterNewSession" | "enterOrchestrator" | "enterGlobalOrchestrator">,
+  ctx: Pick<KeyContext, "view" | "enterNewSession" | "enterOrchestrator" | "enterGlobalOrchestrator"> & StaleKillCtx,
 ): boolean {
   if (ctx.view !== "sessions") return false;
 
@@ -200,6 +203,11 @@ function handleSessionStartKeys(
   // (no repo or worktree left to pick) beside this menu. Scoped to ONE repo it
   // is that repo's orchestrator instead, exactly as `O` (src/repositories/scopeRepo.ts).
   if (input === "G") { ctx.enterGlobalOrchestrator(); return true; }
+
+  // kill every stale orchestrator with a window open — the ⚠ line's names, never
+  // the one O/G opens — over `x`'s own guards, after one y/n naming them all.
+  // A capital too: `k` is ↑.
+  if (input === "K") { killStale(ctx); return true; }
 
   return false;
 }
