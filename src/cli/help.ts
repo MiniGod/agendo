@@ -166,7 +166,7 @@ Usage:
                                 compact, so the first \`send\` can time out waiting
                                 for an input box — retry rather than --force.
       --attach, -a              Switch/attach to it immediately (default: detached)
-  agendo focus --pr <n> | --work-item <n> | <id>
+  agendo focus --pr <n> | --work-item <n> | <id> | <window>
                               Bring a session to the front of your terminal: the
                               attached tmux client you used last is switched to
                               its window (resumed first if paused or idle), and on
@@ -174,7 +174,9 @@ Usage:
                               sessions: the latest running one, else the latest.
                               Never launches a new session; with none, or no
                               client attached, it says so in a desktop
-                              notification.
+                              notification. <window> is its tmux window name
+                              (cl-claude-…, cl-wi-…); a cl-wi-/cl-pr- name goes
+                              by the session id its live window is tagged with.
                               "focusTerminal" in config.json opens a terminal
                               when no client is attached (off by default).
       --repo <repo>             Only the PR / work item in that repo (owner/name
@@ -182,7 +184,7 @@ Usage:
   agendo url-handler install|uninstall|status
                               Register agendo as the handler for agendo:// links
                               (agendo://focus?pr=<n>[&repo=<repo>], ?workItem=<n>
-                              [&repo=<repo>], ?session=<id>),
+                              [&repo=<repo>], ?session=<id or window name>),
                               which run focus — e.g. from the browser user-script
                               in extras/userscript/. A link moves a client already
                               showing the target's tmux session, else the one used

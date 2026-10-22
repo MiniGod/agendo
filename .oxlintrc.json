@@ -149,7 +149,10 @@
         // it 138) since one-orchestrator-per-repo reworked the flow. The holder is
         // src/orchestration/index.ts `orchestratorSystemPrompt`; 148 fails against
         // the current tree.
-        "max-lines-per-function": ["error", { "max": 149, "skipBlankLines": false, "skipComments": false }], // src/orchestration/index.ts orchestratorSystemPrompt
+        // LOWERED 149 -> 146: `orchestratorSystemPrompt`'s task-list section is now
+        // `taskListSection`, and the prompt is 140. The holder is
+        // src/ui/hooks/useRepoScope.ts `useRepoScope`; 145 fails against the current tree.
+        "max-lines-per-function": ["error", { "max": 146, "skipBlankLines": false, "skipComments": false }], // src/ui/hooks/useRepoScope.ts useRepoScope
         // Was also src/cli/wait/index.ts at 34; `runWait` is now complexity 3. So were
         // `claudeAction` and `loadCodexActivity` in src/sessions/activity/index.ts; both are now
         // walks over small per-record handlers under src/sessions/activity/, the worst of

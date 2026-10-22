@@ -7,7 +7,7 @@
 //
 //     agendo://focus?pr=<digits>[&repo=<repo>]
 //     agendo://focus?workItem=<digits>[&repo=<repo>]
-//     agendo://focus?session=<session id or short id>
+//     agendo://focus?session=<session id, short id or agendo window name>
 //
 // `repo` — a bare repo name (ADO) or one `owner/name` slug (GitHub) — is the one
 // optional extra, only after `pr` or `workItem` and only in that order. GitHub
@@ -45,6 +45,15 @@ const ID_RE = /^[1-9]\d{0,9}$/;
  */
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
+/**
+ * One of agendo's own tmux window names (src/runtime/tmux/names.ts,
+ * src/launch/task.ts): a known `cl-<kind>-` prefix, then the same letters,
+ * digits and dashes. Its own pattern only because a `cl-wi-`/`cl-pr-` name can
+ * fold a whole repo slug in and outgrow SESSION_RE's 64 — the prefix list is
+ * the price of the extra length, so nothing else gets it.
+ */
+const WINDOW_NAME_RE = /^cl-(?:claude|copilot|codex|bg|new|free|wi|pr)-[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
+
 /** A repo name or `owner/name` slug: each segment opens with a letter, digit or `_`; 120 characters at most. */
 const REPO_RE = /^(?=.{1,120}$)[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)?$/;
 
@@ -65,9 +74,14 @@ export function isRepo(raw: string): boolean {
   return REPO_RE.test(raw);
 }
 
-/** Is `raw` a session token a URL may carry? */
+/** Is `raw` one of agendo's own window names (`cl-wi-102`, `cl-bg-codex-…`)? */
+export function isWindowName(raw: string): boolean {
+  return WINDOW_NAME_RE.test(raw);
+}
+
+/** Is `raw` a session token a URL may carry: a session id, a short id or a window name? */
 export function isSessionToken(raw: string): boolean {
-  return SESSION_RE.test(raw);
+  return SESSION_RE.test(raw) || isWindowName(raw);
 }
 
 /** The value checked against its key's own shape; `repo` only alongside an item id. */
@@ -96,7 +110,7 @@ export function parseFocusUrl(url: unknown): ParsedFocusUrl {
   if (url.length > MAX_URL_LENGTH) return refuse("URL too long");
   if (!url.startsWith("agendo://")) return refuse("not an agendo:// URL");
   const m = URL_RE.exec(url);
-  if (!m) return refuse("only agendo://focus?pr=<n>, ?workItem=<n> (each with an optional &repo=) or ?session=<id> is accepted");
+  if (!m) return refuse("only agendo://focus?pr=<n>, ?workItem=<n> (each with an optional &repo=) or ?session=<id or window name> is accepted");
   return targetFor(m[1], m[2], m[3]);
 }
 

@@ -40,6 +40,28 @@ export type { OrchestratorRole } from "./role.ts";
 export const ORCHESTRATOR_SLUG = "orchestrator";
 
 /**
+ * The task-list section of `orchestratorSystemPrompt`, and how to name a session
+ * to the user while reporting it. Its own function so the prompt stays inside
+ * its length budget.
+ */
+function taskListSection(selfCmd: string): string[] {
+  return [
+    "## Keep a task list, always current",
+    "",
+    "Maintain a task list covering every unit of work, each in exactly one state:",
+    "**pending** (not launched yet) · **running** (session implementing) · **in-review**",
+    "(session in its sub-agent review loop) · **done** (reviewed clean, merged) ·",
+    "**blocked** (needs a decision, conflicted, or hit a limit). Update it as sessions",
+    "progress — every launch, every status poll that changes something, every merge. It",
+    "is the single source of truth across the hand-offs, so nothing is dropped.",
+    "Whenever you name a session to the user — in that list or anywhere else — write it",
+    "as a markdown link, [<window name or short id>](agendo://focus?session=<short id>),",
+    `so a click jumps to its window (\`${selfCmd} --llm\` says what clicking needs).`,
+    "",
+  ];
+}
+
+/**
  * The orchestrator instructions, appended to the session's system prompt.
  *
  * `selfCmd` is how to re-invoke the launcher from a shell (see `SELF_CMD` in
@@ -100,15 +122,7 @@ export function orchestratorSystemPrompt(selfCmd: string, agent: AgentSource): s
     "you do the integrating), no attribution noise in commit messages, and stay inside its",
     "own files where possible.",
     "",
-    "## Keep a task list, always current",
-    "",
-    "Maintain a task list covering every unit of work, each in exactly one state:",
-    "**pending** (not launched yet) · **running** (session implementing) · **in-review**",
-    "(session in its sub-agent review loop) · **done** (reviewed clean, merged) ·",
-    "**blocked** (needs a decision, conflicted, or hit a limit). Update it as sessions",
-    "progress — every launch, every status poll that changes something, every merge. It",
-    "is the single source of truth across the hand-offs, so nothing is dropped.",
-    "",
+    ...taskListSection(selfCmd),
     "## Parallelize aggressively; serialize only on real dependencies",
     "",
     "- Independent units (disjoint files, separate features, per-module work) launch in",

@@ -16,6 +16,11 @@ describe("sessionKind", () => {
     expect(sessionKind(kind(false, true))).toBe("orchestrator");
     expect(sessionKind(kind(false, false))).toBe("background");
   });
+
+  test("the link is by short id, so a full uuid is cut to the 12 characters a link carries", () => {
+    const lines = launchSummary(kind(false, false), { id: "019cde00-1111-7000-8000-00000000cde0", cwd: "/w", tmuxName: "cl-claude-019cde001111" }, null);
+    expect(lines[2]).toBe("  link:    agendo://focus?session=019cde001111");
+  });
 });
 
 describe("launchSummary", () => {
@@ -24,6 +29,7 @@ describe("launchSummary", () => {
     expect(lines).toEqual([
       "▸ launched orchestrator session abc123",
       "  window:  cl-bg-abc123   (in /w)",
+      "  link:    agendo://focus?session=abc123",
       `  status:  ${SELF_CMD} status abc123`,
       "  attach:  open agendo and pick it (running → attach), or rerun with --attach",
     ]);
@@ -35,11 +41,17 @@ describe("launchSummary", () => {
     expect(launchSummary(kind(true, false, "codex"), landed, withNote)).toEqual([
       "▸ launched global orchestrator session — codex assigns its own id",
       "  window:  cl-bg-x   (in /w)",
+      "  link:    agendo://focus?session=cl-bg-x",
       `  id:      ${SELF_CMD} list   (then: ${SELF_CMD} status <id>)`,
       "  layout:  its own tmux window — no pane: not inside the TUI",
       "  attach:  open agendo and pick it (running → attach), or rerun with --attach",
     ]);
     const asked = { cwd: "/w", layout: "pane" as const, layoutNote: null };
-    expect(launchSummary(kind(true, false), landed, asked)[3]).toBe("  layout:  split pane beside the agendo TUI");
+    expect(launchSummary(kind(true, false), landed, asked)[4]).toBe("  layout:  split pane beside the agendo TUI");
+  });
+
+  test("the link is by short id, so a full uuid is cut to the 12 characters a link carries", () => {
+    const lines = launchSummary(kind(false, false), { id: "019cde00-1111-7000-8000-00000000cde0", cwd: "/w", tmuxName: "cl-claude-019cde001111" }, null);
+    expect(lines[2]).toBe("  link:    agendo://focus?session=019cde001111");
   });
 });

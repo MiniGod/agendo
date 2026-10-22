@@ -13,7 +13,7 @@
 // any web page can trigger must not be able to do more than change what is on
 // screen.
 import {
-  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveTargetForShortId, pickClient, pickClientFor, selectWindow,
+  LAUNCHER_SESSION, exactTarget, focusClientOn, hasSession, listClients, liveManagedPaths, liveTargetForShortId, pickClient, pickClientFor, selectWindow,
   sessionName, sessionRoot, shortId, tmuxAvailable, windowIdentity, type TmuxClient, type WindowIdentity,
 } from "../../runtime/tmux/index.ts";
 import { refreshLiveTmux, loadModel } from "../../app/model/index.ts";
@@ -23,10 +23,11 @@ import type { AgentSession } from "../../shared/types.ts";
 import { currentModelOptions } from "../links.ts";
 import { flushWarnings } from "../warnings.ts";
 import { sessionState } from "../list/rows.ts";
-import { findSession, resumeSession } from "../commands/resume.ts";
+import { resumeSession } from "../commands/resume.ts";
 import { describeLinkTarget, describeTarget, parseFocusUrl, type FocusTarget } from "./url.ts";
 import { launcherForCwd, parseFocusArgs, pickSession, type FocusCandidate } from "./choose.ts";
 import { linkedMatches, narrowToLinkRepo, resolveLinked } from "./linked.ts";
+import { sessionsForToken } from "./windowName.ts";
 import { failLoudly, notify, onNotify } from "./notify.ts";
 import { raiseTerminal } from "./raise.ts";
 import { focusTerminalTemplate, openTerminal } from "./terminal.ts";
@@ -66,8 +67,7 @@ async function linkedSessions(target: Exclude<FocusTarget, { kind: "session" }>,
 /** Every session the target could mean. */
 async function candidates(target: FocusTarget, label: string, index: SessionIndex): Promise<AgentSession[]> {
   if (target.kind !== "session") return linkedSessions(target, label);
-  const s = findSession(index.all, target.token);
-  return s ? [s] : [];
+  return sessionsForToken(index.all, target.token, liveManagedPaths);
 }
 
 /** The candidates with their live state, as `list` would report it, and where a paused one's tab sits. */

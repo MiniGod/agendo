@@ -131,6 +131,25 @@ function endGuide(): string[] {
 }
 
 /**
+ * How to name a session to a human: as an agendo:// link that brings its window
+ * forward. Its own function, like `endGuide`, so `llmGuide` stays a table of
+ * contents. Shared with the orchestrator prompt, which reports sessions too.
+ */
+export function sessionLinkGuide(): string[] {
+  return [
+    "Name it as a link:",
+    "  Whenever you mention a session to the user, write it as a clickable markdown link,",
+    "  [<window name or short id>](agendo://focus?session=<short id>) — the short id is the",
+    "  12-character id `list` prints — so a click jumps to that session's tmux window. A",
+    "  session with no id yet (codex, just launched) can be linked by its window name",
+    "  instead: session=<window name>. Clicking needs the URL handler",
+    `  (\`${SELF_CMD} url-handler install\`) and, inside tmux,`,
+    "  `set -as terminal-features 'xterm*:hyperlinks'`.",
+    "",
+  ];
+}
+
+/**
  * `send`: its two routes, claude's resume dialog, the not-running cases, and
  * codex's read-back delivery. Its own function, like `endGuide`, so `llmGuide`
  * stays a table of contents rather than growing past its length budget.
@@ -259,6 +278,7 @@ export function llmGuide(): string {
     `  bare number, and never hand-assemble one. \`${SELF_CMD} list --json\` carries the`,
     "  same links per session as prUrl / workItemUrl.",
     "",
+    ...sessionLinkGuide(),
     ...sendGuide(),
     `Be told when it needs you (DON'T poll):`,
     `              ${SELF_CMD} wait <id...> --any --json --timeout 30m`,

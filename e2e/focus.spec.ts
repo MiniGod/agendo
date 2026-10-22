@@ -430,6 +430,40 @@ test("a link to no session names it in the notification only by what agendo chos
   expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for the linked session"]);
 });
 
+test("a link by an id-less window name focuses the session that window is tagged with", async ({ mock }) => {
+  // `cl-wi-…` embeds a work-item id, not a session id: only the window's own tag says whose it is.
+  const name = "cl-wi-acme-appweb-777";
+  await seed(mock, {
+    windows: [{ session: "agendo", index: 1, name }],
+    panes: [{ session: "agendo", window: name, cwd: "/elsewhere", placeholder: false, tags: { "@cl_session_id": STANDALONE_SESSION_ID } }],
+  });
+  const r = await agendo(mock.env, "url", `agendo://focus?session=${name}`);
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", name)]]);
+  // It was running in that window: nothing resumed.
+  expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
+});
+
+test("focus by an id-bearing window name is focus by the short id it embeds", async ({ mock }) => {
+  await seed(mock);
+  const r = await agendo(mock.env, "focus", RUNNING_TARGET);
+  expect(r.code, r.stderr).toBe(0);
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, RUNNING_TARGET)]]);
+});
+
+test("a window name with no tagged live window focuses nothing and resumes nothing", async ({ mock }) => {
+  // Untagged: the cwd heuristic may attribute it for display, but never for a link.
+  await seed(mock, {
+    windows: [{ session: "agendo", index: 1, name: "cl-wi-102" }],
+    panes: [{ session: "agendo", window: "cl-wi-102", cwd: "/crash", placeholder: false }],
+  });
+  const r = await agendo(mock.env, "url", "agendo://focus?session=cl-wi-102");
+  expect(r.code).not.toBe(0);
+  expect(await notifications(mock)).toEqual(["notify-send --app-name=agendo agendo No agendo session for the linked session"]);
+  const log = await mock.tmuxLog();
+  expect(log.some((a) => ["new-session", "new-window", "switch-client", "kill-window"].includes(a[0]))).toBe(false);
+});
+
 test("focus with no linked session notifies and fails without launching anything", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "focus", "--pr", "9999");
