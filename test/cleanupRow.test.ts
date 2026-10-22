@@ -77,6 +77,18 @@ describe("disk", () => {
     expect(await cachedUsage(d, 2_000)).toBeGreaterThan(first ?? 0);
   });
 
+  test("a du still walking when the cache is invalidated or cleared does not write its answer back", async () => {
+    for (const forget of [(d: string) => invalidateUsage(d), () => clearUsage()]) {
+      const d = join(tmp, `racing-${Math.random()}`);
+      mkdirSync(d, { recursive: true });
+      const walking = cachedUsage(d, 1_000);
+      forget(d);
+      const stale = await walking;
+      writeFileSync(join(d, "big"), "x".repeat(200_000));
+      expect(await cachedUsage(d, 2_000)).toBeGreaterThan(stale ?? 0);
+    }
+  });
+
   test("usageOf sums what exists, null when nothing does", async () => {
     const a = join(tmp, "ua");
     mkdirSync(a, { recursive: true });
