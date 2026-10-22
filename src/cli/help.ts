@@ -170,10 +170,11 @@ Usage:
                               Bring a session to the front of your terminal: the
                               attached tmux client you used last is switched to
                               its window (resumed first if paused or idle), and on
-                              X11 the terminal is raised. Several linked sessions:
-                              the latest running one, else the latest. Never
-                              launches a new session; with none, or no client
-                              attached, it says so in a desktop notification.
+                              X11 or sway the terminal is raised. Several linked
+                              sessions: the latest running one, else the latest.
+                              Never launches a new session; with none, or no
+                              client attached, it says so in a desktop
+                              notification.
                               "focusTerminal" in config.json opens a terminal
                               when no client is attached (off by default).
       --repo <repo>             Only the PR / work item in that repo (owner/name

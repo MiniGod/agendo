@@ -3,9 +3,9 @@
 //
 // Everything they touch outside agendo is a fake on PATH: tmux (attached
 // clients are fixture data in `state.clients`), notify-send, wmctrl, xdotool,
-// xdg-mime and update-desktop-database. The installer runs against a temp
-// XDG_DATA_HOME / XDG_CONFIG_HOME, so neither the developer's desktop entries
-// nor their mimeapps.list is ever written.
+// i3-msg, swaymsg, xdg-mime and update-desktop-database. The installer runs
+// against a temp XDG_DATA_HOME / XDG_CONFIG_HOME, so neither the developer's
+// desktop entries nor their mimeapps.list is ever written.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -454,6 +454,24 @@ test("focus raises the client's terminal through wmctrl on X11", async ({ mock }
   const r = await agendo(env, "focus", "--pr", "5001");
   expect(r.code, r.stderr).toBe(0);
   expect(await mock.callLog()).toContain("wmctrl -ia 0x04000007");
+});
+
+test("on i3, focus goes through i3-msg so a window on another workspace is focused, not just marked urgent", async ({ mock }) => {
+  await seed(mock);
+  const env = { ...mock.env, DISPLAY: ":99", FAKE_I3_SOCKET: "/run/user/1000/i3/ipc-socket.1", FAKE_WMCTRL_LIST: "0x04600004  4 4107   host  Terminal" };
+  const r = await agendo(env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  const log = await mock.callLog();
+  expect(log).toContain("i3-msg [id=73400324] focus");
+  expect(log.some((l) => l.startsWith("wmctrl -ia"))).toBe(false);
+});
+
+test("on i3, a focus i3 refuses falls back to wmctrl", async ({ mock }) => {
+  await seed(mock);
+  const env = { ...mock.env, DISPLAY: ":99", FAKE_I3_SOCKET: "/s", FAKE_I3_FAIL: "1", FAKE_WMCTRL_LIST: "0x04600004  4 4107   host  Terminal" };
+  const r = await agendo(env, "focus", "--pr", "5001");
+  expect(r.code, r.stderr).toBe(0);
+  expect(await mock.callLog()).toContain("wmctrl -ia 0x04600004");
 });
 
 test("focus falls back to xdotool when wmctrl knows no ancestor's window", async ({ mock }) => {

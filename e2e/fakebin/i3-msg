@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake `i3-msg` — records the call so a spec can assert it, and acts on nothing.
+# Never let the real one run under test: it would move focus on the developer's
+# desktop. `--get-socketpath` succeeds only when $FAKE_I3_SOCKET is set, so i3
+# reads as absent unless a spec asks for it; a command fails (exit 2, as i3-msg
+# does when i3 rejects one) when $FAKE_I3_FAIL is set.
+if [ -n "$FAKE_CALL_LOG" ]; then echo "i3-msg $*" >> "$FAKE_CALL_LOG"; fi
+if [ "$1" = "--get-socketpath" ]; then
+  [ -n "$FAKE_I3_SOCKET" ] || exit 1
+  echo "$FAKE_I3_SOCKET"; exit 0
+fi
+[ -z "$FAKE_I3_FAIL" ] || exit 2
+exit 0

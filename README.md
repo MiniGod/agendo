@@ -514,10 +514,11 @@ it switches the tmux client you typed into last. From a link, it switches a clie
 already showing the tmux session that holds (or, once resumed, will hold) the
 session's window — the most recently used one, if several are. When no client is on
 that session, it switches the client you typed into last. A paused or idle session is
-resumed first. On X11 the chosen client's terminal window is raised too, except when a
-link arrives while another terminal is being typed in: raising it would steal that
-terminal's keyboard focus. When several sessions are linked, the latest running one
-wins; if none is running, the latest one wins. A paused session goes back into the
+resumed first. On X11 (through i3's IPC when i3 is the window manager) and on
+sway the chosen client's terminal window is raised too, except when a link arrives
+while another terminal is being typed in: raising it would steal that terminal's
+keyboard focus. When several sessions are linked, the latest running one wins; if
+none is running, the latest one wins. A paused session goes back into the
 tmux session its tab was parked in. An idle one opens in the path-scoped agendo
 session for its repository when a client is showing one, else in the agendo session
 the client you typed into last is showing, else in the shared `agendo` session, else
