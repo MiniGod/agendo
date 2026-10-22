@@ -507,17 +507,19 @@ cycles the sort between updated, created and size; `r` reverses it.
 `f` filters the list: all → **safe to remove** → **has something to lose** → all.
 "Safe to remove" is exactly the rule the dialog uses to start the worktree and branch
 ticked (below), so a row is listed there only when deleting it loses nothing — clean,
-nothing unpushed, merged, no ignored files, not running and not written to in the last
-five minutes. "Has something to lose" is a row with dirty files, unpushed commits, an
-unmerged branch, ignored files, checked-out submodules or an unreadable `git status`.
+nothing unpushed, merged, no ignored files or checked-out submodules, not running, not
+written to in the last five minutes, and no other running session or agendo pane in its
+worktree. "Has something to lose" is any row but the main checkout whose git shows dirty
+files, unpushed commits, an unmerged branch, ignored files, checked-out submodules or an
+unreadable `git status` — whether or not the dialog would offer to remove it.
 A row whose git state is still being measured is in neither until it is; under a filter
-the header says how many are still being checked. (A row measured again after a delete keeps its
-place until the new measurement lands; after `R` every row starts over.) A row with nothing to judge or nothing on
-offer only shows under "all": the main checkout, a session whose checkout and branch are
+the header says how many are still being checked. (A row measured again after a delete
+keeps its place until the new measurement lands; after `R` every row starts over.) The
+rest only show under "all": the main checkout, a session whose checkout and branch are
 both gone, and a row whose git shows nothing at risk but whose dialog would tick nothing —
 it is running, was written to moments ago, another running session or agendo pane (this
-agendo included) is in its worktree, or it is a checkout the dialog won't remove. `/` adds a text filter on
-title, branch and path (enter keeps it, esc clears it). The header shows the filter
+agendo included) is in its worktree, or it is a checkout the dialog won't remove. `/` adds
+a text filter on title, branch and path (enter keeps it, esc clears it). The header shows the filter
 and `shown of total`; sorting applies within the filter. The `f` filter (not the
 `/` text) is kept until agendo exits, so leaving the view and pressing `C` again keeps it.
 

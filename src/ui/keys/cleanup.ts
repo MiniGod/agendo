@@ -171,9 +171,15 @@ function deleteAllSafe(state: CleanupState, env: CleanupEnv): CleanupState {
   const bulk = safe.filter((r) => !pausedTabIn(r, env.all));
   if (bulk.length > 0) return { ...state, bulk: openBulk(bulk) };
   if (safe.length > 0) return { ...state, note: "only paused tabs are safe here — D skips them; use space on one" };
+  return { ...state, note: nothingSafe(state, env) };
+}
+
+/** Why D found nothing: the filter can't show a safe row, rows are still being checked, or there is none. */
+function nothingSafe(state: CleanupState, env: CleanupEnv): string {
+  if (state.filter === "risk") return "nothing at risk is safe to remove — f switches to safe to remove";
   // Under a filter the rows still being checked are hidden, so the view says how many there are.
   const checking = (env.pending ?? 0) > 0 || env.rows.some((r) => env.verdict(r) === "pending");
-  return { ...state, note: checking ? "nothing shown is safe to remove yet — some rows are still being checked" : "nothing shown is safe to remove" };
+  return checking ? "nothing shown is safe to remove yet — some rows are still being checked" : "nothing shown is safe to remove";
 }
 
 /** Enter on a row whose session is live (running, or a paused tab) switches to it, as on the session rows. */

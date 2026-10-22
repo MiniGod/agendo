@@ -164,6 +164,8 @@ describe("the list's D, R and enter", () => {
     expect(press(INITIAL_CLEANUP, envOf([row("b"), row("p")]), "D").state.note).toContain("still being checked");
     // Under a filter the pending rows are hidden; the view's count of them still says so.
     expect(press(INITIAL_CLEANUP, { ...envOf([row("b")]), pending: 2 }, "D").state.note).toContain("still being checked");
+    // Under "has something to lose" no row can be safe, so waiting would not help: it says how to get there.
+    expect(press({ ...INITIAL_CLEANUP, filter: "risk" }, { ...envOf([row("b")]), pending: 2 }, "D").state.note).toContain("f switches");
   });
 
   test("D leaves paused tabs out, and says so when they are all that is safe", () => {
