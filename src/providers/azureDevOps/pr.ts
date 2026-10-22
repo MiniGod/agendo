@@ -107,18 +107,32 @@ export async function getPullRequest(repoId: string, prId: number): Promise<Pull
   }
 }
 
-/** Work-item ids linked to a pull request (via the PR→workitems ADO direction). */
-export async function getPullRequestWorkItems(repoId: string, prId: number): Promise<number[]> {
+/**
+ * A pull request by its number alone, in the configured project, as ADO
+ * returned it — no repo needed, since ADO numbers PRs per collection. Null when
+ * ADO does not answer with one (unknown id, no access, a failed request): the
+ * caller then has no shortcut, not an answer.
+ */
+export async function getRawPullRequest(prId: number): Promise<any | null> {
   try {
-    const data = await adoGet(
-      `${encodeURIComponent(cfg.project)}/_apis/git/repositories/${repoId}` +
-        `/pullRequests/${prId}/workitems?${API}`,
-    );
-    return (data.value ?? [])
-      .map((w: any) => Number(w.id))
-      .filter((n: number) => Number.isFinite(n));
+    return await adoGet(`${encodeURIComponent(cfg.project)}/_apis/git/pullrequests/${prId}?${API}`);
   } catch {
-    return [];
+    return null;
   }
 }
 
+/** Work-item ids linked to a pull request (via the PR→workitems ADO direction); a failed request throws. */
+export async function fetchPullRequestWorkItems(repoId: string, prId: number): Promise<number[]> {
+  const data = await adoGet(
+    `${encodeURIComponent(cfg.project)}/_apis/git/repositories/${repoId}` +
+      `/pullRequests/${prId}/workitems?${API}`,
+  );
+  return (data.value ?? [])
+    .map((w: any) => Number(w.id))
+    .filter((n: number) => Number.isFinite(n));
+}
+
+/** Work-item ids linked to a pull request, or none when the request fails. */
+export async function getPullRequestWorkItems(repoId: string, prId: number): Promise<number[]> {
+  return fetchPullRequestWorkItems(repoId, prId).catch(() => []);
+}

@@ -19,10 +19,12 @@ import type { AgentSession } from "../shared/types.ts";
 import { claudeProvider } from "./claude.ts";
 import { copilotProvider } from "./copilot.ts";
 import { codexProvider } from "./codex.ts";
+import type { TranscriptFilter } from "./provider.ts";
 
 export { __claudeParseCount, __resetClaudeParseCount, __claudeCacheSize } from "./claude.ts";
 import { repoScope, sessionInScope } from "./scope.ts";
 export { repoScopeFilter } from "./scope.ts";
+export type { TranscriptFilter } from "./provider.ts";
 
 const PROVIDERS = [claudeProvider, copilotProvider, codexProvider];
 
@@ -31,9 +33,14 @@ export class SessionIndex {
   private byBranch = new Map<string, AgentSession[]>();
   readonly all: AgentSession[] = [];
 
-  static async build(): Promise<SessionIndex> {
+  /**
+   * The index of every session on disk — or, given `only`, of the Claude
+   * transcripts it admits plus every Copilot and Codex session (those two scan
+   * in milliseconds; Claude's parse is the cost, see `TranscriptFilter`).
+   */
+  static async build(only?: TranscriptFilter): Promise<SessionIndex> {
     const idx = new SessionIndex();
-    const lists = await Promise.all(PROVIDERS.map((p) => p.index()));
+    const lists = await Promise.all(PROVIDERS.map((p) => p.index(only)));
     // Dedupe by source:id — the same session can be discovered more than once
     // when a user has symlinked pieces of one profile's store into another (a
     // single `<id>.jsonl`, an `<enc-cwd>/` dir; a symlinked `projects/` or

@@ -7,10 +7,16 @@ import { SessionIndex } from "../../sessions/index.ts";
 import { hasSession, killWindow, liveTargetForShortId, sessionName, shortId } from "../../runtime/tmux/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 
-/** The session a token names: its full id, its short id, or its `cl-<agent>-<short>` window name. */
-export function findSession(all: AgentSession[], token: string): AgentSession | undefined {
+/** Whether `token` names session `id`: its full id, its short id, or its `cl-<agent>-<short>` window name. */
+export function tokenNames(token: string): (id: string) => boolean {
   const sid = token.match(/^cl-[a-z]+-(.+)$/)?.[1] ?? shortId(token);
-  return all.find((x) => x.id === token || shortId(x.id) === sid);
+  return (id) => id === token || shortId(id) === sid;
+}
+
+/** The session a token names (see `tokenNames`). */
+export function findSession(all: AgentSession[], token: string): AgentSession | undefined {
+  const names = tokenNames(token);
+  return all.find((x) => names(x.id));
 }
 
 /** No id at all: usage, exit 1. */

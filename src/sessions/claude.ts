@@ -6,7 +6,7 @@ import { forEachPooled, INDEX_CONCURRENCY } from "../shared/pool.ts";
 import { rebaseWorkflowPaths, WorkflowScan } from "../orchestration/workflows.ts";
 import type { AgentSession, WorkflowRef } from "../shared/types.ts";
 import { TranscriptCache } from "./cache.ts";
-import { claudeBaseDirs, type SessionProvider } from "./provider.ts";
+import { claudeBaseDirs, type SessionProvider, type TranscriptFilter } from "./provider.ts";
 
 // ── Claude Code ───────────────────────────────────────────────────────────────
 // Each session is one JSONL file under projects/<encoded-cwd>/<sessionId>.jsonl.
@@ -161,8 +161,8 @@ interface ClaudeTranscript {
   configDir: string;
 }
 
-/** Every top-level transcript file under one profile's `projects/` dir. */
-async function profileTranscripts(projects: string, configDir: string): Promise<ClaudeTranscript[]> {
+/** Every top-level transcript file under one profile's `projects/` dir that `only` (when given) admits. */
+async function profileTranscripts(projects: string, configDir: string, only?: TranscriptFilter): Promise<ClaudeTranscript[]> {
   let dirs: string[];
   try {
     dirs = await readdir(projects);
@@ -178,6 +178,7 @@ async function profileTranscripts(projects: string, configDir: string): Promise<
         // sessionId. Skip them so they don't show up as phantom sessions.
         return (await readdir(dirPath))
           .filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"))
+          .filter((f) => !only || only(dir, f.slice(0, -".jsonl".length)))
           .map((file) => ({ dirPath, file, configDir }));
       } catch {
         return [];
@@ -232,9 +233,9 @@ async function indexTranscript(t: ClaudeTranscript, seen: Set<string>): Promise<
 
 export const claudeProvider: SessionProvider = {
   source: "claude",
-  async index() {
+  async index(only) {
     const bases = await claudeBaseDirs();
-    const transcripts = (await Promise.all(bases.map(({ projects, configDir }) => profileTranscripts(projects, configDir)))).flat();
+    const transcripts = (await Promise.all(bases.map(({ projects, configDir }) => profileTranscripts(projects, configDir, only)))).flat();
     const sessions: AgentSession[] = [];
     // Absolute paths of transcripts that still exist this scan; cache entries
     // for anything else (deleted or vanished mid-scan) are pruned afterwards.
@@ -248,8 +249,9 @@ export const claudeProvider: SessionProvider = {
     // Prune cache entries for transcripts that no longer exist. The seen-set is
     // exactly the Claude files enumerated this scan, so this only ever touches
     // Claude transcript keys, and it runs after every per-file task above has
-    // finished recording its path.
-    claudeParseCache.prune(seen);
+    // finished recording its path. A narrowed scan saw only what it admitted, so
+    // it must not prune: everything it skipped still exists.
+    if (!only) claudeParseCache.prune(seen);
     return sessions;
   },
 };

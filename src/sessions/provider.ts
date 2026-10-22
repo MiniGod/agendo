@@ -17,7 +17,16 @@ export function claudeBaseDirs(): Promise<{ projects: string; configDir: string 
   return discoverProfiles().then(dedupeProfiles);
 }
 
+/**
+ * Which Claude transcripts a narrowed index reads, by the project dir it sits in
+ * (Claude's encoding of the session's cwd) and the session id its filename
+ * carries. Decided BEFORE a transcript is opened, which is the whole point:
+ * parsing every transcript is what makes a full index slow.
+ */
+export type TranscriptFilter = (projectDir: string, sessionId: string) => boolean;
+
 export interface SessionProvider {
   source: AgentSource;
-  index(): Promise<AgentSession[]>;
+  /** Every session on disk — or, given `only`, the ones it admits (providers cheap enough to scan whole may ignore it). */
+  index(only?: TranscriptFilter): Promise<AgentSession[]>;
 }
