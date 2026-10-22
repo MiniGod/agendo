@@ -15,10 +15,10 @@ function ConfirmView({ b, page }: { b: BulkDialog; page: number }) {
   return (
     <Box flexDirection="column">
       <Text bold color="red">{`Delete everything safe to remove — ${n} row${n === 1 ? "" : "s"}?`}</Text>
-      <Text dimColor wrap="truncate">
-        {"Each goes with the boxes its own dialog starts ticked (worktree and branch); transcripts and tmp files are kept."}
-      </Text>
-      <Text dimColor wrap="truncate">{"Each row is checked again right before it goes; one that is no longer safe is skipped. A paused tab's checkout is left alone."}</Text>
+      {/* Each line fits 80 columns: these are what the dialog is there to say. */}
+      <Text dimColor wrap="truncate">{"Each goes with the boxes its own dialog starts ticked: worktree and branch."}</Text>
+      <Text dimColor wrap="truncate">{"Transcripts and tmp files are kept. A paused tab's checkout is left alone."}</Text>
+      <Text dimColor wrap="truncate">{"Each row is checked again right before it goes; one no longer safe is skipped."}</Text>
       <Box flexDirection="column" marginTop={1}>
         {b.top > 0 ? <Text dimColor>{`   ↑ ${b.top} more`}</Text> : null}
         {shown.map((r) => (

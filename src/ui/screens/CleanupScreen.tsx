@@ -45,7 +45,7 @@ interface ListProps {
   rows: CleanupRow[];
   /** How many rows there are before the filter. */
   total: number;
-  /** How many of those are still being probed, and so in no filter but `all` yet. */
+  /** How many rows the `/` text matches are still being probed. Each is in no filter but `all` — unless measured before, when it keeps its last filter until the new result lands. */
   pending: number;
   state: CleanupState;
   gits: ReadonlyMap<string, GitState | null>;
@@ -160,7 +160,9 @@ export function CleanupScreen({
   }, [state, stored, visible]);
   const { stdout } = useStdout();
   const page = Math.max(2, Math.floor(((stdout?.rows ?? 24) - 8) / 2));
-  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict, page, pending };
+  // D's dialog is one line a row, under nine lines of its own (title, three of explanation, ↑/↓ more, the y line and gaps).
+  const bulkPage = Math.max(2, (stdout?.rows ?? 24) - 10);
+  const env: CleanupEnv = { rows: visible, all: sorted, offers, git, verdict, page: bulkPage, pending };
   const setNote = (note: string | null) => setState((s) => ({ ...s, note }));
   const end = useCleanupEnd({ model, setNote, reload, onQuit });
   const { run, runAll } = useCleanupRuns({ rows, setState });
@@ -210,7 +212,7 @@ export function CleanupScreen({
   const top = useRef(0);
   top.current = pageTop(state.cursor, visible.length, page, top.current);
 
-  if (state.bulk) return <CleanupBulkView b={state.bulk} page={page} />;
+  if (state.bulk) return <CleanupBulkView b={state.bulk} page={bulkPage} />;
   if (end.confirm) return <ConfirmEndScreen title={end.confirm.session.title} prompt={end.confirm.prompt} force={end.confirm.force} />;
   const d = state.dialog;
   if (d) {

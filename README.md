@@ -512,8 +512,10 @@ five minutes. "Has something to lose" is a row with dirty files, unpushed commit
 unmerged branch, ignored files, checked-out submodules or an unreadable `git status`.
 A row whose git state is still being measured is in neither until it is; the header
 says how many are still being checked. (A row measured again after a delete keeps its
-place until the new measurement lands; after `R` every row starts over.) The main checkout, and a session whose
-checkout and branch are both gone, only show under "all". `/` adds a text filter on
+place until the new measurement lands; after `R` every row starts over.) A row with nothing to judge or nothing on
+offer only shows under "all": the main checkout, a session whose checkout and branch are
+both gone, and a row whose git shows nothing at risk but whose dialog would tick nothing —
+it is running, was written to moments ago, or is a checkout the dialog won't remove. `/` adds a text filter on
 title, branch and path (enter keeps it, esc clears it). The header shows the filter
 and `shown of total`; sorting applies within the filter. The `f` filter (not the
 `/` text) is kept until agendo exits, so leaving the view and pressing `C` again keeps it.
