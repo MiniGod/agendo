@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Open in agendo
 // @namespace    https://github.com/MiniGod/agendo
-// @version      1.2.0
+// @version      1.3.0
 // @description  Adds an "Open in agendo" button to Azure DevOps and GitHub pull requests and work items. It focuses the agendo session for that PR or work item, resuming it first if it is paused or idle.
 // @match        https://dev.azure.com/*
 // @match        https://*.visualstudio.com/*
 // @match        https://github.com/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
+// @noframes
 // ==/UserScript==
 //
 // The button is a plain link to agendo://focus?pr=<id> or ?workItem=<id>, plus
@@ -24,21 +25,29 @@
 // another changes the URL without loading a page. So the script re-reads the
 // location whenever it changes and moves, relabels or removes the button.
 //
-// A click never navigates the page itself. Following the link would send the
-// TOP window to agendo://, and even though the page stays put, the browser
-// fires beforeunload/pagehide first — Firefox included — and Azure DevOps tears
-// down its live-update (SignalR) connection and shows an "updates paused"
-// warning. So the click is cancelled and the link is handed over from a hidden
-// iframe instead (`launch`), created inside the click handler so it carries the
-// click's user activation, which Firefox and Chromium both require before an
-// iframe may open an external protocol. The frame stays until the next click
-// or a minute has passed: the first click raises the browser's "open this
-// link?" prompt, which belongs to the frame and must outlive the human reading
-// it. If the page's Content-Security-Policy ENFORCES a rule refusing an agendo:
-// frame, the browser reports a securitypolicyviolation and the script falls
-// back to following the link: the warning comes back, but the button still
-// works. A report-only policy did not block anything and is ignored. Nothing
-// in this script assigns window.location.
+// A click follows the link like any other: the browser hands it to the
+// desktop's handler, and since an external protocol returns no document, the
+// page is not replaced. But browsers fire beforeunload first anyway — Firefox
+// says so in nsDocShell ("other browsers fire beforeunload for external
+// protocols, so keep doing that") — and Azure DevOps then drops its live-update
+// connection and shows an "updates paused" warning. (The jQuery SignalR 2.x
+// client binds, in Firefox only, a beforeunload handler that stops the
+// connection: jquery.signalR.core.js, "Firefox does not fire cross-domain XHRs
+// in the normal unload handler".) So the click arms a one-shot guard (`guard`)
+// that swallows that one beforeunload before the page's handlers see it — in
+// Chromium, the handlers added after the guard, which document-start makes all
+// of them when the script manager injects in time. No pagehide or unload
+// follows, since nothing commits.
+//
+// 1.2.0 launched from a hidden iframe instead, and did nothing on Azure DevOps:
+// its enforced Content-Security-Policy says `frame-src http: https: blob: tfs:`,
+// and Firefox subjects external schemes to frame-src (nsCSPService.cpp), so the
+// frame was refused. GitHub's frame-src names two hosts and refuses it too.
+// window.open would dodge CSP but leaves a blank tab behind in some browsers.
+// Nothing in this script assigns window.location or opens a window.
+//
+// Set localStorage["agendo.debug"] = "1" on the page (devtools console) to log
+// to the console what each click did and whether the guard caught the event.
 (function () {
   "use strict";
 
@@ -83,62 +92,93 @@
     return `agendo://focus?${target.kind}=${target.id}${target.repo ? `&repo=${target.repo}` : ""}`;
   }
 
-  /** How long the hidden iframe stays at most: long enough to answer the browser's first-use prompt. */
-  const FRAME_MS = 60000;
+  /**
+   * How long a click keeps the guard armed, waiting for the browser's
+   * beforeunload. Chromium fires it while handling the click and Firefox a
+   * task later, so this is slack, kept short because a real unload in that
+   * window (the tab closing) would be swallowed too.
+   */
+  const GUARD_MS = 1000;
 
-  /** The previous launch's teardown: its frame and its CSP listener go when the next click comes. */
-  let pending = null;
+  /** localStorage key that switches on console logging of what the button did. */
+  const DEBUG_KEY = "agendo.debug";
 
   /**
-   * Hand `href` to the desktop's agendo:// handler from a hidden iframe, so the
-   * page itself never begins to unload (see the header). If an ENFORCED CSP
-   * blocks the frame, follow the link after all (`fallback`), once. `doc` and
-   * `later` are injected for tests.
+   * console.info `args` when localStorage[DEBUG_KEY] is "1" — info, not
+   * debug, which Chromium's console hides by default. `storage` and `out` are
+   * injected for tests; storage that throws (blocked site data), even on
+   * access, means off.
    */
-  function launch(href, fallback, doc = document, later = setTimeout) {
-    if (pending) pending();
-    const frame = doc.createElement("iframe");
-    const done = () => {
-      frame.remove();
-      doc.removeEventListener("securitypolicyviolation", onBlocked);
-      if (pending === done) pending = null;
-    };
-    const onBlocked = (e) => {
-      if (e.disposition !== "enforce" || !String(e.blockedURI).startsWith("agendo")) return;
-      done();
-      fallback();
-    };
-    pending = done;
-    doc.addEventListener("securitypolicyviolation", onBlocked);
-    frame.style.display = "none";
-    frame.src = href;
-    doc.body.appendChild(frame);
-    later(done, FRAME_MS);
+  function debug(args, storage = () => globalThis.localStorage, out = console) {
+    let on = false;
+    try {
+      on = storage().getItem(DEBUG_KEY) === "1";
+    } catch {
+      return;
+    }
+    if (on) out.info("[agendo]", ...args);
   }
 
   /**
-   * The button's click: launch from an iframe instead of following the link; a
-   * modified click is left to the browser. `later` is injected for tests.
+   * Install the beforeunload guard on `win` and return its `arm`. Once armed,
+   * the next beforeunload stops at this listener, so the page's handlers
+   * after it never see it. Which handlers come after depends on the engine,
+   * as measured in real Chromium and Firefox: Firefox runs a window's capture
+   * listeners before its bubble ones (EventDispatcher.cpp) and skips the
+   * bubble pass once propagation is stopped, so it beats every bubble handler
+   * whenever it was added; Chromium runs a window's listeners in the order
+   * they were added, so it beats only those added after it — hence
+   * @run-at document-start. The guard neither cancels the event nor sets
+   * returnValue, which would raise the "leave this page?" prompt. It disarms
+   * after that one event, or after GUARD_MS if none comes; `arm` returns a
+   * `disarm` for a click that turns out not to navigate. While armed, a
+   * beforeunload of the page's own — the tab closing — is swallowed too, so
+   * the window is kept short. `later` and `log` are injected for tests.
    */
-  function onClick(e, later = setTimeout) {
-    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-    e.preventDefault();
-    const link = e.currentTarget;
-    launch(link.getAttribute("href"), () => {
-      // Only reached when the page's CSP refused the iframe: a real click on a
-      // throwaway copy, which this handler is not listening to.
-      // Attached for the click, since Firefox long ignored click() on a detached link.
-      const copy = document.createElement("a");
-      copy.href = link.getAttribute("href");
-      document.body.appendChild(copy);
-      copy.click();
-      copy.remove();
-    }, document, later);
+  function guard(win = window, later = setTimeout, log = debug) {
+    let armed = null;
+    win.addEventListener("beforeunload", (e) => {
+      if (!armed) return;
+      armed = null;
+      e.stopImmediatePropagation();
+      log(["stopped beforeunload: page listeners added after the guard were skipped"]);
+    }, true);
+    return function arm() {
+      const token = {};
+      armed = token;
+      later(() => {
+        if (armed !== token) return;
+        armed = null;
+        log([`no beforeunload within ${GUARD_MS}ms; guard disarmed`]);
+      }, GUARD_MS);
+      return () => {
+        if (armed === token) armed = null;
+      };
+    };
   }
 
-  /** Tear down any pending launch — for tests, which share this script's state. */
-  function reset() {
-    if (pending) pending();
+  /**
+   * The button's click. A plain click arms the guard and lets the browser
+   * follow the link itself, with the click's user activation intact; a
+   * modified click is left to the browser unguarded. A page listener that runs
+   * after this one may still cancel the click, and then no beforeunload comes:
+   * a task later, once the click has been dispatched to every listener, a
+   * cancelled click disarms the guard again. `later` and `log` are injected
+   * for tests.
+   */
+  function onClick(e, arm, later = setTimeout, log = debug) {
+    const href = e.currentTarget.getAttribute("href");
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) {
+      log([`modified click on ${href}: left to the browser`]);
+      return;
+    }
+    const disarm = arm();
+    log([`following ${href}; beforeunload guard armed for ${GUARD_MS}ms`]);
+    later(() => {
+      if (!e.defaultPrevented) return;
+      disarm();
+      log(["the page cancelled the click, so the link was not followed; guard disarmed"]);
+    }, 0);
   }
 
   function render() {
@@ -166,7 +206,7 @@
         boxShadow: "0 2px 8px rgba(0,0,0,.3)",
         cursor: "pointer",
       });
-      button.addEventListener("click", onClick);
+      button.addEventListener("click", (e) => onClick(e, arm));
       document.body.appendChild(button);
     }
     const href = hrefFor(target);
@@ -183,12 +223,21 @@
   // whose GM_info every one of them (Tampermonkey, Violentmonkey,
   // Greasemonkey 4) defines even then.
   if (typeof GM_info === "undefined" && typeof module === "object" && module && module.exports) {
-    module.exports = { linkFor, hrefFor, launch, onClick, reset, FRAME_MS };
+    module.exports = { linkFor, hrefFor, debug, guard, onClick, GUARD_MS, DEBUG_KEY };
     return;
   }
 
+  // First, before the page's own scripts where @run-at document-start allows,
+  // so in Chromium the guard runs ahead of every beforeunload listener they
+  // add (see `guard`). A script manager that injects late leaves Chromium's
+  // earlier listeners unguarded; Firefox's bubble listeners stay guarded.
+  const arm = guard();
+  debug([`guard installed at readyState ${document.readyState}`]);
+
   let last = "";
   function check() {
+    // At document-start there is no body yet; the poll comes back for it.
+    if (!document.body) return;
     if (window.location.href === last && document.getElementById(BUTTON_ID)) return;
     last = window.location.href;
     render();
