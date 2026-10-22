@@ -582,6 +582,17 @@ GitHub page can run it. Setup on Linux:
    github.com). Some browsers' "always" applies to every site, which lets any page
    you visit fire `agendo://` links.
 
+**Links in the terminal.** `agendo launch` prints each new detached session's link
+(`link:    agendo://focus?session=<short id>`), and `agendo --llm` and the
+orchestrator prompts tell agents to write any session they mention to you as a
+markdown link, `[<window name or short id>](agendo://focus?session=<short id>)`.
+Clicking one runs the same handler, so it needs step 1 above. Inside tmux, links
+are clickable only once tmux passes hyperlinks through to your terminal:
+`set -as terminal-features 'xterm*:hyperlinks'` in `~/.tmux.conf`. A link by short
+id also resumes a closed session; one by window name (what `launch` prints for a
+codex session, which has no id yet) reaches the session only while that window is
+open.
+
 Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)
 and `?session=<id>`, where the id may also be one of agendo's own window names
