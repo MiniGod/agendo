@@ -16,6 +16,7 @@ describe("parseFocusUrl accepts exactly the three forms", () => {
     ["agendo://focus?session=cl-bg-codex-a1b2c3", { kind: "session", token: "cl-bg-codex-a1b2c3" }],
     ["agendo://focus?session=cl-wi-102", { kind: "session", token: "cl-wi-102" }],
     [`agendo://focus?session=cl-pr-${"a".repeat(60)}-${"b".repeat(30)}-5001`, { kind: "session", token: `cl-pr-${"a".repeat(60)}-${"b".repeat(30)}-5001` }],
+    [`agendo://focus?session=cl-pr-${"a".repeat(170)}`, { kind: "session", token: `cl-pr-${"a".repeat(170)}` }],
     // Browsers differ on whether they add an empty path.
     ["agendo://focus/?pr=1", { kind: "pr", id: 1 }],
     ["agendo://focus?pr=2147483647", { kind: "pr", id: 2147483647 }],
@@ -131,7 +132,7 @@ describe("parseFocusUrl refuses everything else", () => {
     `agendo://focus?session=a${"b".repeat(64)}`,
     // a window name gets its extra length only under a known prefix, and no further
     `agendo://focus?session=cl-evil-${"b".repeat(64)}`,
-    `agendo://focus?session=cl-wi-${"b".repeat(101)}`,
+    `agendo://focus?session=cl-wi-${"b".repeat(171)}`,
     "agendo://focus?session=cl-wi-a.b",
     "agendo://focus?session=cl-wi-102&repo=acme",
     `agendo://focus?pr=${"1".repeat(MAX_URL_LENGTH)}`,
@@ -180,12 +181,12 @@ describe("the per-field shapes", () => {
     expect(isSessionToken("")).toBe(false);
   });
 
-  test("isWindowName: a known cl-<kind>- prefix and up to 100 more characters, never more", () => {
-    for (const ok of ["cl-claude-abc", "cl-copilot-x", "cl-codex-1", "cl-bg-codex-a1", "cl-new-claude-z", "cl-free-q", "cl-wi-102", "cl-pr-acme-appweb-5", `cl-wi-${"a".repeat(100)}`]) {
+  test("isWindowName: a known cl-<kind>- prefix and up to 170 more characters, never more", () => {
+    for (const ok of ["cl-claude-abc", "cl-copilot-x", "cl-codex-1", "cl-bg-codex-a1", "cl-new-claude-z", "cl-free-q", "cl-wi-102", "cl-pr-acme-appweb-5", `cl-wi-${"a".repeat(170)}`]) {
       expect(isWindowName(ok), ok).toBe(true);
       expect(isSessionToken(ok), ok).toBe(true);
     }
-    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(101)}`]) {
+    for (const bad of ["cl-wi-", "cl-x-1", "cl-WI-1", "cl-wi--1", "cl-wi-1.2", "cl-wi-1:2", "launcher", "cl-wi-1 2", `cl-wi-${"a".repeat(171)}`]) {
       expect(isWindowName(bad), bad).toBe(false);
     }
   });

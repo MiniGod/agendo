@@ -444,7 +444,7 @@ test("a link by an id-less window name focuses the session that window is tagged
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
 });
 
-test("focus by an id-bearing window name is focus by the short id it embeds", async ({ mock }) => {
+test("focus by an id-bearing window name is still focus by the short id it embeds", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "focus", RUNNING_TARGET);
   expect(r.code, r.stderr).toBe(0);

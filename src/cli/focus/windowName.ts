@@ -16,10 +16,11 @@
 // window focus then brings forward is the attributed one, i.e. this window.
 // Placeholders are never attributed (they hold no agent), so never match.
 //
-// Read-only: the only tmux call it can lead to is the pane listing behind
-// `attributed`, and it returns sessions that already exist — what focus then
-// does with them is focus's business, and a link can still only focus.
-import { ID_BEARING_NAME, sessionName, shortId, type LiveTarget } from "../../runtime/tmux/index.ts";
+// Read-only: the only tmux calls it can lead to are the window and pane
+// listings behind `attributed`, and it returns sessions that already exist —
+// what focus then does with them is focus's business, and a link can still
+// only focus.
+import { ID_BEARING_NAME, sessionName, type LiveTarget } from "../../runtime/tmux/index.ts";
 import type { AgentSession } from "../../shared/types.ts";
 import { findSession } from "../commands/resume.ts";
 import { isWindowName } from "./url.ts";
@@ -32,13 +33,9 @@ import { isWindowName } from "./url.ts";
  * name, so an id never costs a tmux read.
  */
 export function sessionsForToken(all: AgentSession[], token: string, attributed: () => Map<string, LiveTarget>): AgentSession[] {
-  if (!isWindowName(token)) {
+  // `findSession` already reads an id-bearing name as the short id it embeds.
+  if (!isWindowName(token) || ID_BEARING_NAME.test(token)) {
     const s = findSession(all, token);
-    return s ? [s] : [];
-  }
-  const sid = ID_BEARING_NAME.exec(token)?.[1];
-  if (sid) {
-    const s = all.find((x) => shortId(x.id) === sid);
     return s ? [s] : [];
   }
   const windows = attributed();
