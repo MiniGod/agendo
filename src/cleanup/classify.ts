@@ -97,6 +97,16 @@ export function defaultSelection(offers: Offers, git: GitState | null | undefine
   };
 }
 
+/**
+ * Whether the dialog would open with the worktree or the branch ticked — the
+ * one definition of "safe to remove" (deleting it loses nothing) that the
+ * view's filter reuses rather than restating. Unprobed git is never safe.
+ */
+export function safeToRemove(offers: Offers, git: GitState | null | undefined, active = false): boolean {
+  const sel = defaultSelection(offers, git, active);
+  return sel.worktree || sel.branch;
+}
+
 /** Everything that would be lost by removing the checkout and its branch, one line each; empty when nothing. */
 export function lossLines(git: GitState | null | undefined): string[] {
   if (!git) return [];

@@ -11,7 +11,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { sessionName } from "./harness/fixtures.ts";
+import { RUNNING_TARGET, sessionName, tmuxState } from "./harness/fixtures.ts";
 import { REPO_ROOT, type MockEnv } from "./harness/mockEnv.ts";
 import { expect, KEY, test } from "./harness/test.ts";
 import type { WebTerminal } from "./harness/wterm.ts";
@@ -368,4 +368,139 @@ test("the real-git passthrough fails closed: nothing outside the fixture dir rea
   expect(existsSync(join(outside, "patches"))).toBe(false);
   expect(existsSync(join(outside, "planted"))).toBe(false);
   expect(existsSync(join(outside, "wt"))).toBe(true);
+});
+
+// ── the f filter, the / text filter, and p / x / X on a session ──────────────
+
+/**
+ * Four more orphan worktrees beside the fixture's, one per kind of risk the
+ * filter has to tell apart from "safe": a clean one at master (safe), one whose
+ * branch is pushed but not merged, one with an ignored `.env`, and one dirty
+ * but with no commits of its own. All dated well past the "written moments ago"
+ * guard, which would otherwise hold every one of them back from "safe".
+ */
+async function addFilterCases(fx: Fx): Promise<void> {
+  for (const name of ["spare", "pushed", "ignored", "dirtyonly"]) fx.git(fx.repo, "worktree", "add", "-q", "-b", `worktree-${name}`, fx.wt(name), "master");
+  await writeFile(join(fx.wt("pushed"), "shared.txt"), "on the remote, not in master\n");
+  fx.git(fx.wt("pushed"), "add", "shared.txt");
+  fx.git(fx.wt("pushed"), "commit", "-q", "-m", "shared");
+  fx.git(fx.wt("pushed"), "push", "-q", "origin", "worktree-pushed");
+  await writeFile(join(fx.repo, ".git", "info", "exclude"), ".env\n");
+  await writeFile(join(fx.wt("ignored"), ".env"), "SECRET=1\n");
+  await writeFile(join(fx.wt("dirtyonly"), "notes.txt"), "untracked\n");
+  const old = Date.now() / 1000 - 3600;
+  for (const name of ["spare", "pushed", "ignored", "dirtyonly"]) await utimes(fx.wt(name), old, old);
+}
+
+/** Whether the list shows a row titled `title` (matched in the title column, not in a git cell). */
+const listed = (screen: string, title: string) => new RegExp(`(idle|running|paused|no session)\\s+${title}\\b`).test(screen);
+
+test("f filters to what is safe to remove, then to what has something to lose, with counts; / filters by text", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  await addFilterCases(fx);
+  const wt = await openCleanup(launch, fx);
+  const all = await wt.waitForText("Cleanup — 9 sessions & worktrees");
+  expect(all).toContain("filter: all");
+  expect(all).toContain("f filter: all");
+
+  await wt.press("f");
+  const safe = await wt.waitForText("Cleanup — 2 of 9 sessions & worktrees  ·  filter: safe to remove");
+  for (const t of ["Merged feature", "spare"]) expect(listed(safe, t)).toBe(true);
+  for (const t of ["Half-done work", "orphan", "pushed", "ignored", "dirtyonly", "Busy right now", "Main checkout chat"]) expect(listed(safe, t)).toBe(false);
+
+  await wt.press("f");
+  const risk = await wt.waitForText("Cleanup — 5 of 9 sessions & worktrees  ·  filter: has something to lose");
+  expect(risk).toMatch(/Half-done work.*1 dirty · 1 unpushed · unmerged/);
+  expect(risk).toMatch(/orphan.*1 unpushed · unmerged/);
+  expect(risk).toMatch(/pushed.*clean · unmerged/);
+  expect(risk).toMatch(/ignored.*1 ignored · merged/);
+  expect(risk).toMatch(/dirtyonly.*1 dirty · merged/);
+  // Running and the main checkout have nothing on offer to lose; neither is listed.
+  for (const t of ["Merged feature", "spare", "Busy right now", "Main checkout chat"]) expect(listed(risk, t)).toBe(false);
+  // A cursor whose row the next filter hides lands on a row that is shown.
+  await focus(wt, "Half-done work");
+  await wt.press("f");
+  await wt.waitForText("Cleanup — 9 sessions & worktrees  ·  filter: all");
+  await wt.press("f");
+  const back = await wt.waitForText("filter: safe to remove");
+  expect(back.split("\n").find((l) => l.startsWith("▸"))).toMatch(/Merged feature|spare/);
+  await wt.press("f");
+  await wt.press("f");
+  await wt.waitForText("Cleanup — 9 sessions & worktrees  ·  filter: all");
+
+  await wt.press("/");
+  await wt.waitForText("type to filter by title, branch or path");
+  // Letters that are keys elsewhere in the view (s sorts, p pauses, x kills) are just text here.
+  await wt.press("p");
+  await wt.press("u");
+  await wt.press("s");
+  await wt.press("h");
+  const typed = await wt.waitForText("Cleanup — 1 of 9 sessions & worktrees  ·  filter: all  ·  /push");
+  expect(listed(typed, "pushed")).toBe(true);
+  expect(typed).toContain("sort: updated ↓");
+  await wt.press(KEY.enter);
+  await wt.waitForText("f filter: all");
+  await wt.press(KEY.escape);
+  await wt.waitForText("Cleanup — 9 sessions & worktrees");
+});
+
+test("the filter is kept for the rest of the run: leaving the view and pressing C again keeps it", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  const wt = await openCleanup(launch, fx);
+  await wt.press("f");
+  await wt.waitForText("filter: safe to remove");
+  await wt.press(KEY.escape);
+  await wt.waitForText("Current sprint");
+  await wt.press("C");
+  const again = await wt.waitForText("filter: safe to remove");
+  expect(again).toMatch(/Cleanup — \d+ of 5 sessions & worktrees/);
+});
+
+test("x on a running row asks, kills it the way close does, and the row can then be cleaned up", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  const running = sessionName("claude", IDS.running);
+  await mock.setTmuxState({
+    sessions: ["agendo"],
+    windows: [
+      { session: "agendo", index: 0, name: "launcher" },
+      { session: "agendo", index: 4, name: running },
+    ],
+    panes: [
+      { session: "agendo", window: "launcher", cwd: mock.tmpDir, placeholder: false },
+      { session: "agendo", window: running, cwd: fx.wt("running"), placeholder: false },
+    ],
+    captures: { [running]: tmuxState.captures[RUNNING_TARGET] },
+  });
+  const wt = await openCleanup(launch, fx);
+  await focus(wt, "Busy right now");
+  await wt.waitForText(/● running\s+Busy right now/);
+  await wt.press("x");
+  await wt.waitForText("Kill Busy right now? y/n", 20000);
+  await wt.press("n");
+  await wt.waitForText("Kill cancelled");
+  expect(await wt.screen()).toContain("Cleanup —");
+
+  await wt.press("x");
+  await wt.waitForText("Kill Busy right now? y/n", 20000);
+  await wt.press("y");
+  await wt.waitForText("killed Busy right now", 20000);
+  expect((await mock.tmuxLog()).filter((a) => a[0].startsWith("kill-"))).toEqual([["kill-window", "-t", "=agendo:4"]]);
+  // Still in the cleanup view, the row no longer running — so its checkout is on offer now.
+  await wt.waitForText(/○ idle\s+Busy right now/, 20000);
+  await wt.press(KEY.enter);
+  const dialog = await wt.waitForText("Clean up — Busy right now");
+  expect(dialog).not.toContain("This session is running");
+  expect(dialog).toContain("[x] worktree");
+  expect(existsSync(fx.wt("running"))).toBe(true);
+});
+
+test("p and x on a row with no session say why and do nothing", async ({ launch, mock }) => {
+  const fx = await buildFixture(mock);
+  const wt = await openCleanup(launch, fx);
+  await focus(wt, "orphan");
+  await wt.press("x");
+  await wt.waitForText("x kills a running session — this row is not a session.");
+  await wt.press("p");
+  await wt.waitForText("p pauses a running session — this row is not a session.");
+  expect((await mock.tmuxLog()).filter((a) => a[0].startsWith("kill-"))).toEqual([]);
 });

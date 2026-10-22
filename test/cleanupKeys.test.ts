@@ -15,7 +15,7 @@ const row = (key: string, over: Partial<CleanupRow> = {}): CleanupRow => ({
 const CLEAN: GitState = { worktreeExists: true, isMain: false, branch: "worktree-a", mainBranch: "master", head: "h1", dirty: 0, ignored: [], changed: [], submodules: 0, unpushed: 0, merged: true, base: "origin/master" };
 
 function envOf(rows: CleanupRow[], gits: Record<string, GitState | null | undefined>): CleanupEnv {
-  return { rows, offers: (r) => offersFor(r, gits[r.key]), git: (r) => gits[r.key] };
+  return { rows, all: rows, offers: (r) => offersFor(r, gits[r.key]), git: (r) => gits[r.key] };
 }
 
 function press(state: CleanupState, env: CleanupEnv, ...keys: Array<string | Partial<Key>>) {

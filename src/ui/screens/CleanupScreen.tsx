@@ -1,18 +1,21 @@
 import { Box, Text, useInput, useStdout } from "ink";
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { LoadedModel } from "../../app/model/index.ts";
 import { offersFor } from "../../cleanup/classify.ts";
 import { claudeTmpRoot } from "../../cleanup/disk.ts";
 import { executeCleanup } from "../../cleanup/execute.ts";
+import { filterLabel, filterRows, verdictOf, type CleanupFilter } from "../../cleanup/filter.ts";
 import { othersRunningIn, sharedActivityPaths } from "../../cleanup/rows.ts";
 import { formatSize, sortRows, totalSize } from "../../cleanup/sort.ts";
 import type { CleanupRow, GitState, RowSizes } from "../../cleanup/types.ts";
 import { fit, homeShort, timeAgo } from "../format/index.ts";
 import { liveManagedPaths } from "../../runtime/tmux/index.ts";
 import { canonical, useCleanupData } from "../hooks/useCleanupData.ts";
+import { useCleanupEnd } from "../hooks/useCleanupEnd.ts";
 import { cleanupKey, finishRun, syncCursor, INITIAL_CLEANUP, type CleanupDialog, type CleanupEnv, type CleanupState } from "../keys/cleanup.ts";
 import { gitCells, pageTop, runCell, sortLabel } from "../models/cleanupRow.ts";
 import { CleanupDialogView, StyledCells } from "./CleanupDialog.tsx";
+import { ConfirmEndScreen } from "./ConfirmEndScreen.tsx";
 
 /**
  * Where every live (non-placeholder) agendo pane is working, as realpaths —
@@ -54,6 +57,10 @@ function RowLines({ row, focused, git, sizes, titleW }: { row: CleanupRow; focus
 
 interface ListProps {
   rows: CleanupRow[];
+  /** How many rows there are before the filter. */
+  total: number;
+  /** How many of those are still being probed, and so in no filter but `all` yet. */
+  pending: number;
   state: CleanupState;
   gits: ReadonlyMap<string, GitState | null>;
   sizes: ReadonlyMap<string, RowSizes>;
@@ -62,31 +69,60 @@ interface ListProps {
   cols: number;
 }
 
-function CleanupList({ rows, state, gits, sizes, top, page, cols }: ListProps): ReactElement {
+/** The header's count: every row, or `3 of 7` once a filter hides some. */
+function countLabel(shown: number, total: number, filtered: boolean): string {
+  return `${filtered ? `${shown} of ${total}` : total} session${total === 1 ? "" : "s"} & worktrees`;
+}
+
+/** What the header says is filtering the list: the `f` filter, the `/` text, and what is not judged yet. */
+function filterNote(state: CleanupState, pending: number): string {
+  const parts = [`filter: ${filterLabel(state.filter)}`];
+  if (state.query) parts.push(`/${state.query}`);
+  if (state.filter !== "all" && pending > 0) parts.push(`${pending} still checking`);
+  return parts.map((p) => `  ·  ${p}`).join("");
+}
+
+function Footer({ state }: { state: CleanupState }) {
+  if (state.typing) return <Text dimColor wrap="truncate">{"type to filter by title, branch or path · enter keep · esc clear"}</Text>;
+  return (
+    <Text dimColor wrap="truncate">
+      {`↑/↓ move · enter/space clean up · f filter: ${filterLabel(state.filter)} · / search · s sort: ${state.sort} · r reverse · p pause · x/X kill · esc back · q quit`}
+    </Text>
+  );
+}
+
+function CleanupList({ rows, total, pending, state, gits, sizes, top, page, cols }: ListProps): ReactElement {
   const titleW = Math.max(16, Math.min(48, cols - 2 - RUN_W - 2 * TIME_W - SIZE_W - 30));
   const shown = rows.slice(top, top + page);
+  const filtered = state.filter !== "all" || state.query !== "";
   return (
     <Box flexDirection="column">
       <Text bold>
-        {`Cleanup — ${rows.length} session${rows.length === 1 ? "" : "s"} & worktrees`}
-        <Text dimColor>{`  ·  sort: ${sortLabel(state.sort, state.reversed)}`}</Text>
+        {`Cleanup — ${countLabel(rows.length, total, filtered)}`}
+        <Text dimColor>{`${filterNote(state, pending)}  ·  sort: ${sortLabel(state.sort, state.reversed)}`}</Text>
       </Text>
+      {state.typing ? <Text>{`/ ${state.query}`}<Text color="cyan">{"▏"}</Text></Text> : null}
       <Text dimColor wrap="truncate">
         {`  ${"STATE".padEnd(RUN_W)}${"TITLE / PATH [BRANCH]".padEnd(titleW)}${"UPDATED".padEnd(TIME_W)}${"CREATED".padEnd(TIME_W)}${"SIZE".padStart(SIZE_W - 1).padEnd(SIZE_W)}GIT`}
       </Text>
-      {rows.length === 0 ? <Text dimColor>{"  nothing to clean up here"}</Text> : null}
+      {rows.length === 0 ? <Text dimColor>{filtered && total > 0 ? "  nothing matches this filter" : "  nothing to clean up here"}</Text> : null}
       {top > 0 ? <Text dimColor>{`  ↑ ${top} more`}</Text> : null}
       {shown.map((r, i) => (
         <RowLines key={r.key} row={r} focused={top + i === state.cursor} git={gits.get(r.key)} sizes={sizes.get(r.key)} titleW={titleW} />
       ))}
       {top + page < rows.length ? <Text dimColor>{`  ↓ ${rows.length - top - page} more`}</Text> : null}
       {state.note ? <Text color="yellow">{state.note}</Text> : null}
-      <Text dimColor wrap="truncate">
-        {`↑/↓ move · enter/space clean up · s sort: ${state.sort} · r reverse · esc back · q quit`}
-      </Text>
+      <Footer state={state} />
     </Box>
   );
 }
+
+/**
+ * The `f` filter the view last showed, kept for the rest of this run of the
+ * TUI so leaving the view and coming back (C again) keeps it. Never written to
+ * disk: a new run starts from `all`.
+ */
+let rememberedFilter: CleanupFilter = "all";
 
 /**
  * The cleanup view (C from the list): every session in scope and every
@@ -103,31 +139,44 @@ export function CleanupScreen({
   extraRoots,
   onBack,
   onQuit,
+  reload,
 }: {
   model: LoadedModel;
   inScope: (cwd: string) => boolean;
   extraRoots: readonly string[];
   onBack: () => void;
   onQuit: () => void;
+  /** Re-read the model, so a session paused or killed here shows it. */
+  reload: () => void;
 }): ReactElement {
   const [scanKey, setScanKey] = useState(0);
   const { rows, gits, sizes } = useCleanupData({ model, inScope, extraRoots, scanKey });
-  const [stored, setState] = useState<CleanupState>(INITIAL_CLEANUP);
+  const [stored, setState] = useState<CleanupState>(() => ({ ...INITIAL_CLEANUP, filter: rememberedFilter }));
+  useEffect(() => {
+    rememberedFilter = stored.filter;
+  }, [stored.filter]);
+  // Re-read with every model refresh; run() reads it afresh again before deleting.
+  const panes = useMemo(() => livePaneCwds(), [model]); // eslint-disable-line react-hooks/exhaustive-deps -- `model` is the refresh tick, not an input
+  const offers = useCallback((row: CleanupRow) => offersFor(row, gits.get(row.key), othersRunningIn(row, rows, panes)), [gits, rows, panes]);
+  const git = useCallback((row: CleanupRow) => gits.get(row.key), [gits]);
   const sorted = useMemo(() => sortRows(rows, stored.sort, stored.reversed, sizes), [rows, stored.sort, stored.reversed, sizes]);
-  const state = syncCursor(stored, sorted);
+  // The filter judges each row with the dialog's own offers and defaults (see `verdictOf`).
+  const verdicts = useMemo(() => new Map(sorted.map((r) => [r.key, verdictOf(r, git(r), offers(r))])), [sorted, git, offers]);
+  const visible = useMemo(
+    () => filterRows(sorted, stored.filter, stored.query, (r) => verdicts.get(r.key) ?? "pending", git),
+    [sorted, stored.filter, stored.query, verdicts, git],
+  );
+  const pending = [...verdicts.values()].filter((v) => v === "pending").length;
+  // A filter that hides the focused row leaves the cursor at its index, on whatever row is there now.
+  const state = syncCursor(stored, visible);
   // Keep the stored focus in step, so a re-sort before the next key moves the
   // cursor with its row rather than leaving it on an index.
   // Functional, so it applies on top of whatever landed meanwhile (a finished run) rather than over it.
   useEffect(() => {
-    if (state !== stored) setState((s) => syncCursor(s, sorted));
-  }, [state, stored, sorted]);
-  // Re-read with every model refresh; run() reads it afresh again before deleting.
-  const panes = useMemo(() => livePaneCwds(), [model]); // eslint-disable-line react-hooks/exhaustive-deps -- `model` is the refresh tick, not an input
-  const env: CleanupEnv = {
-    rows: sorted,
-    offers: (row) => offersFor(row, gits.get(row.key), othersRunningIn(row, rows, panes)),
-    git: (row) => gits.get(row.key),
-  };
+    if (state !== stored) setState((s) => syncCursor(s, visible));
+  }, [state, stored, visible]);
+  const env: CleanupEnv = { rows: visible, all: sorted, offers, git };
+  const end = useCleanupEnd({ model, setNote: (note) => setState((s) => ({ ...s, note })), reload, onQuit });
 
   // The plan is built from the row as it is NOW, not the dialog's snapshot: a
   // session that started running while the dialog was open must be refused.
@@ -155,6 +204,7 @@ export function CleanupScreen({
   };
 
   useInput((input, key) => {
+    if (end.answer(input, key)) return;
     const step = cleanupKey(state, input, key, env);
     // A key it ignored must not write its (possibly stale) state back over a run that just finished.
     if (step.state !== state) setState(step.state);
@@ -162,6 +212,7 @@ export function CleanupScreen({
     else if (step.effect === "quit") onQuit();
     else if (step.effect === "refresh") setScanKey((k) => k + 1);
     else if (step.effect === "run" && step.state.dialog) run(step.state.dialog);
+    else if (step.effect !== "none") end.start(step.effect, visible[step.state.cursor]);
   });
 
   const { stdout } = useStdout();
@@ -169,13 +220,16 @@ export function CleanupScreen({
   // The window only moves when the cursor would leave it. A ref, not state:
   // it is derived from the cursor each render and never drives one itself.
   const top = useRef(0);
-  top.current = pageTop(state.cursor, sorted.length, page, top.current);
+  top.current = pageTop(state.cursor, visible.length, page, top.current);
 
+  if (end.confirm) return <ConfirmEndScreen title={end.confirm.session.title} prompt={end.confirm.prompt} force={end.confirm.force} />;
   const d = state.dialog;
   if (d) {
     const live = sorted.find((r) => r.key === d.key);
     const row = live ?? d.row;
     return <CleanupDialogView d={d} row={row} git={gits.get(row.key) ?? d.git} offers={env.offers(row)} sizes={sizes.get(row.key)} />;
   }
-  return <CleanupList rows={sorted} state={state} gits={gits} sizes={sizes} top={top.current} page={page} cols={stdout?.columns ?? 80} />;
+  return (
+    <CleanupList rows={visible} total={sorted.length} pending={pending} state={state} gits={gits} sizes={sizes} top={top.current} page={page} cols={stdout?.columns ?? 80} />
+  );
 }

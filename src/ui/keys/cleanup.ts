@@ -1,9 +1,11 @@
 import type { Key } from "ink";
 import { defaultSelection, needsConfirm, selectionProblem } from "../../cleanup/classify.ts";
 import type { CleanupResult } from "../../cleanup/execute.ts";
+import { nextFilter, type CleanupFilter } from "../../cleanup/filter.ts";
 import { nextSort, type CleanupSort } from "../../cleanup/sort.ts";
 import { BOXES, type CleanupRow, type GitState, type Offers, type Selection } from "../../cleanup/types.ts";
 import type { KeyContext } from "./context.ts";
+import { editLine } from "./lineEdit.ts";
 
 // ── cleanup view (C from the list) ──
 // The view owns its own state and its own useInput (src/ui/screens/CleanupScreen.tsx),
@@ -44,23 +46,41 @@ export interface CleanupState {
   focus: string | null;
   sort: CleanupSort;
   reversed: boolean;
+  /** Which rows `f` keeps. Remembered by the screen for the rest of the TUI's run. */
+  filter: CleanupFilter;
+  /** The `/` text filter on title, branch and path; empty for none. */
+  query: string;
+  /** Whether keys are being typed into the `/` filter. */
+  typing: boolean;
   dialog: CleanupDialog | null;
   /** A one-line answer to the last list key. */
   note: string | null;
 }
 
-/** What the screen must do after a key: nothing, leave, quit, run the dialog's plan, or re-probe. */
-export type CleanupEffect = "none" | "back" | "quit" | "run" | "refresh";
+/**
+ * What the screen must do after a key: nothing, leave, quit, run the dialog's
+ * plan, re-probe, or pause / kill / force-kill the focused row's session.
+ */
+export type CleanupEffect = "none" | "back" | "quit" | "run" | "refresh" | "pause" | "kill" | "forceKill";
 
 export interface CleanupEnv {
+  /** The rows on screen: sorted, then filtered. The list's cursor moves over these. */
   rows: readonly CleanupRow[];
+  /**
+   * Every row, filter or not. The dialog finds its row here, so a row that
+   * leaves the filter while its dialog is open (it went active, say) is not
+   * mistaken for one that is gone.
+   */
+  all: readonly CleanupRow[];
   offers: (row: CleanupRow) => Offers;
   git: (row: CleanupRow) => GitState | null | undefined;
 }
 
 type Step = { state: CleanupState; effect: CleanupEffect };
 
-export const INITIAL_CLEANUP: CleanupState = { cursor: 0, focus: null, sort: "updated", reversed: false, dialog: null, note: null };
+export const INITIAL_CLEANUP: CleanupState = {
+  cursor: 0, focus: null, sort: "updated", reversed: false, filter: "all", query: "", typing: false, dialog: null, note: null,
+};
 
 const stay = (state: CleanupState): Step => ({ state, effect: "none" });
 
@@ -101,18 +121,48 @@ export function openDialog(row: CleanupRow, env: CleanupEnv): CleanupDialog {
   };
 }
 
+function moveCursor(state: CleanupState, dir: -1 | 1, env: CleanupEnv): Step {
+  const cursor = clamp(state.cursor + dir, env.rows.length);
+  return stay({ ...state, cursor, focus: env.rows[cursor]?.key ?? null });
+}
+
+/**
+ * A key while typing into the `/` filter: enter keeps the text and goes back
+ * to the list's keys, esc drops it, ↑/↓ still move, and everything else edits.
+ */
+function queryKey(state: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
+  if (key.return) return stay({ ...state, typing: false });
+  if (key.escape) return stay({ ...state, typing: false, query: "" });
+  if (key.upArrow || key.downArrow) return moveCursor(state, key.upArrow ? -1 : 1, env);
+  const edit = editLine(input, key, state.query, state.query.length);
+  return edit ? stay({ ...state, query: edit.value }) : stay(state);
+}
+
+/** The session keys of the list: p pauses, x kills, X force-kills — the same actions as on the session rows. */
+const END_KEYS: Record<string, CleanupEffect> = { p: "pause", x: "kill", X: "forceKill" };
+
+/** The list's view keys: sort, reverse, filter, and the `/` prompt. Null for any other key. */
+function viewKey(state: CleanupState, input: string): CleanupState | null {
+  // A new order or filter keeps the focused row where it can; syncCursor finds it in the new rows.
+  if (input === "s") return { ...state, sort: nextSort(state.sort) };
+  if (input === "r") return { ...state, reversed: !state.reversed };
+  if (input === "f") return { ...state, filter: nextFilter(state.filter) };
+  if (input === "/") return { ...state, typing: true };
+  return null;
+}
+
 function listKey(prev: CleanupState, input: string, key: Key, env: CleanupEnv): Step {
   const state = prev.note ? { ...prev, note: null } : prev;
-  if (key.escape) return { state, effect: "back" };
+  if (state.typing) return queryKey(state, input, key, env);
+  // esc drops a `/` filter first, and only then leaves.
+  if (key.escape) return state.query ? stay({ ...state, query: "" }) : { state, effect: "back" };
   if (input === "q") return { state, effect: "quit" };
   const dir = vertical(input, key);
-  if (dir) {
-    const cursor = clamp(state.cursor + dir, env.rows.length);
-    return stay({ ...state, cursor, focus: env.rows[cursor]?.key ?? null });
-  }
-  // A new order keeps the focused row; syncCursor finds it in the re-sorted rows.
-  if (input === "s") return stay({ ...state, sort: nextSort(state.sort) });
-  if (input === "r") return stay({ ...state, reversed: !state.reversed });
+  if (dir) return moveCursor(state, dir, env);
+  const view = viewKey(state, input);
+  if (view) return stay(view);
+  const end = key.ctrl || key.meta ? undefined : END_KEYS[input];
+  if (end) return { state, effect: end };
   const row = env.rows[state.cursor];
   if (!(key.return || input === " ") || !row) return stay(state);
   // The defaults are decided from the git state, so the dialog waits for it.
@@ -138,7 +188,7 @@ function submit(d: CleanupDialog, row: CleanupRow, env: CleanupEnv): { dialog: C
 
 function editKey(state: CleanupState, d: CleanupDialog, input: string, key: Key, env: CleanupEnv): Step {
   if (key.escape) return stay({ ...state, dialog: null });
-  const row = env.rows.find((r) => r.key === d.key);
+  const row = env.all.find((r) => r.key === d.key);
   if (!row) return stay({ ...state, dialog: null }); // the row went away under the dialog
   const dir = vertical(input, key);
   if (dir) return stay({ ...state, dialog: { ...d, cursor: clamp(d.cursor + dir, BOXES.length), note: null } });
@@ -155,7 +205,7 @@ function editKey(state: CleanupState, d: CleanupDialog, input: string, key: Key,
  */
 function confirmKey(state: CleanupState, d: CleanupDialog, input: string, env: CleanupEnv): Step {
   if (input !== "y" && input !== "Y") return stay({ ...state, dialog: { ...d, stage: "edit", note: "not deleted" } });
-  const row = env.rows.find((r) => r.key === d.key);
+  const row = env.all.find((r) => r.key === d.key);
   if (!row) return stay({ ...state, dialog: null });
   const problem = selectionProblem(d.sel, env.offers(row), env.git(row));
   if (problem) return stay({ ...state, dialog: { ...d, stage: "edit", note: problem } });

@@ -90,8 +90,8 @@ export interface ModeProps {
   canClone: boolean;
   anyHostableRepo: boolean;
   reposForTarget: (t: FreshTarget) => RepoInfo[];
-  /** What the cleanup view (C) needs from App: the scope, the path context's repos, and the way out. */
-  cleanup: { inScope: (cwd: string) => boolean; extraRoots: readonly string[]; onBack: () => void; onQuit: () => void };
+  /** What the cleanup view (C) needs from App: the scope, the path context's repos, the way out, and a model reload. */
+  cleanup: { inScope: (cwd: string) => boolean; extraRoots: readonly string[]; onBack: () => void; onQuit: () => void; reload: () => void };
 }
 
 export function renderMode(p: ModeProps): ReactElement | null {
