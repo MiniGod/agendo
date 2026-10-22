@@ -479,6 +479,23 @@ test("a codex fresh-launch window name goes by its cwd, the link `launch` prints
   expect((await mock.tmuxLog()).some((a) => a[0] === "new-session" || a[0] === "new-window")).toBe(false);
 });
 
+test("two id-less windows attributed to one session: one focuses, the other is refused, never resumed", async ({ mock }) => {
+  // Both sit in the crash session's cwd, so the cwd fallback gives both to it, and it keeps one.
+  const crashCwd = join(mock.home, "repos", "appweb", ".claude", "worktrees", "fix-crash-102");
+  const names = ["cl-wi-102", "cl-wi-103"];
+  await seed(mock, {
+    windows: names.map((name, i) => ({ session: "agendo", index: i + 1, name })),
+    panes: names.map((window) => ({ session: "agendo", window, cwd: crashCwd, placeholder: false })),
+  });
+  const runs = [];
+  for (const name of names) runs.push(await agendo(mock.env, "focus", name));
+  expect(runs.filter((r) => r.code === 0)).toHaveLength(1);
+  const won = names[runs.findIndex((r) => r.code === 0)];
+  expect(await switches(mock)).toEqual([["switch-client", "-c", "/dev/pts/7", "-t", switchTarget(mock.env, "agendo", won)]]);
+  expect(runs.find((r) => r.code !== 0)?.stderr).toContain("No agendo session");
+  expect((await mock.tmuxLog()).some((a) => ["new-session", "new-window", "kill-window"].includes(a[0]))).toBe(false);
+});
+
 test("a window name no live window carries focuses nothing and resumes nothing", async ({ mock }) => {
   await seed(mock);
   const r = await agendo(mock.env, "url", "agendo://focus?session=cl-wi-102");

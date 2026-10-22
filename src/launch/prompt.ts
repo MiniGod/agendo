@@ -148,7 +148,8 @@ function sessionLinkGuide(): string[] {
     "  resumes a closed one. Either resolves only once the session is on disk, i.e. once",
     "  `list` shows it — not the instant `launch` returns. Clicking needs the URL",
     `  handler (\`${SELF_CMD} url-handler install\`) and, inside tmux,`,
-    "  `set -as terminal-features 'xterm*:hyperlinks'`. (Unlike a PR / work-item URL",
+    "  `set -as terminal-features 'xterm*:hyperlinks'` — the USER's one-time setup: tell",
+    "  them if a link does nothing, never run either yourself. (Unlike a PR / work-item URL",
     "  above, this one you DO assemble yourself, from the short id.)",
     "",
   ];

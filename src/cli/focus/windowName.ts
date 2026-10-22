@@ -18,7 +18,8 @@
 // moves the client by, never against the named window on its own. Attribution
 // gives each session ONE window, so when two windows fall to the same session —
 // two id-less windows in one cwd, or one beside that cwd's newest session's own
-// window — the one that lost resolves to nothing and the link says so. Resolving
+// window — the one that lost resolves to nothing, refused exactly as an unknown
+// name is ("No agendo session …"): nothing on that path can tell the two apart. Resolving
 // it anyway would be worse: focus would then bring forward the session's OTHER
 // window, or, finding the session it picked not running, resume it a second
 // time onto the same transcript. A refusal is the only honest answer until

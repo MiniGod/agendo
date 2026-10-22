@@ -17,6 +17,8 @@ describe("session links", () => {
     expect(g).toContain("Whenever you mention a session to the user");
     expect(g).toContain(" url-handler install`");
     expect(g).toContain("`set -as terminal-features 'xterm*:hyperlinks'`");
+    // Setup that rewires the desktop and the live tmux server is the human's, not the agent's.
+    expect(g).toContain("the USER's one-time setup: tell them if a link does nothing, never run either yourself");
   });
 
   test("both orchestrator prompts say it too, with the codex case, and point at --llm for the rest", () => {
