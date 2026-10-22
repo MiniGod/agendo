@@ -587,11 +587,14 @@ GitHub page can run it. Setup on Linux:
 orchestrator prompts tell agents to write any session they mention to you as a
 markdown link, `[<window name or short id>](agendo://focus?session=<short id>)`.
 Clicking one runs the same handler, so it needs step 1 above. Inside tmux, links
-are clickable only once tmux passes hyperlinks through to your terminal:
-`set -as terminal-features 'xterm*:hyperlinks'` in `~/.tmux.conf`. A link by short
-id also resumes a closed session; one by window name (what `launch` prints for a
-codex session, which has no id yet) reaches the session only while that window is
-open.
+are clickable only once tmux (3.4 or later) passes hyperlinks through to your
+terminal: `set -as terminal-features 'xterm*:hyperlinks'` in `~/.tmux.conf`, with
+`xterm*` replaced by a pattern matching your terminal's `TERM` if it is not an
+xterm (`alacritty`, `foot`, …), then re-attach. A link by short id also resumes a
+closed session; one by window name (what `launch` prints for a codex session,
+which has no id yet) reaches the session only while that window is open, and goes
+by the session that window is attributed to — in a directory other sessions share,
+such as a `--no-worktree` launch, that can be none or the wrong one.
 
 Any web page can open an `agendo://` link, so the handler accepts exactly
 `agendo://focus?pr=<n>`, `?workItem=<n>` (each optionally followed by `&repo=<repo>`)

@@ -48,7 +48,9 @@ const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 /**
  * One of agendo's own tmux window names, in exactly the shapes agendo mints
  * them: `cl-<kind>-<short id>` (`sessionName`, `kindName`; a short id is 1–12
- * letters and digits); for `cl-bg-`/`cl-new-` optionally with the `codex-` tag
+ * letters and digits) — plus the legacy `cl-free-`, no longer minted, whose
+ * tail is taken to be the same short id (a guess: its shape predates the
+ * history, so a legacy name outside it is refused); for `cl-bg-`/`cl-new-` optionally with the `codex-` tag
  * `kindName` puts before the id of the one agent that takes no preassigned id
  * (`cl-bg-codex-…`, the same form as `CODEX_WINDOW_RE`); or `cl-wi-`/`cl-pr-`,
  * an optional lower-case scope slug and the item id (`freshName`/`prFreshName`,
