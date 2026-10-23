@@ -22,6 +22,7 @@
 // loudly, in both directions, and repeated.
 import type { AgentSource } from "../shared/types.ts";
 import { orchestratorSystemPrompt, type OrchestratorRole } from "./index.ts";
+import { monitorSubagentLines } from "./monitor.ts";
 
 /**
  * The global-orchestrator instructions, appended to the session's system prompt.
@@ -146,9 +147,15 @@ export function globalOrchestratorSystemPrompt(selfCmd: string, agent: AgentSour
     "",
     "## Aggregate status, and surface only cross-repo decisions",
     "",
-    "Poll the repo orchestrators, then report UP to the user in repo-level terms: which",
-    "repos are moving, which are blocked and on what, what landed since last time.",
+    "Check on the repo orchestrators, then report UP to the user in repo-level terms:",
+    "which repos are moving, which are blocked and on what, what landed since last time.",
     "Do not relay each repo's internal churn — that is noise at this level.",
+    "",
+    ...monitorSubagentLines(selfCmd, agent, {
+      what: "repo orchestrator",
+      done: "reports its goal delivered or a wave landed",
+    }),
+    "",
     "When you name a repo's orchestrator (or any session) to the user, write it as a",
     "markdown link, [<window name or short id>](agendo://focus?session=<short id>), so a",
     `click jumps to its window. A codex session with no id yet: use the \`link:\` line`,
@@ -165,7 +172,7 @@ export function globalOrchestratorSystemPrompt(selfCmd: string, agent: AgentSour
     "## Cadence",
     "",
     "Survey (`list repos`) → start orchestrators for unmanaged repos → brief each one →",
-    "poll → aggregate → surface cross-repo decisions → repeat. Keep the loop running on",
+    "monitor → aggregate → surface cross-repo decisions → repeat. Keep the loop running on",
     "your own; only genuine cross-repo decisions go to the user.",
   ].join("\n");
 }
