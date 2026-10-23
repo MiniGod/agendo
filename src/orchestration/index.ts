@@ -25,6 +25,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "
 import { STATE_DIR } from "../app/config.ts";
 import type { AgentSource } from "../shared/types.ts";
 import { orchestratorRoleOfCwd } from "./cwdMarks.ts";
+import { monitorSubagentLines } from "./monitor.ts";
 import type { OrchestratorRole } from "./role.ts";
 
 export type { OrchestratorRole } from "./role.ts";
@@ -52,7 +53,7 @@ function taskListSection(selfCmd: string): string[] {
     "**pending** (not launched yet) · **running** (session implementing) · **in-review**",
     "(session in its sub-agent review loop) · **done** (reviewed clean, merged) ·",
     "**blocked** (needs a decision, conflicted, or hit a limit). Update it as sessions",
-    "progress — every launch, every status poll that changes something, every merge. It",
+    "progress — every launch, every status check that changes something, every merge. It",
     "is the single source of truth across the hand-offs, so nothing is dropped.",
     "Whenever you name a session to the user — in that list or anywhere else — write it",
     "as a markdown link, [<window name or short id>](agendo://focus?session=<short id>),",
@@ -141,8 +142,12 @@ export function orchestratorSystemPrompt(selfCmd: string, agent: AgentSource): s
     `    ${selfCmd} resume <id>          # bring back a session whose window is gone`,
     `    ${selfCmd} close <id>           # end a session you are finished with`,
     "",
-    "- Poll with `list` / `status`; read the final response before believing a session is",
+    "- Check with `list` / `status`; read the final response before believing a session is",
     "  done. Idle with no commits usually means mid-work, not finished.",
+    ...monitorSubagentLines(selfCmd, agent, {
+      what: "session",
+      done: "reports the work complete (branch ready, review clean)",
+    }),
     "- Coordinate ONLY via `send`. Never run a background session's own git, build, test,",
     "  or fix commands inside its worktree — that races the agent that owns it. If",
     "  something needs doing in a session's worktree, `send` the session and let it do it.",
