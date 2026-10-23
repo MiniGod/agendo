@@ -616,8 +616,8 @@ GitHub page can run it. Setup on Linux:
    and work items on `dev.azure.com`, `*.visualstudio.com` and `github.com`, including
    pages reached by in-app navigation. On Azure DevOps it sits in the page's own
    header row, next to Publish/Approve on a PR and before "More actions" in a work
-   item's command bar; on a page layout it does not know, it floats small and faded
-   in the bottom left corner. A click follows the link, which leaves the
+   item's command bar; on GitHub, in the classic PR and issue header actions; on a
+   page layout it does not know, it floats small and faded in the bottom left corner. A click follows the link, which leaves the
    page where it is, and hides the `beforeunload` the browser fires first from the
    page's listeners (in Chromium, from those added after the script, which runs at
    document-start), so Azure DevOps keeps its live updates instead of warning that

@@ -496,7 +496,8 @@
   let wake = null;
   const schedule = batched(() => {
     if (!document.body) return;
-    const wait = sync(document, window.location, state, Date.now());
+    // A monotonic clock: a wall clock stepped back would hold the float and the name wait off by the step.
+    const wait = sync(document, window.location, state, performance.now());
     clearTimeout(wake);
     wake = wait > 0 ? setTimeout(schedule, wait + 1) : null;
   });

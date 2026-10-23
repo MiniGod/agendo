@@ -598,7 +598,7 @@ describe("the script as installed", () => {
     let clock = 0;
     const timers: { at: number; fn: () => void; id: number }[] = [];
     let ids = 0;
-    const run = new Function("GM_info", "window", "document", "MutationObserver", "requestAnimationFrame", "setTimeout", "clearTimeout", "setInterval", "Date", readFileSync(PATH, "utf-8"));
+    const run = new Function("GM_info", "window", "document", "MutationObserver", "requestAnimationFrame", "setTimeout", "clearTimeout", "setInterval", "performance", readFileSync(PATH, "utf-8"));
     run(
       {},
       win,
