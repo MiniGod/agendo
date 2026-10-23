@@ -401,17 +401,20 @@
   /**
    * Bring `doc`'s button in line with the page at `loc`, as of `now`. `state`
    * carries what an earlier call learned: the URL (`url`) and when it changed
-   * (`since`), its link (`target`), and whether a mount point has shown since
-   * (`mounted`). The button goes inline where the page has a known mount point;
-   * with none FALLBACK_MS after a URL change that never showed one, it floats;
-   * between those, while a re-render briefly takes the mount point away, it is
-   * left where it is. Every other copy is removed, and nothing is written when
-   * the button already stands where it should, so a call that changes nothing
-   * triggers no further mutation. Returns how many ms from `now` the button
-   * is due to float, while it is waiting for that; else 0.
+   * (`since`), its link (`target`), and since when the page has shown no
+   * mount point (`missing`, null while it shows one). The button goes inline
+   * where the page has a known mount point. With none for FALLBACK_MS — since
+   * the URL changed, or since a mount point it had went away — it floats; in
+   * between it is not shown (but a floating button from before is kept), so a
+   * re-render that takes the row away for a moment does not flash it. Every
+   * other copy is removed, and nothing is written when the button already
+   * stands where it should, so a call that changes nothing triggers no further
+   * mutation. Returns in how many ms to look again when nothing in the DOM may
+   * say so — the button is due to float, or the link still carries a repo id
+   * whose name the page may yet show (see `needsRender`) — else 0.
    */
   function sync(doc, loc, state, now) {
-    if (loc.href !== state.url) Object.assign(state, { url: loc.href, since: now, target: undefined, mounted: false });
+    if (loc.href !== state.url) Object.assign(state, { url: loc.href, since: now, target: undefined, missing: now });
     if (state.target === undefined || (state.target && needsRender(loc.href, state.url, hrefFor(state.target), state.since, now))) {
       state.target = linkFor(loc, doc);
     }
@@ -422,9 +425,10 @@
       return 0;
     }
     const mount = mountFor(doc, loc, target);
-    if (mount) state.mounted = true;
+    if (mount) state.missing = null;
+    else if (state.missing === null) state.missing = now;
     let want = mount;
-    if (!want && !state.mounted && now - state.since >= FALLBACK_MS) want = { place: "float", parent: doc.body, before: null };
+    if (!want && now - state.missing >= FALLBACK_MS) want = { place: "float", parent: doc.body, before: null };
     let button;
     if (want) {
       button = existing.find((el) => el.getAttribute(MARK) === want.place);
@@ -436,13 +440,14 @@
       button = existing.find((el) => el.getAttribute(MARK) === "float");
     }
     for (const el of existing) if (el !== button) el.remove();
-    if (!button) return state.mounted ? 0 : state.since + FALLBACK_MS - now;
+    const naming = needsRender(loc.href, state.url, hrefFor(target), state.since, now) ? Math.min(500, state.since + NAME_WAIT_MS - now) : 0;
+    if (!button) return Math.min(state.missing + FALLBACK_MS - now, naming || Infinity);
     const href = hrefFor(target);
     if (button.getAttribute("href") !== href) {
       button.setAttribute("href", href);
       button.title = target.kind === "pr" ? `Focus the agendo session for PR ${target.id}` : `Focus the agendo session for work item ${target.id}`;
     }
-    return 0;
+    return naming;
   }
 
   /**
@@ -484,8 +489,9 @@
   debug([`guard installed at readyState ${document.readyState}`]);
   document.addEventListener("click", delegate(arm), true);
 
-  // While the button waits to float, a timer comes back for it when it is
-  // due: a page that has stopped changing gives the observer nothing to report.
+  // While the button waits to float, or for a repo id's name, a timer comes
+  // back for it: a page that has stopped changing gives the observer nothing
+  // to report, and a name may arrive as an attribute change or in <head>.
   const state = {};
   let wake = null;
   const schedule = batched(() => {

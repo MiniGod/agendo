@@ -10,8 +10,10 @@
 //
 // Where the button is mounted is tested against linkedom documents built from
 // the Azure DevOps markup as copied out of devtools (trimmed to the parts the
-// script looks at). Nobody can drive real Azure DevOps from CI, so what is NOT
-// tested is that ADO still renders those classes, and how the button looks.
+// script looks at), and the script's own wiring (observer, frame batching, wake
+// timer, click listener) by running its body against one. Nobody can drive real
+// Azure DevOps from CI, so what is NOT tested is that ADO still renders those
+// classes in that nesting, and how the button looks.
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { readFileSync } from "fs";
@@ -494,6 +496,31 @@ describe("sync: the floating fallback", () => {
     expect(inline.sync(ADO_PR, 0)).toBe(0);
   });
 
+  test("a row that goes away for good on the same URL floats the button FALLBACK_MS later", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR, 0);
+    document.body.firstElementChild!.remove();
+    expect(sync(ADO_PR, 5000)).toBe(script.FALLBACK_MS);
+    expect(buttons()).toHaveLength(0);
+    expect(sync(ADO_PR, 5000 + script.FALLBACK_MS)).toBe(0);
+    expect(buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["float"]);
+  });
+
+  test("while the link carries a repo id, sync asks to look again for the name, until NAME_WAIT_MS", () => {
+    const GUID = "4b12fdea-5ae3-48d4-a2cd-1f47d10700ce";
+    const url = `https://dev.azure.com/org/proj/_git/${GUID}/pullrequest/81276`;
+    const { document, sync, buttons } = page(PR_HEADER);
+    expect(sync(url, 0)).toBe(500);
+    expect(sync(url, script.NAME_WAIT_MS - 100)).toBe(100);
+    // The name arrives as an attribute change in <head>, which the observer does not see; the wake does.
+    document.head.insertAdjacentHTML("beforeend", `<link rel="canonical" href="https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/81276">`);
+    expect(sync(url, script.NAME_WAIT_MS - 50)).toBe(0);
+    expect(buttons()[0].getAttribute("href")).toBe("agendo://focus?pr=81276&repo=mc-applications");
+    const settled = page(PR_HEADER);
+    settled.sync(url, 0);
+    expect(settled.sync(url, script.NAME_WAIT_MS)).toBe(0);
+  });
+
   test("GitHub's React layout, with no classic header actions, falls back too", () => {
     const { sync, buttons } = page(`<div>react</div>`);
     sync("https://github.com/MiniGod/agendo/issues/5", 0);
@@ -554,5 +581,92 @@ describe("batched", () => {
     expect(runs).toBe(1);
     schedule();
     expect(frames.length).toBe(2);
+  });
+});
+
+// The wiring the exports above leave out: the script's own body, run as a script
+// manager would (GM_info defined) against a linkedom page, with its frame and
+// timers held so the test decides when they fire. Not covered even here: the
+// 500ms URL check (setInterval is stubbed out) and a real browser's event order.
+describe("the script as installed", () => {
+  function install(url: string, html: string) {
+    const { document, MutationObserver } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
+    const location = new URL(url);
+    const listeners: Record<string, ((e: unknown) => void)[]> = {};
+    const win = { location, addEventListener: (t: string, fn: (e: unknown) => void) => (listeners[t] ||= []).push(fn) };
+    const frames: (() => void)[] = [];
+    let clock = 0;
+    const timers: { at: number; fn: () => void; id: number }[] = [];
+    let ids = 0;
+    const run = new Function("GM_info", "window", "document", "MutationObserver", "requestAnimationFrame", "setTimeout", "clearTimeout", "setInterval", "Date", readFileSync(PATH, "utf-8"));
+    run(
+      {},
+      win,
+      document,
+      MutationObserver,
+      (fn: () => void) => frames.push(fn),
+      (fn: () => void, ms: number) => (timers.push({ at: clock + ms, fn, id: ++ids }), ids),
+      (id: number) => timers.splice(0, timers.length, ...timers.filter((t) => t.id !== id)),
+      () => 0,
+      { now: () => clock },
+    );
+    const settle = async () => {
+      // Mutation records are delivered in a microtask; frames run when the test says.
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+        await new Promise((r) => setImmediate(r));
+        while (frames.length) frames.shift()!();
+      }
+    };
+    const advance = async (ms: number) => {
+      clock += ms;
+      for (const t of timers.filter((x) => x.at <= clock)) {
+        timers.splice(timers.indexOf(t), 1);
+        t.fn();
+      }
+      await settle();
+    };
+    const buttons = () => [...document.querySelectorAll(`[${script.MARK}]`)] as El[];
+    /** Fire a beforeunload at the window's listeners; whether one of them stopped it. */
+    const unload = () => {
+      let stopped = false;
+      for (const fn of listeners.beforeunload || []) fn({ stopImmediatePropagation: () => (stopped = true) });
+      return stopped;
+    };
+    return { document, location, buttons, settle, advance, unload };
+  }
+
+  test("a header that renders after load gets the inline button; one replaced gets it back", async () => {
+    const p = install(ADO_PR, "");
+    await p.settle();
+    expect(p.buttons()).toHaveLength(0);
+    p.document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    await p.settle();
+    expect(p.buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["ado-pr"]);
+    p.document.body.firstElementChild!.remove();
+    p.document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    await p.settle();
+    expect(p.buttons()).toHaveLength(1);
+    expect(p.buttons()[0].nextElementSibling!.className).toContain("repos-pr-header-complete-button");
+  });
+
+  test("a quiet page with no known row floats the button once FALLBACK_MS has passed", async () => {
+    const p = install(ADO_PR, "<div>another layout</div>");
+    await p.settle();
+    await p.advance(script.FALLBACK_MS - 10);
+    expect(p.buttons()).toHaveLength(0);
+    await p.advance(20);
+    expect(p.buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["float"]);
+  });
+
+  test("the document-level click listener is installed: a plain click on the button is not cancelled and arms the guard", async () => {
+    const p = install(ADO_PR, PR_HEADER);
+    await p.settle();
+    expect(p.unload()).toBe(false);
+    const ev = Object.assign(new p.document.defaultView.Event("click", { bubbles: true, cancelable: true }), { button: 0 });
+    p.buttons()[0].querySelector(".bolt-button-text")!.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(p.unload()).toBe(true);
+    expect(p.unload()).toBe(false);
   });
 });
