@@ -7,7 +7,15 @@
 // listeners first; Chromium runs them in the order they were added, so there it
 // depends on the script manager injecting at document-start), and that the link
 // then reaches the OS handler.
+//
+// Where the button is mounted is tested against linkedom documents built from
+// the Azure DevOps markup as copied out of devtools (trimmed to the parts the
+// script looks at), and the script's own wiring (observer, frame batching, wake
+// timer, click listener) by running its body against one. Nobody can drive real
+// Azure DevOps from CI, so what is NOT tested is that ADO still renders those
+// classes in that nesting, and how the button looks.
 import { describe, expect, test } from "bun:test";
+import { parseHTML } from "linkedom";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -281,4 +289,384 @@ test("the script runs at document-start, in the top window only", () => {
   const code = readFileSync(PATH, "utf-8");
   expect(code).toMatch(/^\/\/ @run-at\s+document-start$/m);
   expect(code).toMatch(/^\/\/ @noframes$/m);
+});
+
+// The PR header's flex row, from devtools: the title row, the Publish split
+// button, and the trailing "More actions".
+const PR_HEADER = `<div class="flex-row rhythm-horizontal-8 flex-center flex-grow"><div class="repos-pr-title-row inline-flex-row flex-grow rhythm-horizontal-8 flex-center"><input value="title"></div><div class="repos-pr-header-complete-button bolt-split-button flex-stretch inline-flex-row"><button class="bolt-split-button-main bolt-button bolt-icon-button enabled primary bolt-focus-treatment" type="button"><span class="fluent-icons-enabled"><span aria-hidden="true" class="left-icon flex-noshrink fabric-icon ms-Icon--Send medium"></span></span><span class="bolt-button-text body-m">Publish</span></button><div class="bolt-split-button-divider flex-noshrink primary"></div><div class="inline-flex-row"><button aria-label="More actions" class="bolt-split-button-option icon-only"><span class="ms-Icon--ChevronDownMed small"></span></button></div></div><div class="bolt-header-command-item-button bolt-expandable-button inline-flex-row"><button aria-label="More actions" class="icon-only bolt-button bolt-icon-button enabled icon-only bolt-focus-treatment" id="__bolt-menu-button-1"><span class="ms-Icon--MoreVertical medium"></span></button></div></div>`;
+
+// The work item header's command bar, from devtools: Save, Follow, Refresh, Revert, More actions.
+const WI_BAR = `<div class="work-item-header-command-bar flex-row flex-grow flex-self-start bolt-header-commandbar bolt-button-group flex-row" role="toolbar"><div class="work-item-header-command-bar flex-row flex-grow flex-self-start bolt-header-commandbar-button-group flex-row flex-center flex-grow scroll-hidden rhythm-horizontal-8"><button aria-disabled="true" class="bolt-header-command-item-button bolt-button bolt-icon-button disabled primary bolt-focus-treatment" id="__bolt-save"><span class="fluent-icons-enabled"><span class="left-icon flex-noshrink fabric-icon ms-Icon--Save medium"></span></span><span class="bolt-button-text body-m">Save</span></button><div class="flex-noshrink bolt-header-command-item-button bolt-split-button">Follow</div><button aria-label="Refresh" class="bolt-header-command-item-button bolt-button bolt-icon-button enabled subtle icon-only bolt-focus-treatment" id="__bolt-refresh"></button><button aria-label="Revert Changes" id="__bolt-revert"></button><div class="bolt-header-command-item-button bolt-expandable-button inline-flex-row"><button aria-label="More actions">More</button></div></div></div>`;
+
+const ADO_PR = "https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/81276";
+const ADO_WI = "https://dev.azure.com/org/proj/_workitems/edit/102";
+
+/** An element of a linkedom document (the project's tsconfig has no DOM lib). */
+type El = ReturnType<ReturnType<typeof parseHTML>["document"]["createElement"]>;
+
+/** A document whose body holds `html`, and a sync over it with a fixed clock. */
+function page(html: string) {
+  const { document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
+  const state = {};
+  const sync = (url: string, now = 0): number => script.sync(document, loc(url), state, now);
+  const buttons = () => [...document.querySelectorAll(`[${script.MARK}]`)] as El[];
+  return { document, state, sync, buttons };
+}
+
+describe("sync: where the button goes", () => {
+  test("ADO PR: just before the Publish/Complete button, as a plain, non-primary bolt-button with an icon", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR);
+    const [b] = buttons();
+    expect(buttons()).toHaveLength(1);
+    expect(b.nextElementSibling).toBe(document.querySelector(".repos-pr-header-complete-button"));
+    expect(b.previousElementSibling!.className).toContain("repos-pr-title-row");
+    expect(b.tagName).toBe("A");
+    expect(b.getAttribute("href")).toBe("agendo://focus?pr=81276&repo=mc-applications");
+    expect(b.className.split(" ")).toContain("bolt-button");
+    expect(b.className.split(" ")).not.toContain("primary");
+    expect(b.className).not.toContain("split");
+    expect(b.querySelector(".ms-Icon--OpenInNewWindow")).not.toBeNull();
+    expect(b.querySelector(".bolt-button-text")!.textContent).toBe("agendo");
+    expect(b.style.position).toBe("");
+  });
+
+  test("ADO PR with no Complete button (completed, abandoned): right after the title row", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    document.querySelector(".repos-pr-header-complete-button")!.remove();
+    sync(ADO_PR);
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].previousElementSibling!.className).toContain("repos-pr-title-row");
+  });
+
+  test("ADO work item: in the command bar's button group, before the trailing More actions, as a subtle command item", () => {
+    const { document, sync, buttons } = page(WI_BAR);
+    sync(ADO_WI);
+    const [b] = buttons();
+    expect(buttons()).toHaveLength(1);
+    expect(b.parentElement!.className).toContain("bolt-header-commandbar-button-group");
+    expect(b.nextElementSibling!.className).toContain("bolt-expandable-button");
+    expect(b.previousElementSibling!.id).toBe("__bolt-revert");
+    expect(b.className.split(" ")).toEqual(expect.arrayContaining(["bolt-header-command-item-button", "bolt-button", "bolt-icon-button", "enabled", "subtle"]));
+    expect(b.className.split(" ")).not.toContain("primary");
+    expect(b.querySelector(".bolt-button-text")!.textContent).toBe("agendo");
+    expect(b.getAttribute("href")).toBe("agendo://focus?workItem=102");
+    void document;
+  });
+
+  test("ADO work item dialog over a board: the dialog's bar, and only one button even with two bars", () => {
+    const { document, sync, buttons } = page(`<div class="page">${WI_BAR}</div><div role="dialog">${WI_BAR}</div>`);
+    sync("https://dev.azure.com/org/proj/_boards/board/t/team/Stories?workitem=7");
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].closest('[role="dialog"]')).not.toBeNull();
+    expect(buttons()[0].getAttribute("href")).toBe("agendo://focus?workItem=7");
+    // A dialog opened over a work item page leaves the URL's item on the page's own bar.
+    sync(ADO_WI);
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].closest('[role="dialog"]')).toBeNull();
+    expect(buttons()[0].closest(".page")).not.toBeNull();
+    // An edit path names the item even with ?workitem= on it, as in linkFor: the page's bar, not the dialog's.
+    sync(`${ADO_WI}?workitem=7`);
+    expect(buttons().map((b) => [b.getAttribute("href"), b.closest('[role="dialog"]')])).toEqual([["agendo://focus?workItem=102", null]]);
+    void document;
+  });
+
+  test("GitHub classic header actions: first in the row, as a btn", () => {
+    const { document, sync, buttons } = page(`<div class="gh-header-actions"><button class="btn">Edit</button></div>`);
+    sync("https://github.com/MiniGod/agendo/pull/137");
+    expect(buttons()).toHaveLength(1);
+    expect(document.querySelector(".gh-header-actions")!.firstElementChild).toBe(buttons()[0]);
+    expect(buttons()[0].className).toBe("btn btn-sm");
+    sync("https://github.com/MiniGod/agendo/pull/137");
+    expect(document.querySelector(".gh-header-actions")!.firstElementChild).toBe(buttons()[0]);
+  });
+});
+
+describe("sync: across re-renders", () => {
+  test("once placed, repeated syncs keep one button and write nothing to the DOM, so the observer cannot loop", () => {
+    const pages: [string, string, (d: ReturnType<typeof page>["document"]) => void, number][] = [
+      ["PR before Complete", PR_HEADER, () => {}, 0],
+      ["PR with no Complete button", PR_HEADER, (d) => d.querySelector(".repos-pr-header-complete-button")!.remove(), 0],
+      ["work item bar", WI_BAR, () => {}, 0],
+      ["work item bar with no More actions", WI_BAR, (d) => d.querySelector(".bolt-expandable-button")!.remove(), 0],
+      ["GitHub header actions", `<div class="gh-header-actions"><button class="btn">Edit</button></div>`, () => {}, 0],
+      ["floating", `<div>another layout</div>`, () => {}, script.FALLBACK_MS],
+    ];
+    for (const [name, html, prepare, at] of pages) {
+      const p = page(html);
+      prepare(p.document);
+      const url = name.startsWith("work item") ? ADO_WI : name.startsWith("GitHub") ? "https://github.com/MiniGod/agendo/pull/1" : ADO_PR;
+      p.sync(url, 0);
+      p.sync(url, at);
+      const first = p.buttons()[0];
+      expect([name, p.buttons().length]).toEqual([name, 1]);
+      // linkedom reports mutations through MutationObserver as a browser does; count every one.
+      const records: unknown[] = [];
+      const mo = new p.document.defaultView.MutationObserver((r: unknown[]) => records.push(...r));
+      mo.observe(p.document.body, { childList: true, subtree: true, attributes: true });
+      for (let i = 1; i <= 5; i++) p.sync(url, at + i);
+      records.push(...mo.takeRecords());
+      mo.disconnect();
+      expect([name, p.buttons()]).toEqual([name, [first]]);
+      expect([name, records.length]).toEqual([name, 0]);
+    }
+  });
+
+  test("a container the app replaced gets the button back, once", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR);
+    const old = document.body.firstElementChild!;
+    old.remove();
+    document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    sync(ADO_PR, 100);
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].nextElementSibling).toBe(document.querySelector(".repos-pr-header-complete-button"));
+    expect(document.body.contains(buttons()[0])).toBe(true);
+  });
+
+  test("a button the app moved out of place goes back before the Complete button", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR);
+    document.body.appendChild(buttons()[0]);
+    sync(ADO_PR, 100);
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].nextElementSibling).toBe(document.querySelector(".repos-pr-header-complete-button"));
+  });
+
+  test("stray copies (another instance of the script, a cloned subtree) are removed", () => {
+    const { document, sync, buttons } = page(PR_HEADER + WI_BAR);
+    sync(ADO_PR);
+    document.querySelector(".bolt-header-commandbar-button-group")!.appendChild(buttons()[0].cloneNode(true));
+    expect(buttons()).toHaveLength(2);
+    sync(ADO_PR, 100);
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].nextElementSibling!.className).toContain("repos-pr-header-complete-button");
+  });
+
+  test("a copy cloned ahead of the original may be the one kept, and still arms the guard on click", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR);
+    const original = buttons()[0];
+    const row = original.parentElement!;
+    row.insertBefore(original.cloneNode(true), row.firstElementChild);
+    sync(ADO_PR, 100);
+    expect(buttons()).toHaveLength(1);
+    let arms = 0;
+    document.addEventListener("click", script.delegate(() => (arms++, () => {}), () => {}, () => {}), true);
+    const text = buttons()[0].querySelector(".bolt-button-text")!;
+    text.dispatchEvent(Object.assign(new document.defaultView.Event("click", { bubbles: true }), { button: 0 }));
+    expect(arms).toBe(1);
+  });
+
+  test("navigating relabels the button, moves it to the new page's row, and removes it where there is no link", () => {
+    const { sync, buttons } = page(PR_HEADER + WI_BAR);
+    sync(ADO_PR);
+    sync("https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/9", 10);
+    expect(buttons().map((b) => b.getAttribute("href"))).toEqual(["agendo://focus?pr=9&repo=mc-applications"]);
+    sync(ADO_WI, 20);
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0].parentElement!.className).toContain("bolt-header-commandbar-button-group");
+    expect(buttons()[0].title).toBe("Focus the agendo session for work item 102");
+    sync("https://dev.azure.com/org/proj/_boards/board", 30);
+    expect(buttons()).toHaveLength(0);
+  });
+});
+
+describe("sync: the floating fallback", () => {
+  test("no known row within FALLBACK_MS of the URL change floats a small button, bottom left", () => {
+    const { document, sync, buttons } = page(`<div>another layout</div>`);
+    sync(ADO_PR, 1000);
+    sync(ADO_PR, 1000 + script.FALLBACK_MS - 1);
+    expect(buttons()).toHaveLength(0);
+    sync(ADO_PR, 1000 + script.FALLBACK_MS);
+    const [b] = buttons();
+    expect(buttons()).toHaveLength(1);
+    expect(b.parentElement).toBe(document.body);
+    expect([b.style.position, b.style.left, b.style.bottom]).toEqual(["fixed", "8px", "8px"]);
+    expect(b.style.right).toBe("");
+    expect(b.getAttribute("href")).toBe("agendo://focus?pr=81276&repo=mc-applications");
+  });
+
+  test("while waiting, sync says when the button is due to float, so a quiet page still gets it", () => {
+    const { sync } = page(`<div>another layout</div>`);
+    expect(sync(ADO_PR, 1000)).toBe(script.FALLBACK_MS);
+    expect(sync(ADO_PR, 1800)).toBe(script.FALLBACK_MS - 800);
+    expect(sync(ADO_PR, 1000 + script.FALLBACK_MS)).toBe(0);
+    const inline = page(PR_HEADER);
+    expect(inline.sync(ADO_PR, 0)).toBe(0);
+  });
+
+  test("a row that goes away for good on the same URL floats the button FALLBACK_MS later", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR, 0);
+    document.body.firstElementChild!.remove();
+    expect(sync(ADO_PR, 5000)).toBe(script.FALLBACK_MS);
+    expect(buttons()).toHaveLength(0);
+    expect(sync(ADO_PR, 5000 + script.FALLBACK_MS)).toBe(0);
+    expect(buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["float"]);
+  });
+
+  test("while the link carries a repo id, sync asks to look again for the name, until NAME_WAIT_MS", () => {
+    const GUID = "4b12fdea-5ae3-48d4-a2cd-1f47d10700ce";
+    const url = `https://dev.azure.com/org/proj/_git/${GUID}/pullrequest/81276`;
+    const { document, sync, buttons } = page(PR_HEADER);
+    expect(sync(url, 0)).toBe(500);
+    expect(sync(url, script.NAME_WAIT_MS - 100)).toBe(100);
+    // The name is added to <head>, which the observer does not watch; the wake sees it.
+    document.head.insertAdjacentHTML("beforeend", `<link rel="canonical" href="https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/81276">`);
+    expect(sync(url, script.NAME_WAIT_MS - 50)).toBe(0);
+    expect(buttons()[0].getAttribute("href")).toBe("agendo://focus?pr=81276&repo=mc-applications");
+    const settled = page(PR_HEADER);
+    settled.sync(url, 0);
+    expect(settled.sync(url, script.NAME_WAIT_MS)).toBe(0);
+  });
+
+  test("GitHub's React layout, with no classic header actions, falls back too", () => {
+    const { sync, buttons } = page(`<div>react</div>`);
+    sync("https://github.com/MiniGod/agendo/issues/5", 0);
+    sync("https://github.com/MiniGod/agendo/issues/5", script.FALLBACK_MS);
+    expect(buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["float"]);
+  });
+
+  test("a row that renders late replaces the floating button", () => {
+    const { document, sync, buttons } = page(``);
+    sync(ADO_PR, 0);
+    sync(ADO_PR, script.FALLBACK_MS);
+    expect(buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["float"]);
+    document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    sync(ADO_PR, script.FALLBACK_MS + 1);
+    expect(buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["ado-pr"]);
+  });
+
+  test("a row that a re-render takes away for a moment does not bring the floating button back", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR, 0);
+    document.body.firstElementChild!.remove();
+    sync(ADO_PR, script.FALLBACK_MS * 2);
+    expect(buttons()).toHaveLength(0);
+    document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    sync(ADO_PR, script.FALLBACK_MS * 2 + 1);
+    expect(buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["ado-pr"]);
+  });
+});
+
+describe("the button's click", () => {
+  test("a click on or inside any place's button arms the guard; a modified click, or a click elsewhere, does not", () => {
+    for (const place of ["ado-pr", "ado-wi", "github", "float"]) {
+      const { document } = parseHTML("<!doctype html><html><body><p>elsewhere</p></body></html>");
+      let arms = 0;
+      document.addEventListener("click", script.delegate(() => (arms++, () => {}), () => {}, () => {}), true);
+      const b = script.makeButton(document, place);
+      b.setAttribute("href", "agendo://focus?pr=1");
+      document.body.appendChild(b);
+      const click = (el: El, extra: Record<string, unknown>) => el.dispatchEvent(Object.assign(new document.defaultView.Event("click", { bubbles: true }), extra));
+      click(b.firstElementChild ?? b, { button: 0 });
+      click(b, { button: 0, ctrlKey: true });
+      click(document.querySelector("p")!, { button: 0 });
+      expect([place, arms]).toEqual([place, 1]);
+    }
+  });
+});
+
+describe("batched", () => {
+  test("any number of calls before the frame runs it once; a call after the frame schedules again", () => {
+    const frames: (() => void)[] = [];
+    let runs = 0;
+    const schedule = script.batched(() => runs++, (fn: () => void) => frames.push(fn));
+    schedule();
+    schedule();
+    schedule();
+    expect([frames.length, runs]).toEqual([1, 0]);
+    frames[0]();
+    expect(runs).toBe(1);
+    schedule();
+    expect(frames.length).toBe(2);
+  });
+});
+
+// The wiring the exports above leave out: the script's own body, run as a script
+// manager would (GM_info defined) against a linkedom page, with its frame and
+// timers held so the test decides when they fire. Not covered even here: the
+// 500ms URL check (setInterval is stubbed out) and a real browser's event order.
+describe("the script as installed", () => {
+  function install(url: string, html: string) {
+    const { document, MutationObserver } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
+    const location = new URL(url);
+    const listeners: Record<string, ((e: unknown) => void)[]> = {};
+    const win = { location, addEventListener: (t: string, fn: (e: unknown) => void) => (listeners[t] ||= []).push(fn) };
+    const frames: (() => void)[] = [];
+    let clock = 0;
+    const timers: { at: number; fn: () => void; id: number }[] = [];
+    let ids = 0;
+    const run = new Function("GM_info", "window", "document", "MutationObserver", "requestAnimationFrame", "setTimeout", "clearTimeout", "setInterval", "performance", readFileSync(PATH, "utf-8"));
+    run(
+      {},
+      win,
+      document,
+      MutationObserver,
+      (fn: () => void) => frames.push(fn),
+      (fn: () => void, ms: number) => (timers.push({ at: clock + ms, fn, id: ++ids }), ids),
+      (id: number) => timers.splice(0, timers.length, ...timers.filter((t) => t.id !== id)),
+      () => 0,
+      { now: () => clock },
+    );
+    const settle = async () => {
+      // Mutation records are delivered in a microtask; frames run when the test says.
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+        await new Promise((r) => setImmediate(r));
+        while (frames.length) frames.shift()!();
+      }
+    };
+    const advance = async (ms: number) => {
+      clock += ms;
+      for (const t of timers.filter((x) => x.at <= clock)) {
+        timers.splice(timers.indexOf(t), 1);
+        t.fn();
+      }
+      await settle();
+    };
+    const buttons = () => [...document.querySelectorAll(`[${script.MARK}]`)] as El[];
+    /** Fire a beforeunload at the window's listeners; whether one of them stopped it. */
+    const unload = () => {
+      let stopped = false;
+      for (const fn of listeners.beforeunload || []) fn({ stopImmediatePropagation: () => (stopped = true) });
+      return stopped;
+    };
+    return { document, location, buttons, settle, advance, unload };
+  }
+
+  test("a header that renders after load gets the inline button; one replaced gets it back", async () => {
+    const p = install(ADO_PR, "");
+    await p.settle();
+    expect(p.buttons()).toHaveLength(0);
+    p.document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    await p.settle();
+    expect(p.buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["ado-pr"]);
+    p.document.body.firstElementChild!.remove();
+    p.document.body.insertAdjacentHTML("beforeend", PR_HEADER);
+    await p.settle();
+    expect(p.buttons()).toHaveLength(1);
+    expect(p.buttons()[0].nextElementSibling!.className).toContain("repos-pr-header-complete-button");
+  });
+
+  test("a quiet page with no known row floats the button once FALLBACK_MS has passed", async () => {
+    const p = install(ADO_PR, "<div>another layout</div>");
+    await p.settle();
+    await p.advance(script.FALLBACK_MS - 10);
+    expect(p.buttons()).toHaveLength(0);
+    await p.advance(20);
+    expect(p.buttons().map((b) => b.getAttribute(script.MARK))).toEqual(["float"]);
+  });
+
+  test("the document-level click listener is installed: a plain click on the button is not cancelled and arms the guard", async () => {
+    const p = install(ADO_PR, PR_HEADER);
+    await p.settle();
+    expect(p.unload()).toBe(false);
+    const ev = Object.assign(new p.document.defaultView.Event("click", { bubbles: true, cancelable: true }), { button: 0 });
+    p.buttons()[0].querySelector(".bolt-button-text")!.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(p.unload()).toBe(true);
+    expect(p.unload()).toBe(false);
+  });
 });

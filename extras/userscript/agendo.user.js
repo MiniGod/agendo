@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Open in agendo
 // @namespace    https://github.com/MiniGod/agendo
-// @version      1.4.0
+// @version      1.5.0
 // @description  Adds an "Open in agendo" button to Azure DevOps and GitHub pull requests and work items. It focuses the agendo session for that PR or work item, resuming it first if it is paused or idle.
 // @match        https://dev.azure.com/*
 // @match        https://*.visualstudio.com/*
@@ -26,12 +26,20 @@
 // the script looks for the name on the page — a canonical link or breadcrumb
 // link to this same PR by name — and sends the GUID only when the page does not
 // say, which agendo resolves itself (src/cli/focus/linked.ts). The breadcrumb
-// renders after the URL changes, so while the link still carries a GUID the poll
-// keeps looking, for ten seconds at most.
+// renders after the URL changes, so while the link still carries a GUID the
+// script keeps looking, for ten seconds at most.
 //
-// Azure DevOps and GitHub are both single-page apps: moving from one PR to
-// another changes the URL without loading a page. So the script re-reads the
-// location whenever it changes and moves, relabels or removes the button.
+// The button sits in the page's own button row, styled as one of its buttons:
+// in an Azure DevOps PR header just before Publish/Approve/Complete, in a work
+// item's command bar (page or dialog) before its trailing "More actions", and
+// in GitHub's classic PR/issue header actions. Up to 1.4.0 it floated over the
+// bottom right corner, where it covered buttons of the page's own. Both apps are
+// single-page apps that render those rows after load and replace them on
+// navigation and re-renders, so one MutationObserver on the body, batched to a
+// frame, re-reads the location and puts the button back, relabels it or
+// removes it (`sync`). Where no known row shows up within FALLBACK_MS of a URL
+// change (another layout, GitHub's React pages), the button floats again, but
+// small and faded, in the bottom left corner.
 //
 // A click follows the link like any other: the browser hands it to the
 // desktop's handler, and since an external protocol returns no document, the
@@ -159,8 +167,8 @@
   }
 
   /**
-   * Whether the poll must re-render: the URL changed, the button is gone, or the
-   * link still carries a repo id and the page has had less than NAME_WAIT_MS
+   * Whether the link must be worked out again: the URL changed, there is no
+   * button yet, or the link still carries a repo id and the page has had less than NAME_WAIT_MS
    * since the URL changed (`since`) to show the name.
    */
   function needsRender(href, last, buttonHref, since, now) {
@@ -245,11 +253,11 @@
    * modified click is left to the browser unguarded. A page listener that runs
    * after this one may still cancel the click, and then no beforeunload comes:
    * a task later, once the click has been dispatched to every listener, a
-   * cancelled click disarms the guard again. `later` and `log` are injected
-   * for tests.
+   * cancelled click disarms the guard again. `link` is the button clicked.
+   * `later` and `log` are injected for tests.
    */
-  function onClick(e, arm, later = setTimeout, log = debug) {
-    const href = e.currentTarget.getAttribute("href");
+  function onClick(e, arm, later = setTimeout, log = debug, link = e.currentTarget) {
+    const href = link.getAttribute("href");
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) {
       log([`modified click on ${href}: left to the browser`]);
       return;
@@ -263,39 +271,200 @@
     }, 0);
   }
 
-  function render() {
-    const target = linkFor(window.location, document);
-    let button = document.getElementById(BUTTON_ID);
-    if (!target) {
-      if (button) button.remove();
-      return;
+  /** Marks every button this script inserted, wherever it stands, so a stray copy is always found. */
+  const MARK = "data-agendo-button";
+
+  /** How long after a URL change the script waits for a known mount point before floating the button instead. */
+  const FALLBACK_MS = 3000;
+
+  function isAdo(host) {
+    return host === "dev.azure.com" || host.endsWith(".visualstudio.com");
+  }
+
+  /**
+   * The work item header's button group to mount in. A work item opened as a
+   * dialog over a board, backlog or query (`?workitem=<id>`) has its command
+   * bar in the dialog; one opened as a dialog over a work item page leaves the
+   * page's own bar showing the URL's item. So the URL picks which bar, by the
+   * same rule as `linkFor` (an edit path wins over `?workitem=`), and either
+   * way only one is used.
+   */
+  function workItemGroup(doc, loc) {
+    const groups = [...doc.querySelectorAll(".work-item-header-command-bar .bolt-header-commandbar-button-group")];
+    if (!groups.length) return null;
+    const wantDialog = !/\/_workitems\/edit\/\d+(?:\/|$)/i.test(loc.pathname) && new URLSearchParams(loc.search).has("workitem");
+    const fit = groups.filter((g) => !!g.closest('[role="dialog"]') === wantDialog);
+    if (fit.length) return wantDialog ? fit[fit.length - 1] : fit[0];
+    return wantDialog ? groups[groups.length - 1] : groups[0];
+  }
+
+  /**
+   * Where the button for `target` goes on `doc`: a `place` (which look it
+   * gets), the `parent` it goes in and the element it goes just `before`
+   * (null: last). Null when the page shows none of the known button rows yet.
+   */
+  function mountFor(doc, loc, target) {
+    if (isAdo(loc.hostname)) {
+      if (target.kind === "pr") {
+        const complete = doc.querySelector(".repos-pr-header-complete-button");
+        if (complete && complete.parentElement) return { place: "ado-pr", parent: complete.parentElement, before: complete };
+        // A completed or abandoned PR may show no Complete button: then right after the title.
+        const title = doc.querySelector(".repos-pr-title-row");
+        if (!title || !title.parentElement) return null;
+        let before = title.nextElementSibling;
+        while (before && before.hasAttribute(MARK)) before = before.nextElementSibling;
+        return { place: "ado-pr", parent: title.parentElement, before };
+      }
+      const group = workItemGroup(doc, loc);
+      if (!group) return null;
+      const more = [...group.children].filter((c) => c.classList.contains("bolt-expandable-button")).pop();
+      return { place: "ado-wi", parent: group, before: more || null };
     }
-    if (!button) {
-      button = document.createElement("a");
-      button.id = BUTTON_ID;
-      button.textContent = "Open in agendo";
-      Object.assign(button.style, {
+    const actions = doc.querySelector(".gh-header-actions");
+    if (!actions) return null;
+    return { place: "github", parent: actions, before: [...actions.children].find((c) => !c.hasAttribute(MARK)) || null };
+  }
+
+  /** The classes each inline place's button wears: ADO's own bolt-button, never `primary`, and GitHub's btn. */
+  const CLASSES = {
+    "ado-pr": "bolt-button bolt-icon-button enabled bolt-focus-treatment",
+    "ado-wi": "bolt-header-command-item-button bolt-button bolt-icon-button enabled subtle bolt-focus-treatment",
+    github: "btn btn-sm",
+  };
+
+  /**
+   * A new button for `place`. Built with createElement throughout, not
+   * innerHTML, which a Trusted Types policy would refuse. Its click is
+   * handled by `delegate`, not by a listener of its own.
+   */
+  function makeButton(doc, place) {
+    const a = doc.createElement("a");
+    a.id = BUTTON_ID;
+    a.setAttribute(MARK, place);
+    if (place === "float") {
+      a.textContent = "agendo";
+      // Small and out of the way: bottom left, where neither app keeps its
+      // primary actions, and faded until pointed at.
+      Object.assign(a.style, {
         position: "fixed",
-        right: "16px",
-        bottom: "16px",
+        left: "8px",
+        bottom: "8px",
         zIndex: "2147483647",
-        padding: "8px 14px",
-        borderRadius: "6px",
+        padding: "2px 8px",
+        borderRadius: "10px",
         background: "#1f6feb",
         color: "#fff",
-        font: "600 13px/1.2 system-ui, sans-serif",
+        font: "600 11px/1.4 system-ui, sans-serif",
         textDecoration: "none",
-        boxShadow: "0 2px 8px rgba(0,0,0,.3)",
+        opacity: "0.55",
         cursor: "pointer",
       });
-      button.addEventListener("click", (e) => onClick(e, arm));
-      document.body.appendChild(button);
+      a.addEventListener("mouseenter", () => (a.style.opacity = "1"));
+      a.addEventListener("mouseleave", () => (a.style.opacity = "0.55"));
+    } else {
+      a.className = CLASSES[place];
+      a.style.textDecoration = "none";
+      if (place === "github") {
+        a.textContent = "agendo";
+      } else {
+        a.setAttribute("data-is-focusable", "true");
+        const wrap = doc.createElement("span");
+        wrap.className = "fluent-icons-enabled";
+        const icon = doc.createElement("span");
+        icon.setAttribute("aria-hidden", "true");
+        icon.className = "left-icon flex-noshrink fabric-icon ms-Icon--OpenInNewWindow medium";
+        wrap.appendChild(icon);
+        const text = doc.createElement("span");
+        text.className = "bolt-button-text body-m";
+        text.textContent = "agendo";
+        a.append(wrap, text);
+      }
     }
+    return a;
+  }
+
+  /**
+   * The click listener, for the whole document, that hands a click on any
+   * copy of the button to `onClick`. A copy the app cloned with its subtree
+   * (GitHub's restored page snapshots, a re-rendered header) carries the mark
+   * but none of the original's listeners, and `sync` may keep it rather than
+   * the original, so the button's own listener could not be relied on.
+   * `later` and `log` are injected for tests.
+   */
+  function delegate(arm, later = setTimeout, log = debug) {
+    return (e) => {
+      const link = e.target && typeof e.target.closest === "function" ? e.target.closest(`[${MARK}]`) : null;
+      if (link) onClick(e, arm, later, log, link);
+    };
+  }
+
+  /**
+   * Bring `doc`'s button in line with the page at `loc`, as of `now`. `state`
+   * carries what an earlier call learned: the URL (`url`) and when it changed
+   * (`since`), its link (`target`), and since when the page has shown no
+   * mount point (`missing`, null while it shows one). The button goes inline
+   * where the page has a known mount point. With none for FALLBACK_MS — since
+   * the URL changed, or since a mount point it had went away — it floats; in
+   * between it is not shown (but a floating button from before is kept), so a
+   * re-render that takes the row away for a moment does not flash it. Every
+   * other copy is removed, and nothing is written when the button already
+   * stands where it should, so a call that changes nothing triggers no further
+   * mutation. Returns in how many ms to look again when nothing in the DOM may
+   * say so — the button is due to float, or the link still carries a repo id
+   * whose name the page may yet show (see `needsRender`) — else 0.
+   */
+  function sync(doc, loc, state, now) {
+    if (loc.href !== state.url) Object.assign(state, { url: loc.href, since: now, target: undefined, missing: now });
+    if (state.target === undefined || (state.target && needsRender(loc.href, state.url, hrefFor(state.target), state.since, now))) {
+      state.target = linkFor(loc, doc);
+    }
+    const target = state.target;
+    const existing = [...doc.querySelectorAll(`[${MARK}]`)];
+    if (!target) {
+      for (const el of existing) el.remove();
+      return 0;
+    }
+    const mount = mountFor(doc, loc, target);
+    if (mount) state.missing = null;
+    else if (state.missing === null) state.missing = now;
+    let want = mount;
+    if (!want && now - state.missing >= FALLBACK_MS) want = { place: "float", parent: doc.body, before: null };
+    let button;
+    if (want) {
+      button = existing.find((el) => el.getAttribute(MARK) === want.place);
+      if (!button) button = makeButton(doc, want.place);
+      const placed = button.parentElement === want.parent && (want.place === "float" || button.nextElementSibling === want.before);
+      if (!placed) want.parent.insertBefore(button, want.before);
+    } else {
+      // Waiting: only a floating button from before is kept, so it does not flicker.
+      button = existing.find((el) => el.getAttribute(MARK) === "float");
+    }
+    for (const el of existing) if (el !== button) el.remove();
+    const naming = needsRender(loc.href, state.url, hrefFor(target), state.since, now) ? Math.min(500, state.since + NAME_WAIT_MS - now) : 0;
+    if (!button) return Math.min(state.missing + FALLBACK_MS - now, naming || Infinity);
     const href = hrefFor(target);
     if (button.getAttribute("href") !== href) {
       button.setAttribute("href", href);
       button.title = target.kind === "pr" ? `Focus the agendo session for PR ${target.id}` : `Focus the agendo session for work item ${target.id}`;
     }
+    return naming;
+  }
+
+  /**
+   * `run`, at most once a frame however many times this is called before the
+   * frame comes: ADO's DOM mutates constantly, and one sync per batch is
+   * enough. `frame` is injected for tests.
+   */
+  function batched(run, frame = (fn) => requestAnimationFrame(fn)) {
+    let pending = false;
+    return function schedule() {
+      if (pending) return;
+      pending = true;
+      frame(() => {
+        pending = false;
+        run();
+      });
+    };
   }
 
   // Under `bun test` (test/userscript.test.ts), which loads this file as a
@@ -305,7 +474,10 @@
   // whose GM_info every one of them (Tampermonkey, Violentmonkey,
   // Greasemonkey 4) defines even then.
   if (typeof GM_info === "undefined" && typeof module === "object" && module && module.exports) {
-    module.exports = { linkFor, hrefFor, needsRender, NAME_WAIT_MS, debug, guard, onClick, GUARD_MS, DEBUG_KEY };
+    module.exports = {
+      linkFor, hrefFor, needsRender, NAME_WAIT_MS, debug, guard, onClick, GUARD_MS, DEBUG_KEY,
+      mountFor, makeButton, delegate, sync, batched, FALLBACK_MS, MARK, BUTTON_ID,
+    };
     return;
   }
 
@@ -315,23 +487,46 @@
   // earlier listeners unguarded; Firefox's bubble listeners stay guarded.
   const arm = guard();
   debug([`guard installed at readyState ${document.readyState}`]);
+  document.addEventListener("click", delegate(arm), true);
 
-  let last = "";
-  let since = 0;
-  function check() {
-    // At document-start there is no body yet; the poll comes back for it.
+  // While the button waits to float, or for a repo id's name, a timer comes
+  // back for it: a page that has stopped changing gives the observer nothing
+  // to report, and a name may arrive as an attribute change or in <head>.
+  const state = {};
+  let wake = null;
+  const schedule = batched(() => {
     if (!document.body) return;
-    const button = document.getElementById(BUTTON_ID);
-    const now = Date.now();
-    if (!needsRender(window.location.href, last, button ? button.getAttribute("href") || "" : null, since, now)) return;
-    if (window.location.href !== last) since = now;
-    last = window.location.href;
-    render();
+    // A monotonic clock: a wall clock stepped back would hold the float and the name wait off by the step.
+    const wait = sync(document, window.location, state, performance.now());
+    clearTimeout(wake);
+    wake = wait > 0 ? setTimeout(schedule, wait + 1) : null;
+  });
+
+  // The button rows are rendered by the app after load, and replaced whenever
+  // it re-renders them, so every batch of DOM changes is a reason to look.
+  const observer = new MutationObserver(schedule);
+  let observed = null;
+  function observe() {
+    if (!document.body || observed === document.body) return;
+    // A page that swaps in a new body (GitHub's Turbo) leaves the old one behind: watch only the new.
+    observer.disconnect();
+    observed = document.body;
+    observer.observe(document.body, { childList: true, subtree: true });
+    schedule();
   }
 
-  window.addEventListener("popstate", check);
-  // pushState navigations fire no event, and the apps can re-render the body
-  // under us, so a cheap poll is the dependable signal.
-  setInterval(check, 500);
-  check();
+  // A pushState navigation fires no event and may mutate nothing at first, so
+  // a cheap check of the URL backs the observer up.
+  let lastUrl = "";
+  function checkUrl() {
+    observe();
+    if (window.location.href === lastUrl) return;
+    lastUrl = window.location.href;
+    schedule();
+  }
+
+  window.addEventListener("popstate", checkUrl);
+  document.addEventListener("DOMContentLoaded", checkUrl);
+  setInterval(checkUrl, 500);
+  checkUrl();
 })();
