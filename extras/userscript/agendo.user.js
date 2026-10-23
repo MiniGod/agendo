@@ -365,7 +365,7 @@
       a.className = CLASSES[place];
       a.style.textDecoration = "none";
       if (place === "github") {
-        a.textContent = "Open in agendo";
+        a.textContent = "agendo";
       } else {
         a.setAttribute("data-is-focusable", "true");
         const wrap = doc.createElement("span");

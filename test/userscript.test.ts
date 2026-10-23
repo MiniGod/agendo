@@ -512,7 +512,7 @@ describe("sync: the floating fallback", () => {
     const { document, sync, buttons } = page(PR_HEADER);
     expect(sync(url, 0)).toBe(500);
     expect(sync(url, script.NAME_WAIT_MS - 100)).toBe(100);
-    // The name arrives as an attribute change in <head>, which the observer does not see; the wake does.
+    // The name is added to <head>, which the observer does not watch; the wake sees it.
     document.head.insertAdjacentHTML("beforeend", `<link rel="canonical" href="https://dev.azure.com/org/proj/_git/mc-applications/pullrequest/81276">`);
     expect(sync(url, script.NAME_WAIT_MS - 50)).toBe(0);
     expect(buttons()[0].getAttribute("href")).toBe("agendo://focus?pr=81276&repo=mc-applications");
