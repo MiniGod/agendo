@@ -302,11 +302,11 @@ const ADO_WI = "https://dev.azure.com/org/proj/_workitems/edit/102";
 /** An element of a linkedom document (the project's tsconfig has no DOM lib). */
 type El = ReturnType<ReturnType<typeof parseHTML>["document"]["createElement"]>;
 
-/** A document whose body holds `html`, and a sync over it with a fixed clock and a no-op guard. */
+/** A document whose body holds `html`, and a sync over it with a fixed clock. */
 function page(html: string) {
   const { document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
   const state = {};
-  const sync = (url: string, now = 0) => script.sync(document, loc(url), state, now, () => () => {});
+  const sync = (url: string, now = 0): number => script.sync(document, loc(url), state, now);
   const buttons = () => [...document.querySelectorAll(`[${script.MARK}]`)] as El[];
   return { document, state, sync, buttons };
 }
@@ -363,6 +363,9 @@ describe("sync: where the button goes", () => {
     expect(buttons()).toHaveLength(1);
     expect(buttons()[0].closest('[role="dialog"]')).toBeNull();
     expect(buttons()[0].closest(".page")).not.toBeNull();
+    // An edit path names the item even with ?workitem= on it, as in linkFor: the page's bar, not the dialog's.
+    sync(`${ADO_WI}?workitem=7`);
+    expect(buttons().map((b) => [b.getAttribute("href"), b.closest('[role="dialog"]')])).toEqual([["agendo://focus?workItem=102", null]]);
     void document;
   });
 
@@ -378,16 +381,33 @@ describe("sync: where the button goes", () => {
 });
 
 describe("sync: across re-renders", () => {
-  test("repeated syncs keep one button and, once placed, write nothing", () => {
-    const { sync, buttons } = page(PR_HEADER);
-    sync(ADO_PR);
-    const first = buttons()[0];
-    let writes = 0;
-    const orig = first.setAttribute.bind(first);
-    first.setAttribute = (...a: [string, string]) => (writes++, orig(...a));
-    for (let i = 0; i < 5; i++) sync(ADO_PR, i);
-    expect(buttons()).toEqual([first]);
-    expect(writes).toBe(0);
+  test("once placed, repeated syncs keep one button and write nothing to the DOM, so the observer cannot loop", () => {
+    const pages: [string, string, (d: ReturnType<typeof page>["document"]) => void, number][] = [
+      ["PR before Complete", PR_HEADER, () => {}, 0],
+      ["PR with no Complete button", PR_HEADER, (d) => d.querySelector(".repos-pr-header-complete-button")!.remove(), 0],
+      ["work item bar", WI_BAR, () => {}, 0],
+      ["work item bar with no More actions", WI_BAR, (d) => d.querySelector(".bolt-expandable-button")!.remove(), 0],
+      ["GitHub header actions", `<div class="gh-header-actions"><button class="btn">Edit</button></div>`, () => {}, 0],
+      ["floating", `<div>another layout</div>`, () => {}, script.FALLBACK_MS],
+    ];
+    for (const [name, html, prepare, at] of pages) {
+      const p = page(html);
+      prepare(p.document);
+      const url = name.startsWith("work item") ? ADO_WI : name.startsWith("GitHub") ? "https://github.com/MiniGod/agendo/pull/1" : ADO_PR;
+      p.sync(url, 0);
+      p.sync(url, at);
+      const first = p.buttons()[0];
+      expect([name, p.buttons().length]).toEqual([name, 1]);
+      // linkedom reports mutations through MutationObserver as a browser does; count every one.
+      const records: unknown[] = [];
+      const mo = new p.document.defaultView.MutationObserver((r: unknown[]) => records.push(...r));
+      mo.observe(p.document.body, { childList: true, subtree: true, attributes: true });
+      for (let i = 1; i <= 5; i++) p.sync(url, at + i);
+      records.push(...mo.takeRecords());
+      mo.disconnect();
+      expect([name, p.buttons()]).toEqual([name, [first]]);
+      expect([name, records.length]).toEqual([name, 0]);
+    }
   });
 
   test("a container the app replaced gets the button back, once", () => {
@@ -421,6 +441,21 @@ describe("sync: across re-renders", () => {
     expect(buttons()[0].nextElementSibling!.className).toContain("repos-pr-header-complete-button");
   });
 
+  test("a copy cloned ahead of the original may be the one kept, and still arms the guard on click", () => {
+    const { document, sync, buttons } = page(PR_HEADER);
+    sync(ADO_PR);
+    const original = buttons()[0];
+    const row = original.parentElement!;
+    row.insertBefore(original.cloneNode(true), row.firstElementChild);
+    sync(ADO_PR, 100);
+    expect(buttons()).toHaveLength(1);
+    let arms = 0;
+    document.addEventListener("click", script.delegate(() => (arms++, () => {}), () => {}, () => {}), true);
+    const text = buttons()[0].querySelector(".bolt-button-text")!;
+    text.dispatchEvent(Object.assign(new document.defaultView.Event("click", { bubbles: true }), { button: 0 }));
+    expect(arms).toBe(1);
+  });
+
   test("navigating relabels the button, moves it to the new page's row, and removes it where there is no link", () => {
     const { sync, buttons } = page(PR_HEADER + WI_BAR);
     sync(ADO_PR);
@@ -448,6 +483,15 @@ describe("sync: the floating fallback", () => {
     expect([b.style.position, b.style.left, b.style.bottom]).toEqual(["fixed", "8px", "8px"]);
     expect(b.style.right).toBe("");
     expect(b.getAttribute("href")).toBe("agendo://focus?pr=81276&repo=mc-applications");
+  });
+
+  test("while waiting, sync says when the button is due to float, so a quiet page still gets it", () => {
+    const { sync } = page(`<div>another layout</div>`);
+    expect(sync(ADO_PR, 1000)).toBe(script.FALLBACK_MS);
+    expect(sync(ADO_PR, 1800)).toBe(script.FALLBACK_MS - 800);
+    expect(sync(ADO_PR, 1000 + script.FALLBACK_MS)).toBe(0);
+    const inline = page(PR_HEADER);
+    expect(inline.sync(ADO_PR, 0)).toBe(0);
   });
 
   test("GitHub's React layout, with no classic header actions, falls back too", () => {
@@ -480,15 +524,18 @@ describe("sync: the floating fallback", () => {
 });
 
 describe("the button's click", () => {
-  test("every place's button arms the guard on a plain click, and leaves a modified one alone", () => {
+  test("a click on or inside any place's button arms the guard; a modified click, or a click elsewhere, does not", () => {
     for (const place of ["ado-pr", "ado-wi", "github", "float"]) {
-      const { document } = parseHTML("<!doctype html><html><body></body></html>");
+      const { document } = parseHTML("<!doctype html><html><body><p>elsewhere</p></body></html>");
       let arms = 0;
-      const b = script.makeButton(document, place, () => (arms++, () => {}));
+      document.addEventListener("click", script.delegate(() => (arms++, () => {}), () => {}, () => {}), true);
+      const b = script.makeButton(document, place);
       b.setAttribute("href", "agendo://focus?pr=1");
       document.body.appendChild(b);
-      b.dispatchEvent(Object.assign(new document.defaultView.Event("click"), { button: 0 }));
-      b.dispatchEvent(Object.assign(new document.defaultView.Event("click"), { button: 0, ctrlKey: true }));
+      const click = (el: El, extra: Record<string, unknown>) => el.dispatchEvent(Object.assign(new document.defaultView.Event("click", { bubbles: true }), extra));
+      click(b.firstElementChild ?? b, { button: 0 });
+      click(b, { button: 0, ctrlKey: true });
+      click(document.querySelector("p")!, { button: 0 });
       expect([place, arms]).toEqual([place, 1]);
     }
   });

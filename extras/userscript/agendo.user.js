@@ -253,11 +253,11 @@
    * modified click is left to the browser unguarded. A page listener that runs
    * after this one may still cancel the click, and then no beforeunload comes:
    * a task later, once the click has been dispatched to every listener, a
-   * cancelled click disarms the guard again. `later` and `log` are injected
-   * for tests.
+   * cancelled click disarms the guard again. `link` is the button clicked.
+   * `later` and `log` are injected for tests.
    */
-  function onClick(e, arm, later = setTimeout, log = debug) {
-    const href = e.currentTarget.getAttribute("href");
+  function onClick(e, arm, later = setTimeout, log = debug, link = e.currentTarget) {
+    const href = link.getAttribute("href");
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) {
       log([`modified click on ${href}: left to the browser`]);
       return;
@@ -285,13 +285,14 @@
    * The work item header's button group to mount in. A work item opened as a
    * dialog over a board, backlog or query (`?workitem=<id>`) has its command
    * bar in the dialog; one opened as a dialog over a work item page leaves the
-   * page's own bar showing the URL's item. So the URL picks which bar, and
-   * either way only one is used.
+   * page's own bar showing the URL's item. So the URL picks which bar, by the
+   * same rule as `linkFor` (an edit path wins over `?workitem=`), and either
+   * way only one is used.
    */
   function workItemGroup(doc, loc) {
     const groups = [...doc.querySelectorAll(".work-item-header-command-bar .bolt-header-commandbar-button-group")];
     if (!groups.length) return null;
-    const wantDialog = new URLSearchParams(loc.search).has("workitem");
+    const wantDialog = !/\/_workitems\/edit\/\d+(?:\/|$)/i.test(loc.pathname) && new URLSearchParams(loc.search).has("workitem");
     const fit = groups.filter((g) => !!g.closest('[role="dialog"]') === wantDialog);
     if (fit.length) return wantDialog ? fit[fit.length - 1] : fit[0];
     return wantDialog ? groups[groups.length - 1] : groups[0];
@@ -332,11 +333,11 @@
   };
 
   /**
-   * A new button for `place`, its click wired to `arm`. Built with
-   * createElement throughout, not innerHTML, which a Trusted Types policy
-   * would refuse.
+   * A new button for `place`. Built with createElement throughout, not
+   * innerHTML, which a Trusted Types policy would refuse. Its click is
+   * handled by `delegate`, not by a listener of its own.
    */
-  function makeButton(doc, place, arm) {
+  function makeButton(doc, place) {
     const a = doc.createElement("a");
     a.id = BUTTON_ID;
     a.setAttribute(MARK, place);
@@ -379,8 +380,22 @@
         a.append(wrap, text);
       }
     }
-    a.addEventListener("click", (e) => onClick(e, arm));
     return a;
+  }
+
+  /**
+   * The click listener, for the whole document, that hands a click on any
+   * copy of the button to `onClick`. A copy the app cloned with its subtree
+   * (GitHub's restored page snapshots, a re-rendered header) carries the mark
+   * but none of the original's listeners, and `sync` may keep it rather than
+   * the original, so the button's own listener could not be relied on.
+   * `later` and `log` are injected for tests.
+   */
+  function delegate(arm, later = setTimeout, log = debug) {
+    return (e) => {
+      const link = e.target && typeof e.target.closest === "function" ? e.target.closest(`[${MARK}]`) : null;
+      if (link) onClick(e, arm, later, log, link);
+    };
   }
 
   /**
@@ -392,9 +407,10 @@
    * between those, while a re-render briefly takes the mount point away, it is
    * left where it is. Every other copy is removed, and nothing is written when
    * the button already stands where it should, so a call that changes nothing
-   * triggers no further mutation.
+   * triggers no further mutation. Returns how many ms from `now` the button
+   * is due to float, while it is waiting for that; else 0.
    */
-  function sync(doc, loc, state, now, arm) {
+  function sync(doc, loc, state, now) {
     if (loc.href !== state.url) Object.assign(state, { url: loc.href, since: now, target: undefined, mounted: false });
     if (state.target === undefined || (state.target && needsRender(loc.href, state.url, hrefFor(state.target), state.since, now))) {
       state.target = linkFor(loc, doc);
@@ -403,7 +419,7 @@
     const existing = [...doc.querySelectorAll(`[${MARK}]`)];
     if (!target) {
       for (const el of existing) el.remove();
-      return;
+      return 0;
     }
     const mount = mountFor(doc, loc, target);
     if (mount) state.mounted = true;
@@ -412,7 +428,7 @@
     let button;
     if (want) {
       button = existing.find((el) => el.getAttribute(MARK) === want.place);
-      if (!button) button = makeButton(doc, want.place, arm);
+      if (!button) button = makeButton(doc, want.place);
       const placed = button.parentElement === want.parent && (want.place === "float" || button.nextElementSibling === want.before);
       if (!placed) want.parent.insertBefore(button, want.before);
     } else {
@@ -420,12 +436,13 @@
       button = existing.find((el) => el.getAttribute(MARK) === "float");
     }
     for (const el of existing) if (el !== button) el.remove();
-    if (!button) return;
+    if (!button) return state.mounted ? 0 : state.since + FALLBACK_MS - now;
     const href = hrefFor(target);
     if (button.getAttribute("href") !== href) {
       button.setAttribute("href", href);
       button.title = target.kind === "pr" ? `Focus the agendo session for PR ${target.id}` : `Focus the agendo session for work item ${target.id}`;
     }
+    return 0;
   }
 
   /**
@@ -454,7 +471,7 @@
   if (typeof GM_info === "undefined" && typeof module === "object" && module && module.exports) {
     module.exports = {
       linkFor, hrefFor, needsRender, NAME_WAIT_MS, debug, guard, onClick, GUARD_MS, DEBUG_KEY,
-      mountFor, makeButton, sync, batched, FALLBACK_MS, MARK, BUTTON_ID,
+      mountFor, makeButton, delegate, sync, batched, FALLBACK_MS, MARK, BUTTON_ID,
     };
     return;
   }
@@ -465,32 +482,40 @@
   // earlier listeners unguarded; Firefox's bubble listeners stay guarded.
   const arm = guard();
   debug([`guard installed at readyState ${document.readyState}`]);
+  document.addEventListener("click", delegate(arm), true);
 
+  // While the button waits to float, a timer comes back for it when it is
+  // due: a page that has stopped changing gives the observer nothing to report.
   const state = {};
+  let wake = null;
   const schedule = batched(() => {
-    if (document.body) sync(document, window.location, state, Date.now(), arm);
+    if (!document.body) return;
+    const wait = sync(document, window.location, state, Date.now());
+    clearTimeout(wake);
+    wake = wait > 0 ? setTimeout(schedule, wait + 1) : null;
   });
 
   // The button rows are rendered by the app after load, and replaced whenever
   // it re-renders them, so every batch of DOM changes is a reason to look.
+  const observer = new MutationObserver(schedule);
   let observed = null;
   function observe() {
     if (!document.body || observed === document.body) return;
+    // A page that swaps in a new body (GitHub's Turbo) leaves the old one behind: watch only the new.
+    observer.disconnect();
     observed = document.body;
-    new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true });
     schedule();
   }
 
   // A pushState navigation fires no event and may mutate nothing at first, so
-  // a cheap check of the URL backs the observer up, and a URL change also
-  // schedules the look that may float the button once FALLBACK_MS has passed.
+  // a cheap check of the URL backs the observer up.
   let lastUrl = "";
   function checkUrl() {
     observe();
     if (window.location.href === lastUrl) return;
     lastUrl = window.location.href;
     schedule();
-    setTimeout(schedule, FALLBACK_MS + 50);
   }
 
   window.addEventListener("popstate", checkUrl);
