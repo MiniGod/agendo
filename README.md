@@ -612,9 +612,12 @@ GitHub page can run it. Setup on Linux:
    `update-desktop-database ${XDG_DATA_HOME:-~/.local/share}/applications`.
 2. **Install the user-script:** open
    [`extras/userscript/agendo.user.js`](extras/userscript/agendo.user.js) in
-   Tampermonkey or Violentmonkey. It adds an **Open in agendo** button to pull requests
+   Tampermonkey or Violentmonkey. It adds an **agendo** button to pull requests
    and work items on `dev.azure.com`, `*.visualstudio.com` and `github.com`, including
-   pages reached by in-app navigation. A click follows the link, which leaves the
+   pages reached by in-app navigation. On Azure DevOps it sits in the page's own
+   header row, next to Publish/Approve on a PR and before "More actions" in a work
+   item's command bar; on a page layout it does not know, it floats small and faded
+   in the bottom left corner. A click follows the link, which leaves the
    page where it is, and hides the `beforeunload` the browser fires first from the
    page's listeners (in Chromium, from those added after the script, which runs at
    document-start), so Azure DevOps keeps its live updates instead of warning that
