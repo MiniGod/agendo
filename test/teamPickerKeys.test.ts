@@ -17,7 +17,7 @@ const NONE: Key = {
 const key = (k: Partial<Key>): Key => ({ ...NONE, ...k });
 type TeamMode = Extract<Mode, { kind: "teamPicker" }>;
 const picker = (cursor: number, teams: string[] | null = ["Prisma", "Zeta"], error?: string): TeamMode => ({
-  kind: "teamPicker", cursor, teams, ...(error ? { error } : {}),
+  kind: "teamPicker", cursor, teams, request: 7, ...(error ? { error } : {}),
 });
 const config = { ...DEFAULT_CONFIG, team: "Team DES" };
 const ctxIn = (mode: Mode, saveError: string | null = null) => ({ mode, setMode: mock(), config, saveConfigPatch: mock((_patch: ConfigPatch) => saveError) });
@@ -37,14 +37,20 @@ describe("the list", () => {
   });
 
   test("loaded: the cursor lands on the current team, matched loosely, else the top", () => {
-    expect(teamsLoaded(["Prisma", "Zeta"], " zeta ")(picker(0, null))).toEqual(picker(1));
-    expect(teamsLoaded(["Prisma", "Zeta"], "Team DES")(picker(0, null))).toEqual(picker(0));
-    expect(teamsLoaded(["Prisma"], "Prisma")(list)).toBe(list);
+    expect(teamsLoaded(["Prisma", "Zeta"], " zeta ", 7)(picker(0, null))).toEqual(picker(1));
+    expect(teamsLoaded(["Prisma", "Zeta"], "Team DES", 7)(picker(0, null))).toEqual(picker(0));
   });
 
   test("failed: no teams, the reason, and the cursor on typing a name", () => {
-    expect(teamsFailed("couldn't list your teams: 401")(picker(0, null))).toEqual(picker(0, [], "couldn't list your teams: 401"));
-    expect(teamsFailed("x")(list)).toBe(list);
+    expect(teamsFailed("couldn't list your teams: 401", 7)(picker(0, null))).toEqual(picker(0, [], "couldn't list your teams: 401"));
+  });
+
+  test("an answer is dropped once its picker is gone, or another picker has asked since", () => {
+    expect(teamsLoaded(["Prisma"], "Prisma", 7)(list)).toBe(list);
+    expect(teamsFailed("x", 7)(list)).toBe(list);
+    const newer = picker(0, null);
+    expect(teamsLoaded(["Prisma"], "Prisma", 6)(newer)).toBe(newer);
+    expect(teamsFailed("x", 6)(newer)).toBe(newer);
   });
 });
 

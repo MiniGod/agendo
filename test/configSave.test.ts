@@ -39,6 +39,14 @@ describe("readConfigObject", () => {
       expect(() => readConfigObject(bad)).toThrow(`${bad} doesn't hold a JSON object`);
     }
   });
+
+  test("a file that can't be read says so, not that it isn't JSON", () => {
+    const d = tmp();
+    const dir = join(d, "config.json");
+    mkdirSync(dir);
+    expect(() => readConfigObject(dir)).toThrow("EISDIR");
+    expect(() => readConfigObject(dir)).not.toThrow("isn't valid JSON");
+  });
 });
 
 describe("mergeConfig", () => {

@@ -221,7 +221,7 @@ export async function loadModelProgressively(opts: LoadModelOptions, onStage: St
   });
   // The team check runs after the roster: a roster 404 is its fallback signal.
   const teamPromise = provider.getTeamMembers().then(async (teamMembers) => {
-    const teamCheck = (await provider.checkTeam?.()) ?? null;
+    const teamCheck = opts.checkTeam ? ((await provider.checkTeam?.()) ?? null) : null;
     onStage({
       kind: "team",
       update: (previous) => ({ ...(previous ?? base), teamMembers, teamCheck }),

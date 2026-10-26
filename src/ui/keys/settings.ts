@@ -60,7 +60,7 @@ export function openEditor(field: TextField, config: Ctx["config"]): Mode {
 export function activateConfigField(field: ConfigField, ctx: Ctx): void {
   if (field === "resumeDialogChoice" || field === "peerSocket") {
     ctx.setMode(afterSave(field, ctx.saveConfigPatch(toggledValue(field, ctx.config))));
-  } else if (field === "team") ctx.enterTeamPicker(ctx.config.team);
+  } else if (field === "team") ctx.enterTeamPicker(fieldText("team", ctx.config));
   else ctx.setMode(openEditor(field, ctx.config));
 }
 

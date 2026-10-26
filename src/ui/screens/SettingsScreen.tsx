@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { CONFIG_PATH, type Config } from "../../app/config.ts";
 import { PROVIDER_INFO } from "../../providers/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
@@ -37,9 +37,38 @@ function SettingRow({ label, value, sel }: { label: string; value: Shown; sel: b
 }
 
 /**
+ * Lines the page spends on everything but its rows: the title, the hint, three
+ * gaps, the config.json source line, Resource, the Authentication heading, a
+ * line per backend and the last save's note — plus Ink's last line, which a
+ * page as tall as the terminal would scroll the title away with.
+ */
+export function settingsChrome(backends: number, note: boolean): number {
+  return 9 + backends + (note ? 1 : 0);
+}
+
+/**
+ * The rows that fit in `room` lines, as [start, end): every one when they all
+ * fit; otherwise a window around the cursor, one line shorter to leave room
+ * for saying how many are out of view.
+ */
+export function settingsWindow(cursor: number, count: number, room: number): { start: number; end: number } {
+  if (count <= room) return { start: 0, end: count };
+  const page = Math.max(1, room - 1);
+  const start = Math.min(Math.max(0, cursor - Math.floor(page / 2)), count - page);
+  return { start, end: start + page };
+}
+
+/** The line under a windowed list: how many rows are above and below it. */
+export function hiddenRowsText(above: number, below: number): string | null {
+  const parts = [above > 0 ? `↑ ${above} more` : "", below > 0 ? `↓ ${below} more` : ""].filter(Boolean);
+  return parts.length > 0 ? `  ${parts.join(" · ")}` : null;
+}
+
+/**
  * The Settings page: the actionable rows on top (in `settingsItems` order, the
  * same array the key handler walks) — the launcher's own state, then the
- * config.json fields — then a read-only report of every backend's CLI + auth
+ * config.json fields, windowed around the cursor when the terminal is too short
+ * for all of them — then a read-only report of every backend's CLI + auth
  * state. `authStatus` is the probe that runs on entering the page; `note` is
  * the outcome of the last save made from it.
  */
@@ -75,17 +104,22 @@ export function SettingsScreen({
   };
   const settingValue = (item: SettingsItem): Shown => (isConfigField(item) ? fieldDisplay(item, config) : ui[item]);
   const firstConfig = settingsItems.findIndex(isConfigField);
+  const { stdout } = useStdout();
+  const room = (stdout?.rows ?? 24) - settingsChrome(PROVIDER_INFO.length, note !== undefined);
+  const { start, end } = settingsWindow(cursor, settingsItems.length, room);
+  const hidden = hiddenRowsText(start, settingsItems.length - end);
   return (
     <Box flexDirection="column">
       <Text bold>Settings</Text>
       <Text dimColor>{"↑/↓ move · enter change/toggle · esc back"}</Text>
       <Box marginTop={1} flexDirection="column">
-        {settingsItems.map((item, i) => (
-          <Box key={item} flexDirection="column" marginTop={i === firstConfig ? 1 : 0}>
-            {i === firstConfig ? <ConfigSource inEffect={configInEffect} /> : null}
-            <SettingRow label={settingLabel(item)} value={settingValue(item)} sel={i === cursor} />
+        {settingsItems.slice(start, end).map((item, k) => (
+          <Box key={item} flexDirection="column" marginTop={start + k === firstConfig ? 1 : 0}>
+            {start + k === firstConfig ? <ConfigSource inEffect={configInEffect} /> : null}
+            <SettingRow label={settingLabel(item)} value={settingValue(item)} sel={start + k === cursor} />
           </Box>
         ))}
+        {hidden ? <Text dimColor>{hidden}</Text> : null}
         <Text dimColor wrap="truncate">{`  ${padCell("Resource", 28)}${config.resource}  (Azure DevOps' fixed app id, not editable)`}</Text>
       </Box>
       {note ? <Text color={note.error ? "red" : "green"} wrap="truncate">{note.error ? `✗ ${note.text}` : note.text}</Text> : null}

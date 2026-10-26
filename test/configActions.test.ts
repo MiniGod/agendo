@@ -55,21 +55,38 @@ describe("saveConfigPatch", () => {
 });
 
 describe("enterTeamPicker", () => {
-  const apply = (deps: { setMode: ReturnType<typeof mock> }, i: number): Mode =>
-    (deps.setMode.mock.calls[i][0] as (m: Mode) => Mode)({ kind: "teamPicker", cursor: 0, teams: null });
+  /** The picker `enterTeamPicker` opened, and the update its list request made to it. */
+  const opened = (deps: { setMode: ReturnType<typeof mock> }) => {
+    const loading = deps.setMode.mock.calls[0][0] as Extract<Mode, { kind: "teamPicker" }>;
+    return { loading, answered: () => (deps.setMode.mock.calls[1][0] as (m: Mode) => Mode)(loading) };
+  };
 
   test("opens loading, then lists the teams with the cursor on the current one", async () => {
     const { deps, actions } = setup();
     actions.enterTeamPicker("zeta");
-    expect(deps.setMode.mock.calls[0][0]).toEqual({ kind: "teamPicker", cursor: 0, teams: null });
+    const { loading, answered } = opened(deps);
+    expect(loading).toEqual({ kind: "teamPicker", cursor: 0, teams: null, request: loading.request });
     await settled();
-    expect(apply(deps, 1)).toEqual({ kind: "teamPicker", cursor: 1, teams: ["Prisma", "Zeta"] });
+    expect(answered()).toEqual({ ...loading, cursor: 1, teams: ["Prisma", "Zeta"] });
   });
 
   test("a list that fails says why, leaving typing a name", async () => {
     const { deps, actions } = setup({ myTeams: () => Promise.reject(new Error("HTTP 401")) });
     actions.enterTeamPicker("Prisma");
     await settled();
-    expect(apply(deps, 1)).toEqual({ kind: "teamPicker", cursor: 0, teams: [], error: "couldn't list your teams: HTTP 401" });
+    const { loading, answered } = opened(deps);
+    expect(answered()).toEqual({ ...loading, teams: [], error: "couldn't list your teams: HTTP 401" });
+  });
+
+  test("each picker asks under its own request, so an earlier one's late answer can't land in it", async () => {
+    const { deps, actions } = setup();
+    actions.enterTeamPicker("Prisma");
+    actions.enterTeamPicker("Prisma");
+    const first = deps.setMode.mock.calls[0][0] as Extract<Mode, { kind: "teamPicker" }>;
+    const second = deps.setMode.mock.calls[1][0] as Extract<Mode, { kind: "teamPicker" }>;
+    expect(second.request).not.toBe(first.request);
+    await settled();
+    const firstAnswer = deps.setMode.mock.calls[2][0] as (m: Mode) => Mode;
+    expect(firstAnswer(second)).toBe(second);
   });
 });

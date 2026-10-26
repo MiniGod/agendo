@@ -114,6 +114,12 @@ export interface LoadModelOptions {
    * / empty ⇒ no path context, so nothing is scoped.
    */
   scopeRepos?: RepoInfo[];
+  /**
+   * Check the configured team against the signed-in user's own teams
+   * (`LoadedModel.teamCheck`). Only the TUI shows the answer, so only it pays
+   * the request; the CLI, which background orchestrators poll, leaves it off.
+   */
+  checkTeam?: boolean;
 }
 
 /**

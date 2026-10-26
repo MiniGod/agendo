@@ -1,5 +1,6 @@
 import type { Identity, TeamCheck, TeamMember } from "../../shared/types.ts";
-import { API, GRAPH, VSSPS, cfg } from "./env.ts";
+import { judgeTeam } from "./configChange.ts";
+import { API, GRAPH, VSSPS, cacheWriter, cfg } from "./env.ts";
 import { adoGet } from "./http.ts";
 
 // ── Identities: the authenticated user, and the configured team's members ─────
@@ -8,15 +9,17 @@ let cachedMe: Identity | null = null;
 /** The authenticated az user — the default identity, and the "(you)" marker. */
 export async function getMe(): Promise<Identity> {
   if (cachedMe) return cachedMe;
+  const keep = cacheWriter();
   const d = (await adoGet(
     `${VSSPS}/_apis/profile/profiles/me?api-version=7.1-preview.3`,
   )) as { id: string; displayName?: string; emailAddress?: string };
-  cachedMe = {
+  const me: Identity = {
     id: d.id,
     displayName: d.displayName ?? "Me",
     uniqueName: d.emailAddress ?? "",
   };
-  return cachedMe;
+  keep(() => (cachedMe = me));
+  return me;
 }
 
 let cachedMembers: TeamMember[] | null = null;
@@ -28,12 +31,12 @@ let teamMissing = false;
 /** Members of the configured team — the roster for the identity switcher. */
 export async function getTeamMembers(): Promise<TeamMember[]> {
   if (cachedMembers) return cachedMembers;
+  const keep = cacheWriter();
   const data = await adoGet(
     `_apis/projects/${encodeURIComponent(cfg.project)}` +
       `/teams/${encodeURIComponent(cfg.team)}/members?${API}`,
     { allow404: true },
   );
-  teamMissing = data === null;
   const members: TeamMember[] = (data?.value ?? [])
     .map((m: any) => m.identity)
     .filter(Boolean)
@@ -43,7 +46,10 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
       uniqueName: i.uniqueName ?? "",
     }));
   members.sort((a, b) => a.displayName.localeCompare(b.displayName));
-  cachedMembers = members;
+  keep(() => {
+    cachedMembers = members;
+    teamMissing = data === null;
+  });
   return members;
 }
 
@@ -57,6 +63,7 @@ let cachedMyTeams: string[] | null = null;
  */
 export async function getMyTeams(): Promise<string[]> {
   if (cachedMyTeams) return cachedMyTeams;
+  const keep = cacheWriter();
   const data = await adoGet(
     `_apis/projects/${encodeURIComponent(cfg.project)}/teams` +
       `?$mine=true&$top=200&api-version=7.1-preview.3`,
@@ -65,7 +72,7 @@ export async function getMyTeams(): Promise<string[]> {
     .map((t: any) => t?.name)
     .filter((n: unknown): n is string => typeof n === "string");
   names.sort((a, b) => a.localeCompare(b));
-  cachedMyTeams = names;
+  keep(() => (cachedMyTeams = names));
   return names;
 }
 
@@ -77,11 +84,7 @@ export async function getMyTeams(): Promise<string[]> {
  */
 export async function checkTeam(): Promise<TeamCheck | null> {
   const mine = await getMyTeams().catch(() => null);
-  const team = cfg.team.trim();
-  const project = cfg.project;
-  if (!mine) return teamMissing ? { team, project, mine: null } : null;
-  const isMine = team !== "" && mine.some((t) => t.toLowerCase() === team.toLowerCase());
-  return isMine ? null : { team, project, mine };
+  return judgeTeam({ team: cfg.team, project: cfg.project, mine, missing: teamMissing });
 }
 
 // ── Teams a member belongs to (for "PRs assigned to your teams") ───────────────
@@ -95,6 +98,7 @@ export async function graphGet(path: string): Promise<any> {
 let cachedProjectTeams: { id: string; name: string }[] | null = null;
 async function getProjectTeams(): Promise<{ id: string; name: string }[]> {
   if (cachedProjectTeams) return cachedProjectTeams;
+  const keep = cacheWriter();
   const teams: { id: string; name: string }[] = [];
   for (let skip = 0; ; skip += 200) {
     const data = await adoGet(
@@ -105,7 +109,7 @@ async function getProjectTeams(): Promise<{ id: string; name: string }[]> {
     for (const t of batch) teams.push({ id: t.id, name: t.name });
     if (batch.length < 200) break;
   }
-  cachedProjectTeams = teams;
+  keep(() => (cachedProjectTeams = teams));
   return teams;
 }
 
@@ -113,6 +117,7 @@ const teamsForMemberCache = new Map<string, { id: string; name: string }[]>();
 export async function getTeamsForMember(memberId: string): Promise<{ id: string; name: string }[]> {
   const cached = teamsForMemberCache.get(memberId);
   if (cached) return cached;
+  const keep = cacheWriter();
   try {
     const teams = await getProjectTeams();
     const teamById = new Map(teams.map((t) => [t.id, t.name]));
@@ -133,12 +138,12 @@ export async function getTeamsForMember(memberId: string): Promise<{ id: string;
     const result = ids
       .filter((id): id is string => !!id && teamById.has(id))
       .map((id) => ({ id, name: teamById.get(id)! }));
-    teamsForMemberCache.set(memberId, result);
+    keep(() => teamsForMemberCache.set(memberId, result));
     return result;
   } catch {
     // Graph traversal can fail for accounts without directory read access; the
     // review section still works for the person themselves in that case.
-    teamsForMemberCache.set(memberId, []);
+    keep(() => teamsForMemberCache.set(memberId, []));
     return [];
   }
 }

@@ -20,6 +20,10 @@ export interface ConfigIo {
   myTeams: () => Promise<string[]>;
 }
 
+// Numbers each team picker's list request. Module-level because the actions
+// are rebuilt on every render, and the count must outlive them.
+let pickerRequests = 0;
+
 /**
  * Saving config.json from the Settings page, and the team picker's list.
  *
@@ -53,10 +57,11 @@ export function makeConfigActions({
   }
 
   function enterTeamPicker(current: string): void {
-    setMode({ kind: "teamPicker", cursor: 0, teams: null });
+    const request = ++pickerRequests;
+    setMode({ kind: "teamPicker", cursor: 0, teams: null, request });
     io.myTeams().then(
-      (teams) => setMode(teamsLoaded(teams, current)),
-      (e: unknown) => setMode(teamsFailed(`couldn't list your teams: ${messageOf(e)}`)),
+      (teams) => setMode(teamsLoaded(teams, current, request)),
+      (e: unknown) => setMode(teamsFailed(`couldn't list your teams: ${messageOf(e)}`, request)),
     );
   }
 

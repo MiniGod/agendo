@@ -16,18 +16,23 @@ export function stepTeam(step: 1 | -1): (p: Mode) => Mode {
   return (p) => (p.kind === "teamPicker" ? { ...p, cursor: (p.cursor + step + teamRowCount(p)) % teamRowCount(p) } : p);
 }
 
+/** Whether `p` is the picker still waiting on list request `request`; the request can outlive it. */
+function awaiting(p: Mode, request: number): p is TeamMode {
+  return p.kind === "teamPicker" && p.request === request;
+}
+
 /**
  * The teams have arrived: list them, the cursor on `current` when it is one of
- * them. Ignored once the picker is gone — the request can outlive it.
+ * them. Ignored unless the picker that asked is still up.
  */
-export function teamsLoaded(teams: string[], current: string): (p: Mode) => Mode {
+export function teamsLoaded(teams: string[], current: string, request: number): (p: Mode) => Mode {
   const at = teams.findIndex((t) => t.toLowerCase() === current.trim().toLowerCase());
-  return (p) => (p.kind === "teamPicker" ? { ...p, teams, cursor: Math.max(0, at) } : p);
+  return (p) => (awaiting(p, request) ? { ...p, teams, cursor: Math.max(0, at) } : p);
 }
 
 /** The teams couldn't be listed: say why, and leave typing a name as the way on. */
-export function teamsFailed(error: string): (p: Mode) => Mode {
-  return (p) => (p.kind === "teamPicker" ? { ...p, teams: [], cursor: 0, error } : p);
+export function teamsFailed(error: string, request: number): (p: Mode) => Mode {
+  return (p) => (awaiting(p, request) ? { ...p, teams: [], cursor: 0, error } : p);
 }
 
 /** Enter: save the team under the cursor, or open the editor to type one. */

@@ -162,3 +162,37 @@ test("a team the project doesn't have, with your teams unlistable, reads as not 
   const picker = await wt.waitForText("✗ couldn't list your teams:");
   expect(picker).toContain("❯ ✎ type a team name…");
 });
+
+test("a hand-edited team that isn't text reads as no team, and the picker still opens", async ({ launch, mock }) => {
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(configPath(mock.home), JSON.stringify({ org: "acme", project: "Widgets", team: null }));
+
+  const wt = await launch();
+  const screen = await wt.waitForText("⚑ no team is set, so there is no current sprint — set it in , settings", 20000);
+  expect(screen).not.toContain("Press r to retry");
+
+  const picker = await teamPicker(wt);
+  expect(picker).toMatch(/❯ ○ Team A/);
+  await wt.press(KEY.enter);
+  await wt.waitForText("✓ Team saved");
+  expect((await readJson(configPath(mock.home))).team).toBe("Team A");
+});
+
+test("in a terminal too short for every row, the page windows them around the cursor", async ({ launch }) => {
+  const wt = await launch({ rows: 18 });
+  await wt.waitForText("Sprint 42", 20000);
+  await wt.waitForStable();
+
+  await wt.press(",");
+  let screen = await wt.waitForText("↓ 6 more");
+  expect(screen.split("\n")[0].trim()).toBe("Settings");
+  expect(screen).toContain("❯ Backend");
+  expect(screen).not.toContain("Focus terminal");
+
+  await wt.press("k"); // up from the top wraps to the last row
+  screen = await wt.waitForText("❯ Focus terminal");
+  expect(screen.split("\n")[0].trim()).toBe("Settings");
+  expect(screen).toContain("↑ 6 more");
+  expect(screen).not.toContain("Backend");
+  expect(screen).toContain("Authentication");
+});

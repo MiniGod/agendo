@@ -124,7 +124,7 @@ export function useModelLoader({
         setLoadState(pendingState(readyRef.current));
         try {
           await loadModelProgressively(
-            { provider, identity, hostSession, scopeRepos: discoveredRepos },
+            { provider, identity, hostSession, scopeRepos: discoveredRepos, checkTeam: true },
             (stage) => publish(token, completed, stage),
           );
           if (cancelled || token !== activeAttempt) return;

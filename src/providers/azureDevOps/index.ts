@@ -14,7 +14,6 @@
 // so the re-exports below are written out rather than `export *`, so that
 // helpers which only became cross-module for the split (mapPr,
 // getTeamsForMember, adoGet/adoPost) are not promoted into the public surface.
-import type { Config } from "../../app/config.ts";
 import { API, cfg, reloadEnv } from "./env.ts";
 import { adoGet, adoPost, resetToken } from "./http.ts";
 import { resetIdentityCaches } from "./identity.ts";
@@ -34,19 +33,18 @@ export { mapLimit, enrichPrCI, fetchActivePRs, fetchReviewPRs } from "./policy.t
  * Re-read config.json after the Settings page saved it, and when the org,
  * project, team or tenant changed, drop every answer cached for the old one —
  * the token (minted per tenant), the identities and team lists, the project id
- * and build results, the PRs. Says whether any of them changed. `next` is for
- * the unit suite, which must never read the real config file.
+ * and build results, the PRs (configChange.ts `invalidatedBy`). Says whether
+ * any of them changed.
  */
-export function reloadConfig(next?: Config): boolean {
-  const change = reloadEnv(next);
-  if (change.tenant) resetToken();
-  const changed = change.org || change.project || change.team || change.tenant;
-  if (changed) {
+export function reloadConfig(): boolean {
+  const { token, caches } = reloadEnv();
+  if (token) resetToken();
+  if (caches) {
     resetIdentityCaches();
     resetPolicyCaches();
     clearPrCache();
   }
-  return changed;
+  return caches;
 }
 
 // ── Current iteration for the configured team ─────────────────────────────────

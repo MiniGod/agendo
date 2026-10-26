@@ -221,11 +221,13 @@
         // LOWERED 390 -> 365: the provider switch moved to
         // src/ui/actions/provider.ts (same factory shape as the clone and
         // profile actions), leaving one wiring call where the closure sat.
-        "max-lines-per-function": ["error", { "max": 365, "skipBlankLines": false, "skipComments": false }],
-        // LOWERED 68 -> 67: the Settings page's row list is one shared array
-        // (src/ui/models/configFields.ts SETTINGS_ITEMS) rather than a local
-        // rebuilt each render, and config.json's state and save closures came in
-        // as one hook call (src/ui/hooks/useConfigSettings.ts).
+        // LOWERED 365 -> 345 and 68 -> 67: slack, not a split. `App` already
+        // measured 67 statements, and wiring in the Settings page's config.json
+        // editing left it there: its state and save closures came in as one
+        // hook call (src/ui/hooks/useConfigSettings.ts), paid for by dropping
+        // the local row list for the shared SETTINGS_ITEMS
+        // (src/ui/models/configFields.ts). Both now sit where `App` measures.
+        "max-lines-per-function": ["error", { "max": 345, "skipBlankLines": false, "skipComments": false }],
         "max-statements": ["error", 67]
         // NOTE: no complexity line here any more. It was 47, set by `App`; `App`
         // is now complexity 8, and the worst function left in the file is the

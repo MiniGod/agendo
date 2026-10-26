@@ -2,7 +2,7 @@ import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import type { OpenPlan } from "../../launch/index.ts";
 import { configPathInEffect, type Config } from "../../app/config.ts";
-import type { SettingsItem } from "../models/configFields.ts";
+import { fieldText, type SettingsItem } from "../models/configFields.ts";
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
@@ -221,7 +221,7 @@ function renderSettingsMode({
   }
 
   if (mode.kind === "teamPicker") {
-    return <TeamPickerScreen cursor={mode.cursor} teams={mode.teams} current={config.team} project={config.project} error={mode.error} />;
+    return <TeamPickerScreen cursor={mode.cursor} teams={mode.teams} current={fieldText("team", config)} project={fieldText("project", config)} error={mode.error} />;
   }
 
   if (mode.kind === "identity") {

@@ -103,6 +103,12 @@ describe("the config.json rows", () => {
     expect(failing.setMode.mock.calls[0][0]).toEqual(afterSave("resumeDialogChoice", "couldn't save: disk full"));
   });
 
+  test("a hand-edited team that isn't text opens the picker on an empty name rather than crashing it", () => {
+    const ctx = { ...ctxIn(settings(5)), config: { ...config, team: null as never } };
+    activateConfigField("team", ctx);
+    expect(ctx.enterTeamPicker.mock.calls).toEqual([[""]]);
+  });
+
   test("team opens its picker on the current team; every other field opens its editor", () => {
     const ctx = ctxIn(settings(5));
     activateSetting("team", ctx);

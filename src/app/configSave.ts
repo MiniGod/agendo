@@ -26,9 +26,11 @@ export type ConfigPatch = { [K in keyof Config]?: Config[K] | undefined };
  */
 export function readConfigObject(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
+  // Read outside the parse: a file that can't be read throws as itself (EACCES, EISDIR), path included.
+  const text = readFileSync(path, "utf-8");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf-8"));
+    parsed = JSON.parse(text);
   } catch (e) {
     throw new Error(`${path} isn't valid JSON (${messageOf(e)}) — fix or remove it, then save again`);
   }

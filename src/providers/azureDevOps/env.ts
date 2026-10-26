@@ -11,6 +11,7 @@
 // REST layer at a local mock server without patching production defaults. In
 // normal use neither var is set and we talk to the real Azure DevOps hosts.
 import { loadConfig, type Config } from "../../app/config.ts";
+import { invalidatedBy, type Invalidated } from "./configChange.ts";
 
 export const cfg: Config = loadConfig();
 const baseUrl = (c: Config) => (process.env.ADO_BASE_URL ?? `https://dev.azure.com/${encodeURIComponent(c.org)}`).replace(/\/$/, "");
@@ -20,20 +21,27 @@ export const VSSPS = (process.env.ADO_VSSPS_URL ?? "https://app.vssps.visualstud
 export let GRAPH = graphUrl(cfg);
 export const API = "api-version=7.1";
 
-/** What a cached answer is keyed by: a change to any of these means a different org, project, team or signed-in tenant. */
-export type EnvChange = { org: boolean; project: boolean; team: boolean; tenant: boolean };
+// Bumped by `reloadEnv` when org, project, team or tenant change. The caches are cleared then,
+// but a request the old load started before the save can land after it, and
+// must not refill them with an answer about the old org, project or team.
+let configEpoch = 0;
 
-/** Re-read config.json into `cfg` and re-derive the base URLs from it; says which of the keys requests depend on changed. */
-export function reloadEnv(next: Config = loadConfig()): EnvChange {
+/** A cache write bound to the config as it is now: it runs only if org, project, team and tenant haven't changed since. */
+export function cacheWriter(): (write: () => void) => void {
+  const epoch = configEpoch;
+  return (write) => {
+    if (epoch === configEpoch) write();
+  };
+}
+
+/** Re-read config.json into `cfg` and re-derive the base URLs from it; says what the change invalidates. */
+export function reloadEnv(): Invalidated {
   const before = { ...cfg };
   for (const key of Object.keys(cfg)) delete (cfg as Partial<Config>)[key as keyof Config];
-  Object.assign(cfg, next);
+  Object.assign(cfg, loadConfig());
   BASE = baseUrl(cfg);
   GRAPH = graphUrl(cfg);
-  return {
-    org: before.org !== cfg.org,
-    project: before.project !== cfg.project,
-    team: before.team !== cfg.team,
-    tenant: before.tenant !== cfg.tenant,
-  };
+  const invalidated = invalidatedBy(before, cfg);
+  if (invalidated.caches) configEpoch++;
+  return invalidated;
 }

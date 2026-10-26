@@ -26,8 +26,10 @@ export type Mode =
   // last enter didn't save — a validation message, or the save's own failure.
   | { kind: "settingsEdit"; field: TextField; value: string; cursor: number; error?: string }
   // The team picker: the signed-in user's own teams in the project (null while
-  // they load), then a row for typing a name instead.
-  | { kind: "teamPicker"; cursor: number; teams: string[] | null; error?: string }
+  // they load), then a row for typing a name instead. `request` names the list
+  // request this picker is waiting on, so an earlier picker's late answer is
+  // dropped rather than shown here.
+  | { kind: "teamPicker"; cursor: number; teams: string[] | null; request: number; error?: string }
   // `fromSettings` routes the picker back to the Settings page (not the list)
   // on cancel, so Settings acts as a hub you drill into and return to.
   | { kind: "provider"; cursor: number; fromSettings?: boolean }
