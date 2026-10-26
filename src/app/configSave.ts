@@ -54,12 +54,14 @@ export function mergeConfig(raw: Record<string, unknown>, patch: ConfigPatch): R
  * Replace `path` with `text` atomically: a temp file beside it, then rename(2),
  * so a crash or a full disk can't leave a truncated config behind. A symlinked
  * config (a dotfiles checkout) is written through, so it stays a link, and an
- * existing file keeps its permissions.
+ * existing file keeps its permissions; a new one takes `modeOf`'s, when that
+ * exists (the legacy config a first save migrates).
  */
-export function writeFileAtomic(path: string, text: string): void {
+export function writeFileAtomic(path: string, text: string, modeOf: string = path): void {
   const target = existsSync(path) ? realpathSync(path) : path;
   mkdirSync(dirname(target), { recursive: true });
-  const kept = existsSync(target) ? statSync(target).mode & 0o777 : null;
+  const like = existsSync(target) ? target : modeOf;
+  const kept = existsSync(like) ? statSync(like).mode & 0o777 : null;
   const tmp = `${target}.${process.pid}.tmp`;
   try {
     writeFileSync(tmp, text, { mode: kept ?? 0o644 });
@@ -82,6 +84,6 @@ export function saveConfig(
   paths: { from: string; to: string } = { from: configPathInEffect(), to: CONFIG_PATH },
 ): string {
   const merged = mergeConfig(readConfigObject(paths.from), patch);
-  writeFileAtomic(paths.to, `${JSON.stringify(merged, null, 2)}\n`);
+  writeFileAtomic(paths.to, `${JSON.stringify(merged, null, 2)}\n`, paths.from);
   return paths.to;
 }

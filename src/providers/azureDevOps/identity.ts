@@ -25,7 +25,7 @@ export async function getMe(): Promise<Identity> {
 let cachedMembers: TeamMember[] | null = null;
 // Set when the members request 404'd: the configured team doesn't exist. That
 // is a config mistake, not an outage, so it leaves the roster empty and is
-// reported by `checkTeam` rather than failing the whole load.
+// reported by `checkTeam` — a notice in the TUI, a failed load in the CLI.
 let teamMissing = false;
 
 /** Members of the configured team — the roster for the identity switcher. */
@@ -80,10 +80,11 @@ export async function getMyTeams(): Promise<string[]> {
  * Whether the configured team is one the user can expect their sprint from: null
  * when it is one of their own teams (or nothing can be told), else what to say
  * about it. Run after `getTeamMembers`, whose 404 is the fallback signal when
- * the user's teams can't be listed. Never throws.
+ * the user's teams can't be listed — or aren't asked for (`listMine: false`,
+ * which costs no request). Never throws.
  */
-export async function checkTeam(): Promise<TeamCheck | null> {
-  const mine = await getMyTeams().catch(() => null);
+export async function checkTeam({ listMine = true }: { listMine?: boolean } = {}): Promise<TeamCheck | null> {
+  const mine = listMine ? await getMyTeams().catch(() => null) : null;
   return judgeTeam({ team: cfg.team, project: cfg.project, mine, missing: teamMissing });
 }
 

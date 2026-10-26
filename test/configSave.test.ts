@@ -1,7 +1,8 @@
 // Saving config.json from the Settings page (src/app/configSave.ts). The e2e
 // suite saves through the real TUI into a temp HOME, once per shape it can
 // reach from a keystroke; the shapes it can't — a malformed file in effect, a
-// symlinked config, a write that fails half way, a file's permissions — sit
+// symlinked config, a write that fails half way, a file's permissions (kept, or
+// carried over from the legacy file a first save migrates) — sit
 // here, each on its own temp directory. Every path is explicit: nothing here
 // reads or writes a real ~/.agendo, ~/.clops or ~/.claude-launcher.
 import { afterEach, describe, expect, test } from "bun:test";
@@ -111,6 +112,19 @@ describe("saveConfig", () => {
     expect(saveConfig({ team: "Prisma" }, { from: legacy, to })).toBe(to);
     expect(readFileSync(to, "utf-8")).toBe('{\n  "org": "contoso",\n  "team": "Prisma",\n  "hmiTag": "keep me"\n}\n');
     expect(readFileSync(legacy, "utf-8")).toBe(legacyText);
+  });
+
+  test("the new file takes the legacy file's permissions, past the umask", () => {
+    for (const mode of [0o600, 0o664]) {
+      const home = tmp();
+      const legacy = join(home, ".clops", "config.json");
+      mkdirSync(join(home, ".clops"));
+      writeFileSync(legacy, '{"team":"Team DES"}');
+      chmodSync(legacy, mode);
+      const to = join(home, ".agendo", "config.json");
+      saveConfig({ team: "Prisma" }, { from: legacy, to });
+      expect(statSync(to).mode & 0o777).toBe(mode);
+    }
   });
 
   test("with no file anywhere, the save writes just the patch", () => {

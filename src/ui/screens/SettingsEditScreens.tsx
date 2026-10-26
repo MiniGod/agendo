@@ -73,7 +73,7 @@ export function TeamPickerScreen({
   const hidden = hiddenRowsText(start, rows.length + 1 - end);
   return (
     <Box flexDirection="column">
-      <Text bold>{`Settings › Team — your teams in ${project || "(no project set)"}`}</Text>
+      <Text bold wrap="truncate">{`Settings › Team — your teams in ${project || "(no project set)"}`}</Text>
       <Text dimColor>{"↑/↓ move · enter select · esc back"}</Text>
       <Box marginTop={1} flexDirection="column">
         <TeamListState teams={teams} error={error} />

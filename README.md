@@ -700,19 +700,24 @@ that you belong to; its last row lets you type a name instead. A value that does
 validate stays in its editor with the reason under it.
 
 A save changes only the key you edited. Every other key in the file, including keys
-agendo doesn't read, is written back unchanged, and the write is atomic (a temp file,
-then a rename). Saves always go to `~/.agendo/config.json`: while agendo still reads a
-legacy `~/.clops/config.json` or `~/.claude-launcher/config.json`, the page says so, and
-the first save writes that file's whole content, plus your edit, to the new path. The
-legacy file is left as it was. Changing the org, project, team, tenant or closed states
+agendo doesn't read, is read and written back with its value and in its place, though
+not its formatting: the file comes out as two-space-indented JSON. The write is atomic
+(a temp file, then a rename) and keeps the file's permissions. Saves always go to
+`~/.agendo/config.json`: while agendo still reads a legacy `~/.clops/config.json` or
+`~/.claude-launcher/config.json`, the page says so, and the first save writes that
+file's whole content, plus your edit, to the new path, with the legacy file's
+permissions. The legacy file is left as it was. Changing the org, project, team, tenant or closed states
 reloads the lists, so **Current sprint** follows without a restart.
 
 When the configured team isn't one of yours, or the project has no team by that name,
 the Work items view says so in one line and names a few of your teams:
 
 ```
-⚑ team 'Team DES' isn't one of yours (Prisma, Zeta, …), set it in , settings
+⚑ team 'Team DES' isn't one of yours (Prisma, Saga, Zeta, …), set it in , settings
 ```
+
+The CLI has no such line. A team the project doesn't have fails its backend load
+instead, as it always has, now with `team '…' wasn't found in …` as the reason.
 
 Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
 platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the

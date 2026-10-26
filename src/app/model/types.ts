@@ -117,7 +117,8 @@ export interface LoadModelOptions {
   /**
    * Check the configured team against the signed-in user's own teams
    * (`LoadedModel.teamCheck`). Only the TUI shows the answer, so only it pays
-   * the request; the CLI, which background orchestrators poll, leaves it off.
+   * the request; the CLI, which background orchestrators poll, leaves it off,
+   * and fails its load on a team the project doesn't have instead.
    */
   checkTeam?: boolean;
 }

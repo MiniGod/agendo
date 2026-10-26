@@ -4,7 +4,7 @@ import { getProvider } from "../../providers/index.ts";
 import { SessionIndex } from "../../sessions/index.ts";
 import { captureRestore } from "../../runtime/restore/index.ts";
 import { discoverRepos, mergeRepos, repoScopeKeys } from "../../repositories/index.ts";
-import type { PRWithSessions, WorkItem } from "../../shared/types.ts";
+import type { PRWithSessions, TeamCheck, WorkItem } from "../../shared/types.ts";
 import { refreshLiveTmux } from "./live.ts";
 import { adoptForeignPanes } from "./adopt.ts";
 import { livePanes } from "../../runtime/tmux/index.ts";
@@ -180,6 +180,19 @@ async function resolveOrphans(
   return { prLinked, remainingOrphans: orphanPrs.filter((pr) => !surfacedPrIds.has(pr.id)) };
 }
 
+/**
+ * What the Work items view says about the configured team. Only the TUI asks
+ * for the full check (`opts.checkTeam`): it has a line to show it on, so it
+ * pays the request for the user's own teams. Everywhere else a team the
+ * project doesn't have — which the roster request has already found out, for
+ * free — fails the load, as the roster's 404 did before there was a notice.
+ */
+async function teamCheckFor(provider: Provider, opts: LoadModelOptions): Promise<TeamCheck | null> {
+  const check = (await provider.checkTeam?.({ listMine: opts.checkTeam === true })) ?? null;
+  if (check && !opts.checkTeam) throw new Error(`team '${check.team}' wasn't found in ${check.project}; set it on agendo's settings page (,)`);
+  return check;
+}
+
 export async function loadModelProgressively(opts: LoadModelOptions, onStage: StageListener): Promise<LoadedModel> {
   const provider = getProvider(opts.provider);
   // Invalidate any per-load backend caches so a refresh re-reads mutable state
@@ -221,7 +234,7 @@ export async function loadModelProgressively(opts: LoadModelOptions, onStage: St
   });
   // The team check runs after the roster: a roster 404 is its fallback signal.
   const teamPromise = provider.getTeamMembers().then(async (teamMembers) => {
-    const teamCheck = opts.checkTeam ? ((await provider.checkTeam?.()) ?? null) : null;
+    const teamCheck = await teamCheckFor(provider, opts);
     onStage({
       kind: "team",
       update: (previous) => ({ ...(previous ?? base), teamMembers, teamCheck }),

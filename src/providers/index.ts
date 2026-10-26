@@ -70,8 +70,10 @@ export interface Provider {
   /** Roster for the identity switcher. */
   getTeamMembers(): Promise<TeamMember[]>;
   /** Whether the configured team is one of the user's own (ADO only; see
-   *  `TeamCheck`). Run after getTeamMembers; never throws. */
-  checkTeam?(): Promise<TeamCheck | null>;
+   *  `TeamCheck`). Run after getTeamMembers; never throws. `listMine: false`
+   *  skips the request for the user's teams, so only a team the roster request
+   *  found missing is reported. */
+  checkTeam?(opts?: { listMine?: boolean }): Promise<TeamCheck | null>;
   /** Work items (ADO: current-iteration assigned items; GitHub: open issues). */
   fetchWorkItems(ctx: FetchContext): Promise<{
     items: Omit<WorkItem, "sessions">[];
