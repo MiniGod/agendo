@@ -10,13 +10,24 @@ import type { FreshTarget, OpenTargets } from "../models/targets.ts";
 import type { PrSort, Row, SessionSort } from "../models/rows.ts";
 import type { OrchestratorPins } from "../models/orchestratorPins.ts";
 import type { Skipped } from "../actions/staleKill.ts";
+import type { Config } from "../../app/config.ts";
+import type { ConfigPatch } from "../../app/configSave.ts";
+import type { SettingsItem, TextField } from "../models/configFields.ts";
 
 // ── top-level views & fresh-session flow state ────────────────────────────────
 export type View = "items" | "prs" | "sessions";
 
 export type Mode =
   | { kind: "list" }
-  | { kind: "settings"; cursor: number }
+  // `note` is the outcome of the last save made from the page (or its editors),
+  // shown under the rows until the page is left.
+  | { kind: "settings"; cursor: number; note?: { text: string; error?: boolean } }
+  // Typing a config.json value (src/ui/keys/settingsEdit.ts). `error` is why the
+  // last enter didn't save — a validation message, or the save's own failure.
+  | { kind: "settingsEdit"; field: TextField; value: string; cursor: number; error?: string }
+  // The team picker: the signed-in user's own teams in the project (null while
+  // they load), then a row for typing a name instead.
+  | { kind: "teamPicker"; cursor: number; teams: string[] | null; error?: string }
   // `fromSettings` routes the picker back to the Settings page (not the list)
   // on cancel, so Settings acts as a hub you drill into and return to.
   | { kind: "provider"; cursor: number; fromSettings?: boolean }
@@ -146,7 +157,14 @@ export type KeyContext = {
   beginInit: (mode: InitParentMode, rawParent: string) => void;
 
   // ── settings / pickers ──
-  settingsItems: Array<"provider" | "identity" | "autoResume">;
+  settingsItems: readonly SettingsItem[];
+  /** config.json as last loaded — what the config rows show and the editors open with. */
+  config: Config;
+  /** Save to config.json; the error to show, or null once saved (and, when it
+   *  re-points the backend, the model reloading). */
+  saveConfigPatch: (patch: ConfigPatch) => string | null;
+  /** Open the team picker, its cursor on `current` once the teams arrive. */
+  enterTeamPicker: (current: string) => void;
   enterSettings: () => void;
   enterProvider: (fromSettings?: boolean) => void;
   enterIdentity: (fromSettings?: boolean) => void;

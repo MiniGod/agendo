@@ -5,7 +5,10 @@
 // variants, the repo filter with none, one and several repos — so a change to
 // one reads against the rest.
 import { describe, expect, test } from "bun:test";
-import { coordinatorHint, pinnedLineCount, repoFilterHint, scopeText, scopeToggleHint, searchHint, viewHint } from "../src/ui/screens/listLines.tsx";
+import {
+  coordinatorHint, pinnedLineCount, repoFilterHint, scopeText, scopeToggleHint, searchHint, teamNoticeLines, teamNoticeText, viewHint,
+} from "../src/ui/screens/listLines.tsx";
+import type { LoadedModel } from "../src/app/model/types.ts";
 
 const state = { grouped: false, prsGrouped: true, prSort: "created" as const, sessionSort: "updated" as const };
 
@@ -62,5 +65,33 @@ describe("pinnedLineCount", () => {
     expect(pinnedLineCount("sessions", pins)).toBe(2);
     expect(pinnedLineCount("prs", pins)).toBe(0);
     expect(pinnedLineCount("sessions", null)).toBe(0);
+  });
+});
+
+describe("teamNoticeText", () => {
+  const check = (team: string, mine: string[] | null) => ({ team, project: "Fabrikam", mine });
+
+  test("nothing to say when the team checked out, or wasn't checked", () => {
+    expect(teamNoticeText(null)).toBeNull();
+    expect(teamNoticeText(undefined)).toBeNull();
+  });
+
+  test("no team at all, and a team the project doesn't have", () => {
+    expect(teamNoticeText(check("", ["Prisma"]))).toBe("no team is set, so there is no current sprint — set it in , settings");
+    expect(teamNoticeText(check("Team Prisma", null))).toBe("team 'Team Prisma' wasn't found in Fabrikam, set it in , settings");
+  });
+
+  test("a team that isn't one of the user's names up to three of theirs", () => {
+    expect(teamNoticeText(check("Team DES", ["Prisma"]))).toBe("team 'Team DES' isn't one of yours (Prisma), set it in , settings");
+    expect(teamNoticeText(check("Team DES", ["A", "B", "C", "D"]))).toBe("team 'Team DES' isn't one of yours (A, B, C, …), set it in , settings");
+    expect(teamNoticeText(check("Team DES", []))).toBe("team 'Team DES' isn't one of yours (you're in no team of Fabrikam), set it in , settings");
+  });
+
+  test("the viewport reserves its line only in the Work items view, and only when there is one", () => {
+    const model = { teamCheck: check("Team DES", ["Prisma"]) } as LoadedModel;
+    expect(teamNoticeLines("items", model)).toBe(1);
+    expect(teamNoticeLines("sessions", model)).toBe(0);
+    expect(teamNoticeLines("items", { teamCheck: null } as LoadedModel)).toBe(0);
+    expect(teamNoticeLines("items", null)).toBe(0);
   });
 });

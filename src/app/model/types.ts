@@ -9,7 +9,7 @@ import type { RepoInfo } from "../../repositories/index.ts";
 import type { LiveTarget, SessionKind } from "../../runtime/tmux/index.ts";
 import type {
   Identity, LinkedPR, PRWithSessions, ProviderName,
-  RepoSessions, ReviewPRWithSessions, TeamMember, WorkItem,
+  RepoSessions, ReviewPRWithSessions, TeamCheck, TeamMember, WorkItem,
 } from "../../shared/types.ts";
 
 /**
@@ -90,6 +90,9 @@ export interface LoadedModel {
   identity: Identity;
   /** Roster for the identity switcher (configured team's members). */
   teamMembers: TeamMember[];
+  /** Set when the configured team isn't one of the user's own (ADO; see
+   *  Provider.checkTeam) — the Work items view says so in one line. */
+  teamCheck?: TeamCheck | null;
 }
 
 export interface LoadModelOptions {

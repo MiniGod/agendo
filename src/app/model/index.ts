@@ -219,14 +219,16 @@ export async function loadModelProgressively(opts: LoadModelOptions, onStage: St
     onStage({ kind: "items", update: (previous) => applyItems(previous, base, data, me, identity) });
     return { ...result, data };
   });
-  const teamPromise = provider.getTeamMembers().then((teamMembers) => {
+  // The team check runs after the roster: a roster 404 is its fallback signal.
+  const teamPromise = provider.getTeamMembers().then(async (teamMembers) => {
+    const teamCheck = (await provider.checkTeam?.()) ?? null;
     onStage({
       kind: "team",
-      update: (previous) => ({ ...(previous ?? base), teamMembers }),
+      update: (previous) => ({ ...(previous ?? base), teamMembers, teamCheck }),
     });
-    return teamMembers;
+    return { teamMembers, teamCheck };
   });
-  const [{ currentIterationPath, data }, activePRs, reviewPRs, teamMembers] = await Promise.all([
+  const [{ currentIterationPath, data }, activePRs, reviewPRs, { teamMembers, teamCheck }] = await Promise.all([
     itemPromise,
     provider.fetchActivePRs(ctx),
     provider.fetchReviewPRs(ctx),
@@ -280,6 +282,7 @@ export async function loadModelProgressively(opts: LoadModelOptions, onStage: St
     me,
     identity,
     teamMembers,
+    teamCheck,
   };
   onStage({
     kind: "complete",

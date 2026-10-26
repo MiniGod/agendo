@@ -10,6 +10,7 @@ import type {
   ProviderName,
   PullRequest,
   ReviewPR,
+  TeamCheck,
   TeamMember,
   WorkItem,
 } from "../shared/types.ts";
@@ -68,6 +69,9 @@ export interface Provider {
   getMe(): Promise<Identity>;
   /** Roster for the identity switcher. */
   getTeamMembers(): Promise<TeamMember[]>;
+  /** Whether the configured team is one of the user's own (ADO only; see
+   *  `TeamCheck`). Run after getTeamMembers; never throws. */
+  checkTeam?(): Promise<TeamCheck | null>;
   /** Work items (ADO: current-iteration assigned items; GitHub: open issues). */
   fetchWorkItems(ctx: FetchContext): Promise<{
     items: Omit<WorkItem, "sessions">[];
@@ -111,6 +115,7 @@ const adoProvider: Provider = {
   checkAuth: ado.checkAuth,
   getMe: ado.getMe,
   getTeamMembers: ado.getTeamMembers,
+  checkTeam: ado.checkTeam,
   fetchWorkItems: (ctx) => ado.fetchWorkItems(ctx.identity.uniqueName),
   fetchActivePRs: (ctx) => ado.fetchActivePRs(ctx.identity.id),
   fetchReviewPRs: (ctx) => ado.fetchReviewPRs(ctx.identity),
@@ -121,6 +126,11 @@ const adoProvider: Provider = {
 
 // github.ts already speaks FetchContext, so its namespace is a Provider as-is.
 const githubProvider: Provider = github;
+
+// The Azure DevOps settings in config.json, for the Settings page: the
+// signed-in user's teams (its team picker), and re-reading the file after a
+// save so the next load asks the new org / project / team / tenant.
+export { getMyTeams as getMyAdoTeams, reloadConfig as reloadAdoConfig } from "./azureDevOps/index.ts";
 
 /** The backend for the given name (both are cheap singletons — no caching). */
 export function getProvider(name: ProviderName): Provider {

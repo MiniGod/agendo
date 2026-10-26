@@ -711,4 +711,8 @@ export const ADO = {
   // Project teams (getProjectTeams). Empty → the graph traversal short-circuits,
   // exercising the "no team memberships" fallback (review reason stays "you").
   teams: { value: [] as { id: string; name: string }[] },
+  // The signed-in user's own teams (getMyTeams, `$mine=true`). Holds the
+  // config's "Team A", so the team check stays quiet in every spec that doesn't
+  // set out to trip it; "Team B" is the one the Settings specs switch to.
+  myTeams: { value: [{ id: "team-a", name: "Team A" }, { id: "team-b", name: "Team B" }] },
 };

@@ -15,8 +15,15 @@ async function getProjectId(): Promise<string> {
 }
 
 // A completed build's result is immutable and a purged build stays purged, so
-// cache every outcome (including "unknown") for the process lifetime.
+// cache every outcome (including "unknown") for the process lifetime — or until
+// the config names another org or project, where the same build id is another build.
 const buildResultCache = new Map<number, "pass" | "fail" | undefined>();
+
+/** Forget the project id and build results, which belong to the org and project config.json named before it changed. */
+export function resetPolicyCaches(): void {
+  cachedProjectId = null;
+  buildResultCache.clear();
+}
 
 // Pass/fail of a finished build, or undefined if it's no longer fetchable
 // (purged by retention) or didn't reach a clear pass/fail outcome. `get` is

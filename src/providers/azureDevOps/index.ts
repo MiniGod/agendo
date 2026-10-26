@@ -11,14 +11,15 @@
 //
 // This file remains the single import path — src/providers/index.ts imports it
 // as namespace `ado`; e2e/provider.spec.ts imports the URL builders by name —
-// so the re-exports below are exactly the 18 names it
-// exported before, written out rather than `export *` so that helpers which
-// only became cross-module for the split (mapPr, getTeamsForMember,
-// adoGet/adoPost) are not promoted into the public surface.
-import { API, cfg } from "./env.ts";
-import { adoGet, adoPost } from "./http.ts";
-import { fetchPullRequestWorkItems, getPullRequest, getPullRequestWorkItems, getRawPullRequest, mapPr, parsePrArtifact } from "./pr.ts";
-import { mapLimit } from "./policy.ts";
+// so the re-exports below are written out rather than `export *`, so that
+// helpers which only became cross-module for the split (mapPr,
+// getTeamsForMember, adoGet/adoPost) are not promoted into the public surface.
+import type { Config } from "../../app/config.ts";
+import { API, cfg, reloadEnv } from "./env.ts";
+import { adoGet, adoPost, resetToken } from "./http.ts";
+import { resetIdentityCaches } from "./identity.ts";
+import { clearPrCache, fetchPullRequestWorkItems, getPullRequest, getPullRequestWorkItems, getRawPullRequest, mapPr, parsePrArtifact } from "./pr.ts";
+import { mapLimit, resetPolicyCaches } from "./policy.ts";
 import { attachSurfacingPrs, groupPrsByWorkItem, surfacedPrIdsOf } from "./prWorkItems.ts";
 import type { FocusEntity, Identity, PullRequest, WorkItem } from "../../shared/types.ts";
 
@@ -26,8 +27,27 @@ import { urls } from "./urls.ts";
 export { adoWorkItemUrl, adoPullRequestUrl, urls } from "./urls.ts";
 export { getToken, checkAuth } from "./http.ts";
 export { clearPrCache, getPullRequestWorkItems } from "./pr.ts";
-export { getMe, getTeamMembers } from "./identity.ts";
+export { checkTeam, getMe, getMyTeams, getTeamMembers } from "./identity.ts";
 export { mapLimit, enrichPrCI, fetchActivePRs, fetchReviewPRs } from "./policy.ts";
+
+/**
+ * Re-read config.json after the Settings page saved it, and when the org,
+ * project, team or tenant changed, drop every answer cached for the old one —
+ * the token (minted per tenant), the identities and team lists, the project id
+ * and build results, the PRs. Says whether any of them changed. `next` is for
+ * the unit suite, which must never read the real config file.
+ */
+export function reloadConfig(next?: Config): boolean {
+  const change = reloadEnv(next);
+  if (change.tenant) resetToken();
+  const changed = change.org || change.project || change.team || change.tenant;
+  if (changed) {
+    resetIdentityCaches();
+    resetPolicyCaches();
+    clearPrCache();
+  }
+  return changed;
+}
 
 // ── Current iteration for the configured team ─────────────────────────────────
 // A team that has never configured any sprints 404s here instead of returning an

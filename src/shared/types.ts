@@ -238,6 +238,20 @@ export interface TeamMember {
   uniqueName: string;
 }
 
+/**
+ * Why the configured team can't be where "Current sprint" comes from: it isn't
+ * among the signed-in user's own teams in the project, or — when those couldn't
+ * be listed — Azure DevOps said it doesn't exist. Either way the sprint section
+ * would otherwise just read empty, with nothing saying why.
+ */
+export interface TeamCheck {
+  /** The configured team, as written in config.json (may be blank). */
+  team: string;
+  project: string;
+  /** The user's own teams in the project, or null when they couldn't be listed and the team 404'd. */
+  mine: string[] | null;
+}
+
 /** The identity the launcher is currently acting as. */
 export type Identity = TeamMember;
 

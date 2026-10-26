@@ -118,7 +118,9 @@ export async function startAdoServer(): Promise<AdoServer> {
     // ── identity / project metadata ──
     if (/_apis\/profile\/profiles\/me$/i.test(path)) return json(ADO.profile);
     if (/_apis\/projects\/[^/]+\/teams\/[^/]+\/members$/i.test(path)) return json(ADO.teamMembers);
-    if (/_apis\/projects\/[^/]+\/teams$/i.test(path)) return json(ADO.teams);
+    // `$mine=true` is the signed-in user's own teams (the Settings team picker
+    // and the team check); without it, every team in the project.
+    if (/_apis\/projects\/[^/]+\/teams$/i.test(path)) return json(q.get("$mine") === "true" ? ADO.myTeams : ADO.teams);
     if (/_apis\/projects\/[^/]+$/i.test(path)) return json(ADO.project);
     // Graph traversal (team-membership). Intentionally unmocked → 404; the app
     // catches it and falls back to "self only" (review reason "you").

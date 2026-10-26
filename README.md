@@ -689,6 +689,31 @@ default 240) lives in the same file, as does `peerSocket` (see
 you are viewing as, and the auto-resume toggle are remembered separately in
 `~/.agendo/state.json`.
 
+### Editing it from the settings page
+
+Every key above can be changed on the settings page (`,`) without opening the file:
+`org`, `project`, `team`, `tenant`, `closedStates` (comma-separated),
+`stalledAfterMinutes`, `resumeDialogChoice` and `peerSocket` (enter flips them), and
+`focusTerminal` (empty turns it off). `resource`, Azure DevOps' fixed application id,
+is shown but not editable. Enter on **Team** lists the teams of the configured project
+that you belong to; its last row lets you type a name instead. A value that doesn't
+validate stays in its editor with the reason under it.
+
+A save changes only the key you edited. Every other key in the file, including keys
+agendo doesn't read, is written back unchanged, and the write is atomic (a temp file,
+then a rename). Saves always go to `~/.agendo/config.json`: while agendo still reads a
+legacy `~/.clops/config.json` or `~/.claude-launcher/config.json`, the page says so, and
+the first save writes that file's whole content, plus your edit, to the new path. The
+legacy file is left as it was. Changing the org, project, team, tenant or closed states
+reloads the lists, so **Current sprint** follows without a restart.
+
+When the configured team isn't one of yours, or the project has no team by that name,
+the Work items view says so in one line and names a few of your teams:
+
+```
+⚑ team 'Team DES' isn't one of yours (Prisma, Zeta, …), set it in , settings
+```
+
 Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
 platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the
 executable to use instead, for hosts where that default isn't right (containers, WSL).

@@ -1,4 +1,4 @@
-import type { Identity, TeamMember } from "../../shared/types.ts";
+import type { Identity, TeamCheck, TeamMember } from "../../shared/types.ts";
 import { API, GRAPH, VSSPS, cfg } from "./env.ts";
 import { adoGet } from "./http.ts";
 
@@ -20,6 +20,10 @@ export async function getMe(): Promise<Identity> {
 }
 
 let cachedMembers: TeamMember[] | null = null;
+// Set when the members request 404'd: the configured team doesn't exist. That
+// is a config mistake, not an outage, so it leaves the roster empty and is
+// reported by `checkTeam` rather than failing the whole load.
+let teamMissing = false;
 
 /** Members of the configured team — the roster for the identity switcher. */
 export async function getTeamMembers(): Promise<TeamMember[]> {
@@ -27,8 +31,10 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   const data = await adoGet(
     `_apis/projects/${encodeURIComponent(cfg.project)}` +
       `/teams/${encodeURIComponent(cfg.team)}/members?${API}`,
+    { allow404: true },
   );
-  const members: TeamMember[] = (data.value ?? [])
+  teamMissing = data === null;
+  const members: TeamMember[] = (data?.value ?? [])
     .map((m: any) => m.identity)
     .filter(Boolean)
     .map((i: any): TeamMember => ({
@@ -39,6 +45,43 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   members.sort((a, b) => a.displayName.localeCompare(b.displayName));
   cachedMembers = members;
   return members;
+}
+
+// ── The signed-in user's own teams (the Settings team picker, and checkTeam) ──
+let cachedMyTeams: string[] | null = null;
+
+/**
+ * Names of the configured project's teams the signed-in user is a member of,
+ * sorted. One request, cached until the config changes (`resetIdentityCaches`);
+ * a failure is not cached, so the picker can try again.
+ */
+export async function getMyTeams(): Promise<string[]> {
+  if (cachedMyTeams) return cachedMyTeams;
+  const data = await adoGet(
+    `_apis/projects/${encodeURIComponent(cfg.project)}/teams` +
+      `?$mine=true&$top=200&api-version=7.1-preview.3`,
+  );
+  const names: string[] = (data?.value ?? [])
+    .map((t: any) => t?.name)
+    .filter((n: unknown): n is string => typeof n === "string");
+  names.sort((a, b) => a.localeCompare(b));
+  cachedMyTeams = names;
+  return names;
+}
+
+/**
+ * Whether the configured team is one the user can expect their sprint from: null
+ * when it is one of their own teams (or nothing can be told), else what to say
+ * about it. Run after `getTeamMembers`, whose 404 is the fallback signal when
+ * the user's teams can't be listed. Never throws.
+ */
+export async function checkTeam(): Promise<TeamCheck | null> {
+  const mine = await getMyTeams().catch(() => null);
+  const team = cfg.team.trim();
+  const project = cfg.project;
+  if (!mine) return teamMissing ? { team, project, mine: null } : null;
+  const isMine = team !== "" && mine.some((t) => t.toLowerCase() === team.toLowerCase());
+  return isMine ? null : { team, project, mine };
 }
 
 // ── Teams a member belongs to (for "PRs assigned to your teams") ───────────────
@@ -100,3 +143,13 @@ export async function getTeamsForMember(memberId: string): Promise<{ id: string;
   }
 }
 
+
+/** Forget every answer above — they were all for the org, project, team and tenant config.json named before it changed. */
+export function resetIdentityCaches(): void {
+  cachedMe = null;
+  cachedMembers = null;
+  teamMissing = false;
+  cachedMyTeams = null;
+  cachedProjectTeams = null;
+  teamsForMemberCache.clear();
+}
