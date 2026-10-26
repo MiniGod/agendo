@@ -1,15 +1,16 @@
 // Saving config.json from the Settings page (src/app/configSave.ts). The e2e
 // suite saves through the real TUI into a temp HOME, once per shape it can
 // reach from a keystroke; the shapes it can't — a malformed file in effect, a
-// symlinked config, a write that fails half way, a file's permissions (kept, or
-// carried over from the legacy file a first save migrates) — sit
-// here, each on its own temp directory. Every path is explicit: nothing here
-// reads or writes a real ~/.agendo, ~/.clops or ~/.claude-launcher.
+// symlinked config (dangling or looped too), a write that fails half way, a
+// file's permissions (kept, or carried over from the legacy file a first save
+// migrates) — sit here, each on its own temp directory. Every path is
+// explicit: nothing here reads or writes a real ~/.agendo, ~/.clops or
+// ~/.claude-launcher.
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mergeConfig, readConfigObject, saveConfig, writeFileAtomic } from "../src/app/configSave.ts";
+import { configReadError, mergeConfig, readConfigObject, saveConfig, writeFileAtomic } from "../src/app/configSave.ts";
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -47,6 +48,18 @@ describe("readConfigObject", () => {
     mkdirSync(dir);
     expect(() => readConfigObject(dir)).toThrow("EISDIR");
     expect(() => readConfigObject(dir)).not.toThrow("isn't valid JSON");
+  });
+});
+
+describe("configReadError", () => {
+  test("null for a file that reads, or none at all; else why not", () => {
+    const d = tmp();
+    const path = join(d, "config.json");
+    expect(configReadError(path)).toBeNull();
+    writeFileSync(path, '{"org":"o"}');
+    expect(configReadError(path)).toBeNull();
+    writeFileSync(path, '{"org":"o",}');
+    expect(configReadError(path)).toContain(`${path} isn't valid JSON (`);
   });
 });
 
@@ -90,6 +103,27 @@ describe("writeFileAtomic", () => {
     writeFileAtomic(link, '{"team":"Prisma"}');
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readFileSync(real, "utf-8")).toBe('{"team":"Prisma"}');
+  });
+
+  test("a dangling link is written through too, its target created", () => {
+    const d = tmp();
+    const real = join(d, "dotfiles", "agendo", "config.json");
+    const link = join(d, "config.json");
+    symlinkSync(real, link);
+    writeFileAtomic(link, '{"team":"Prisma"}');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(real, "utf-8")).toBe('{"team":"Prisma"}');
+  });
+
+  test("a link loop is given up on: the write replaces the link rather than spinning", () => {
+    const d = tmp();
+    const a = join(d, "a.json");
+    const b = join(d, "b.json");
+    symlinkSync(b, a);
+    symlinkSync(a, b);
+    writeFileAtomic(a, "{}");
+    expect(lstatSync(a).isSymbolicLink()).toBe(false);
+    expect(readFileSync(a, "utf-8")).toBe("{}");
   });
 
   test("a failed rename throws and removes the temp file", () => {

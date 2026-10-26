@@ -1,26 +1,46 @@
 // Opening the Settings page, saving config.json and listing the user's teams
 // from it (src/ui/actions/config.ts), on a fake of the file and the Azure
 // DevOps layer. The e2e suite saves through the real ones; a save that throws,
-// a team list that fails, a save that needn't reload, and a file another
-// agendo changed under the page are reached here.
+// a team list that fails, a save that needn't reload, a file another agendo
+// changed under the page, a file that won't read, and the "viewing as" choice
+// a move to another org or tenant drops are reached here.
 import { describe, expect, mock, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import type { ConfigPatch } from "../src/app/configSave.ts";
 import { makeConfigActions, type ConfigIo } from "../src/ui/actions/config.ts";
 import type { Mode } from "../src/ui/keys/context.ts";
+import type { ProviderName } from "../src/shared/types.ts";
 
 /** Let the team list's promise handlers run. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
 const loaded: Config = { ...DEFAULT_CONFIG, team: "Prisma" };
 
+const STILL = { caches: false, identities: false };
+const NEW_TEAM = { caches: true, identities: false };
+const NEW_ORG = { caches: true, identities: true };
+
 function setup({
   save = (_p: ConfigPatch): unknown => "/tmp/x",
-  backendMoved = false,
+  moved = STILL,
+  readError = null,
+  provider = "ado",
   myTeams = () => Promise.resolve(["Prisma", "Zeta"]),
-}: { save?: ConfigIo["save"]; backendMoved?: boolean; myTeams?: ConfigIo["myTeams"] } = {}) {
-  const fake = { save: mock(save), load: mock(() => loaded), reloadBackend: mock(() => backendMoved), myTeams: mock(myTeams) };
-  const deps = { setConfig: mock(), setMode: mock(), reload: mock() };
-  return { fake, deps, actions: makeConfigActions({ ...deps, io: fake }) };
+}: {
+  save?: ConfigIo["save"];
+  moved?: { caches: boolean; identities: boolean };
+  readError?: string | null;
+  provider?: ProviderName;
+  myTeams?: ConfigIo["myTeams"];
+} = {}) {
+  const fake = {
+    save: mock(save),
+    load: mock(() => loaded),
+    readError: mock(() => readError),
+    reloadBackend: mock(() => moved),
+    myTeams: mock(myTeams),
+  };
+  const deps = { setConfig: mock(), setMode: mock(), reload: mock(), setIdentity: mock(), persist: mock() };
+  return { fake, deps, actions: makeConfigActions({ ...deps, provider, io: fake }) };
 }
 
 describe("saveConfigPatch", () => {
@@ -33,12 +53,28 @@ describe("saveConfigPatch", () => {
   });
 
   test("a save re-reads the file into the page and the backend, and reloads when requests moved", () => {
-    const { deps, fake, actions } = setup({ backendMoved: true });
+    const { deps, fake, actions } = setup({ moved: NEW_TEAM });
     expect(actions.saveConfigPatch({ team: "Prisma" })).toBeNull();
     expect(fake.save.mock.calls).toEqual([[{ team: "Prisma" }]]);
     expect(deps.setConfig.mock.calls).toEqual([[loaded]]);
     expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
     expect(deps.reload).toHaveBeenCalledTimes(1);
+    expect(deps.setIdentity).not.toHaveBeenCalled(); // a team's members are still the org's identities
+  });
+
+  test("a move to another org or tenant drops the viewing-as choice, on screen and on disk", () => {
+    const { deps, actions } = setup({ moved: NEW_ORG });
+    actions.saveConfigPatch({ org: "contoso" });
+    expect(deps.setIdentity.mock.calls).toEqual([[null]]);
+    expect(deps.persist.mock.calls).toEqual([[{ identity: null }]]);
+    expect(deps.reload).toHaveBeenCalledTimes(1);
+  });
+
+  test("on GitHub the viewing-as choice isn't Azure DevOps', so an org move leaves it", () => {
+    const { deps, actions } = setup({ moved: NEW_ORG, provider: "github" });
+    actions.saveConfigPatch({ org: "contoso" });
+    expect(deps.setIdentity).not.toHaveBeenCalled();
+    expect(deps.persist).not.toHaveBeenCalled();
   });
 
   test("closed states reload even though the backend's endpoints didn't move", () => {
@@ -66,9 +102,21 @@ describe("openSettings", () => {
   });
 
   test("a file changed elsewhere that moved requests reloads the model", () => {
-    const { deps, actions } = setup({ backendMoved: true });
+    const { deps, actions } = setup({ moved: NEW_ORG });
     actions.openSettings();
     expect(deps.reload).toHaveBeenCalledTimes(1);
+    expect(deps.setIdentity.mock.calls).toEqual([[null]]);
+  });
+
+  test("a file that won't read keeps the last good read, here and in the backend, and says why", () => {
+    const { deps, fake, actions } = setup({ readError: "~/.agendo/config.json isn't valid JSON (x)" });
+    actions.openSettings();
+    expect(deps.setConfig).not.toHaveBeenCalled();
+    expect(fake.reloadBackend).not.toHaveBeenCalled();
+    expect(deps.reload).not.toHaveBeenCalled();
+    expect(deps.setMode.mock.calls).toEqual([
+      [{ kind: "settings", cursor: 0, note: { text: "kept the last good read: ~/.agendo/config.json isn't valid JSON (x)", error: true } }],
+    ]);
   });
 });
 

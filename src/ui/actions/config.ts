@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type { Config } from "../../app/config.ts";
 import type { ConfigPatch } from "../../app/configSave.ts";
 import { messageOf } from "../../shared/errors.ts";
+import type { Identity, ProviderName } from "../../shared/types.ts";
 import type { Mode } from "../keys/context.ts";
 import { teamsFailed, teamsLoaded } from "../keys/teamPicker.ts";
 import { patchReloads } from "../models/configFields.ts";
@@ -15,8 +16,13 @@ import { patchReloads } from "../models/configFields.ts";
 export interface ConfigIo {
   save: (patch: ConfigPatch) => unknown;
   load: () => Config;
-  /** Re-read the file into the Azure DevOps layer; whether org/project/team/tenant changed. */
-  reloadBackend: () => boolean;
+  /** Why the file in effect can't be read as a config, or null when it can (configSave.ts `configReadError`). */
+  readError: () => string | null;
+  /**
+   * Re-read the file into the Azure DevOps layer: whether org/project/team/tenant
+   * changed (`caches`), and whether org or tenant did (`identities`).
+   */
+  reloadBackend: () => { caches: boolean; identities: boolean };
   myTeams: () => Promise<string[]>;
 }
 
@@ -38,13 +44,31 @@ export function makeConfigActions({
   setConfig,
   setMode,
   reload,
+  provider,
+  setIdentity,
+  persist,
   io,
 }: {
   setConfig: Dispatch<SetStateAction<Config>>;
   setMode: Dispatch<SetStateAction<Mode>>;
   reload: () => void;
+  /** The backend in use, and the "viewing as" choice a move to another org or tenant drops. */
+  provider: ProviderName;
+  setIdentity: (i: Identity | null) => void;
+  persist: (next: { identity: null }) => void;
   io: ConfigIo;
 }) {
+  /** Re-read the file into the Azure DevOps layer; whether requests moved. */
+  function followFile(): boolean {
+    const moved = io.reloadBackend();
+    // Identity ids belong to an org and its tenant: as on a backend switch, the override goes.
+    if (moved.identities && provider === "ado") {
+      setIdentity(null);
+      persist({ identity: null });
+    }
+    return moved.caches;
+  }
+
   function saveConfigPatch(patch: ConfigPatch): string | null {
     try {
       io.save(patch);
@@ -53,18 +77,25 @@ export function makeConfigActions({
     }
     setConfig(io.load());
     // Always re-read, so closedStates reaches the WIQL too; reload when either says so.
-    if (io.reloadBackend() || patchReloads(patch)) reload();
+    if (followFile() || patchReloads(patch)) reload();
     return null;
   }
 
   /**
    * Open the Settings page on config.json as it is now — another agendo, or a
    * hand edit, may have changed it since the last read. The Azure DevOps layer
-   * follows the file too, and the model reloads when requests moved.
+   * follows the file too, and the model reloads when requests moved. A file
+   * that won't read (half-written, or a hand edit gone wrong) would read as
+   * blank defaults, so the last good read stays, here and in the backend.
    */
   function openSettings(): void {
+    const unreadable = io.readError();
+    if (unreadable) {
+      setMode({ kind: "settings", cursor: 0, note: { text: `kept the last good read: ${unreadable}`, error: true } });
+      return;
+    }
     setConfig(io.load());
-    if (io.reloadBackend()) reload();
+    if (followFile()) reload();
     setMode({ kind: "settings", cursor: 0 });
   }
 

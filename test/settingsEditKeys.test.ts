@@ -33,7 +33,7 @@ describe("submitSettingsEdit", () => {
     const ctx = ctxIn(mode);
     submitSettingsEdit(mode, ctx);
     expect(ctx.saveConfigPatch).not.toHaveBeenCalled();
-    expect(ctx.setMode.mock.calls[0][0]).toEqual({ ...mode, error: "enter a positive number of minutes (e.g. 240)" });
+    expect(ctx.setMode.mock.calls[0][0]).toEqual({ ...mode, error: "enter a number of minutes, 0 or more (e.g. 240)" });
   });
 
   test("a valid value saves its patch and goes back to the page on its row", () => {

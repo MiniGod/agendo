@@ -11,18 +11,22 @@ import { invalidatedBy, judgeTeam } from "../src/providers/azureDevOps/configCha
 const before: Config = { ...DEFAULT_CONFIG, org: "acme", project: "Widgets", team: "Team A", tenant: "t1" };
 
 describe("invalidatedBy", () => {
-  test("a tenant change drops the token and every cache", () => {
-    expect(invalidatedBy(before, { ...before, tenant: "t2" })).toEqual({ token: true, caches: true });
+  test("a tenant change drops the token, every cache and the identities", () => {
+    expect(invalidatedBy(before, { ...before, tenant: "t2" })).toEqual({ token: true, caches: true, identities: true });
   });
 
-  test("org, project or team drop the caches but keep the token", () => {
-    for (const change of [{ org: "contoso" }, { project: "Gadgets" }, { team: "Team B" }]) {
-      expect(invalidatedBy(before, { ...before, ...change })).toEqual({ token: false, caches: true });
+  test("an org change drops the caches and the identities but keeps the token", () => {
+    expect(invalidatedBy(before, { ...before, org: "contoso" })).toEqual({ token: false, caches: true, identities: true });
+  });
+
+  test("a project or team change drops only the caches", () => {
+    for (const change of [{ project: "Gadgets" }, { team: "Team B" }]) {
+      expect(invalidatedBy(before, { ...before, ...change })).toEqual({ token: false, caches: true, identities: false });
     }
   });
 
   test("anything else drops nothing", () => {
-    expect(invalidatedBy(before, { ...before, stalledAfterMinutes: 5, closedStates: ["Done"], peerSocket: false })).toEqual({ token: false, caches: false });
+    expect(invalidatedBy(before, { ...before, stalledAfterMinutes: 5, closedStates: ["Done"], peerSocket: false })).toEqual({ token: false, caches: false, identities: false });
   });
 });
 

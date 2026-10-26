@@ -287,7 +287,7 @@ export default function App({
     provider, available, setProvider, setIdentity, persist, setCursor, clearSearch, setMode, setNotice,
   });
   // config.json as Settings shows it, its save and its team picker — ./hooks/useConfigSettings.ts.
-  const { config, saveConfigPatch, openSettings, enterTeamPicker } = useConfigSettings({ setMode, reload });
+  const { config, saveConfigPatch, openSettings, enterTeamPicker } = useConfigSettings({ setMode, reload, provider, setIdentity, persist });
 
   // ── starting a session ──────────────────────────────────────────────────────
   // Agent pick → repo pick → worktree/checkout routing → launch, all in

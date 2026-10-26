@@ -34,17 +34,18 @@ export { mapLimit, enrichPrCI, fetchActivePRs, fetchReviewPRs } from "./policy.t
  * project, team or tenant changed, drop every answer cached for the old one —
  * the token (minted per tenant), the identities and team lists, the project id
  * and build results, the PRs (configChange.ts `invalidatedBy`). Says whether
- * any of them changed.
+ * any of them changed, and whether an identity id from before still means
+ * anything.
  */
-export function reloadConfig(): boolean {
-  const { token, caches } = reloadEnv();
+export function reloadConfig(): { caches: boolean; identities: boolean } {
+  const { token, caches, identities } = reloadEnv();
   if (token) resetToken();
   if (caches) {
     resetIdentityCaches();
     resetPolicyCaches();
     clearPrCache();
   }
-  return caches;
+  return { caches, identities };
 }
 
 // ── Current iteration for the configured team ─────────────────────────────────

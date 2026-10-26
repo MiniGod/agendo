@@ -10,8 +10,8 @@
 // one (see `configPathInEffect`). Saves always go to the new `~/.agendo/`, so the
 // first one writes the legacy content plus the edit there, and every later read
 // finds the new file first. The legacy file is left as it was.
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
-import { dirname } from "path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { dirname, resolve } from "path";
 import { messageOf } from "../shared/errors.ts";
 import { CONFIG_PATH, configPathInEffect, type Config } from "./config.ts";
 
@@ -40,6 +40,21 @@ export function readConfigObject(path: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Why the file at `path` can't be read as a config, or null when it can (an
+ * absent file reads, as `{}`). `loadConfig` reads such a file as the defaults,
+ * which at startup is all there is; a re-read under a running launcher would
+ * blank a working org, project and team instead, so it asks here first.
+ */
+export function configReadError(path: string): string | null {
+  try {
+    readConfigObject(path);
+    return null;
+  } catch (e) {
+    return messageOf(e);
+  }
+}
+
 /** `raw` with `patch` applied. Keys the patch doesn't name keep their value and their place. */
 export function mergeConfig(raw: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
   const out: Record<string, unknown> = { ...raw };
@@ -50,6 +65,31 @@ export function mergeConfig(raw: Record<string, unknown>, patch: ConfigPatch): R
   return out;
 }
 
+/** Whether `path` is itself a symlink, resolving or not. */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The file a write to `path` lands in: the end of its symlinks, so a link stays
+ * a link. A dangling one (a dotfiles target not checked out yet) is followed by
+ * hand, since realpath refuses it; a loop is given up on after Linux's own 40
+ * hops, and the write replaces the link.
+ */
+function writeTarget(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  let target = path;
+  for (let hops = 0; isSymlink(target); hops++) {
+    if (hops === 40) return path;
+    target = resolve(dirname(target), readlinkSync(target));
+  }
+  return target;
+}
+
 /**
  * Replace `path` with `text` atomically: a temp file beside it, then rename(2),
  * so a crash or a full disk can't leave a truncated config behind. A symlinked
@@ -58,7 +98,7 @@ export function mergeConfig(raw: Record<string, unknown>, patch: ConfigPatch): R
  * exists (the legacy config a first save migrates).
  */
 export function writeFileAtomic(path: string, text: string, modeOf: string = path): void {
-  const target = existsSync(path) ? realpathSync(path) : path;
+  const target = writeTarget(path);
   mkdirSync(dirname(target), { recursive: true });
   const like = existsSync(target) ? target : modeOf;
   const kept = existsSync(like) ? statSync(like).mode & 0o777 : null;

@@ -698,7 +698,9 @@ Every key above can be changed on the settings page (`,`) without opening the fi
 is shown but not editable. Enter on **Team** lists the teams of the configured project
 that you belong to; its last row lets you type a name instead. A value that doesn't
 validate stays in its editor with the reason under it. The page reads the file each time
-it opens, so a hand edit, or a save from another agendo, shows up there.
+it opens, so a hand edit, or a save from another agendo, shows up there; a file that
+doesn't read as JSON then is left alone, and the page keeps the last good read and says
+why.
 
 A save changes only the key you edited. Every other key in the file, including keys
 agendo doesn't read, is read and written back with its value and in its place, though
@@ -707,8 +709,10 @@ not its formatting: the file comes out as two-space-indented JSON. The write is 
 `~/.agendo/config.json`: while agendo still reads a legacy `~/.clops/config.json` or
 `~/.claude-launcher/config.json`, the page says so, and the first save writes that
 file's whole content, plus your edit, to the new path, with the legacy file's
-permissions. The legacy file is left as it was. Changing the org, project, team, tenant or closed states
-reloads the lists, so **Current sprint** follows without a restart.
+permissions. The legacy file is left as it was. Changing the org, project, team, tenant
+or closed states reloads the lists, so **Current sprint** follows without a restart.
+Changing the org or tenant also resets **Viewing as** to you, since a teammate's
+identity belongs to the old one.
 
 When the configured team isn't one of yours, or the project has no team by that name,
 the Work items view says so in one line and names a few of your teams:

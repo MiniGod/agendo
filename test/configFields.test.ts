@@ -95,11 +95,12 @@ describe("parseField", () => {
     expect(parseField("closedStates", "Won't Fix")).toEqual({ error: "a state name can't contain ' (it would break the work-item query)" });
   });
 
-  test("stalled after: a positive number of minutes, fractions allowed", () => {
+  test("stalled after: minutes, 0 or more, fractions allowed — what the stall check itself accepts", () => {
     expect(parseField("stalledAfterMinutes", " 90 ")).toEqual({ patch: { stalledAfterMinutes: 90 } });
     expect(parseField("stalledAfterMinutes", "1.5")).toEqual({ patch: { stalledAfterMinutes: 1.5 } });
-    for (const bad of ["abc", "0", "-5", "", "1e3", "0x10", "4h"]) {
-      expect(parseField("stalledAfterMinutes", bad)).toEqual({ error: "enter a positive number of minutes (e.g. 240)" });
+    expect(parseField("stalledAfterMinutes", "0")).toEqual({ patch: { stalledAfterMinutes: 0 } });
+    for (const bad of ["abc", "-5", "", "1e3", "0x10", "4h", "9".repeat(400)]) {
+      expect(parseField("stalledAfterMinutes", bad)).toEqual({ error: "enter a number of minutes, 0 or more (e.g. 240)" });
     }
   });
 

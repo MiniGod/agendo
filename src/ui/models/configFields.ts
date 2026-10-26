@@ -125,7 +125,8 @@ function parseClosedStates(raw: string): Parsed {
 function parseMinutes(raw: string): Parsed {
   const text = raw.trim();
   const n = Number(text);
-  if (!/^\d+(\.\d+)?$/.test(text) || n <= 0) return { error: "enter a positive number of minutes (e.g. 240)" };
+  // 0 is a value like any other here, as it is to `resolveStalledAfterMs`: every idle session reads stalled.
+  if (!/^\d+(\.\d+)?$/.test(text) || !Number.isFinite(n)) return { error: "enter a number of minutes, 0 or more (e.g. 240)" };
   return { patch: { stalledAfterMinutes: n } };
 }
 

@@ -1,7 +1,7 @@
 import { Box, Text, useStdout } from "ink";
 import { CaretText } from "../components/index.tsx";
 import { FIELD_SPECS, type TextField } from "../models/configFields.ts";
-import { hiddenRowsText, settingsWindow } from "./SettingsScreen.tsx";
+import { hiddenRowsText, settingsWindow } from "../models/settingsLayout.ts";
 
 /** The line editor for one config.json value: what it means, the input, and why the last enter didn't save. */
 export function SettingsEditScreen({ field, value, cursor, error }: { field: TextField; value: string; cursor: number; error?: string }) {

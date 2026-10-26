@@ -1,11 +1,18 @@
 import { useState, type Dispatch, type SetStateAction } from "react";
-import { loadConfig, type Config } from "../../app/config.ts";
-import { saveConfig } from "../../app/configSave.ts";
+import { configPathInEffect, loadConfig, type Config } from "../../app/config.ts";
+import { configReadError, saveConfig } from "../../app/configSave.ts";
 import { getMyAdoTeams, reloadAdoConfig } from "../../providers/index.ts";
+import type { Identity, ProviderName } from "../../shared/types.ts";
 import { makeConfigActions, type ConfigIo } from "../actions/config.ts";
 import type { Mode } from "../keys/context.ts";
 
-const IO: ConfigIo = { save: saveConfig, load: loadConfig, reloadBackend: () => reloadAdoConfig(), myTeams: getMyAdoTeams };
+const IO: ConfigIo = {
+  save: saveConfig,
+  load: loadConfig,
+  readError: () => configReadError(configPathInEffect()),
+  reloadBackend: () => reloadAdoConfig(),
+  myTeams: getMyAdoTeams,
+};
 
 /**
  * config.json as the Settings page shows and edits it, and the closures that
@@ -13,7 +20,13 @@ const IO: ConfigIo = { save: saveConfig, load: loadConfig, reloadBackend: () => 
  * hook so App holds one line for it: the state is read at mount, and again
  * whenever the page opens and after every save.
  */
-export function useConfigSettings({ setMode, reload }: { setMode: Dispatch<SetStateAction<Mode>>; reload: () => void }) {
+export function useConfigSettings(deps: {
+  setMode: Dispatch<SetStateAction<Mode>>;
+  reload: () => void;
+  provider: ProviderName;
+  setIdentity: (i: Identity | null) => void;
+  persist: (next: { identity: null }) => void;
+}) {
   const [config, setConfig] = useState<Config>(() => loadConfig());
-  return { config, ...makeConfigActions({ setConfig, setMode, reload, io: IO }) };
+  return { config, ...makeConfigActions({ ...deps, setConfig, io: IO }) };
 }

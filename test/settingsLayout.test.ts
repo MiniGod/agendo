@@ -1,9 +1,9 @@
 // How the Settings page and its team picker fit a short terminal
-// (src/ui/screens/SettingsScreen.tsx). The e2e suite opens the page once in a
+// (src/ui/models/settingsLayout.ts). The e2e suite opens the page once in a
 // terminal too short for its rows and walks to the last one; the window's
 // clamping at both ends and the hidden-row line's every shape sit here.
 import { describe, expect, test } from "bun:test";
-import { hiddenRowsText, settingsChrome, settingsWindow } from "../src/ui/screens/SettingsScreen.tsx";
+import { hiddenRowsText, settingsChrome, settingsWindow } from "../src/ui/models/settingsLayout.ts";
 
 describe("settingsChrome", () => {
   test("everything but the rows, plus Ink's last line; the note only when there is one", () => {

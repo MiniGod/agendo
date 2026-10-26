@@ -9,16 +9,20 @@ import type { TeamCheck } from "../../shared/types.ts";
  * What a config.json change invalidates. The token is minted per tenant; every
  * other cached answer — identities, team lists, the project id, build results,
  * PRs — belongs to an org, project and team, and a tenant change can mean
- * another account seeing them.
+ * another account seeing them. `identities` is whether an identity id from
+ * before (the launcher's "viewing as" choice) can mean anything after: those
+ * belong to an org and its tenant, not to a project or team.
  */
 export interface Invalidated {
   token: boolean;
   caches: boolean;
+  identities: boolean;
 }
 
 export function invalidatedBy(before: Config, after: Config): Invalidated {
   const token = before.tenant !== after.tenant;
-  return { token, caches: token || before.org !== after.org || before.project !== after.project || before.team !== after.team };
+  const identities = token || before.org !== after.org;
+  return { token, identities, caches: identities || before.project !== after.project || before.team !== after.team };
 }
 
 /**

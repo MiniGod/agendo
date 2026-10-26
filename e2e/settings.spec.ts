@@ -21,7 +21,7 @@ const TEAM_B_ITERATIONS = /\/Team%20B\/_apis\/work\/teamsettings\/iterations$/i;
 const SPRINT_43 = { body: { value: [{ id: "it-43", name: "Sprint 43", path: "Widgets\\Sprint 43" }] } };
 
 // Settings rows, top to bottom: Backend, Viewing as, Auto-resume, then config.json's.
-const ROW = { team: 5, stalledAfterMinutes: 8 } as const;
+const ROW = { org: 3, team: 5, stalledAfterMinutes: 8 } as const;
 
 /** Open Settings from the list and put the cursor on row `index`, labelled `label`. */
 async function settingsRow(wt: WebTerminal, index: number, label: string): Promise<string> {
@@ -118,7 +118,7 @@ test("a value that doesn't validate stays in the editor with the reason, and sav
   await wt.press(CTRL_U);
   await wt.press("q");
   await wt.press(KEY.enter);
-  const refused = await wt.waitForText("✗ enter a positive number of minutes (e.g. 240)");
+  const refused = await wt.waitForText("✗ enter a number of minutes, 0 or more (e.g. 240)");
   expect(refused).toContain("Stalled after (minutes): q");
   expect(existsSync(configPath(mock.home))).toBe(false);
 
@@ -182,6 +182,54 @@ test("a team the project doesn't have, with your teams unlistable, reads as not 
   await wt.press(KEY.enter);
   const picker = await wt.waitForText("✗ couldn't list your teams:");
   expect(picker).toContain("❯ ✎ type a team name…");
+});
+
+test("a move to another org drops the viewing-as choice, whose id belonged to the old one", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Add login screen", 20000);
+  await wt.waitForStable();
+  await wt.press("u");
+  await wt.waitForText("Switch who you are");
+  await wt.press(KEY.down);
+  await wt.press(KEY.down); // Ada, Alan, Grace
+  await wt.press(KEY.enter);
+  await wt.waitForText("as Grace Hopper", 20000);
+  await wt.waitForStable();
+
+  await settingsRow(wt, ROW.org, "Organization");
+  await wt.press(KEY.enter);
+  await wt.waitForText("Organization: acme");
+  await wt.press(CTRL_U);
+  await wt.press("contoso");
+  await wt.press(KEY.enter);
+  await wt.waitForText("✓ Organization saved");
+  expect(await readJson(configPath(mock.home))).toMatchObject({ org: "contoso" });
+
+  await wt.press(KEY.escape);
+  const screen = await wt.waitForText("as Ada Lovelace (you)", 20000);
+  await wt.waitForText("Add login screen", 20000);
+  expect(screen).not.toContain("Grace Hopper");
+  expect((await readJson(join(mock.home, ".agendo", "state.json"))).identityId).toBeUndefined();
+});
+
+test("a config.json broken under a running launcher keeps the last good read, and says why", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Sprint 42", 20000);
+  await wt.waitForStable();
+
+  // A hand edit half done: read as it stands, it would blank the org, project and team.
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(configPath(mock.home), '{ "org": "acme", ');
+  await wt.press(",");
+  const screen = await wt.waitForText("✗ kept the last good read:");
+  expect(screen).toMatch(/Organization\s+acme/);
+  expect(screen).toMatch(/Team\s+Team A/);
+
+  await wt.press(KEY.escape);
+  await wt.press("r");
+  await wt.waitForStable();
+  const list = await wt.waitForText("Sprint 42", 20000);
+  expect(list).not.toContain("Press r to retry");
 });
 
 test("a hand-edited team that isn't text reads as no team, and the picker still opens", async ({ launch, mock }) => {
