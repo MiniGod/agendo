@@ -80,11 +80,13 @@ describe("parseField", () => {
     expect(parseField("tenant", "a b")).toEqual({ error: "the tenant has no spaces or slashes" });
   });
 
-  test("project and team: required and trimmed, spaces allowed", () => {
+  test("project and team: required and trimmed, spaces allowed, slashes not", () => {
     expect(parseField("project", " My Project ")).toEqual({ patch: { project: "My Project" } });
     expect(parseField("project", "")).toEqual({ error: "the project can't be empty" });
+    expect(parseField("project", "https://dev.azure.com/acme/Widgets")).toEqual({ error: "the project has no slashes (its name, not a URL)" });
     expect(parseField("team", "Team DES")).toEqual({ patch: { team: "Team DES" } });
     expect(parseField("team", " ")).toEqual({ error: "the team can't be empty" });
+    expect(parseField("team", "Widgets\\Prisma")).toEqual({ error: "the team has no slashes (its name, not a URL)" });
   });
 
   test("closed states: comma-split, trimmed, blanks and duplicates dropped; at least one, no quote", () => {

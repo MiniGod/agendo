@@ -108,6 +108,13 @@ function word(raw: string, what: string): { value: string } | { error: string } 
   return /[\s/]/.test(r.value) ? { error: `${what} has no spaces or slashes` } : r;
 }
 
+/** A project or team name: required, spaces allowed, but no slash — it is one segment of the URLs it goes into. */
+function segment(raw: string, what: string): { value: string } | { error: string } {
+  const r = required(raw, what);
+  if ("error" in r) return r;
+  return /[/\\]/.test(r.value) ? { error: `${what} has no slashes (its name, not a URL)` } : r;
+}
+
 function parseClosedStates(raw: string): Parsed {
   const states = [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
   if (states.length === 0) return { error: "list at least one state, comma-separated (e.g. Closed, Done, Removed)" };
@@ -129,8 +136,8 @@ function patchOf(field: "org" | "project" | "team" | "tenant", r: { value: strin
 
 const PARSE: Record<TextField, (raw: string) => Parsed> = {
   org: (raw) => patchOf("org", word(raw, "the organization")),
-  project: (raw) => patchOf("project", required(raw, "the project")),
-  team: (raw) => patchOf("team", required(raw, "the team")),
+  project: (raw) => patchOf("project", segment(raw, "the project")),
+  team: (raw) => patchOf("team", segment(raw, "the team")),
   tenant: (raw) => patchOf("tenant", word(raw, "the tenant")),
   closedStates: parseClosedStates,
   stalledAfterMinutes: parseMinutes,

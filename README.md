@@ -697,7 +697,8 @@ Every key above can be changed on the settings page (`,`) without opening the fi
 `focusTerminal` (empty turns it off). `resource`, Azure DevOps' fixed application id,
 is shown but not editable. Enter on **Team** lists the teams of the configured project
 that you belong to; its last row lets you type a name instead. A value that doesn't
-validate stays in its editor with the reason under it.
+validate stays in its editor with the reason under it. The page reads the file each time
+it opens, so a hand edit, or a save from another agendo, shows up there.
 
 A save changes only the key you edited. Every other key in the file, including keys
 agendo doesn't read, is read and written back with its value and in its place, though

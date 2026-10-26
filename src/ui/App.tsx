@@ -261,10 +261,10 @@ export default function App({
     clearSearch();
   };
 
-  // Open the Settings page (backend, identity, filters, auth status).
+  // Open the Settings page (backend, identity, filters, auth status), config.json re-read.
   const enterSettings = () => {
     setNotice(null);
-    setMode({ kind: "settings", cursor: 0 });
+    openSettings();
   };
 
   // Open the backend picker (Azure DevOps ↔ GitHub), cursor on the current one.
@@ -287,7 +287,7 @@ export default function App({
     provider, available, setProvider, setIdentity, persist, setCursor, clearSearch, setMode, setNotice,
   });
   // config.json as Settings shows it, its save and its team picker — ./hooks/useConfigSettings.ts.
-  const { config, saveConfigPatch, enterTeamPicker } = useConfigSettings({ setMode, reload });
+  const { config, saveConfigPatch, openSettings, enterTeamPicker } = useConfigSettings({ setMode, reload });
 
   // ── starting a session ──────────────────────────────────────────────────────
   // Agent pick → repo pick → worktree/checkout routing → launch, all in

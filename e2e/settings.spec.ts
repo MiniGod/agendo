@@ -147,6 +147,27 @@ test("a configured team that isn't one of yours says so in Work items, until it'
   await expect.poll(async () => (await wt.screen()).includes("isn't one of yours"), { timeout: 20000 }).toBe(false);
 });
 
+// The page shrinks by the notice's line. At 12 rows the frame is exactly full
+// once the list's own notice shows too and both scroll markers are up: one
+// line more overflows the terminal, Ink's redraw garbles the frame, and the
+// `↑ 1 more` marker is the line it loses.
+test("the team notice's line comes out of the list's page, so a full frame still fits", async ({ launch, mock }) => {
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(configPath(mock.home), JSON.stringify({ org: "acme", project: "Widgets", team: "Team DES" }));
+
+  const wt = await launch({ rows: 12 });
+  await wt.waitForText("isn't one of yours", 20000);
+  await wt.waitForStable();
+  wt.write("o"); // the open-in-browser dialog for the hovered #101
+  await wt.waitForText("Open in browser");
+  wt.write("i");
+  const screen = await wt.waitForText("Opening #101 in browser…");
+  expect(screen.split("\n")[0]).toContain("agendo [Azure DevOps]");
+  expect(screen).toContain("⚑ team 'Team DES' isn't one of yours");
+  expect(screen).toContain("↑ 1 more");
+  expect(screen).toContain("↓ 1 more");
+});
+
 test("a team the project doesn't have, with your teams unlistable, reads as not found", async ({ launch, mock }) => {
   mock.setAdoResponse(/\/teams\/[^/]+\/members$/i, { status: 404, body: { message: "team not found" } });
   mock.setAdoResponse(/_apis\/projects\/[^/]+\/teams$/i, { status: 500 });

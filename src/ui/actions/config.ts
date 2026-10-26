@@ -25,7 +25,8 @@ export interface ConfigIo {
 let pickerRequests = 0;
 
 /**
- * Saving config.json from the Settings page, and the team picker's list.
+ * Opening the Settings page on a fresh read of config.json, saving it, and
+ * the team picker's list.
  *
  * Same shape as `makeProviderActions`: plain closures over App's setters, no
  * hooks. A save that changes where requests go (org, project, team, tenant,
@@ -56,6 +57,17 @@ export function makeConfigActions({
     return null;
   }
 
+  /**
+   * Open the Settings page on config.json as it is now — another agendo, or a
+   * hand edit, may have changed it since the last read. The Azure DevOps layer
+   * follows the file too, and the model reloads when requests moved.
+   */
+  function openSettings(): void {
+    setConfig(io.load());
+    if (io.reloadBackend()) reload();
+    setMode({ kind: "settings", cursor: 0 });
+  }
+
   function enterTeamPicker(current: string): void {
     const request = ++pickerRequests;
     setMode({ kind: "teamPicker", cursor: 0, teams: null, request });
@@ -65,5 +77,5 @@ export function makeConfigActions({
     );
   }
 
-  return { saveConfigPatch, enterTeamPicker };
+  return { saveConfigPatch, openSettings, enterTeamPicker };
 }

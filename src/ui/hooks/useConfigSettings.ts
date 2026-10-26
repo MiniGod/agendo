@@ -9,9 +9,9 @@ const IO: ConfigIo = { save: saveConfig, load: loadConfig, reloadBackend: () => 
 
 /**
  * config.json as the Settings page shows and edits it, and the closures that
- * save it and open its team picker (../actions/config.ts). One hook so App
- * holds one line for it: the state is read once at mount and replaced after
- * every save.
+ * open the page, save it and open its team picker (../actions/config.ts). One
+ * hook so App holds one line for it: the state is read at mount, and again
+ * whenever the page opens and after every save.
  */
 export function useConfigSettings({ setMode, reload }: { setMode: Dispatch<SetStateAction<Mode>>; reload: () => void }) {
   const [config, setConfig] = useState<Config>(() => loadConfig());

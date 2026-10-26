@@ -1,7 +1,8 @@
-// Saving config.json and listing the user's teams from the Settings page
-// (src/ui/actions/config.ts), on a fake of the file and the Azure DevOps layer.
-// The e2e suite saves through the real ones; a save that throws, a team list
-// that fails, and a save that needn't reload are reached here.
+// Opening the Settings page, saving config.json and listing the user's teams
+// from it (src/ui/actions/config.ts), on a fake of the file and the Azure
+// DevOps layer. The e2e suite saves through the real ones; a save that throws,
+// a team list that fails, a save that needn't reload, and a file another
+// agendo changed under the page are reached here.
 import { describe, expect, mock, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import type { ConfigPatch } from "../src/app/configSave.ts";
@@ -51,6 +52,23 @@ describe("saveConfigPatch", () => {
     actions.saveConfigPatch({ stalledAfterMinutes: 30 });
     expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
     expect(deps.reload).not.toHaveBeenCalled();
+  });
+});
+
+describe("openSettings", () => {
+  test("the page opens on a fresh read of the file, the backend following it", () => {
+    const { deps, fake, actions } = setup();
+    actions.openSettings();
+    expect(deps.setConfig.mock.calls).toEqual([[loaded]]);
+    expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
+    expect(deps.reload).not.toHaveBeenCalled();
+    expect(deps.setMode.mock.calls).toEqual([[{ kind: "settings", cursor: 0 }]]);
+  });
+
+  test("a file changed elsewhere that moved requests reloads the model", () => {
+    const { deps, actions } = setup({ backendMoved: true });
+    actions.openSettings();
+    expect(deps.reload).toHaveBeenCalledTimes(1);
   });
 });
 
