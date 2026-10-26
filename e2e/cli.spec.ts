@@ -3069,6 +3069,19 @@ test("agendo list --json emits the running session with its associations", async
   expect(login.workItem.id).toBe(101);
 });
 
+// The TUI turns a team the project doesn't have into a notice (settings.spec.ts);
+// the CLI has no line for one, so its load fails and the listing says why.
+test("agendo list --json with a team the project doesn't have names the team, and still lists", async ({ mock }) => {
+  mock.setAdoResponse(/\/teams\/[^/]+\/members$/i, { status: 404, body: { message: "team not found" } });
+  const r = await agendoAsync(mock.env, "list", "--json").done;
+  expect(r.code).toBe(0);
+  expect(r.stderr).toContain("list: continuing without PR/work-item associations (team 'Team A' wasn't found in Widgets;");
+  expect(r.stderr).toContain("team not found"); // ADO's own words for the 404 ride along
+  const rows = JSON.parse(r.stdout) as any[];
+  expect(rows).toHaveLength(1);
+  expect(rows[0].shortId).toBe(SHORT_ID);
+});
+
 test("agendo list --all includes idle sessions, marked running vs idle", async ({ mock }) => {
   const r = await agendoAsync(mock.env, "list", "--all").done;
   expect(r.code).toBe(0);

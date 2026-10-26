@@ -1,0 +1,193 @@
+// Writing config.json from the Settings page.
+//
+// config.json is hand-edited JSON that may carry keys agendo never reads (a
+// user's own notes, a key from an older or newer version), so a save is a merge,
+// never a rewrite from the Config shape: the file in effect is read as a plain
+// object, the edited keys are set on it, and every other key goes back out
+// verbatim and in its place.
+//
+// The file in effect may still be a legacy `~/.clops/` or `~/.claude-launcher/`
+// one (see `configPathInEffect`). Saves always go to the new `~/.agendo/`, so the
+// first one writes the legacy content plus the edit there, and every later read
+// finds the new file first. The legacy file is left as it was.
+import {
+  accessSync,
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  constants,
+} from "fs";
+import { dirname, resolve } from "path";
+import { messageOf } from "../shared/errors.ts";
+import { CONFIG_PATH, configFrom, configPathInEffect, tildePath, type Config } from "./config.ts";
+
+/** Keys to set; a key given as `undefined` is removed from the file instead. */
+export type ConfigPatch = { [K in keyof Config]?: Config[K] | undefined };
+
+/**
+ * The JSON object stored at `path`, or `{}` when there is no file. Throws when
+ * the file exists but isn't a JSON object: saving over it would replace the
+ * user's hand-edited content with only what the Settings page knows, which is
+ * worse than refusing and saying why. The advice is to fix it, never to remove
+ * it: with the file gone, the next save would write the edited key alone, and
+ * the org, project and team the page still shows would be lost.
+ */
+export function readConfigObject(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
+  // Read outside the parse: a file that can't be read throws as itself (EACCES, EISDIR), path included.
+  const text = readFileSync(path, "utf-8");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    // The advice before the parser's detail: the line it lands on truncates at the terminal's width.
+    throw new Error(`${tildePath(path)} isn't valid JSON — fix it by hand; nothing saves until then (${messageOf(e)})`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${tildePath(path)} doesn't hold a JSON object — fix it by hand; nothing saves until then`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * config.json as `loadConfig` reads it, from ONE read of the file at `path` —
+ * or why it can't be read, where `loadConfig` takes the defaults. That is right
+ * at startup, which has nothing better; under a running launcher it would blank
+ * a working org, project and team, so a re-read comes through here, and the one
+ * object it returns is what the page and the Azure DevOps layer both take: a
+ * second read could catch the file half-written.
+ */
+export function readConfig(path: string = configPathInEffect()): { config: Config } | { error: string } {
+  try {
+    return { config: configFrom(readConfigObject(path)) };
+  } catch (e) {
+    return { error: messageOf(e) };
+  }
+}
+
+/**
+ * Throws when the file at `path` exists and this process may not write it.
+ * rename(2) would replace it regardless — it needs only the directory's
+ * permission — and a read-only config.json is one its owner protected.
+ */
+function refuseReadOnly(path: string): void {
+  if (!existsSync(path)) return;
+  try {
+    accessSync(path, constants.W_OK);
+  } catch {
+    throw new Error(`${tildePath(path)} is read-only — make it writable to save from here`);
+  }
+}
+
+/** `raw` with `patch` applied. Keys the patch doesn't name keep their value and their place. */
+export function mergeConfig(raw: Record<string, unknown>, patch: ConfigPatch): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...raw };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) delete out[key];
+    else out[key] = value;
+  }
+  return out;
+}
+
+/** Whether `path` is itself a symlink, resolving or not. */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The file a write to `path` lands in: the end of its symlinks, so a link stays
+ * a link. A dangling one (a dotfiles target not checked out yet) is followed by
+ * hand, since realpath refuses it; a loop is given up on after Linux's own 40
+ * hops, and the write replaces the link.
+ */
+function writeTarget(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  let target = path;
+  for (let hops = 0; isSymlink(target); hops++) {
+    if (hops === 40) return path;
+    target = resolve(dirname(target), readlinkSync(target));
+  }
+  return target;
+}
+
+/** Write `text` to a new file at `path`, flushed to disk before this returns. */
+function writeFlushed(path: string, text: string, mode: number): void {
+  const fd = openSync(path, "w", mode);
+  try {
+    writeFileSync(fd, text);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Flush `dir`'s entries to disk, so a rename into it outlives a power cut. Best effort. */
+function flushDir(dir: string): void {
+  try {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // Not every filesystem lets a directory be opened and synced; the rename has happened either way.
+  }
+}
+
+/**
+ * Replace `path` with `text` atomically: a temp file beside it, flushed to disk,
+ * then rename(2), and the directory flushed after it — so a crash, a full disk or
+ * a power cut can't leave a truncated or empty config behind. A symlinked
+ * config (a dotfiles checkout) is written through, so it stays a link, and an
+ * existing file keeps its permissions; a new one takes `modeOf`'s, when that
+ * exists (the legacy config a first save migrates).
+ */
+export function writeFileAtomic(path: string, text: string, modeOf: string = path): void {
+  const target = writeTarget(path);
+  mkdirSync(dirname(target), { recursive: true });
+  const like = existsSync(target) ? target : modeOf;
+  const kept = existsSync(like) ? statSync(like).mode & 0o777 : null;
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFlushed(tmp, text, kept ?? 0o644);
+    // The create mode is masked by the umask; an existing file's is restored exactly.
+    if (kept !== null) chmodSync(tmp, kept);
+    renameSync(tmp, target);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+  flushDir(dirname(target));
+}
+
+/**
+ * Apply `patch` to the config in effect and write the result to the new path.
+ * Returns the config as it now reads, so nothing has to read the file back.
+ * Throws (with a message fit to show) when the file
+ * in effect is read-only or can't be merged into, or the write fails.
+ */
+export function saveConfig(
+  patch: ConfigPatch,
+  paths: { from: string; to: string } = { from: configPathInEffect(), to: CONFIG_PATH },
+): Config {
+  refuseReadOnly(paths.from);
+  const merged = mergeConfig(readConfigObject(paths.from), patch);
+  writeFileAtomic(paths.to, `${JSON.stringify(merged, null, 2)}\n`, paths.from);
+  return configFrom(merged);
+}

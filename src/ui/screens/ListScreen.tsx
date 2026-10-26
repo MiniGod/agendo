@@ -4,7 +4,8 @@ import type { LoadedModel } from "../../app/model/index.ts";
 import type { PaneState } from "../format/index.ts";
 import { V } from "../models/vocabState.ts";
 import {
-  columnHeader, edgeLine, hintLine, identityLine, noticeLine, pinnedBlock, scopeLine, searchLine, viewTab, type SearchFocus,
+  columnHeader, edgeLine, hintLine, identityLine, noticeLine, pinnedBlock, scopeLine, searchLine, teamNoticeLine, viewTab,
+  type SearchFocus,
 } from "./listLines.tsx";
 import type { OrchestratorPins } from "../models/orchestratorPins.ts";
 import { renderRow } from "./listRows.tsx";
@@ -146,6 +147,7 @@ export function ListScreen({
         <>
           {pinnedBlock(view, pins)}
           {identityLine(view, model)}
+          {teamNoticeLine(view, model)}
           {columnHeader(view, prSort)}
           {edgeLine(moreAbove, "↑")}
 

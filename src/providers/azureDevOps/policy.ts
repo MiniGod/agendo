@@ -1,6 +1,6 @@
 import type { Identity, PullRequest, ReviewPR } from "../../shared/types.ts";
 import { aggregateBuild, type BuildStatus, buildResult, worstExpired } from "./build.ts";
-import { API, cfg } from "./env.ts";
+import { API, cacheWriter, cfg } from "./env.ts";
 import { adoGet } from "./http.ts";
 import { getTeamsForMember } from "./identity.ts";
 import { mapPr } from "./pr.ts";
@@ -9,14 +9,23 @@ import { mapPr } from "./pr.ts";
 let cachedProjectId: string | null = null;
 async function getProjectId(): Promise<string> {
   if (cachedProjectId) return cachedProjectId;
+  const keep = cacheWriter();
   const d = await adoGet(`_apis/projects/${encodeURIComponent(cfg.project)}?${API}`);
-  cachedProjectId = d.id as string;
-  return cachedProjectId;
+  const id = d.id as string;
+  keep(() => (cachedProjectId = id));
+  return id;
 }
 
 // A completed build's result is immutable and a purged build stays purged, so
-// cache every outcome (including "unknown") for the process lifetime.
+// cache every outcome (including "unknown") for the process lifetime — or until
+// the config names another org or project, where the same build id is another build.
 const buildResultCache = new Map<number, "pass" | "fail" | undefined>();
+
+/** Forget the project id and build results, which belong to the org and project config.json named before it changed. */
+export function resetPolicyCaches(): void {
+  cachedProjectId = null;
+  buildResultCache.clear();
+}
 
 // Pass/fail of a finished build, or undefined if it's no longer fetchable
 // (purged by retention) or didn't reach a clear pass/fail outcome. `get` is
@@ -24,13 +33,14 @@ const buildResultCache = new Map<number, "pass" | "fail" | undefined>();
 // no fixture expires a build and a purged one cannot be staged.
 export async function fetchBuildResult(buildId: number, get: (path: string) => Promise<any> = adoGet): Promise<"pass" | "fail" | undefined> {
   if (buildResultCache.has(buildId)) return buildResultCache.get(buildId);
+  const keep = cacheWriter();
   let result: "pass" | "fail" | undefined;
   try {
     result = buildResult(await get(`${encodeURIComponent(cfg.project)}/_apis/build/builds/${buildId}?${API}`));
   } catch {
     result = undefined; // 404 → build purged by retention; result unrecoverable.
   }
-  buildResultCache.set(buildId, result);
+  keep(() => buildResultCache.set(buildId, result));
   return result;
 }
 

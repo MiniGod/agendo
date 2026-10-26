@@ -1,6 +1,8 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import type { OpenPlan } from "../../launch/index.ts";
+import { configPathInEffect, type Config } from "../../app/config.ts";
+import { fieldText, type SettingsItem } from "../models/configFields.ts";
 import type { LoadedModel } from "../../app/model/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
@@ -19,6 +21,7 @@ import { ProfileScreen } from "./ProfileScreen.tsx";
 import { ProviderScreen } from "./ProviderScreen.tsx";
 import { WtChoiceScreen } from "./WtChoiceScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
+import { SettingsEditScreen, TeamPickerScreen } from "./SettingsEditScreens.tsx";
 import { RepoScreen } from "./RepoScreen.tsx";
 import { CleanupScreen } from "./CleanupScreen.tsx";
 
@@ -78,7 +81,9 @@ export interface ModeProps {
   model: LoadedModel;
   identity: Identity | null;
   roster: Identity[];
-  settingsItems: Array<"provider" | "identity" | "autoResume">;
+  settingsItems: readonly SettingsItem[];
+  /** config.json as last loaded, for the Settings page's config rows. */
+  config: Config;
   providerLabel: string;
   provider: ProviderName;
   autoResume: boolean;
@@ -207,10 +212,18 @@ function renderPromptMode({ mode, cloneUrl, resolved, filterRoot }: ModeProps): 
   return null;
 }
 
-/** The settings screen and its two pickers. */
+/** The settings screen, its two pickers, and the config.json editors. */
 function renderSettingsMode({
-  mode, model, identity, roster, settingsItems, providerLabel, provider, autoResume, available, authStatus,
+  mode, model, identity, roster, settingsItems, providerLabel, provider, autoResume, available, authStatus, config,
 }: ModeProps): ReactElement | null {
+  if (mode.kind === "settingsEdit") {
+    return <SettingsEditScreen field={mode.field} value={mode.value} cursor={mode.cursor} error={mode.error} />;
+  }
+
+  if (mode.kind === "teamPicker") {
+    return <TeamPickerScreen cursor={mode.cursor} teams={mode.teams} current={fieldText("team", config)} project={fieldText("project", config)} error={mode.error} />;
+  }
+
   if (mode.kind === "identity") {
     return <IdentityScreen cursor={mode.cursor} identity={identity} me={model.me} roster={roster} />;
   }
@@ -226,6 +239,9 @@ function renderSettingsMode({
         autoResume={autoResume}
         available={available}
         authStatus={authStatus}
+        config={config}
+        configInEffect={configPathInEffect()}
+        note={mode.note}
       />
     );
   }

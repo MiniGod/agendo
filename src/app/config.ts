@@ -115,9 +115,14 @@ export const OLD_STATE_DIR = join(homedir(), ".claude-launcher");
 export const STATE_PATH = join(STATE_DIR, "state.json");
 const PREV_STATE_PATH = join(PREV_STATE_DIR, "state.json");
 const OLD_STATE_PATH = join(OLD_STATE_DIR, "state.json");
-const CONFIG_PATH = join(STATE_DIR, "config.json");
-const PREV_CONFIG_PATH = join(PREV_STATE_DIR, "config.json");
-const OLD_CONFIG_PATH = join(OLD_STATE_DIR, "config.json");
+export const CONFIG_PATH = join(STATE_DIR, "config.json");
+export const PREV_CONFIG_PATH = join(PREV_STATE_DIR, "config.json");
+export const OLD_CONFIG_PATH = join(OLD_STATE_DIR, "config.json");
+
+/** `path` with the home directory written as `~`, the way the README names the config files. */
+export function tildePath(path: string, home: string = homedir()): string {
+  return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
 
 /**
  * First existing file in `paths`, or `paths[0]` as the default write target.
@@ -139,12 +144,27 @@ function defaults(): Config {
   return { ...DEFAULT_CONFIG, closedStates: [...DEFAULT_CONFIG.closedStates] };
 }
 
+/** The config a config.json holding the object `raw` reads as: the defaults, with its keys over them. */
+export function configFrom(raw: object): Config {
+  return { ...defaults(), ...raw };
+}
+
+/**
+ * The config.json that `loadConfig` reads: the new path when it exists, else
+ * the first legacy one that does, else the new path (which then doesn't exist
+ * yet). The Settings page names it, and its first save copies a legacy file's
+ * content forward into the new path (src/app/configSave.ts).
+ */
+export function configPathInEffect(): string {
+  return firstExisting([CONFIG_PATH, PREV_CONFIG_PATH, OLD_CONFIG_PATH]);
+}
+
 // A malformed config/state file falls back to defaults and records a warning
 // naming the path (surfaced by the UI) rather than throwing: both files are
 // preferences whose every value is re-derivable, so bricking the launcher over
 // one — with a message that doesn't even say which file — is strictly worse.
 export function loadConfig(): Config {
-  const path = firstExisting([CONFIG_PATH, PREV_CONFIG_PATH, OLD_CONFIG_PATH]);
+  const path = configPathInEffect();
   if (!existsSync(path)) return defaults();
   let text: string;
   try {
@@ -155,7 +175,7 @@ export function loadConfig(): Config {
   const override = parseJsonFileOr<Partial<Config>>(text, path, {});
   // `JSON.parse('"oops"')`/`42` succeed but aren't records; spreading a string
   // would inject its character indices as config keys (same guard as loadState).
-  return { ...defaults(), ...(override && typeof override === "object" ? override : {}) };
+  return configFrom(override && typeof override === "object" ? override : {});
 }
 
 /**

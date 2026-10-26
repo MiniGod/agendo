@@ -19,6 +19,7 @@ export function useViewport({
   searchFocus,
   filterRoot,
   pinnedLines = 0,
+  extraLines = 0,
 }: {
   rows: Row[];
   cursor: number;
@@ -27,6 +28,8 @@ export function useViewport({
   filterRoot: string | null;
   /** Rows the pinned orchestrator block takes above the list (see `pinnedLineCount`). */
   pinnedLines?: number;
+  /** Lines of chrome shown only sometimes — the Work items view's team notice (see `teamNoticeLines`). */
+  extraLines?: number;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
   const { stdout } = useStdout();
@@ -40,7 +43,7 @@ export function useViewport({
   // Non-sessions views also reserve a line for the "viewing as / filter" status.
   // The search box (shown while a search is active) takes one extra line, and a
   // path-scoped launcher shows one scope line.
-  const chrome = (view === "sessions" ? 6 : 8) + (searchFocus ? 1 : 0) + (filterRoot ? 1 : 0);
+  const chrome = (view === "sessions" ? 6 : 8) + (searchFocus ? 1 : 0) + (filterRoot ? 1 : 0) + extraLines;
   const { pageSize, pinsShown } = pageLayout(termRows, chrome, pinnedLines);
   useEffect(() => {
     setScrollTop((prev) => {

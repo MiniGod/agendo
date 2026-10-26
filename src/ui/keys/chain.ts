@@ -20,6 +20,8 @@ import { handleRepoKeys } from "./repo.ts";
 import { handleWtchoiceKeys } from "./wtchoice.ts";
 import { handleSearchKeys } from "./search.ts";
 import { handleSettingsKeys } from "./settings.ts";
+import { handleSettingsEditKeys } from "./settingsEdit.ts";
+import { handleTeamPickerKeys } from "./teamPicker.ts";
 
 export type KeyHandler = (input: string, key: Key, ctx: KeyContext) => boolean;
 
@@ -37,6 +39,8 @@ export const KEY_HANDLERS: readonly KeyHandler[] = [
   handleWtchoiceKeys,
   handleBranchKeys,
   handleSettingsKeys,
+  handleSettingsEditKeys,
+  handleTeamPickerKeys,
   handleProviderKeys,
   handleIdentityKeys,
   handleProfileKeys,

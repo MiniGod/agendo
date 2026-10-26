@@ -48,6 +48,11 @@ export function getToken(): string {
   return value;
 }
 
+/** Forget the cached token — it was minted for the tenant config.json named before it changed. */
+export function resetToken(): void {
+  tokens = EMPTY_TOKEN_CACHE;
+}
+
 /** A different token to retry with after ADO refused `stale`, or null when
  *  there is none — `az` handed back the very token that was just refused, so
  *  a retry would only be refused again. */

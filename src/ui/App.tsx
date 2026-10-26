@@ -12,6 +12,7 @@ import { makeInitActions } from "./actions/init.ts";
 import { makeSessionFlow } from "./actions/sessionFlow.ts";
 import { makeProfileActions } from "./actions/profile.ts";
 import { makeProviderActions } from "./actions/provider.ts";
+import { SETTINGS_ITEMS } from "./models/configFields.ts";
 import { makeContinueInOtherAgent } from "./actions/convertAgent.ts";
 import {
   sessionId,
@@ -20,6 +21,7 @@ import {
 } from "./models/rows.ts";
 import { useActivityWatchers } from "./hooks/useActivityWatchers.ts";
 import { useAuthProbe } from "./hooks/useAuthProbe.ts";
+import { useConfigSettings } from "./hooks/useConfigSettings.ts";
 import { useCloneFlow } from "./hooks/useCloneFlow.ts";
 import { useModelLoader } from "./hooks/useModelLoader.ts";
 import { useReadinessPoll } from "./hooks/useReadinessPoll.ts";
@@ -33,7 +35,7 @@ import { useLocalRescan } from "./hooks/useLocalRescan.ts";
 import type { KeyContext, Mode, View } from "./keys/context.ts";
 import { dispatchKey } from "./keys/chain.ts";
 import { ListScreen } from "./screens/ListScreen.tsx";
-import { pinnedLineCount } from "./screens/listLines.tsx";
+import { pinnedLineCount, teamNoticeLines } from "./screens/listLines.tsx";
 import { renderLoadState, renderMode } from "./screens/ModeScreens.tsx";
 import type { AgentSession, Identity, ProviderName } from "../shared/types.ts";
 
@@ -175,9 +177,6 @@ export default function App({
       .catch(() => setActivity((p) => new Map(p).set(id, "error")));
   };
 
-  // The actionable rows of the Settings page, in display order. Kept in one
-  // place so the input handler (cursor / enter) and the renderer stay in lockstep.
-  const settingsItems: Array<"provider" | "identity" | "autoResume"> = ["provider", "identity", "autoResume"];
   const providerLabel = PROVIDER_INFO.find((p) => p.name === provider)?.label ?? provider;
 
   const { scoped, inScope, scopedRepos, reposForTarget, anyHostableRepo, scopeRepo } = useRepoScope({
@@ -231,6 +230,7 @@ export default function App({
     searchFocus,
     filterRoot,
     pinnedLines: pinnedLineCount(view, pins),
+    extraLines: teamNoticeLines(view, model),
   });
 
   const move = (dir: 1 | -1) => {
@@ -261,10 +261,10 @@ export default function App({
     clearSearch();
   };
 
-  // Open the Settings page (backend, identity, filters, auth status).
+  // Open the Settings page (backend, identity, filters, auth status), config.json re-read.
   const enterSettings = () => {
     setNotice(null);
-    setMode({ kind: "settings", cursor: 0 });
+    openSettings();
   };
 
   // Open the backend picker (Azure DevOps ↔ GitHub), cursor on the current one.
@@ -286,6 +286,8 @@ export default function App({
   const { applyProvider } = makeProviderActions({
     provider, available, setProvider, setIdentity, persist, setCursor, clearSearch, setMode, setNotice,
   });
+  // config.json as Settings shows it, its save and its team picker — ./hooks/useConfigSettings.ts.
+  const { config, saveConfigPatch, openSettings, enterTeamPicker } = useConfigSettings({ setMode, reload, provider, setIdentity, persist });
 
   // ── starting a session ──────────────────────────────────────────────────────
   // Agent pick → repo pick → worktree/checkout routing → launch, all in
@@ -335,7 +337,8 @@ export default function App({
     enterFresh, enterNewSession, enterOrchestrator, enterGlobalOrchestrator, proceedFresh, reposForTarget,
     chooseRepo, startFresh, open, openInBrowser,
     canClone, beginClone, cancelClone, setCloneNote, cloneNoteRef, beginInitDir, beginInit,
-    settingsItems, enterSettings, enterProvider, enterIdentity, applyProvider,
+    settingsItems: SETTINGS_ITEMS, enterSettings, enterProvider, enterIdentity, applyProvider,
+    config, saveConfigPatch, enterTeamPicker,
     setAutoResume, persist, roster, setIdentity,
     continueInOtherAgent, enterProfilePicker, moveToProfile,
   };
@@ -351,7 +354,7 @@ export default function App({
   if (busy) return <Text><Text color="cyan">⟳</Text> {busy}</Text>;
 
   const modal = renderMode({
-    mode, model, identity, roster, settingsItems, providerLabel, provider, autoResume,
+    mode, model, identity, roster, settingsItems: SETTINGS_ITEMS, config, providerLabel, provider, autoResume,
     available, authStatus, cloneNote, cloneUrl, resolved, filterRoot, canClone,
     anyHostableRepo, reposForTarget,
     cleanup: { inScope, extraRoots: discoveredRepos.map((r) => r.root), onBack: () => setMode({ kind: "list" }), onQuit: exit, reload, open },

@@ -7,6 +7,7 @@ import type { PrSort, SessionSort } from "../models/rows.ts";
 import type { OrchestratorPins, PinLine } from "../models/orchestratorPins.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
 import type { View } from "../keys/context.ts";
+import type { TeamCheck } from "../../shared/types.ts";
 
 /**
  * The lines above and below the rows of the list screen. Plain functions
@@ -175,6 +176,35 @@ export function columnHeader(view: View, prSort: PrSort): ReactElement | null {
 /** How many rows lie past the viewport's edge, or a blank line to hold the place. */
 export function edgeLine(count: number, arrow: "↑" | "↓"): ReactElement {
   return <Text dimColor>{count > 0 ? `  ${arrow} ${count} more` : " "}</Text>;
+}
+
+/**
+ * What the Work items view says about a configured team that can't be where
+ * "Current sprint" comes from (see TeamCheck), or null when there's nothing to
+ * say. Names a few of the user's own teams, so the fix is in the message.
+ */
+export function teamNoticeText(check: TeamCheck | null | undefined): string | null {
+  if (!check) return null;
+  if (!check.team) return "no team is set, so there is no current sprint — set it in , settings";
+  if (check.mine === null) return `team '${check.team}' wasn't found in ${check.project}, set it in , settings`;
+  const yours = check.mine.length === 0 ? `you're in no team of ${check.project}` : check.mine.slice(0, 3).join(", ") + (check.mine.length > 3 ? ", …" : "");
+  return `team '${check.team}' isn't one of yours (${yours}), set it in , settings`;
+}
+
+/** The team notice as the one line under "as …" in the Work items view; the other views never show it. */
+export function teamNoticeLine(view: View, model: LoadedModel): ReactElement | null {
+  const text = view === "items" ? teamNoticeText(model.teamCheck) : null;
+  if (!text) return null;
+  return (
+    <Box>
+      <Text color="yellow" wrap="truncate">⚑ {text}</Text>
+    </Box>
+  );
+}
+
+/** Lines `teamNoticeLine` takes, for the viewport to leave room for. */
+export function teamNoticeLines(view: View, model: LoadedModel | null): number {
+  return view === "items" && teamNoticeText(model?.teamCheck) ? 1 : 0;
 }
 
 export function noticeLine(notice: string | null): ReactElement | null {
