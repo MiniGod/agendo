@@ -6,8 +6,8 @@ import type { Config } from "../../app/config.ts";
 import type { TeamCheck } from "../../shared/types.ts";
 
 /**
- * What a config.json change invalidates. The token is minted per tenant; every
- * other cached answer — identities, team lists, the project id, build results,
+ * What a config.json change invalidates. The token is minted per tenant and
+ * resource (the audience `az` is asked for); every other cached answer — identities, team lists, the project id, build results,
  * PRs — belongs to an org, project and team, and a tenant change can mean
  * another account seeing them. `identities` is whether an identity id from
  * before (the launcher's "viewing as" choice) can mean anything after: those
@@ -20,9 +20,12 @@ export interface Invalidated {
 }
 
 export function invalidatedBy(before: Config, after: Config): Invalidated {
-  const token = before.tenant !== after.tenant;
-  const identities = token || before.org !== after.org;
-  return { token, identities, caches: identities || before.project !== after.project || before.team !== after.team };
+  const identities = before.tenant !== after.tenant || before.org !== after.org;
+  return {
+    token: before.tenant !== after.tenant || before.resource !== after.resource,
+    identities,
+    caches: identities || before.project !== after.project || before.team !== after.team,
+  };
 }
 
 /**

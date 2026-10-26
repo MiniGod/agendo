@@ -35,7 +35,7 @@ describe("readConfigObject", () => {
     const bad = join(d, "bad.json");
     writeFileSync(bad, "{ org: ");
     expect(() => readConfigObject(bad)).toThrow(`${bad} isn't valid JSON (`);
-    expect(() => readConfigObject(bad)).toThrow("fix or remove it, then save again");
+    expect(() => readConfigObject(bad)).toThrow("fix it by hand; nothing saves until then");
     for (const text of ["[1,2]", "42", "null", '"oops"']) {
       writeFileSync(bad, text);
       expect(() => readConfigObject(bad)).toThrow(`${bad} doesn't hold a JSON object`);

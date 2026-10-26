@@ -37,7 +37,9 @@ export type ConfigPatch = { [K in keyof Config]?: Config[K] | undefined };
  * The JSON object stored at `path`, or `{}` when there is no file. Throws when
  * the file exists but isn't a JSON object: saving over it would replace the
  * user's hand-edited content with only what the Settings page knows, which is
- * worse than refusing and saying why.
+ * worse than refusing and saying why. The advice is to fix it, never to remove
+ * it: with the file gone, the next save would write the edited key alone, and
+ * the org, project and team the page still shows would be lost.
  */
 export function readConfigObject(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
@@ -47,10 +49,10 @@ export function readConfigObject(path: string): Record<string, unknown> {
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    throw new Error(`${path} isn't valid JSON (${messageOf(e)}) — fix or remove it, then save again`);
+    throw new Error(`${path} isn't valid JSON (${messageOf(e)}) — fix it by hand; nothing saves until then`);
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${path} doesn't hold a JSON object — fix or remove it, then save again`);
+    throw new Error(`${path} doesn't hold a JSON object — fix it by hand; nothing saves until then`);
   }
   return parsed as Record<string, unknown>;
 }

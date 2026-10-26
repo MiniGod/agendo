@@ -3,7 +3,8 @@
 // what the Work items view says about the configured team. The e2e suite saves
 // a team and an org, trips the not-yours, not-found and no-team notices, and
 // clears the not-found one while the team list still fails; it never changes the
-// tenant (whose token the fake `az` mints the same either way) or the project.
+// tenant or the resource (the fake `az` mints the same token either way) or the
+// project.
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import { invalidatedBy, judgeTeam } from "../src/providers/azureDevOps/configChange.ts";
@@ -17,6 +18,10 @@ describe("invalidatedBy", () => {
 
   test("an org change drops the caches and the identities but keeps the token", () => {
     expect(invalidatedBy(before, { ...before, org: "contoso" })).toEqual({ token: false, caches: true, identities: true });
+  });
+
+  test("a resource change (a hand edit; the page shows it read-only) drops only the token", () => {
+    expect(invalidatedBy(before, { ...before, resource: "another-app-id" })).toEqual({ token: true, caches: false, identities: false });
   });
 
   test("a project or team change drops only the caches", () => {
