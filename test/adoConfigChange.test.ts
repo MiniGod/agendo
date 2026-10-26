@@ -1,9 +1,9 @@
 // The pure half of a config.json change under a running launcher
 // (src/providers/azureDevOps/configChange.ts): what a save invalidates, and
 // what the Work items view says about the configured team. The e2e suite saves
-// a team and trips the not-yours and not-found notices; it never changes the
-// tenant (whose token the fake `az` mints the same either way), leaves the team
-// blank, or has the team list fail while the team itself exists.
+// a team and an org, trips the not-yours, not-found and no-team notices, and
+// clears the not-found one while the team list still fails; it never changes the
+// tenant (whose token the fake `az` mints the same either way) or the project.
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import { invalidatedBy, judgeTeam } from "../src/providers/azureDevOps/configChange.ts";

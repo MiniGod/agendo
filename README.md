@@ -693,8 +693,8 @@ you are viewing as, and the auto-resume toggle are remembered separately in
 
 Every key above can be changed on the settings page (`,`) without opening the file:
 `org`, `project`, `team`, `tenant`, `closedStates` (comma-separated),
-`stalledAfterMinutes`, `resumeDialogChoice` and `peerSocket` (enter flips them), and
-`focusTerminal` (empty turns it off). `resource`, Azure DevOps' fixed application id,
+`stalledAfterMinutes` (a number of minutes), `resumeDialogChoice` and `peerSocket` (enter
+flips these two), and `focusTerminal` (empty turns it off). `resource`, Azure DevOps' fixed application id,
 is shown but not editable. Enter on **Team** lists the teams of the configured project
 that you belong to; its last row lets you type a name instead. A value that doesn't
 validate stays in its editor with the reason under it. The page reads the file each time

@@ -1,7 +1,8 @@
 // The team picker's keys and list updates (src/ui/keys/teamPicker.ts). The e2e
-// suite picks a team from the list and falls through to typing one; it never
-// wraps the cursor, has the list request fail or land after the picker closed,
-// or has the save itself fail. Each arm here runs on a context of mocks.
+// suite picks a team from the list, wraps up from the top to typing one, and
+// has the list request fail; it never wraps down past the last row, has the
+// list land after the picker closed, or has the save itself fail. Each arm here
+// runs on a context of mocks.
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import { DEFAULT_CONFIG } from "../src/app/config.ts";

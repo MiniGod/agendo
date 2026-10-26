@@ -1,8 +1,9 @@
 // The settings page's keys (src/ui/keys/settings.ts). The e2e suite opens the
-// page, moves once and toggles auto-resume, and edits the team; it never wraps
-// the cursor at either end, presses a key the page swallows, enters the
-// provider and identity pickers from here, or flips a config toggle whose save
-// fails. Every arm sits beside the one next to it, on a context of mocks.
+// page, moves down it and wraps up from the top, toggles auto-resume, enters the
+// backend picker, and edits and picks config rows; it never wraps down past the
+// last row, presses a key the page swallows, enters the identity picker from
+// here, or flips a config toggle at all. Every arm sits beside the one next to
+// it, on a context of mocks.
 import { describe, expect, mock, test } from "bun:test";
 import type { Key } from "ink";
 import { DEFAULT_CONFIG } from "../src/app/config.ts";

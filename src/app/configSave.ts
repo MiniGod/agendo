@@ -10,7 +10,22 @@
 // one (see `configPathInEffect`). Saves always go to the new `~/.agendo/`, so the
 // first one writes the legacy content plus the edit there, and every later read
 // finds the new file first. The legacy file is left as it was.
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { dirname, resolve } from "path";
 import { messageOf } from "../shared/errors.ts";
 import { CONFIG_PATH, configPathInEffect, type Config } from "./config.ts";
@@ -90,9 +105,35 @@ function writeTarget(path: string): string {
   return target;
 }
 
+/** Write `text` to a new file at `path`, flushed to disk before this returns. */
+function writeFlushed(path: string, text: string, mode: number): void {
+  const fd = openSync(path, "w", mode);
+  try {
+    writeFileSync(fd, text);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Flush `dir`'s entries to disk, so a rename into it outlives a power cut. Best effort. */
+function flushDir(dir: string): void {
+  try {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // Not every filesystem lets a directory be opened and synced; the rename has happened either way.
+  }
+}
+
 /**
- * Replace `path` with `text` atomically: a temp file beside it, then rename(2),
- * so a crash or a full disk can't leave a truncated config behind. A symlinked
+ * Replace `path` with `text` atomically: a temp file beside it, flushed to disk,
+ * then rename(2), and the directory flushed after it — so a crash, a full disk or
+ * a power cut can't leave a truncated or empty config behind. A symlinked
  * config (a dotfiles checkout) is written through, so it stays a link, and an
  * existing file keeps its permissions; a new one takes `modeOf`'s, when that
  * exists (the legacy config a first save migrates).
@@ -104,7 +145,7 @@ export function writeFileAtomic(path: string, text: string, modeOf: string = pat
   const kept = existsSync(like) ? statSync(like).mode & 0o777 : null;
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, text, { mode: kept ?? 0o644 });
+    writeFlushed(tmp, text, kept ?? 0o644);
     // The create mode is masked by the umask; an existing file's is restored exactly.
     if (kept !== null) chmodSync(tmp, kept);
     renameSync(tmp, target);
@@ -112,6 +153,7 @@ export function writeFileAtomic(path: string, text: string, modeOf: string = pat
     rmSync(tmp, { force: true });
     throw e;
   }
+  flushDir(dirname(target));
 }
 
 /**

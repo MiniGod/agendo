@@ -38,7 +38,7 @@ export const FIELD_SPECS: Record<ConfigField, FieldSpec> = {
   team: { label: "Team", hint: "whose current iteration is \"Current sprint\", exactly as Azure DevOps names it", reloads: true },
   tenant: { label: "Tenant", hint: "the Entra tenant id (or domain) the org trusts, passed to az --tenant", reloads: true },
   closedStates: { label: "Closed states", hint: "comma-separated work-item states treated as done", reloads: true },
-  stalledAfterMinutes: { label: "Stalled after (minutes)", hint: "idle minutes before a live session reads ⚠stalled", reloads: false },
+  stalledAfterMinutes: { label: "Stalled after (minutes)", hint: "idle minutes before `agendo list` and `agendo status` mark a live session ⚠stalled", reloads: false },
   resumeDialogChoice: { label: "Resume dialog choice", hint: "", reloads: false },
   peerSocket: { label: "Peer socket", hint: "", reloads: false },
   focusTerminal: {
