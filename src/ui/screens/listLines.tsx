@@ -185,8 +185,8 @@ export function edgeLine(count: number, arrow: "↑" | "↓"): ReactElement {
  */
 export function teamNoticeText(check: TeamCheck | null | undefined): string | null {
   if (!check) return null;
-  if (!check.team) return "no team is set, so there is no current sprint — set it in , settings";
   if (check.projectMissing) return `project '${check.project}' wasn't found, set it in , settings`;
+  if (!check.team) return "no team is set, so there is no current sprint — set it in , settings";
   if (check.mine === null) return `team '${check.team}' wasn't found in ${check.project}, set it in , settings`;
   const yours = check.mine.length === 0 ? `you're in no team of ${check.project}` : check.mine.slice(0, 3).join(", ") + (check.mine.length > 3 ? ", …" : "");
   return `team '${check.team}' isn't one of yours (${yours}), set it in , settings`;

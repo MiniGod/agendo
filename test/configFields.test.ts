@@ -1,7 +1,8 @@
 // The config.json rows of the Settings page (src/ui/models/configFields.ts):
 // how each value reads on its row, and how typed text becomes a value or the
-// error shown under the input. The e2e suite types one valid and one invalid
-// value; every other arm of every field sits here, beside its neighbours.
+// error shown under the input. The e2e suite types a team, a number of minutes
+// and an org, and one invalid value; every other arm of every field sits here,
+// beside its neighbours.
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import {

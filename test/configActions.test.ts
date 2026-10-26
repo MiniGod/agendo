@@ -15,13 +15,14 @@ import type { ProviderName } from "../src/shared/types.ts";
 /** Let the team list's promise handlers run. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
 const loaded: Config = { ...DEFAULT_CONFIG, team: "Prisma" };
+const saved: Config = { ...DEFAULT_CONFIG, team: "Zeta" };
 
 const STILL = { caches: false, identities: false };
 const NEW_TEAM = { caches: true, identities: false };
 const NEW_ORG = { caches: true, identities: true };
 
 function setup({
-  save = (_p: ConfigPatch): unknown => "/tmp/x",
+  save = (_p: ConfigPatch): Config => saved,
   moved = STILL,
   readError = null,
   provider = "ado",
@@ -35,9 +36,8 @@ function setup({
 } = {}) {
   const fake = {
     save: mock(save),
-    load: mock(() => loaded),
-    readError: mock(() => readError),
-    reloadBackend: mock(() => moved),
+    read: mock(() => (readError === null ? { config: loaded } : { error: readError })),
+    reloadBackend: mock((_next: Config) => moved),
     myTeams: mock(myTeams),
   };
   const deps = { setConfig: mock(), setMode: mock(), reload: mock(), setIdentity: mock(), persist: mock() };
@@ -53,12 +53,13 @@ describe("saveConfigPatch", () => {
     expect(deps.reload).not.toHaveBeenCalled();
   });
 
-  test("a save re-reads the file into the page and the backend, and reloads when requests moved", () => {
+  test("what a save wrote goes to the page and the backend, unread, and reloads when requests moved", () => {
     const { deps, fake, actions } = setup({ moved: NEW_TEAM });
-    expect(actions.saveConfigPatch({ team: "Prisma" })).toBeNull();
-    expect(fake.save.mock.calls).toEqual([[{ team: "Prisma" }]]);
-    expect(deps.setConfig.mock.calls).toEqual([[loaded]]);
-    expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
+    expect(actions.saveConfigPatch({ team: "Zeta" })).toBeNull();
+    expect(fake.save.mock.calls).toEqual([[{ team: "Zeta" }]]);
+    expect(fake.read).not.toHaveBeenCalled();
+    expect(deps.setConfig.mock.calls).toEqual([[saved]]);
+    expect(fake.reloadBackend.mock.calls).toEqual([[saved]]);
     expect(deps.reload).toHaveBeenCalledTimes(1);
     expect(deps.setIdentity).not.toHaveBeenCalled(); // a team's members are still the org's identities
   });
@@ -102,11 +103,12 @@ describe("saveConfigPatch", () => {
 });
 
 describe("openSettings", () => {
-  test("the page opens on a fresh read of the file, the backend following it", () => {
+  test("the page opens on one fresh read of the file, which the backend takes too", () => {
     const { deps, fake, actions } = setup();
     actions.openSettings();
+    expect(fake.read).toHaveBeenCalledTimes(1);
     expect(deps.setConfig.mock.calls).toEqual([[loaded]]);
-    expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
+    expect(fake.reloadBackend.mock.calls).toEqual([[loaded]]);
     expect(deps.reload).not.toHaveBeenCalled();
     expect(deps.setMode.mock.calls).toEqual([[{ kind: "settings", cursor: 0 }]]);
   });

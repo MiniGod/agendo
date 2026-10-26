@@ -14,15 +14,15 @@ import { patchReloads } from "../models/configFields.ts";
  * writing a real config.json.
  */
 export interface ConfigIo {
-  save: (patch: ConfigPatch) => unknown;
-  load: () => Config;
-  /** Why the file in effect can't be read as a config, or null when it can (configSave.ts `configReadError`). */
-  readError: () => string | null;
+  /** Save `patch` (configSave.ts `saveConfig`); the config as it now reads. */
+  save: (patch: ConfigPatch) => Config;
+  /** One read of the file in effect (configSave.ts `readConfig`): the config, or why it can't be read. */
+  read: () => { config: Config } | { error: string };
   /**
-   * Re-read the file into the Azure DevOps layer: whether org/project/team/tenant
+   * Point the Azure DevOps layer at `next`: whether org/project/team/tenant
    * changed (`caches`), and whether org or tenant did (`identities`).
    */
-  reloadBackend: () => { caches: boolean; identities: boolean };
+  reloadBackend: (next: Config) => { caches: boolean; identities: boolean };
   myTeams: () => Promise<string[]>;
 }
 
@@ -61,9 +61,13 @@ export function makeConfigActions({
 }) {
   const onAdo = provider === "ado";
 
-  /** Re-read the file into the Azure DevOps layer; whether the model in view must reload. */
-  function followFile(): boolean {
-    const moved = io.reloadBackend();
+  /**
+   * Take `next` — config.json as just read or saved — into the page and the
+   * Azure DevOps layer alike; whether the model in view must reload.
+   */
+  function take(next: Config): boolean {
+    setConfig(next);
+    const moved = io.reloadBackend(next);
     if (!onAdo) return false;
     // Identity ids belong to an org and its tenant: as on a backend switch, the override goes.
     if (moved.identities) {
@@ -74,14 +78,14 @@ export function makeConfigActions({
   }
 
   function saveConfigPatch(patch: ConfigPatch): string | null {
+    let saved: Config;
     try {
-      io.save(patch);
+      saved = io.save(patch);
     } catch (e) {
       return `couldn't save: ${messageOf(e)}`;
     }
-    setConfig(io.load());
-    // Always re-read, so closedStates reaches the WIQL too; reload when either says so.
-    if (followFile() || (onAdo && patchReloads(patch))) reload();
+    // The backend always takes it, so closedStates reaches the WIQL too; reload when either says so.
+    if (take(saved) || (onAdo && patchReloads(patch))) reload();
     return null;
   }
 
@@ -95,13 +99,12 @@ export function makeConfigActions({
    * and the note says what to do about the file.
    */
   function openSettings(): void {
-    const unreadable = io.readError();
-    if (unreadable) {
-      setMode({ kind: "settings", cursor: 0, note: { text: unreadable, error: true } });
+    const read = io.read();
+    if ("error" in read) {
+      setMode({ kind: "settings", cursor: 0, note: { text: read.error, error: true } });
       return;
     }
-    setConfig(io.load());
-    if (followFile()) reload();
+    if (take(read.config)) reload();
     setMode({ kind: "settings", cursor: 0 });
   }
 

@@ -3,9 +3,9 @@
 // `loadConfig()` runs at module scope, exactly as it did in ado.ts — ES modules
 // are singletons, so importing this from each ado/* module keeps that a SINGLE
 // read of the config file rather than one per module. The Settings page can
-// change the file under a running launcher, so `reloadEnv` re-reads it INTO the
-// same `cfg` object (every module holds that object, not a copy) and re-derives
-// the base URLs, which are live bindings for the same reason.
+// change the file under a running launcher, so `reloadEnv` puts its fresh read
+// INTO the same `cfg` object (every module holds that object, not a copy) and
+// re-derives the base URLs, which are live bindings for the same reason.
 //
 // Base URLs are overridable via env so an integration test can point the whole
 // REST layer at a local mock server without patching production defaults. In
@@ -34,11 +34,15 @@ export function cacheWriter(): (write: () => void) => void {
   };
 }
 
-/** Re-read config.json into `cfg` and re-derive the base URLs from it; says what the change invalidates. */
-export function reloadEnv(): Invalidated {
+/**
+ * Put `next` — config.json as the Settings page just read or saved it — into
+ * `cfg`, and re-derive the base URLs from it; says what the change invalidates.
+ * A copy, so the page's own state and `cfg` never share an array.
+ */
+export function reloadEnv(next: Config): Invalidated {
   const before = { ...cfg };
   for (const key of Object.keys(cfg)) delete (cfg as Partial<Config>)[key as keyof Config];
-  Object.assign(cfg, loadConfig());
+  Object.assign(cfg, structuredClone(next));
   BASE = baseUrl(cfg);
   GRAPH = graphUrl(cfg);
   const invalidated = invalidatedBy(before, cfg);

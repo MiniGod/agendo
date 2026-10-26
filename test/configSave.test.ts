@@ -1,16 +1,18 @@
 // Saving config.json from the Settings page (src/app/configSave.ts). The e2e
 // suite saves through the real TUI into a temp HOME, once per shape it can
-// reach from a keystroke; the shapes it can't — a malformed file in effect, a
-// symlinked config (dangling or looped too), a write that fails half way, a
-// file's permissions (kept, or carried over from the legacy file a first save
-// migrates) — sit here, each on its own temp directory. Every path is
+// reach from a keystroke; the shapes it can't — a symlinked config (dangling or
+// looped too), a write that fails half way, a file's permissions (kept, carried
+// over from the legacy file a first save migrates, or read-only and so refused),
+// a malformed file in effect at save time — sit here, each on its own temp
+// directory. Every path is
 // explicit: nothing here reads or writes a real ~/.agendo, ~/.clops or
 // ~/.claude-launcher.
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { configReadError, mergeConfig, readConfigObject, saveConfig, writeFileAtomic } from "../src/app/configSave.ts";
+import { dirname, join } from "node:path";
+import { DEFAULT_CONFIG } from "../src/app/config.ts";
+import { mergeConfig, readConfig, readConfigObject, saveConfig, writeFileAtomic } from "../src/app/configSave.ts";
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -50,15 +52,16 @@ describe("readConfigObject", () => {
   });
 });
 
-describe("configReadError", () => {
-  test("null for a file that reads, or none at all; else why not", () => {
+describe("readConfig", () => {
+  test("the config a file reads as, unknown keys and all, or the defaults for none; else why not", () => {
     const d = tmp();
     const path = join(d, "config.json");
-    expect(configReadError(path)).toBeNull();
-    writeFileSync(path, '{"org":"o"}');
-    expect(configReadError(path)).toBeNull();
+    expect(readConfig(path)).toEqual({ config: DEFAULT_CONFIG });
+    writeFileSync(path, '{"org":"o","hmiTag":"x"}');
+    expect(readConfig(path)).toEqual({ config: { ...DEFAULT_CONFIG, org: "o", hmiTag: "x" } as typeof DEFAULT_CONFIG });
     writeFileSync(path, '{"org":"o",}');
-    expect(configReadError(path)).toContain(`${path} isn't valid JSON — `);
+    const broken = readConfig(path);
+    expect("error" in broken ? broken.error : "").toContain(`${path} isn't valid JSON — `);
   });
 });
 
@@ -142,7 +145,9 @@ describe("saveConfig", () => {
     const legacyText = '{\n  "org": "contoso",\n  "team": "Team DES",\n  "hmiTag": "keep me"\n}';
     writeFileSync(legacy, legacyText);
     const to = join(home, ".agendo", "config.json");
-    expect(saveConfig({ team: "Prisma" }, { from: legacy, to })).toBe(to);
+    expect(saveConfig({ team: "Prisma" }, { from: legacy, to })).toEqual({
+      ...DEFAULT_CONFIG, org: "contoso", team: "Prisma", hmiTag: "keep me",
+    } as typeof DEFAULT_CONFIG); // what it wrote, as loadConfig would read it back
     expect(readFileSync(to, "utf-8")).toBe('{\n  "org": "contoso",\n  "team": "Prisma",\n  "hmiTag": "keep me"\n}\n');
     expect(readFileSync(legacy, "utf-8")).toBe(legacyText);
   });
@@ -165,6 +170,23 @@ describe("saveConfig", () => {
     const to = join(home, ".agendo", "config.json");
     saveConfig({ stalledAfterMinutes: 90 }, { from: to, to });
     expect(JSON.parse(readFileSync(to, "utf-8"))).toEqual({ stalledAfterMinutes: 90 });
+  });
+
+  // root writes through any mode, so there is no refusal to see as root.
+  test.skipIf(process.getuid?.() === 0)("a read-only file in effect refuses the save, the new file and a legacy one alike", () => {
+    const home = tmp();
+    const to = join(home, ".agendo", "config.json");
+    const legacy = join(home, ".clops", "config.json");
+    for (const path of [to, legacy]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, '{"team":"Team DES"}');
+      chmodSync(path, 0o444);
+    }
+    expect(() => saveConfig({ team: "Prisma" }, { from: to, to })).toThrow(`${to} is read-only — make it writable to save from here`);
+    expect(readFileSync(to, "utf-8")).toBe('{"team":"Team DES"}');
+    rmSync(to);
+    expect(() => saveConfig({ team: "Prisma" }, { from: legacy, to })).toThrow(`${legacy} is read-only`);
+    expect(existsSync(to)).toBe(false);
   });
 
   test("a malformed file in effect refuses the save and writes nothing", () => {

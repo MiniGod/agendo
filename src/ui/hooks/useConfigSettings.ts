@@ -1,16 +1,15 @@
 import { useState, type Dispatch, type SetStateAction } from "react";
-import { configPathInEffect, loadConfig, type Config } from "../../app/config.ts";
-import { configReadError, saveConfig } from "../../app/configSave.ts";
+import { loadConfig, type Config } from "../../app/config.ts";
+import { readConfig, saveConfig } from "../../app/configSave.ts";
 import { getMyAdoTeams, reloadAdoConfig } from "../../providers/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
 import { makeConfigActions, type ConfigIo } from "../actions/config.ts";
 import type { Mode } from "../keys/context.ts";
 
 const IO: ConfigIo = {
-  save: saveConfig,
-  load: loadConfig,
-  readError: () => configReadError(configPathInEffect()),
-  reloadBackend: () => reloadAdoConfig(),
+  save: (patch) => saveConfig(patch),
+  read: () => readConfig(),
+  reloadBackend: reloadAdoConfig,
   // Opened on purpose, so asked fresh: the answer the team check cached may predate a fix made in Azure DevOps.
   myTeams: () => getMyAdoTeams({ fresh: true }),
 };

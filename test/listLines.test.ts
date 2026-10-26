@@ -83,6 +83,8 @@ describe("teamNoticeText", () => {
 
   test("a project that doesn't exist is named, not the team in it", () => {
     expect(teamNoticeText({ ...check("Team Prisma", null), projectMissing: true })).toBe("project 'Fabrikam' wasn't found, set it in , settings");
+    // No team set as well: the project comes first, since no team can be picked from it.
+    expect(teamNoticeText({ ...check("", null), projectMissing: true })).toBe("project 'Fabrikam' wasn't found, set it in , settings");
   });
 
   test("a team that isn't one of the user's names up to three of theirs", () => {

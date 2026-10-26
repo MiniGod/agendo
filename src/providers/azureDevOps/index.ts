@@ -20,6 +20,7 @@ import { resetIdentityCaches } from "./identity.ts";
 import { clearPrCache, fetchPullRequestWorkItems, getPullRequest, getPullRequestWorkItems, getRawPullRequest, mapPr, parsePrArtifact } from "./pr.ts";
 import { mapLimit, resetPolicyCaches } from "./policy.ts";
 import { attachSurfacingPrs, groupPrsByWorkItem, surfacedPrIdsOf } from "./prWorkItems.ts";
+import type { Config } from "../../app/config.ts";
 import type { FocusEntity, Identity, PullRequest, WorkItem } from "../../shared/types.ts";
 
 import { urls } from "./urls.ts";
@@ -30,15 +31,16 @@ export { checkTeam, getMe, getMyTeams, getTeamMembers } from "./identity.ts";
 export { mapLimit, enrichPrCI, fetchActivePRs, fetchReviewPRs } from "./policy.ts";
 
 /**
- * Re-read config.json after the Settings page saved it, and when the org,
- * project, team or tenant changed, drop every answer cached for the old one —
- * the token (minted per tenant), the identities and team lists, the project id
+ * Take `next` — config.json as the Settings page just read or saved it — and
+ * when the org, project, team or tenant changed, drop every answer cached for
+ * the old one —
+ * the token (minted per tenant and resource), the identities and team lists, the project id
  * and build results, the PRs (configChange.ts `invalidatedBy`). Says whether
  * any of them changed, and whether an identity id from before still means
  * anything.
  */
-export function reloadConfig(): { caches: boolean; identities: boolean } {
-  const { token, caches, identities } = reloadEnv();
+export function reloadConfig(next: Config): { caches: boolean; identities: boolean } {
+  const { token, caches, identities } = reloadEnv(next);
   if (token) resetToken();
   if (caches) {
     resetIdentityCaches();

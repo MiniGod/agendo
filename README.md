@@ -705,7 +705,8 @@ running with, and it says so, refusing saves until the file is fixed by hand.
 A save changes only the key you edited. Every other key in the file, including keys
 agendo doesn't read, is read and written back with its value and in its place, though
 not its formatting: the file comes out as two-space-indented JSON. The write is atomic
-(a temp file, then a rename) and keeps the file's permissions. Saves always go to
+(a temp file, then a rename) and keeps the file's permissions; a read-only file is not
+saved over, and the page says so. Saves always go to
 `~/.agendo/config.json`: while agendo still reads a legacy `~/.clops/config.json` or
 `~/.claude-launcher/config.json`, the page says so, and the first save writes that
 file's whole content, plus your edit, to the new path, with the legacy file's

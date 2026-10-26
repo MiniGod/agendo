@@ -16,6 +16,8 @@ const legacyPath = (home: string) => join(home, ".claude-launcher", "config.json
 const configPath = (home: string) => join(home, ".agendo", "config.json");
 const readJson = async (path: string) => JSON.parse(await readFile(path, "utf-8"));
 
+// The configured team's iteration requests, by project and team.
+const TEAM_A_ITERATIONS = /\/Widgets\/Team%20A\/_apis\/work\/teamsettings\/iterations$/i;
 // Team B's current iteration, so a switch to it shows on the list.
 const TEAM_B_ITERATIONS = /\/Team%20B\/_apis\/work\/teamsettings\/iterations$/i;
 const SPRINT_43 = { body: { value: [{ id: "it-43", name: "Sprint 43", path: "Widgets\\Sprint 43" }] } };
@@ -79,6 +81,7 @@ test("picking one of your teams saves it to ~/.agendo, carrying the legacy file'
   expect(picker).toContain("✎ type a team name…");
 
   await wt.press("j");
+  await wt.waitForText("❯ ○ Team B");
   await wt.press(KEY.enter);
   const saved = await wt.waitForText("✓ Team saved to ~/.agendo/config.json");
   expect(saved).toContain("config.json · ~/.agendo/config.json");
@@ -298,11 +301,20 @@ test("a config.json broken under a running launcher keeps the values in use, and
   expect(screen).toMatch(/Organization\s+acme/);
   expect(screen).toMatch(/Team\s+Team A/);
 
+  // Had the backend taken the broken file as blank defaults, the reload would
+  // ask for an iteration of no project and no team, and the list would say no
+  // team is set; the mock answers every iteration path, so "Sprint 42" alone
+  // can't tell.
   await wt.press(KEY.escape);
+  await wt.waitForText("Add login screen");
+  const asked = () => mock.ado.requests.filter((r) => TEAM_A_ITERATIONS.test(r)).length;
+  const before = asked();
   await wt.press("r");
+  await expect.poll(asked, { timeout: 20000 }).toBeGreaterThan(before);
   await wt.waitForStable();
   const list = await wt.waitForText("Sprint 42", 20000);
   expect(list).not.toContain("Press r to retry");
+  expect(list).not.toContain("⚑");
 });
 
 test("a hand-edited team that isn't text reads as no team, and the picker still opens", async ({ launch, mock }) => {

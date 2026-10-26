@@ -144,6 +144,11 @@ function defaults(): Config {
   return { ...DEFAULT_CONFIG, closedStates: [...DEFAULT_CONFIG.closedStates] };
 }
 
+/** The config a config.json holding the object `raw` reads as: the defaults, with its keys over them. */
+export function configFrom(raw: object): Config {
+  return { ...defaults(), ...raw };
+}
+
 /**
  * The config.json that `loadConfig` reads: the new path when it exists, else
  * the first legacy one that does, else the new path (which then doesn't exist
@@ -170,7 +175,7 @@ export function loadConfig(): Config {
   const override = parseJsonFileOr<Partial<Config>>(text, path, {});
   // `JSON.parse('"oops"')`/`42` succeed but aren't records; spreading a string
   // would inject its character indices as config keys (same guard as loadState).
-  return { ...defaults(), ...(override && typeof override === "object" ? override : {}) };
+  return configFrom(override && typeof override === "object" ? override : {});
 }
 
 /**

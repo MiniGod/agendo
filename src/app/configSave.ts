@@ -11,6 +11,7 @@
 // first one writes the legacy content plus the edit there, and every later read
 // finds the new file first. The legacy file is left as it was.
 import {
+  accessSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -25,10 +26,11 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  constants,
 } from "fs";
 import { dirname, resolve } from "path";
 import { messageOf } from "../shared/errors.ts";
-import { CONFIG_PATH, configPathInEffect, tildePath, type Config } from "./config.ts";
+import { CONFIG_PATH, configFrom, configPathInEffect, tildePath, type Config } from "./config.ts";
 
 /** Keys to set; a key given as `undefined` is removed from the file instead. */
 export type ConfigPatch = { [K in keyof Config]?: Config[K] | undefined };
@@ -59,17 +61,32 @@ export function readConfigObject(path: string): Record<string, unknown> {
 }
 
 /**
- * Why the file at `path` can't be read as a config, or null when it can (an
- * absent file reads, as `{}`). `loadConfig` reads such a file as the defaults,
- * which at startup is all there is; a re-read under a running launcher would
- * blank a working org, project and team instead, so it asks here first.
+ * config.json as `loadConfig` reads it, from ONE read of the file at `path` —
+ * or why it can't be read, where `loadConfig` takes the defaults. That is right
+ * at startup, which has nothing better; under a running launcher it would blank
+ * a working org, project and team, so a re-read comes through here, and the one
+ * object it returns is what the page and the Azure DevOps layer both take: a
+ * second read could catch the file half-written.
  */
-export function configReadError(path: string): string | null {
+export function readConfig(path: string = configPathInEffect()): { config: Config } | { error: string } {
   try {
-    readConfigObject(path);
-    return null;
+    return { config: configFrom(readConfigObject(path)) };
   } catch (e) {
-    return messageOf(e);
+    return { error: messageOf(e) };
+  }
+}
+
+/**
+ * Throws when the file at `path` exists and this process may not write it.
+ * rename(2) would replace it regardless — it needs only the directory's
+ * permission — and a read-only config.json is one its owner protected.
+ */
+function refuseReadOnly(path: string): void {
+  if (!existsSync(path)) return;
+  try {
+    accessSync(path, constants.W_OK);
+  } catch {
+    throw new Error(`${tildePath(path)} is read-only — make it writable to save from here`);
   }
 }
 
@@ -161,14 +178,16 @@ export function writeFileAtomic(path: string, text: string, modeOf: string = pat
 
 /**
  * Apply `patch` to the config in effect and write the result to the new path.
- * Returns the path written. Throws (with a message fit to show) when the file
- * in effect can't be merged into, or the write fails.
+ * Returns the config as it now reads, so nothing has to read the file back.
+ * Throws (with a message fit to show) when the file
+ * in effect is read-only or can't be merged into, or the write fails.
  */
 export function saveConfig(
   patch: ConfigPatch,
   paths: { from: string; to: string } = { from: configPathInEffect(), to: CONFIG_PATH },
-): string {
+): Config {
+  refuseReadOnly(paths.from);
   const merged = mergeConfig(readConfigObject(paths.from), patch);
   writeFileAtomic(paths.to, `${JSON.stringify(merged, null, 2)}\n`, paths.from);
-  return paths.to;
+  return configFrom(merged);
 }
