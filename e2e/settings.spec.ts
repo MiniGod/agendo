@@ -242,20 +242,6 @@ test("a team the project doesn't have, with your teams unlistable, reads as not 
   await expect.poll(async () => (await wt.screen()).includes("wasn't found"), { timeout: 20000 }).toBe(false);
 });
 
-// A project that doesn't exist 404s the team list as well as the members, and
-// the load can still complete (the work items query is org-wide): the notice is
-// the one place that says so, and it names the project, not the team in it.
-test("a project that doesn't exist is named in the notice, not the team in it", async ({ launch, mock }) => {
-  const gone = { status: 404, body: { message: "TF200016: The following project does not exist: Widgets." } };
-  mock.setAdoResponse(/\/teams\/[^/]+\/members$/i, gone);
-  mock.setAdoResponse(MY_TEAMS, gone);
-
-  const wt = await launch();
-  const screen = await wt.waitForText("⚑ project 'Widgets' wasn't found, set it in , settings", 20000);
-  expect(screen).not.toContain("wasn't found in Widgets");
-  expect(screen).not.toContain("Press r to retry");
-});
-
 test("a move to another org drops the viewing-as choice, whose id belonged to the old one", async ({ launch, mock }) => {
   const wt = await launch();
   await wt.waitForText("Add login screen", 20000);

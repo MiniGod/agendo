@@ -722,8 +722,7 @@ the Work items view says so in one line and names a few of your teams:
 ⚑ team 'Team DES' isn't one of yours (Prisma, Saga, Zeta, …), set it in , settings
 ```
 
-A project that doesn't exist is named instead (`⚑ project '…' wasn't found`). The CLI
-has no such line. A team the project doesn't have fails its backend load instead, as it
+The CLI has no such line. A team the project doesn't have fails its backend load instead, as it
 always has, now with `team '…' wasn't found in …` as the reason, followed by Azure
 DevOps' own words for it.
 
