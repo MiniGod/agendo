@@ -90,12 +90,14 @@ export function makeConfigActions({
    * hand edit, may have changed it since the last read. The Azure DevOps layer
    * follows the file too, and the model reloads when requests moved. A file
    * that won't read (half-written, or a hand edit gone wrong) would read as
-   * blank defaults, so the last good read stays, here and in the backend.
+   * blank defaults, so the values in use stay, here and in the backend — the
+   * last good read, or the defaults when the file was broken at launch too —
+   * and the note says what to do about the file.
    */
   function openSettings(): void {
     const unreadable = io.readError();
     if (unreadable) {
-      setMode({ kind: "settings", cursor: 0, note: { text: `kept the last good read: ${unreadable}`, error: true } });
+      setMode({ kind: "settings", cursor: 0, note: { text: unreadable, error: true } });
       return;
     }
     setConfig(io.load());

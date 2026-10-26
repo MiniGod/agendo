@@ -699,8 +699,8 @@ is shown but not editable. Enter on **Team** lists the teams of the configured p
 that you belong to; its last row lets you type a name instead. A value that doesn't
 validate stays in its editor with the reason under it. The page reads the file each time
 it opens, so a hand edit, or a save from another agendo, shows up there; a file that
-doesn't read as JSON then is left alone, and the page keeps the last good read and says
-why.
+doesn't read as JSON then is left alone, the page keeps showing the values agendo is
+running with, and it says so, refusing saves until the file is fixed by hand.
 
 A save changes only the key you edited. Every other key in the file, including keys
 agendo doesn't read, is read and written back with its value and in its place, though
@@ -721,8 +721,10 @@ the Work items view says so in one line and names a few of your teams:
 ⚑ team 'Team DES' isn't one of yours (Prisma, Saga, Zeta, …), set it in , settings
 ```
 
-The CLI has no such line. A team the project doesn't have fails its backend load
-instead, as it always has, now with `team '…' wasn't found in …` as the reason.
+A project that doesn't exist is named instead (`⚑ project '…' wasn't found`). The CLI
+has no such line. A team the project doesn't have fails its backend load instead, as it
+always has, now with `team '…' wasn't found in …` as the reason, followed by Azure
+DevOps' own words for it.
 
 Opening a PR or work item in a browser (the `o` key, or `agendo open <id>`) uses your
 platform's default opener — `xdg-open`, `open`, or `start`. Set `AGENDO_BROWSER` to the

@@ -25,20 +25,29 @@ const SPRINT_43 = { body: { value: [{ id: "it-43", name: "Sprint 43", path: "Wid
 const MY_TEAMS = /_apis\/projects\/[^/]+\/teams$/i;
 const teams = (...names: string[]) => ({ body: { value: names.map((name) => ({ id: name, name })) } });
 
-// Settings rows, top to bottom: Backend, Viewing as, Auto-resume, then config.json's.
-const ROW = { org: 3, team: 5, stalledAfterMinutes: 8 } as const;
+// Settings rows, top to bottom, as far down as any spec here goes: Backend,
+// Viewing as, Auto-resume, then config.json's.
+const ROWS = ["Backend", "Viewing as", "Auto-resume", "Organization", "Project", "Team", "Tenant", "Closed states", "Stalled after (minutes)"];
 
-/** Open Settings from the list and put the cursor on row `index`, labelled `label`. */
-async function settingsRow(wt: WebTerminal, index: number, label: string): Promise<string> {
+/**
+ * Open Settings from the list and put the cursor on the row labelled `label`,
+ * one row at a time: a second `j` sent before the first one's render commits
+ * acts on the same cursor, and a loaded machine can take longer than `press`'s
+ * pause to commit.
+ */
+async function settingsRow(wt: WebTerminal, label: string): Promise<string> {
   await wt.press(",");
-  await wt.waitForText("Authentication");
-  for (let i = 0; i < index; i++) await wt.press("j");
-  return wt.waitForText(`❯ ${label}`);
+  let screen = await wt.waitForText("❯ Backend");
+  for (const row of ROWS.slice(1, ROWS.indexOf(label) + 1)) {
+    await wt.press("j");
+    screen = await wt.waitForText(`❯ ${row}`);
+  }
+  return screen;
 }
 
 /** The team picker, its list loaded. */
 async function teamPicker(wt: WebTerminal): Promise<string> {
-  await settingsRow(wt, ROW.team, "Team");
+  await settingsRow(wt, "Team");
   await wt.press(KEY.enter);
   await wt.waitForText("your teams in Widgets");
   return wt.waitForText("Team B");
@@ -56,7 +65,7 @@ test("picking one of your teams saves it to ~/.agendo, carrying the legacy file'
   await wt.waitForText("Sprint 42", 20000);
   await wt.waitForStable();
 
-  const page = await settingsRow(wt, ROW.team, "Team");
+  const page = await settingsRow(wt, "Team");
   expect(page).toContain("config.json · read from ~/.claude-launcher/config.json · saving writes all of it to ~/.agendo/config.json");
   expect(page).toMatch(/Organization\s+acme/);
   expect(page).toMatch(/Project\s+Widgets/);
@@ -115,13 +124,14 @@ test("a value that doesn't validate stays in the editor with the reason, and sav
   await wt.waitForText("Sprint 42", 20000);
   await wt.waitForStable();
 
-  await settingsRow(wt, ROW.stalledAfterMinutes, "Stalled after (minutes)");
+  await settingsRow(wt, "Stalled after (minutes)");
   await wt.press(KEY.enter);
   await wt.waitForText("Stalled after (minutes): 240");
 
   // `q` is a character here, not quit.
   await wt.press(CTRL_U);
   await wt.press("q");
+  await wt.waitForText("Stalled after (minutes): q"); // typed in full before enter, so the two can't share a read
   await wt.press(KEY.enter);
   const refused = await wt.waitForText("✗ enter a number of minutes, 0 or more (e.g. 240)");
   expect(refused).toContain("Stalled after (minutes): q");
@@ -129,6 +139,7 @@ test("a value that doesn't validate stays in the editor with the reason, and sav
 
   await wt.press(CTRL_U);
   await wt.press("90");
+  await wt.waitForText("Stalled after (minutes): 90");
   await wt.press(KEY.enter);
   const saved = await wt.waitForText("✓ Stalled after (minutes) saved to ~/.agendo/config.json");
   expect(saved).toMatch(/Stalled after \(minutes\)\s+90/);
@@ -213,7 +224,7 @@ test("a team the project doesn't have, with your teams unlistable, reads as not 
   expect(screen).not.toContain("Press r to retry");
 
   // The picker can't list the teams either; typing a name is still on offer.
-  await settingsRow(wt, ROW.team, "Team");
+  await settingsRow(wt, "Team");
   await wt.press(KEY.enter);
   const picker = await wt.waitForText("✗ couldn't list your teams:");
   expect(picker).toContain("❯ ✎ type a team name…");
@@ -228,6 +239,20 @@ test("a team the project doesn't have, with your teams unlistable, reads as not 
   await expect.poll(async () => (await wt.screen()).includes("wasn't found"), { timeout: 20000 }).toBe(false);
 });
 
+// A project that doesn't exist 404s the team list as well as the members, and
+// the load can still complete (the work items query is org-wide): the notice is
+// the one place that says so, and it names the project, not the team in it.
+test("a project that doesn't exist is named in the notice, not the team in it", async ({ launch, mock }) => {
+  const gone = { status: 404, body: { message: "TF200016: The following project does not exist: Widgets." } };
+  mock.setAdoResponse(/\/teams\/[^/]+\/members$/i, gone);
+  mock.setAdoResponse(MY_TEAMS, gone);
+
+  const wt = await launch();
+  const screen = await wt.waitForText("⚑ project 'Widgets' wasn't found, set it in , settings", 20000);
+  expect(screen).not.toContain("wasn't found in Widgets");
+  expect(screen).not.toContain("Press r to retry");
+});
+
 test("a move to another org drops the viewing-as choice, whose id belonged to the old one", async ({ launch, mock }) => {
   const wt = await launch();
   await wt.waitForText("Add login screen", 20000);
@@ -235,16 +260,19 @@ test("a move to another org drops the viewing-as choice, whose id belonged to th
   await wt.press("u");
   await wt.waitForText("Switch who you are");
   await wt.press(KEY.down);
+  await wt.waitForText(/❯ .*Alan/);
   await wt.press(KEY.down); // Ada, Alan, Grace
+  await wt.waitForText(/❯ .*Grace Hopper/);
   await wt.press(KEY.enter);
   await wt.waitForText("as Grace Hopper", 20000);
   await wt.waitForStable();
 
-  await settingsRow(wt, ROW.org, "Organization");
+  await settingsRow(wt, "Organization");
   await wt.press(KEY.enter);
   await wt.waitForText("Organization: acme");
   await wt.press(CTRL_U);
   await wt.press("contoso");
+  await wt.waitForText("Organization: contoso");
   await wt.press(KEY.enter);
   await wt.waitForText("✓ Organization saved");
   expect(await readJson(configPath(mock.home))).toMatchObject({ org: "contoso" });
@@ -256,7 +284,7 @@ test("a move to another org drops the viewing-as choice, whose id belonged to th
   expect((await readJson(join(mock.home, ".agendo", "state.json"))).identityId).toBeUndefined();
 });
 
-test("a config.json broken under a running launcher keeps the last good read, and says why", async ({ launch, mock }) => {
+test("a config.json broken under a running launcher keeps the values in use, and says what to do", async ({ launch, mock }) => {
   const wt = await launch();
   await wt.waitForText("Sprint 42", 20000);
   await wt.waitForStable();
@@ -265,7 +293,8 @@ test("a config.json broken under a running launcher keeps the last good read, an
   await mkdir(join(mock.home, ".agendo"), { recursive: true });
   await writeFile(configPath(mock.home), '{ "org": "acme", ');
   await wt.press(",");
-  const screen = await wt.waitForText("✗ kept the last good read:");
+  // The advice whole, at the default 120 columns: the parser's detail is what truncates.
+  const screen = await wt.waitForText("✗ ~/.agendo/config.json isn't valid JSON — fix it by hand; nothing saves until then (");
   expect(screen).toMatch(/Organization\s+acme/);
   expect(screen).toMatch(/Team\s+Team A/);
 

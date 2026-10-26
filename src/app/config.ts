@@ -119,6 +119,11 @@ export const CONFIG_PATH = join(STATE_DIR, "config.json");
 export const PREV_CONFIG_PATH = join(PREV_STATE_DIR, "config.json");
 export const OLD_CONFIG_PATH = join(OLD_STATE_DIR, "config.json");
 
+/** `path` with the home directory written as `~`, the way the README names the config files. */
+export function tildePath(path: string, home: string = homedir()): string {
+  return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
 /**
  * First existing file in `paths`, or `paths[0]` as the default write target.
  * Used so reads transparently migrate from the historical `~/.clops/` and

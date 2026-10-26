@@ -6,7 +6,6 @@
 //
 // `resource` is deliberately absent: it is Microsoft's fixed Azure DevOps
 // application id, the same for every tenant, so the page shows it read-only.
-import { homedir } from "os";
 import { resumeDialogChoice, type Config } from "../../app/config.ts";
 import type { ConfigPatch } from "../../app/configSave.ts";
 
@@ -154,9 +153,4 @@ export function parseField(field: TextField, raw: string): Parsed {
 /** Whether saving `patch` re-points the Azure DevOps requests (and so reloads the model). */
 export function patchReloads(patch: ConfigPatch): boolean {
   return Object.keys(patch).some((k) => FIELD_SPECS[k as ConfigField]?.reloads === true);
-}
-
-/** `path` with the home directory written as `~`, the way the README names the config files. */
-export function tildePath(path: string, home: string = homedir()): string {
-  return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
 }

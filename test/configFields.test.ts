@@ -5,8 +5,9 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import {
-  CONFIG_FIELDS, SETTINGS_ITEMS, fieldDisplay, fieldText, isConfigField, parseField, patchReloads, tildePath, toggledValue,
+  CONFIG_FIELDS, SETTINGS_ITEMS, fieldDisplay, fieldText, isConfigField, parseField, patchReloads, toggledValue,
 } from "../src/ui/models/configFields.ts";
+import { tildePath } from "../src/app/config.ts";
 
 const cfg = (over: Partial<Config> = {}): Config => ({ ...DEFAULT_CONFIG, closedStates: [...DEFAULT_CONFIG.closedStates], ...over });
 

@@ -28,7 +28,7 @@ import {
 } from "fs";
 import { dirname, resolve } from "path";
 import { messageOf } from "../shared/errors.ts";
-import { CONFIG_PATH, configPathInEffect, type Config } from "./config.ts";
+import { CONFIG_PATH, configPathInEffect, tildePath, type Config } from "./config.ts";
 
 /** Keys to set; a key given as `undefined` is removed from the file instead. */
 export type ConfigPatch = { [K in keyof Config]?: Config[K] | undefined };
@@ -49,10 +49,11 @@ export function readConfigObject(path: string): Record<string, unknown> {
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    throw new Error(`${path} isn't valid JSON (${messageOf(e)}) — fix it by hand; nothing saves until then`);
+    // The advice before the parser's detail: the line it lands on truncates at the terminal's width.
+    throw new Error(`${tildePath(path)} isn't valid JSON — fix it by hand; nothing saves until then (${messageOf(e)})`);
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${path} doesn't hold a JSON object — fix it by hand; nothing saves until then`);
+    throw new Error(`${tildePath(path)} doesn't hold a JSON object — fix it by hand; nothing saves until then`);
   }
   return parsed as Record<string, unknown>;
 }

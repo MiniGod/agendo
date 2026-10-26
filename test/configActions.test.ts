@@ -126,14 +126,14 @@ describe("openSettings", () => {
     expect(deps.setIdentity).not.toHaveBeenCalled();
   });
 
-  test("a file that won't read keeps the last good read, here and in the backend, and says why", () => {
+  test("a file that won't read keeps the values in use, here and in the backend, and says why", () => {
     const { deps, fake, actions } = setup({ readError: "~/.agendo/config.json isn't valid JSON (x)" });
     actions.openSettings();
     expect(deps.setConfig).not.toHaveBeenCalled();
     expect(fake.reloadBackend).not.toHaveBeenCalled();
     expect(deps.reload).not.toHaveBeenCalled();
     expect(deps.setMode.mock.calls).toEqual([
-      [{ kind: "settings", cursor: 0, note: { text: "kept the last good read: ~/.agendo/config.json isn't valid JSON (x)", error: true } }],
+      [{ kind: "settings", cursor: 0, note: { text: "~/.agendo/config.json isn't valid JSON (x)", error: true } }],
     ]);
   });
 });

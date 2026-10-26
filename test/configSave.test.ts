@@ -34,8 +34,7 @@ describe("readConfigObject", () => {
     const d = tmp();
     const bad = join(d, "bad.json");
     writeFileSync(bad, "{ org: ");
-    expect(() => readConfigObject(bad)).toThrow(`${bad} isn't valid JSON (`);
-    expect(() => readConfigObject(bad)).toThrow("fix it by hand; nothing saves until then");
+    expect(() => readConfigObject(bad)).toThrow(`${bad} isn't valid JSON — fix it by hand; nothing saves until then (`);
     for (const text of ["[1,2]", "42", "null", '"oops"']) {
       writeFileSync(bad, text);
       expect(() => readConfigObject(bad)).toThrow(`${bad} doesn't hold a JSON object`);
@@ -59,7 +58,7 @@ describe("configReadError", () => {
     writeFileSync(path, '{"org":"o"}');
     expect(configReadError(path)).toBeNull();
     writeFileSync(path, '{"org":"o",}');
-    expect(configReadError(path)).toContain(`${path} isn't valid JSON (`);
+    expect(configReadError(path)).toContain(`${path} isn't valid JSON — `);
   });
 });
 

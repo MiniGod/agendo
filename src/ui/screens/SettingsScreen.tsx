@@ -1,10 +1,10 @@
 import { Box, Text, useStdout } from "ink";
-import { CONFIG_PATH, type Config } from "../../app/config.ts";
+import { CONFIG_PATH, tildePath, type Config } from "../../app/config.ts";
 import { PROVIDER_INFO } from "../../providers/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
 import { padCell } from "../format/index.ts";
 import {
-  FIELD_SPECS, fieldDisplay, isConfigField, tildePath, type SettingsItem, type Shown,
+  FIELD_SPECS, fieldDisplay, isConfigField, type SettingsItem, type Shown,
 } from "../models/configFields.ts";
 import { hiddenRowsText, settingsChrome, settingsWindow } from "../models/settingsLayout.ts";
 
@@ -43,8 +43,8 @@ function SettingRow({ label, value, sel }: { label: string; value: Shown; sel: b
  * config.json fields, windowed around the cursor when the terminal is too short
  * for all of them — then a read-only report of every backend's CLI + auth
  * state. `authStatus` is the probe that runs on entering the page; `note` is
- * the outcome of the last save made from it, or why opening it kept the last
- * good read.
+ * the outcome of the last save made from it, or why opening it couldn't
+ * re-read config.json.
  */
 export function SettingsScreen({
   cursor,

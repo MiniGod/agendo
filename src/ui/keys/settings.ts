@@ -1,7 +1,7 @@
 import type { Key } from "ink";
-import { CONFIG_PATH } from "../../app/config.ts";
+import { CONFIG_PATH, tildePath } from "../../app/config.ts";
 import {
-  FIELD_SPECS, SETTINGS_ITEMS, fieldText, isConfigField, tildePath, toggledValue,
+  FIELD_SPECS, SETTINGS_ITEMS, fieldText, isConfigField, toggledValue,
   type ConfigField, type TextField,
 } from "../models/configFields.ts";
 import type { KeyContext, Mode } from "./context.ts";

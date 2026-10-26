@@ -97,8 +97,14 @@ export async function getMyTeams({ fresh = false }: { fresh?: boolean } = {}): P
  * which costs no request). Never throws.
  */
 export async function checkTeam({ listMine = true }: { listMine?: boolean } = {}): Promise<TeamCheck | null> {
-  const mine = listMine ? await getMyTeams().catch(() => null) : null;
-  const check = judgeTeam({ team: cfg.team, project: cfg.project, mine, missing: teamMissing });
+  let projectMissing = false;
+  const mine = listMine
+    ? await getMyTeams().catch((e: unknown) => {
+        projectMissing = (e as ContextualError).status === 404;
+        return null;
+      })
+    : null;
+  const check = judgeTeam({ team: cfg.team, project: cfg.project, mine, missing: teamMissing, projectMissing });
   // A notice asks for a fix that may land in Azure DevOps rather than here (an
   // admin adding you to the team), so the next load asks again, not the cache.
   if (check) cachedMyTeams = null;

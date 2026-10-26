@@ -1,10 +1,10 @@
 // The pure half of a config.json change under a running launcher
 // (src/providers/azureDevOps/configChange.ts): what a save invalidates, and
 // what the Work items view says about the configured team. The e2e suite saves
-// a team and an org, trips the not-yours, not-found and no-team notices, and
-// clears the not-found one while the team list still fails; it never changes the
-// tenant or the resource (the fake `az` mints the same token either way) or the
-// project.
+// a team and an org, trips the not-yours, not-found, missing-project and no-team
+// notices, and clears the not-found one while the team list still fails; it
+// never changes the tenant or the resource (the fake `az` mints the same token
+// either way) or the project.
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import { invalidatedBy, judgeTeam } from "../src/providers/azureDevOps/configChange.ts";
@@ -54,6 +54,12 @@ describe("judgeTeam", () => {
   test("your teams unknown: not found, in ADO's words, only when the members request 404'd, else nothing to tell", () => {
     expect(judge("Team Prisma", null, "ADO GET … -> 404")).toEqual({ team: "Team Prisma", project: "Widgets", mine: null, why: "ADO GET … -> 404" });
     expect(judge("Team A", null)).toBeNull();
+  });
+
+  test("your teams unlistable because the project 404'd too: the project is what's missing", () => {
+    expect(judgeTeam({ team: "Team A", project: "Widgetz", mine: null, missing: "404", projectMissing: true })).toEqual({
+      team: "Team A", project: "Widgetz", mine: null, why: "404", projectMissing: true,
+    });
   });
 
   test("your teams known: a 404 changes nothing, the list is the better answer", () => {
