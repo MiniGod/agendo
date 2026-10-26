@@ -250,6 +250,8 @@ export interface TeamCheck {
   project: string;
   /** The user's own teams in the project, or null when they couldn't be listed and the team 404'd. */
   mine: string[] | null;
+  /** Azure DevOps' own words for that 404 (which may name the project rather than the team). */
+  why?: string;
 }
 
 /** The identity the launcher is currently acting as. */

@@ -31,7 +31,7 @@ describe("invalidatedBy", () => {
 });
 
 describe("judgeTeam", () => {
-  const judge = (team: unknown, mine: string[] | null, missing = false) => judgeTeam({ team, project: "Widgets", mine, missing });
+  const judge = (team: unknown, mine: string[] | null, missing: string | null = null) => judgeTeam({ team, project: "Widgets", mine, missing });
 
   test("one of your teams, matched loosely, says nothing", () => {
     expect(judge(" team a ", ["Team A", "Team B"])).toBeNull();
@@ -46,14 +46,18 @@ describe("judgeTeam", () => {
     expect(judge("  ", ["Team A"])).toEqual({ team: "", project: "Widgets", mine: ["Team A"] });
   });
 
-  test("your teams unknown: not found only when the members request 404'd, else nothing to tell", () => {
-    expect(judge("Team Prisma", null, true)).toEqual({ team: "Team Prisma", project: "Widgets", mine: null });
-    expect(judge("Team A", null, false)).toBeNull();
+  test("your teams unknown: not found, in ADO's words, only when the members request 404'd, else nothing to tell", () => {
+    expect(judge("Team Prisma", null, "ADO GET … -> 404")).toEqual({ team: "Team Prisma", project: "Widgets", mine: null, why: "ADO GET … -> 404" });
+    expect(judge("Team A", null)).toBeNull();
+  });
+
+  test("your teams known: a 404 changes nothing, the list is the better answer", () => {
+    expect(judge("Team A", ["Team A"], "ADO GET … -> 404")).toBeNull();
   });
 
   test("a hand-edited value of the wrong type reads as text", () => {
     expect(judge(null, ["Team A"])).toEqual({ team: "", project: "Widgets", mine: ["Team A"] });
     expect(judge(7, ["7"])).toBeNull();
-    expect(judgeTeam({ team: "X", project: undefined, mine: null, missing: true })).toEqual({ team: "X", project: "", mine: null });
+    expect(judgeTeam({ team: "X", project: undefined, mine: null, missing: "404" })).toEqual({ team: "X", project: "", mine: null, why: "404" });
   });
 });

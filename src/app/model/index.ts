@@ -189,7 +189,10 @@ async function resolveOrphans(
  */
 async function teamCheckFor(provider: Provider, opts: LoadModelOptions): Promise<TeamCheck | null> {
   const check = (await provider.checkTeam?.({ listMine: opts.checkTeam === true })) ?? null;
-  if (check && !opts.checkTeam) throw new Error(`team '${check.team}' wasn't found in ${check.project}; set it on agendo's settings page (,)`);
+  if (check && !opts.checkTeam) {
+    const why = check.why ? ` — ${check.why}` : "";
+    throw new Error(`team '${check.team}' wasn't found in ${check.project}; set it on agendo's settings page (,)${why}`);
+  }
   return check;
 }
 

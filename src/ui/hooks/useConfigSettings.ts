@@ -11,7 +11,8 @@ const IO: ConfigIo = {
   load: loadConfig,
   readError: () => configReadError(configPathInEffect()),
   reloadBackend: () => reloadAdoConfig(),
-  myTeams: getMyAdoTeams,
+  // Opened on purpose, so asked fresh: the answer the team check cached may predate a fix made in Azure DevOps.
+  myTeams: () => getMyAdoTeams({ fresh: true }),
 };
 
 /**

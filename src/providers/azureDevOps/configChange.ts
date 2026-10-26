@@ -28,13 +28,14 @@ export function invalidatedBy(before: Config, after: Config): Invalidated {
 /**
  * What to say about the configured team, or null for nothing: a team that is
  * one of `mine` (the signed-in user's own), and a team nothing can be told
- * about — `mine` unknown and the members request didn't 404 (`missing`).
+ * about — `mine` unknown and the members request didn't 404 (`missing`, ADO's
+ * words for the 404 when it did).
  */
-export function judgeTeam({ team, project, mine, missing }: { team: unknown; project: unknown; mine: string[] | null; missing: boolean }): TeamCheck | null {
+export function judgeTeam({ team, project, mine, missing }: { team: unknown; project: unknown; mine: string[] | null; missing: string | null }): TeamCheck | null {
   // config.json is hand-edited: a value of the wrong type reads as text, never as a crash.
   const name = String(team ?? "").trim();
   const where = String(project ?? "");
-  if (!mine) return missing ? { team: name, project: where, mine: null } : null;
+  if (!mine) return missing === null ? null : { team: name, project: where, mine: null, why: missing };
   const isMine = name !== "" && mine.some((t) => t.toLowerCase() === name.toLowerCase());
   return isMine ? null : { team: name, project: where, mine };
 }

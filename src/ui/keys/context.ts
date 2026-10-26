@@ -20,7 +20,8 @@ export type View = "items" | "prs" | "sessions";
 export type Mode =
   | { kind: "list" }
   // `note` is the outcome of the last save made from the page (or its editors),
-  // shown under the rows until the page is left.
+  // or why opening it kept the last good read; shown under the rows until the
+  // page is left.
   | { kind: "settings"; cursor: number; note?: { text: string; error?: boolean } }
   // Typing a config.json value (src/ui/keys/settingsEdit.ts). `error` is why the
   // last enter didn't save — a validation message, or the save's own failure.

@@ -37,8 +37,9 @@ let pickerRequests = 0;
  * Same shape as `makeProviderActions`: plain closures over App's setters, no
  * hooks. A save that changes where requests go (org, project, team, tenant,
  * closed states) re-points the Azure DevOps layer, drops what it cached for the
- * old values, and reloads the model, so "Current sprint" follows without a
- * restart. The other fields are read fresh by whatever uses them.
+ * old values, and — on that backend — reloads the model, so "Current sprint"
+ * follows without a restart. The GitHub model reads none of them, so it isn't
+ * fetched again for one. The other fields are read fresh by whatever uses them.
  */
 export function makeConfigActions({
   setConfig,
@@ -58,11 +59,14 @@ export function makeConfigActions({
   persist: (next: { identity: null }) => void;
   io: ConfigIo;
 }) {
-  /** Re-read the file into the Azure DevOps layer; whether requests moved. */
+  const onAdo = provider === "ado";
+
+  /** Re-read the file into the Azure DevOps layer; whether the model in view must reload. */
   function followFile(): boolean {
     const moved = io.reloadBackend();
+    if (!onAdo) return false;
     // Identity ids belong to an org and its tenant: as on a backend switch, the override goes.
-    if (moved.identities && provider === "ado") {
+    if (moved.identities) {
       setIdentity(null);
       persist({ identity: null });
     }
@@ -77,7 +81,7 @@ export function makeConfigActions({
     }
     setConfig(io.load());
     // Always re-read, so closedStates reaches the WIQL too; reload when either says so.
-    if (followFile() || patchReloads(patch)) reload();
+    if (followFile() || (onAdo && patchReloads(patch))) reload();
     return null;
   }
 

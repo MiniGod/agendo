@@ -1,3 +1,4 @@
+import { messageOf, type ContextualError } from "../../shared/errors.ts";
 import type { Identity, TeamCheck, TeamMember } from "../../shared/types.ts";
 import { judgeTeam } from "./configChange.ts";
 import { API, GRAPH, VSSPS, cacheWriter, cfg } from "./env.ts";
@@ -23,20 +24,34 @@ export async function getMe(): Promise<Identity> {
 }
 
 let cachedMembers: TeamMember[] | null = null;
-// Set when the members request 404'd: the configured team doesn't exist. That
-// is a config mistake, not an outage, so it leaves the roster empty and is
-// reported by `checkTeam` — a notice in the TUI, a failed load in the CLI.
-let teamMissing = false;
+// ADO's words when the members request 404'd: the configured team doesn't
+// exist. That is a config mistake, not an outage, so it leaves the roster empty
+// and is reported by `checkTeam` — a notice in the TUI, a failed load in the
+// CLI. Neither it nor the empty roster is cached: the next load asks again, so
+// a team created since, in Azure DevOps, shows without a restart.
+let teamMissing: string | null = null;
+
+/** The members request's answer, or null when it 404'd (`teamMissing` keeps why). */
+async function fetchMembers(keep: (write: () => void) => void): Promise<any> {
+  try {
+    const data = await adoGet(
+      `_apis/projects/${encodeURIComponent(cfg.project)}` +
+        `/teams/${encodeURIComponent(cfg.team)}/members?${API}`,
+    );
+    keep(() => (teamMissing = null));
+    return data;
+  } catch (e) {
+    if ((e as ContextualError).status !== 404) throw e;
+    keep(() => (teamMissing = messageOf(e)));
+    return null;
+  }
+}
 
 /** Members of the configured team — the roster for the identity switcher. */
 export async function getTeamMembers(): Promise<TeamMember[]> {
   if (cachedMembers) return cachedMembers;
   const keep = cacheWriter();
-  const data = await adoGet(
-    `_apis/projects/${encodeURIComponent(cfg.project)}` +
-      `/teams/${encodeURIComponent(cfg.team)}/members?${API}`,
-    { allow404: true },
-  );
+  const data = await fetchMembers(keep);
   const members: TeamMember[] = (data?.value ?? [])
     .map((m: any) => m.identity)
     .filter(Boolean)
@@ -46,10 +61,7 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
       uniqueName: i.uniqueName ?? "",
     }));
   members.sort((a, b) => a.displayName.localeCompare(b.displayName));
-  keep(() => {
-    cachedMembers = members;
-    teamMissing = data === null;
-  });
+  if (data !== null) keep(() => (cachedMembers = members));
   return members;
 }
 
@@ -58,11 +70,12 @@ let cachedMyTeams: string[] | null = null;
 
 /**
  * Names of the configured project's teams the signed-in user is a member of,
- * sorted. One request, cached until the config changes (`resetIdentityCaches`);
- * a failure is not cached, so the picker can try again.
+ * sorted. One request, cached until the config changes (`resetIdentityCaches`)
+ * or the team check finds something to say; a failure is not cached. `fresh`
+ * asks again regardless — the team picker, opened on purpose, does.
  */
-export async function getMyTeams(): Promise<string[]> {
-  if (cachedMyTeams) return cachedMyTeams;
+export async function getMyTeams({ fresh = false }: { fresh?: boolean } = {}): Promise<string[]> {
+  if (cachedMyTeams && !fresh) return cachedMyTeams;
   const keep = cacheWriter();
   const data = await adoGet(
     `_apis/projects/${encodeURIComponent(cfg.project)}/teams` +
@@ -85,7 +98,11 @@ export async function getMyTeams(): Promise<string[]> {
  */
 export async function checkTeam({ listMine = true }: { listMine?: boolean } = {}): Promise<TeamCheck | null> {
   const mine = listMine ? await getMyTeams().catch(() => null) : null;
-  return judgeTeam({ team: cfg.team, project: cfg.project, mine, missing: teamMissing });
+  const check = judgeTeam({ team: cfg.team, project: cfg.project, mine, missing: teamMissing });
+  // A notice asks for a fix that may land in Azure DevOps rather than here (an
+  // admin adding you to the team), so the next load asks again, not the cache.
+  if (check) cachedMyTeams = null;
+  return check;
 }
 
 // ── Teams a member belongs to (for "PRs assigned to your teams") ───────────────
@@ -154,7 +171,7 @@ export async function getTeamsForMember(memberId: string): Promise<{ id: string;
 export function resetIdentityCaches(): void {
   cachedMe = null;
   cachedMembers = null;
-  teamMissing = false;
+  teamMissing = null;
   cachedMyTeams = null;
   cachedProjectTeams = null;
   teamsForMemberCache.clear();

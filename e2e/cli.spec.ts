@@ -3076,6 +3076,7 @@ test("agendo list --json with a team the project doesn't have names the team, an
   const r = await agendoAsync(mock.env, "list", "--json").done;
   expect(r.code).toBe(0);
   expect(r.stderr).toContain("list: continuing without PR/work-item associations (team 'Team A' wasn't found in Widgets;");
+  expect(r.stderr).toContain("team not found"); // ADO's own words for the 404 ride along
   const rows = JSON.parse(r.stdout) as any[];
   expect(rows).toHaveLength(1);
   expect(rows[0].shortId).toBe(SHORT_ID);

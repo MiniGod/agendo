@@ -2,8 +2,9 @@
 // from it (src/ui/actions/config.ts), on a fake of the file and the Azure
 // DevOps layer. The e2e suite saves through the real ones; a save that throws,
 // a team list that fails, a save that needn't reload, a file another agendo
-// changed under the page, a file that won't read, and the "viewing as" choice
-// a move to another org or tenant drops are reached here.
+// changed under the page, a file that won't read, the "viewing as" choice
+// a move to another org or tenant drops, and a save or open on the GitHub
+// backend (which the e2e settings specs never switch to) are reached here.
 import { describe, expect, mock, test } from "bun:test";
 import { DEFAULT_CONFIG, type Config } from "../src/app/config.ts";
 import type { ConfigPatch } from "../src/app/configSave.ts";
@@ -77,6 +78,15 @@ describe("saveConfigPatch", () => {
     expect(deps.persist).not.toHaveBeenCalled();
   });
 
+  test("on GitHub nothing saved reaches the model, so nothing reloads it — the backend still follows the file", () => {
+    for (const patch of [{ team: "Prisma" }, { closedStates: ["Done"] }] as ConfigPatch[]) {
+      const { deps, fake, actions } = setup({ moved: NEW_TEAM, provider: "github" });
+      expect(actions.saveConfigPatch(patch)).toBeNull();
+      expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
+      expect(deps.reload).not.toHaveBeenCalled();
+    }
+  });
+
   test("closed states reload even though the backend's endpoints didn't move", () => {
     const { deps, actions } = setup();
     actions.saveConfigPatch({ closedStates: ["Done"] });
@@ -106,6 +116,14 @@ describe("openSettings", () => {
     actions.openSettings();
     expect(deps.reload).toHaveBeenCalledTimes(1);
     expect(deps.setIdentity.mock.calls).toEqual([[null]]);
+  });
+
+  test("on GitHub a file changed elsewhere re-points the Azure DevOps layer without reloading the GitHub model", () => {
+    const { deps, fake, actions } = setup({ moved: NEW_ORG, provider: "github" });
+    actions.openSettings();
+    expect(fake.reloadBackend).toHaveBeenCalledTimes(1);
+    expect(deps.reload).not.toHaveBeenCalled();
+    expect(deps.setIdentity).not.toHaveBeenCalled();
   });
 
   test("a file that won't read keeps the last good read, here and in the backend, and says why", () => {

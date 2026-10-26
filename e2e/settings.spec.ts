@@ -20,6 +20,11 @@ const readJson = async (path: string) => JSON.parse(await readFile(path, "utf-8"
 const TEAM_B_ITERATIONS = /\/Team%20B\/_apis\/work\/teamsettings\/iterations$/i;
 const SPRINT_43 = { body: { value: [{ id: "it-43", name: "Sprint 43", path: "Widgets\\Sprint 43" }] } };
 
+// The project's teams. With `$mine=true` (which an override can't tell apart)
+// the signed-in user's own — the team check's and the picker's list.
+const MY_TEAMS = /_apis\/projects\/[^/]+\/teams$/i;
+const teams = (...names: string[]) => ({ body: { value: names.map((name) => ({ id: name, name })) } });
+
 // Settings rows, top to bottom: Backend, Viewing as, Auto-resume, then config.json's.
 const ROW = { org: 3, team: 5, stalledAfterMinutes: 8 } as const;
 
@@ -147,6 +152,36 @@ test("a configured team that isn't one of yours says so in Work items, until it'
   await expect.poll(async () => (await wt.screen()).includes("isn't one of yours"), { timeout: 20000 }).toBe(false);
 });
 
+// The fix can land in Azure DevOps instead — an admin adds you to the team —
+// so the answer behind a notice isn't kept: the next load asks again.
+test("a team you're added to in Azure DevOps stops being flagged on the next load", async ({ launch, mock }) => {
+  await mkdir(join(mock.home, ".agendo"), { recursive: true });
+  await writeFile(configPath(mock.home), JSON.stringify({ org: "acme", project: "Widgets", team: "Team DES" }));
+
+  const wt = await launch();
+  await wt.waitForText("isn't one of yours", 20000);
+  mock.setAdoResponse(MY_TEAMS, teams("Team A", "Team DES"));
+  await wt.press("r");
+  await expect.poll(async () => (await wt.screen()).includes("isn't one of yours"), { timeout: 20000 }).toBe(false);
+  await wt.waitForStable();
+  const screen = await wt.screen();
+  expect(screen).toContain("Sprint 42");
+  expect(screen).not.toContain("isn't one of yours");
+});
+
+// The team check keeps the list it was answered (quietly, when the team is
+// yours); the picker, opened on purpose, asks every time.
+test("the picker lists your teams afresh each time it opens", async ({ launch, mock }) => {
+  const wt = await launch();
+  await wt.waitForText("Sprint 42", 20000);
+  expect(await teamPicker(wt)).not.toContain("Team C");
+  mock.setAdoResponse(MY_TEAMS, teams("Team A", "Team B", "Team C"));
+  await wt.press(KEY.escape);
+  await wt.waitForText("❯ Team");
+  await wt.press(KEY.enter);
+  await wt.waitForText("Team C");
+});
+
 // The page shrinks by the notice's line. At 12 rows the frame is exactly full
 // once the list's own notice shows too and both scroll markers are up: one
 // line more overflows the terminal, Ink's redraw garbles the frame, and the
@@ -182,6 +217,15 @@ test("a team the project doesn't have, with your teams unlistable, reads as not 
   await wt.press(KEY.enter);
   const picker = await wt.waitForText("✗ couldn't list your teams:");
   expect(picker).toContain("❯ ✎ type a team name…");
+
+  // The team is created in Azure DevOps since: a 404 isn't kept, so the next load asks again.
+  mock.setAdoResponse(/\/teams\/[^/]+\/members$/i, { body: { value: [] } });
+  await wt.press(KEY.escape);
+  await wt.waitForText("❯ Team");
+  await wt.press(KEY.escape);
+  await wt.waitForText("Sprint 42");
+  await wt.press("r");
+  await expect.poll(async () => (await wt.screen()).includes("wasn't found"), { timeout: 20000 }).toBe(false);
 });
 
 test("a move to another org drops the viewing-as choice, whose id belonged to the old one", async ({ launch, mock }) => {

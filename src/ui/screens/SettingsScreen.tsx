@@ -43,7 +43,8 @@ function SettingRow({ label, value, sel }: { label: string; value: Shown; sel: b
  * config.json fields, windowed around the cursor when the terminal is too short
  * for all of them — then a read-only report of every backend's CLI + auth
  * state. `authStatus` is the probe that runs on entering the page; `note` is
- * the outcome of the last save made from it.
+ * the outcome of the last save made from it, or why opening it kept the last
+ * good read.
  */
 export function SettingsScreen({
   cursor,
