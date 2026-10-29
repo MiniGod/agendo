@@ -17,9 +17,9 @@ export function canonicalQuery(count: number): string {
 
 /**
  * Each slug's current `owner/name`, lowercased, keyed by the slug lowercased.
- * A repo GitHub does not show (gone, private to someone else) maps to itself,
- * as does every slug when the request fails: the search is still matched on
- * the origin's name, which is what it was before this existed.
+ * A repo GitHub does not show (gone, private to someone else) maps to itself.
+ * A failed request rejects rather than answering "no renames", so the caller's
+ * cache never keeps a failure as if it were an answer.
  */
 export async function canonicalSlugs(run: GraphqlRun, slugs: string[]): Promise<Map<string, string>> {
   const out = new Map(slugs.map((s) => [s.toLowerCase(), s.toLowerCase()]));
@@ -30,7 +30,7 @@ export async function canonicalSlugs(run: GraphqlRun, slugs: string[]): Promise<
     vars[`o${i}`] = owner!;
     vars[`n${i}`] = name!;
   });
-  const data = await run(canonicalQuery(slugs.length), vars).catch(() => null);
+  const data = await run(canonicalQuery(slugs.length), vars);
   slugs.forEach((slug, i) => {
     const now = data?.[`r${i}`]?.nameWithOwner;
     if (typeof now === "string") out.set(slug.toLowerCase(), now.toLowerCase());

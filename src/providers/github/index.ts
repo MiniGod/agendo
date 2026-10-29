@@ -61,7 +61,7 @@ const account = new Throttle<AccountData>({ fetch: (login) => searchAccount(sear
 // is expected here, not news: it simply keeps its origin's name.
 const reposRun = graphqlRunner(() => {});
 
-/** Keyed by the scope's slugs: their current names (see canonical.ts). Never fails, so never hammers. */
+/** Keyed by the scope's slugs: their current names (see canonical.ts). Behind the same rate-limit gate as the search. */
 const canonical = new Throttle<Map<string, string>>({
   fetch: (key) => canonicalSlugs(reposRun, key ? key.split(" ") : []),
   resetAt: graphqlResetAt,
@@ -371,7 +371,9 @@ const isMe = (login: string, l: string | undefined) => !!l && l.toLowerCase() ==
 async function inScope(ctx: FetchContext): Promise<(items: RawItem[]) => Map<RepoRef, RawItem[]>> {
   const refs = reposToRefs(ctx.repos);
   const slugs = refs.map(slugOf).sort();
-  const current = await canonical.get(slugs.join(" "));
+  // A failed lookup (rate limit, outage) costs this load its renames, matching
+  // on the origins' own names; it is not cached, so the next load asks again.
+  const current = await canonical.get(slugs.join(" ")).catch(() => new Map<string, string>());
   const bySlug = new Map(refs.map((ref) => {
     const slug = slugOf(ref).toLowerCase();
     return [current.get(slug) ?? slug, ref];

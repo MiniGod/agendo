@@ -136,21 +136,29 @@ export function normalise(node: any): RawItem | null {
 /** Runs one GraphQL operation with string variables and returns its `data`. */
 export type GraphqlRun = (query: string, vars: Record<string, string>) => Promise<any>;
 
+/** Where the next page of a search starts, or undefined when GitHub says there is none. */
+function nextCursor(page: SearchPage | undefined): string | undefined {
+  const info = page?.pageInfo;
+  return (info?.hasNextPage && info.endCursor) || undefined;
+}
+
 /** Every node of one search, up to GitHub's cap: the first page as given, then the rest one request at a time. */
 async function drain(run: GraphqlRun, name: SearchName, q: string, first: SearchPage | undefined): Promise<any[]> {
-  const nodes = [...(first?.nodes ?? [])];
-  const query = isPrSearch(name) ? PAGE_QUERIES.pr : PAGE_QUERIES.issue;
+  const pr = isPrSearch(name);
+  const query = pr ? PAGE_QUERIES.pr : PAGE_QUERIES.issue;
   // Counted in pages, not nodes: a page can come back short (a node GitHub
   // would not show is null), and a short page must not buy an extra request.
-  const pages = RESULT_CAP / (isPrSearch(name) ? PR_PAGE : ISSUE_PAGE);
-  let page = first;
-  let fetched = 1;
-  for (; page?.pageInfo?.hasNextPage && page.pageInfo.endCursor && fetched < pages; fetched++) {
-    page = (await run(query, { q, after: page.pageInfo.endCursor }))?.page as SearchPage | undefined;
+  const pages = RESULT_CAP / (pr ? PR_PAGE : ISSUE_PAGE);
+  const nodes = [...(first?.nodes ?? [])];
+  let after = nextCursor(first);
+  for (let fetched = 1; after; fetched++) {
+    if (fetched >= pages) {
+      reportWarning(`GitHub search "${q}" has more than ${RESULT_CAP} results; showing the ${RESULT_CAP} most recently updated`);
+      break;
+    }
+    const page = (await run(query, { q, after }))?.page as SearchPage | undefined;
     nodes.push(...(page?.nodes ?? []));
-  }
-  if (page?.pageInfo?.hasNextPage && fetched >= pages) {
-    reportWarning(`GitHub search "${q}" has more than ${RESULT_CAP} results; showing the ${RESULT_CAP} most recently updated`);
+    after = nextCursor(page);
   }
   return nodes;
 }

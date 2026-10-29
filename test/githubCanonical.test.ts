@@ -20,9 +20,13 @@ describe("canonicalSlugs", () => {
     expect([...current]).toEqual([["ada/appweb", "ada/appweb"], ["ada/old-lib", "grace/new-lib"]]);
   });
 
-  test("a repo GitHub won't show keeps its own name, and so does every repo when the request fails", async () => {
+  test("a repo GitHub won't show keeps its own name", async () => {
     expect([...(await canonicalSlugs(async () => ({ r0: null }), ["ada/gone"]))]).toEqual([["ada/gone", "ada/gone"]]);
-    expect([...(await canonicalSlugs(async () => { throw new Error("rate limit"); }, ["ada/x"]))]).toEqual([["ada/x", "ada/x"]]);
+  });
+
+  test("a failed request rejects, so no cache can keep it as \"no renames\"", async () => {
+    const boom = new Error("gh api graphql -> exit 1: HTTP 502");
+    await expect(canonicalSlugs(async () => { throw boom; }, ["ada/x"])).rejects.toBe(boom);
   });
 
   test("no repos, no request", async () => {

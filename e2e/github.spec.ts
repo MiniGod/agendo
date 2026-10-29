@@ -138,6 +138,14 @@ test("the account search is narrowed to the local repos, through renames and oth
   expect(calls.filter((l) => l.includes("query=AgendoGithubRepos"))).toHaveLength(1);
 });
 
+test("a failed renames lookup still shows the repos under their origins' names", async ({ launch, mock }) => {
+  await seedGitHub(mock, { graphql: { AgendoGithubRepos: { errors: [{ message: "Something went wrong while executing your query." }] } } });
+  const wt = await launch();
+
+  const screen = await wt.waitForText("Header overlaps on mobile", 20000);
+  expect(screen).toContain("#401");
+});
+
 test("a search GitHub answered only in part shows the part, and says something was left out", async ({ launch, mock }) => {
   await seedGitHub(mock, { searchErrors: [{ message: "Resource protected by organization SAML enforcement." }] });
   const wt = await launch();
