@@ -64,8 +64,8 @@ export interface Provider {
    *  of every loadModel. */
   beginLoad?(): void;
   /** Optional: drop results kept ACROSS loads, so the next load asks the
-   *  backend again. The menu's explicit reload calls it; a background reload
-   *  (`agendo web`'s board poll) does not. GitHub keeps its searches for
+   *  backend again. The menu calls it on every reload it makes; any other
+   *  repeated load in one process reuses them. GitHub keeps its searches for
    *  minutes (see providers/github/throttle.ts); ADO keeps nothing that long. */
   invalidate?(): void;
   /** Whether the backend can authenticate right now (CLI installed + logged in).

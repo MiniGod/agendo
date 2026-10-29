@@ -42,7 +42,6 @@ async function seedGitHub(
 ) {
   await mock.setProvider("github");
   await mock.setGhState({
-    ...extra,
     authed: true,
     user: ME,
     issues: {
@@ -57,6 +56,7 @@ async function seedGitHub(
         "review-requested:ada": [], // nothing awaiting review
       },
     },
+    ...extra,
   });
 }
 
@@ -103,6 +103,48 @@ test("a rate-limited GitHub says until when, instead of showing empty lists", as
   const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
   expect(calls.filter((l) => l.includes("query=AgendoGithubSearch"))).toHaveLength(1);
   expect(calls.filter((l) => l.includes('"rate_limit"'))).toHaveLength(1);
+});
+
+// Scope: only the repos local sessions live in, matched by where each repo
+// lives NOW — case-insensitively, and through a rename — and in a repo someone
+// else owns, only your own issues. One search answers all of it, so the
+// filtering is agendo's, not GitHub's.
+test("the account search is narrowed to the local repos, through renames and other owners", async ({ launch, mock }) => {
+  await mock.setGitState({
+    origins: {
+      appweb: "https://github.com/ada/old-web.git", // renamed to ada/appweb since
+      applib: "https://github.com/Grace/AppLib.git", // grace's repo, mixed case
+    },
+  });
+  const issue = (number: number, title: string, by: string) => ({
+    number, title, state: "OPEN", url: `https://github.com/x/y/issues/${number}`, labels: [], author: { login: by },
+  });
+  await seedGitHub(mock, {
+    renames: { "ada/old-web": "ada/appweb" },
+    issues: {
+      "ada/appweb": [issue(301, "Header overlaps on mobile", ME.login)],
+      "grace/applib": [issue(5, "Ada filed this lib bug", ME.login), issue(6, "Grace filed her own", "grace")],
+      "ada/elsewhere": [issue(9, "Out of scope entirely", ME.login)],
+    },
+  });
+  const wt = await launch();
+
+  const screen = await wt.waitForText("Ada filed this lib bug", 20000);
+  expect(screen).toContain("Header overlaps on mobile"); // found through the rename
+  expect(screen).not.toContain("Grace filed her own"); // grace's repo: only ada's issues
+  expect(screen).not.toContain("Out of scope entirely"); // no local session in it
+  // The renames lookup is one request for every repo, not one per repo.
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithubRepos"))).toHaveLength(1);
+});
+
+test("a search GitHub answered only in part shows the part, and says something was left out", async ({ launch, mock }) => {
+  await seedGitHub(mock, { searchErrors: [{ message: "Resource protected by organization SAML enforcement." }] });
+  const wt = await launch();
+
+  const screen = await wt.waitForText("Header overlaps on mobile", 20000);
+  expect(screen).toContain("#401");
+  await wt.waitForText("GitHub left part of its answer out");
 });
 
 test("GitHub identity + settings reflect the authenticated gh user", async ({ launch, mock }) => {

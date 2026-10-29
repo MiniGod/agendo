@@ -6,9 +6,10 @@
 // search, so the budget was gone within the hour and every list came back
 // silently empty for the rest of it. So:
 //
-//  - A result is reused for TTL_MS, by every caller in the process: the three
-//    fetches of one load, every root `agendo web` reloads, and every reload in
-//    the menu that is not an explicit refresh (`invalidate`).
+//  - A result is reused for TTL_MS by every caller in the process: the three
+//    fetches of one load, and every other load the process makes in that time
+//    (each scope a long-running process loads, say). The menu calls
+//    `invalidate` on each reload it makes, so it asks again whenever it reloads.
 //  - Callers that arrive while a fetch is running wait for that fetch rather
 //    than starting their own.
 //  - A rate-limited fetch closes the gate until GitHub's reset time (read from

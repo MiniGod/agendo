@@ -34,6 +34,8 @@
 //     "user": { "login": "ada", "name": "Ada Lovelace" },
 //     "issues": { "ada/appweb": [ { ...issue json... } ] },
 //     "prs":    { "ada/appweb": { "author:ada": [ {...} ], "review-requested:ada": [ {...} ] } },
+//     "renames": { "ada/old-name": "ada/new-name" },
+//     "searchErrors": [ { "message": "..." } ],
 //     "rateLimit": { "graphql": { "remaining": 0, "reset": 1793293325, ... } },
 //     "graphql": {
 //       "OperationName": { "data": { ... } },
@@ -263,8 +265,12 @@ function nextSequenceIndex(op) {
 //   repo; `user:<login>` is every issue in a repo that login owns.
 //
 // Everything fits one page here, so `hasNextPage` is always false and the
-// follow-up `AgendoGithubSearchPage` is never asked for; pagination is unit
-// tested against a stand-in runner instead.
+// follow-up `AgendoGithubPrPage` / `AgendoGithubIssuePage` is never asked for;
+// pagination is unit tested against a stand-in runner instead.
+//
+// `searchErrors` (a list of GraphQL error objects) is served beside the
+// synthesized data, with gh's exit 1 — the shape GitHub gives when it leaves
+// out one node it won't show, a SAML-protected org's say.
 function prNode(slug, pr) {
   return {
     __typename: "PullRequest",
@@ -308,6 +314,18 @@ function synthesizeSearch(flags) {
     const search = flags.get(name);
     if (search === undefined) fail(`AgendoGithubSearch called without its \`${name}\` variable`);
     data[name] = page(search.includes("is:pr") ? prSearch(search) : issueSearch(search));
+  }
+  return s.searchErrors ? { data, errors: s.searchErrors } : { data };
+}
+
+// `AgendoGithubRepos` asks where each `o<i>/n<i>` lives now
+// (src/providers/github/canonical.ts). Every repo is where its name says unless
+// `renames` maps the old slug to the new one.
+function synthesizeRepos(flags) {
+  const data = {};
+  for (let i = 0; flags.has(`o${i}`); i++) {
+    const slug = `${flags.get(`o${i}`)}/${flags.get(`n${i}`)}`;
+    data[`r${i}`] = { nameWithOwner: (s.renames ?? {})[slug] ?? slug };
   }
   return { data };
 }
@@ -380,7 +398,13 @@ if (key === "api graphql") {
   // `prs` fixtures the per-repo calls used to read — see synthesizeSearch —
   // unless a test registers the operation itself (to serve an error, say).
   if (op === "AgendoGithubSearch" && !Object.prototype.hasOwnProperty.call(registry, op)) {
-    writeFd(1, JSON.stringify(synthesizeSearch(flags)));
+    const body = synthesizeSearch(flags);
+    writeFd(1, JSON.stringify(body));
+    if (body.errors) writeFd(2, `gh: ${body.errors[0]?.message ?? "GraphQL error"}\n`);
+    process.exit(body.errors ? 1 : 0);
+  }
+  if (op === "AgendoGithubRepos" && !Object.prototype.hasOwnProperty.call(registry, op)) {
+    writeFd(1, JSON.stringify(synthesizeRepos(flags)));
     process.exit(0);
   }
   if (!Object.prototype.hasOwnProperty.call(registry, op)) {

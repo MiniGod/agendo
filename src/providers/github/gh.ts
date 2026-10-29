@@ -2,7 +2,7 @@
 // it reuses the user's existing `gh auth login` and there is no token handling
 // here.
 import { spawn } from "child_process";
-import { messageOf, snippetOf, tag } from "../../shared/errors.ts";
+import { type ContextualError, messageOf, snippetOf, tag } from "../../shared/errors.ts";
 
 /**
  * Whether a failed `gh` run looks worth retrying. `gh` collapses every failure
@@ -22,6 +22,36 @@ export function isRateLimited(e: unknown): boolean {
   return /\brate limit/i.test(messageOf(e));
 }
 
+/** A failed `gh` run, with whatever JSON it still printed. */
+export interface GhError extends ContextualError {
+  /** stdout parsed as JSON, when it was JSON: `gh api graphql` prints the whole body even when it exits 1. */
+  body?: any;
+}
+
+function parsedOrUndefined(out: string): any {
+  try {
+    return JSON.parse(out);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The `data` a GraphQL request returned alongside its `errors`, for a failure
+ * that still has some. `gh api graphql` exits 1 whenever the body carries
+ * `errors`, even when `data` is filled in. One node GitHub won't show —
+ * a SAML-protected org, a repo that has since gone — would otherwise fail
+ * the whole answer, so the rest is kept and `onErrors` is told what was
+ * left out. A rate limit is never partial: it is rethrown, as is anything
+ * with no data.
+ */
+export function partialData(e: unknown, onErrors: (first: string) => void): any {
+  const body = (e as GhError | undefined)?.body;
+  if (isRateLimited(e) || !body?.data) throw e;
+  onErrors(messageOf(body.errors?.[0]?.message ?? "an unknown error"));
+  return body.data;
+}
+
 /** Run `gh` and parse its stdout as JSON (null on empty output). */
 export function gh(args: string[]): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -35,7 +65,9 @@ export function gh(args: string[]): Promise<any> {
     child.on("error", reject); // couldn't spawn (gh not installed) — never transient
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(tag(new Error(`${cmd} -> exit ${code}: ${err.trim()}`), { retryable: transientGhFailure(err) }));
+        const failure: GhError = tag(new Error(`${cmd} -> exit ${code}: ${err.trim()}`), { retryable: transientGhFailure(err) });
+        failure.body = parsedOrUndefined(out);
+        reject(failure);
         return;
       }
       try {

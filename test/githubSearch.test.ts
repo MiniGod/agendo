@@ -3,8 +3,9 @@
 // paginates, never repeats an item across the two issue searches, and never
 // hands back a node that is neither a PR nor an issue.
 import { describe, expect, test } from "bun:test";
+import { takeWarnings } from "../src/shared/errors.ts";
 import {
-  PAGE_QUERY, SEARCH_QUERY, type GraphqlRun, graphqlArgs, normalise, searchAccount, searchQueries,
+  PAGE_QUERIES, SEARCH_QUERY, type GraphqlRun, graphqlArgs, normalise, searchAccount, searchQueries,
 } from "../src/providers/github/search.ts";
 
 const pr = (slug: string, number: number, extra: Record<string, unknown> = {}) => ({
@@ -84,7 +85,7 @@ describe("searchAccount", () => {
     };
     const followed: Array<Record<string, string>> = [];
     const run: GraphqlRun = async (query, vars) => {
-      if (query === PAGE_QUERY) {
+      if (query === PAGE_QUERIES.pr) {
         followed.push(vars);
         return { page: pages[vars.after!] };
       }
@@ -95,17 +96,29 @@ describe("searchAccount", () => {
     expect(followed).toEqual([{ q: searchQueries("ada").involves, after: "c1" }, { q: searchQueries("ada").involves, after: "c2" }]);
   });
 
-  test("pagination stops at GitHub's thousand-result cap even if told there is more", async () => {
-    let followed = 0;
+  test("pagination stops at GitHub's thousand-result cap even if told there is more, and says so", async () => {
+    const followed = { pr: 0, issue: 0 };
     const run: GraphqlRun = async (query) => {
-      if (query === PAGE_QUERY) {
-        followed++;
-        return { page: page([], "again") };
-      }
-      return { involves: page([], "again"), reviewRequested: page([]), authored: page([]), owned: page([]) };
+      if (query === PAGE_QUERIES.pr) followed.pr++;
+      if (query === PAGE_QUERIES.issue) followed.issue++;
+      // Empty pages: the cap is counted in pages, so short ones cannot spin it forever.
+      if (query !== SEARCH_QUERY) return { page: page([], "again") };
+      return { involves: page([], "again"), reviewRequested: page([]), authored: page([], "again"), owned: page([]) };
     };
+    takeWarnings();
     await searchAccount(run, "ada");
-    expect(followed).toBe(9);
+    expect(followed).toEqual({ pr: 19, issue: 9 }); // 1000 results: 20 pages of 50 PRs, 10 of 100 issues
+    // The searches drain concurrently, so the warnings arrive in either order.
+    expect(takeWarnings().sort()).toEqual([
+      `GitHub search "${searchQueries("ada").authored}" has more than 1000 results; showing the 1000 most recently updated`,
+      `GitHub search "${searchQueries("ada").involves}" has more than 1000 results; showing the 1000 most recently updated`,
+    ]);
+  });
+
+  test("a search that ends below the cap warns about nothing", async () => {
+    takeWarnings();
+    await searchAccount(async () => ({ involves: page([pr("ada/app", 1)]), reviewRequested: page([]), authored: page([]), owned: page([]) }), "ada");
+    expect(takeWarnings()).toEqual([]);
   });
 
   test("no data at all is four empty lists", async () => {
@@ -116,15 +129,31 @@ describe("searchAccount", () => {
 describe("the queries", () => {
   test("each declares exactly one named operation (the fake gh routes by name)", () => {
     expect([...SEARCH_QUERY.matchAll(/\bquery\s+(\w+)/g)].map((m) => m[1])).toEqual(["AgendoGithubSearch"]);
-    expect([...PAGE_QUERY.matchAll(/\bquery\s+(\w+)/g)].map((m) => m[1])).toEqual(["AgendoGithubSearchPage"]);
+    expect([...PAGE_QUERIES.pr.matchAll(/\bquery\s+(\w+)/g)].map((m) => m[1])).toEqual(["AgendoGithubPrPage"]);
+    expect([...PAGE_QUERIES.issue.matchAll(/\bquery\s+(\w+)/g)].map((m) => m[1])).toEqual(["AgendoGithubIssuePage"]);
   });
 
-  test("search strings: PRs involving or awaiting you, issues you filed or that are in your repos", () => {
+  test("every fragment a query declares, it uses — GitHub refuses the query otherwise", () => {
+    for (const query of [SEARCH_QUERY, PAGE_QUERIES.pr, PAGE_QUERIES.issue]) {
+      const declared = [...query.matchAll(/\bfragment\s+(\w+)/g)].map((m) => m[1]!);
+      expect(declared.length).toBeGreaterThan(0);
+      for (const name of declared) expect(query).toContain(`...${name}`);
+    }
+    expect(PAGE_QUERIES.pr).not.toContain("fragment Iss");
+    expect(PAGE_QUERIES.issue).not.toContain("fragment Pr");
+  });
+
+  test("PR pages carry the PR fields and issue pages only the issue ones", () => {
+    expect(SEARCH_QUERY).toContain("involves: search(query: $involves, type: ISSUE, first: 50) { ...PrPage }");
+    expect(SEARCH_QUERY).toContain("owned: search(query: $owned, type: ISSUE, first: 100) { ...IssuePage }");
+  });
+
+  test("search strings: PRs involving or awaiting you, issues you filed or that are in your repos, newest first", () => {
     expect(searchQueries("ada")).toEqual({
-      involves: "is:pr is:open involves:ada",
-      reviewRequested: "is:pr is:open review-requested:ada",
-      authored: "is:issue is:open author:ada",
-      owned: "is:issue is:open user:ada",
+      involves: "is:pr is:open involves:ada sort:updated-desc",
+      reviewRequested: "is:pr is:open review-requested:ada sort:updated-desc",
+      authored: "is:issue is:open author:ada sort:updated-desc",
+      owned: "is:issue is:open user:ada sort:updated-desc",
     });
   });
 

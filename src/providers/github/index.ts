@@ -15,7 +15,9 @@
 // load in the process reuses it for minutes, not just the one that fetched it.
 import { spawn, spawnSync } from "child_process";
 import { rollupCI } from "./ci.ts";
-import { gh } from "./gh.ts";
+import { canonicalSlugs } from "./canonical.ts";
+import { gh, partialData } from "./gh.ts";
+import { reportWarning } from "../../shared/errors.ts";
 import { type AccountData, type GraphqlRun, type RawItem, graphqlArgs, searchAccount } from "./search.ts";
 import { Throttle } from "./throttle.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
@@ -29,18 +31,43 @@ import type {
 } from "../../shared/types.ts";
 
 // ── The account's searches, shared and throttled ──────────────────────────────
-/** GitHub's GraphQL reset time (epoch ms) when its primary budget is spent; null otherwise. `gh api rate_limit` is free. */
+// GitHub refuses a query that costs more than what is left, so a budget that is
+// merely LOW counts as spent; well above any one load's cost, well below a
+// budget a secondary limit would leave.
+const LOW_BUDGET = 100;
+
+/** GitHub's GraphQL reset time (epoch ms) when its primary budget is (nearly) spent; null otherwise. `gh api rate_limit` is free. */
 async function graphqlResetAt(): Promise<number | null> {
   const graphql = (await gh(["api", "rate_limit"]))?.resources?.graphql;
-  return graphql && graphql.remaining === 0 ? graphql.reset * 1000 : null;
+  return graphql && graphql.remaining < LOW_BUDGET ? graphql.reset * 1000 : null;
 }
 
-const runGraphql: GraphqlRun = async (query, vars) => (await gh(graphqlArgs(query, vars)))?.data;
+/** A GraphQL runner that keeps whatever data came back alongside errors (see partialData). */
+const graphqlRunner = (onErrors: (first: string) => void): GraphqlRun => async (query, vars) => {
+  try {
+    return (await gh(graphqlArgs(query, vars)))?.data;
+  } catch (e) {
+    return partialData(e, onErrors);
+  }
+};
+
+const searchRun = graphqlRunner((first) =>
+  reportWarning(`GitHub left part of its answer out (${first}); showing the rest`, { always: true }));
 
 /** Keyed by login: one search per account serves every repo scope (see throttle.ts). */
-const account = new Throttle<AccountData>({ fetch: (login) => searchAccount(runGraphql, login), resetAt: graphqlResetAt });
+const account = new Throttle<AccountData>({ fetch: (login) => searchAccount(searchRun, login), resetAt: graphqlResetAt });
 
-/** Make the next load ask GitHub again rather than reuse the last answer (the menu's explicit reload). */
+// A repo GitHub won't show is answered with an error beside the others, which
+// is expected here, not news: it simply keeps its origin's name.
+const reposRun = graphqlRunner(() => {});
+
+/** Keyed by the scope's slugs: their current names (see canonical.ts). Never fails, so never hammers. */
+const canonical = new Throttle<Map<string, string>>({
+  fetch: (key) => canonicalSlugs(reposRun, key ? key.split(" ") : []),
+  resetAt: graphqlResetAt,
+});
+
+/** Make the next load ask GitHub again rather than reuse the last answer. The menu calls it on every reload it makes. */
 export function invalidate(): void {
   account.invalidate();
 }
@@ -298,9 +325,7 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
   currentIterationPath: string | null;
 }> {
   const login = ctx.identity.id;
-  const isMe = (l: string | undefined) => !!l && l.toLowerCase() === login.toLowerCase();
-  const { issues, involves } = await account.get(login);
-  const scoped = inScope(ctx);
+  const [{ issues, involves }, scoped] = await Promise.all([account.get(login), inScope(ctx)]);
   const prsByRepo = scoped(involves);
 
   const items: Omit<WorkItem, "sessions">[] = [];
@@ -323,7 +348,7 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
         iterationPath: "",
         project: slug,
         // Authorship drives the two buckets (see header comment).
-        inCurrentSprint: isMe(iss.author?.login),
+        inCurrentSprint: isMe(login, iss.author?.login),
         prs: prsByIssue.get(iss.number) ?? [],
         url: urls.workItem({ id: iss.number, project: slug }) ?? "",
       });
@@ -334,13 +359,23 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
   return { items, currentIterationPath: null };
 }
 
+const isMe = (login: string, l: string | undefined) => !!l && l.toLowerCase() === login.toLowerCase();
+
 /**
  * The account-wide search results narrowed to the repos in scope, grouped by
  * the scope's own RepoRef — so slugs keep the casing of the local `origin`, as
- * they did when each repo was queried by name.
+ * they did when each repo was queried by name. A result is matched on the
+ * repo's CURRENT name, which a renamed or transferred repo's origin may not
+ * carry (see canonical.ts).
  */
-function inScope(ctx: FetchContext): (items: RawItem[]) => Map<RepoRef, RawItem[]> {
-  const bySlug = new Map(reposToRefs(ctx.repos).map((ref) => [slugOf(ref).toLowerCase(), ref]));
+async function inScope(ctx: FetchContext): Promise<(items: RawItem[]) => Map<RepoRef, RawItem[]>> {
+  const refs = reposToRefs(ctx.repos);
+  const slugs = refs.map(slugOf).sort();
+  const current = await canonical.get(slugs.join(" "));
+  const bySlug = new Map(refs.map((ref) => {
+    const slug = slugOf(ref).toLowerCase();
+    return [current.get(slug) ?? slug, ref];
+  }));
   return (items) => {
     const out = new Map<RepoRef, RawItem[]>();
     for (const item of items) {
@@ -353,19 +388,19 @@ function inScope(ctx: FetchContext): (items: RawItem[]) => Map<RepoRef, RawItem[
 
 // ── PRs you created ───────────────────────────────────────────────────────────
 export async function fetchActivePRs(ctx: FetchContext): Promise<PullRequest[]> {
-  const login = ctx.identity.id.toLowerCase();
-  const { involves } = await account.get(ctx.identity.id);
-  return [...inScope(ctx)(involves)].flatMap(([ref, raw]) =>
-    raw.filter((p) => p.author?.login?.toLowerCase() === login).map((p) => mapPR(p, ref)));
+  const login = ctx.identity.id;
+  const [{ involves }, scoped] = await Promise.all([account.get(login), inScope(ctx)]);
+  return [...scoped(involves)].flatMap(([ref, raw]) =>
+    raw.filter((p) => isMe(login, p.author?.login)).map((p) => mapPR(p, ref)));
 }
 
 // ── PRs awaiting your review ──────────────────────────────────────────────────
 export async function fetchReviewPRs(ctx: FetchContext): Promise<ReviewPR[]> {
   const login = ctx.identity.id;
-  const { reviewRequested } = await account.get(login);
-  return [...inScope(ctx)(reviewRequested)].flatMap(([ref, raw]) => raw
+  const [{ reviewRequested }, scoped] = await Promise.all([account.get(login), inScope(ctx)]);
+  return [...scoped(reviewRequested)].flatMap(([ref, raw]) => raw
     // Don't surface your own PRs in your review queue.
-    .filter((p) => p.author?.login !== login)
+    .filter((p) => !isMe(login, p.author?.login))
     .map((p): ReviewPR => ({ ...mapPR(p, ref), reviewReason: "you" })));
 }
 

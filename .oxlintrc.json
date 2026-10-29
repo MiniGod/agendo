@@ -133,7 +133,7 @@
         //
         // LOWERED 450 -> 443. src/providers/github/index.ts set 450; running `gh` is now
         // src/providers/github/gh.ts and its per-repo calls are one account-wide search
-        // (src/providers/github/search.ts, throttled by throttle.ts), and the file is 390.
+        // (src/providers/github/search.ts, throttled by throttle.ts), and the file is 425.
         // The holder is src/runtime/tmux/windows.ts.
         "max-lines": ["error", { "max": 443, "skipBlankLines": false, "skipComments": false }], // src/runtime/tmux/windows.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.

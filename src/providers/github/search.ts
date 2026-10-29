@@ -16,40 +16,58 @@
 //
 // Each node is normalised to the shape `gh pr list --json …` printed, so the
 // mapping downstream (mapPR, rollupCI, latestVotes) reads it unchanged.
+import { reportWarning } from "../../shared/errors.ts";
 
 /** A search's alias in the query, and its variable. */
 export const SEARCHES = ["involves", "reviewRequested", "authored", "owned"] as const;
 export type SearchName = (typeof SEARCHES)[number];
 
-/** The search string behind each alias. */
+const PR_SEARCHES: ReadonlySet<SearchName> = new Set(["involves", "reviewRequested"]);
+
+/**
+ * The search string behind each alias. Newest activity first: GitHub stops at
+ * 1000 results, and past that the ones dropped should be the stalest rather
+ * than an arbitrary best-match cut.
+ */
 export function searchQueries(login: string): Record<SearchName, string> {
   return {
-    involves: `is:pr is:open involves:${login}`,
-    reviewRequested: `is:pr is:open review-requested:${login}`,
-    authored: `is:issue is:open author:${login}`,
-    owned: `is:issue is:open user:${login}`,
+    involves: `is:pr is:open involves:${login} sort:updated-desc`,
+    reviewRequested: `is:pr is:open review-requested:${login} sort:updated-desc`,
+    authored: `is:issue is:open author:${login} sort:updated-desc`,
+    owned: `is:issue is:open user:${login} sort:updated-desc`,
   };
 }
 
-// GitHub's search API stops at 1000 results, i.e. ten pages of 100.
-const MAX_PAGES = 10;
+// GitHub's search API stops at 1000 results. A PR carries its reviews and
+// checks, so it is asked for in pages of 50 to keep one request light; an
+// issue is a handful of scalars.
+const RESULT_CAP = 1000;
+const PR_PAGE = 50;
+const ISSUE_PAGE = 100;
 
-const FRAGMENTS = `
-fragment Page on SearchResultItemConnection {
+// GitHub refuses a fragment that is declared but not used, so each query
+// carries only the fragments it spreads.
+const PR_FRAGMENTS = `
+fragment PrPage on SearchResultItemConnection {
   pageInfo { hasNextPage endCursor }
-  nodes { __typename ...Pr ...Iss }
+  nodes { __typename ...Pr }
 }
 fragment Pr on PullRequest {
   number title url body headRefName isDraft reviewDecision mergeStateStatus createdAt updatedAt
   author { login }
   repository { nameWithOwner }
-  reviews(last: 100) { nodes { state author { login } } }
+  reviews(last: 50) { nodes { state author { login } } }
   commits(last: 1) {
     nodes { commit { statusCheckRollup { contexts(first: 100) {
       nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } }
     } } } }
   }
   closingIssuesReferences(first: 25) { nodes { number } }
+}`;
+const ISSUE_FRAGMENTS = `
+fragment IssuePage on SearchResultItemConnection {
+  pageInfo { hasNextPage endCursor }
+  nodes { __typename ...Iss }
 }
 fragment Iss on Issue {
   number title state url
@@ -57,13 +75,25 @@ fragment Iss on Issue {
   repository { nameWithOwner }
 }`;
 
-export const SEARCH_QUERY = `query AgendoGithubSearch(${SEARCHES.map((s) => `$${s}: String!`).join(", ")}) {
-${SEARCHES.map((s) => `  ${s}: search(query: $${s}, type: ISSUE, first: 100) { ...Page }`).join("\n")}
-}${FRAGMENTS}`;
+const isPrSearch = (s: SearchName) => PR_SEARCHES.has(s);
 
-export const PAGE_QUERY = `query AgendoGithubSearchPage($q: String!, $after: String!) {
-  page: search(query: $q, type: ISSUE, first: 100, after: $after) { ...Page }
-}${FRAGMENTS}`;
+/** One search's selection: PR pages carry the PR fields, issue pages only the issue ones. */
+const selection = (s: SearchName, args: string) =>
+  `search(${args}, type: ISSUE, first: ${isPrSearch(s) ? PR_PAGE : ISSUE_PAGE}) { ...${isPrSearch(s) ? "PrPage" : "IssuePage"} }`;
+
+export const SEARCH_QUERY = `query AgendoGithubSearch(${SEARCHES.map((s) => `$${s}: String!`).join(", ")}) {
+${SEARCHES.map((s) => `  ${s}: ${selection(s, `query: $${s}`)}`).join("\n")}
+}${PR_FRAGMENTS}${ISSUE_FRAGMENTS}`;
+
+/** The follow-up page of a PR search, and of an issue search. */
+export const PAGE_QUERIES = {
+  pr: `query AgendoGithubPrPage($q: String!, $after: String!) {
+  page: ${selection("involves", "query: $q, after: $after")}
+}${PR_FRAGMENTS}`,
+  issue: `query AgendoGithubIssuePage($q: String!, $after: String!) {
+  page: ${selection("authored", "query: $q, after: $after")}
+}${ISSUE_FRAGMENTS}`,
+};
 
 /** A PR or an issue, as `gh pr list` / `gh issue list --json` printed it, plus the repo it lives in. */
 export type RawItem = Record<string, any> & { slug: string };
@@ -82,16 +112,8 @@ interface SearchPage {
   nodes?: any[];
 }
 
-/** One GraphQL node in the flat shape the rest of the provider reads, or null for a node that is neither. */
-export function normalise(node: any): RawItem | null {
-  const slug = node?.repository?.nameWithOwner;
-  if (!slug) return null;
-  if (node.__typename === "Issue") {
-    const { repository: _, ...issue } = node;
-    return { ...issue, slug };
-  }
-  if (node.__typename !== "PullRequest") return null;
-  const { repository: _, commits, reviews, closingIssuesReferences, ...pr } = node;
+/** A PR node in the flat shape `gh pr list --json` printed. */
+function flatPr({ repository: _, commits, reviews, closingIssuesReferences, ...pr }: any, slug: string): RawItem {
   return {
     ...pr,
     slug,
@@ -101,16 +123,34 @@ export function normalise(node: any): RawItem | null {
   };
 }
 
+/** One GraphQL node in the flat shape the rest of the provider reads, or null for a node that is neither a PR nor an issue. */
+export function normalise(node: any): RawItem | null {
+  const slug = node?.repository?.nameWithOwner;
+  if (!slug) return null;
+  if (node.__typename === "PullRequest") return flatPr(node, slug);
+  if (node.__typename !== "Issue") return null;
+  const { repository: _, ...issue } = node;
+  return { ...issue, slug };
+}
+
 /** Runs one GraphQL operation with string variables and returns its `data`. */
 export type GraphqlRun = (query: string, vars: Record<string, string>) => Promise<any>;
 
-/** Every node of one search: the first page as given, then the rest one request at a time. */
-async function drain(run: GraphqlRun, q: string, first: SearchPage | undefined): Promise<any[]> {
+/** Every node of one search, up to GitHub's cap: the first page as given, then the rest one request at a time. */
+async function drain(run: GraphqlRun, name: SearchName, q: string, first: SearchPage | undefined): Promise<any[]> {
   const nodes = [...(first?.nodes ?? [])];
+  const query = isPrSearch(name) ? PAGE_QUERIES.pr : PAGE_QUERIES.issue;
+  // Counted in pages, not nodes: a page can come back short (a node GitHub
+  // would not show is null), and a short page must not buy an extra request.
+  const pages = RESULT_CAP / (isPrSearch(name) ? PR_PAGE : ISSUE_PAGE);
   let page = first;
-  for (let n = 1; n < MAX_PAGES && page?.pageInfo?.hasNextPage && page.pageInfo.endCursor; n++) {
-    page = (await run(PAGE_QUERY, { q, after: page.pageInfo.endCursor }))?.page as SearchPage | undefined;
+  let fetched = 1;
+  for (; page?.pageInfo?.hasNextPage && page.pageInfo.endCursor && fetched < pages; fetched++) {
+    page = (await run(query, { q, after: page.pageInfo.endCursor }))?.page as SearchPage | undefined;
     nodes.push(...(page?.nodes ?? []));
+  }
+  if (page?.pageInfo?.hasNextPage && fetched >= pages) {
+    reportWarning(`GitHub search "${q}" has more than ${RESULT_CAP} results; showing the ${RESULT_CAP} most recently updated`);
   }
   return nodes;
 }
@@ -134,7 +174,7 @@ export async function searchAccount(run: GraphqlRun, login: string): Promise<Acc
   const queries = searchQueries(login);
   const data = (await run(SEARCH_QUERY, queries)) ?? {};
   const [involves, reviewRequested, authored, owned] = await Promise.all(
-    SEARCHES.map((s) => drain(run, queries[s], data[s])),
+    SEARCHES.map((s) => drain(run, s, queries[s], data[s])),
   );
   return { involves: items(involves), reviewRequested: items(reviewRequested), issues: items([...authored, ...owned]) };
 }
