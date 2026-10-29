@@ -36,9 +36,13 @@ const PR_401 = {
 
 // Seed the fake `gh`: logged in as ada, one open issue she filed in ada/appweb
 // (→ the "Created by me" bucket) with a PR linked to it via the branch id.
-async function seedGitHub(mock: { setProvider: (n: "github") => Promise<void>; setGhState: (s: unknown) => Promise<void> }) {
+async function seedGitHub(
+  mock: { setProvider: (n: "github") => Promise<void>; setGhState: (s: unknown) => Promise<void> },
+  extra: Record<string, unknown> = {},
+) {
   await mock.setProvider("github");
   await mock.setGhState({
+    ...extra,
     authed: true,
     user: ME,
     issues: {
@@ -76,10 +80,29 @@ test("boots into the GitHub backend: issues vocab, data from gh, '#' PR prefix",
   expect(screen).toContain("#401");
   expect(screen).not.toContain("!401");
 
-  // It genuinely went through the gh code path (not a stub): the backend queried
-  // the issues of the repo derived from the local sessions' origin remote.
-  const calls = await mock.callLog();
-  expect(calls.some((l) => l.startsWith("gh ") && l.includes("issue") && l.includes("ada/appweb"))).toBe(true);
+  // It genuinely went through the gh code path (not a stub): ONE account-wide
+  // search, shared by the load's issue, PR and review fetches — never a call per
+  // repo, which is what used to spend the whole GraphQL budget.
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithubSearch"))).toHaveLength(1);
+  expect(calls.some((l) => l.includes('"issue","list"') || l.includes('"pr","list"'))).toBe(false);
+});
+
+test("a rate-limited GitHub says until when, instead of showing empty lists", async ({ launch, mock }) => {
+  const reset = Math.floor(Date.now() / 1000) + 40 * 60;
+  await seedGitHub(mock, {
+    rateLimit: { graphql: { limit: 5000, used: 5000, remaining: 0, reset } },
+    graphql: { AgendoGithubSearch: { errors: [{ type: "RATE_LIMIT", code: "graphql_rate_limit", message: "API rate limit already exceeded for user ID 1." }] } },
+  });
+  const wt = await launch();
+
+  const d = new Date(reset * 1000);
+  const until = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  await wt.waitForText(`GitHub rate limited until ${until}`, 20000);
+  // Not retried: one search, one free budget read, and nothing after them.
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithubSearch"))).toHaveLength(1);
+  expect(calls.filter((l) => l.includes('"rate_limit"'))).toHaveLength(1);
 });
 
 test("GitHub identity + settings reflect the authenticated gh user", async ({ launch, mock }) => {

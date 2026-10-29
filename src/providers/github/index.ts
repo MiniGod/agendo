@@ -9,9 +9,15 @@
 // `origin` remote; repos whose origin isn't a github.com remote are skipped.
 // Issue↔PR links come from closing references, "#N" mentions, or the issue id
 // embedded in the PR branch (see linkedIssues).
+//
+// The data itself is one account-wide GraphQL search (search.ts) narrowed to
+// that scope here, and shared, cached and rate-limit aware (throttle.ts): every
+// load in the process reuses it for minutes, not just the one that fetched it.
 import { spawn, spawnSync } from "child_process";
-import { messageOf, snippetOf, tag } from "../../shared/errors.ts";
 import { rollupCI } from "./ci.ts";
+import { gh } from "./gh.ts";
+import { type AccountData, type GraphqlRun, type RawItem, graphqlArgs, searchAccount } from "./search.ts";
+import { Throttle } from "./throttle.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
 import type { EntityUrls, FetchContext } from "../index.ts";
 import type {
@@ -22,56 +28,21 @@ import type {
   WorkItem,
 } from "../../shared/types.ts";
 
-// ── gh invocation ─────────────────────────────────────────────────────────────
-/**
- * Whether a failed `gh` run looks worth retrying. `gh` collapses every failure
- * into a non-zero exit, so the only signal is stderr: a 5xx, a rate limit, or a
- * transport-level error can clear on its own, while a 401/403/404 or a bad
- * argument is the same answer every time. Anything unrecognised counts as
- * permanent — see isRetryable on why that's the safe default.
- */
-function transientGhFailure(stderr: string): boolean {
-  return /HTTP 5\d\d|\brate limit\b|connection (reset|refused)|timed? ?out|temporary failure|no such host|network is unreachable|EOF\b/i.test(
-    stderr,
-  );
+// ── The account's searches, shared and throttled ──────────────────────────────
+/** GitHub's GraphQL reset time (epoch ms) when its primary budget is spent; null otherwise. `gh api rate_limit` is free. */
+async function graphqlResetAt(): Promise<number | null> {
+  const graphql = (await gh(["api", "rate_limit"]))?.resources?.graphql;
+  return graphql && graphql.remaining === 0 ? graphql.reset * 1000 : null;
 }
 
-/** Run `gh` and parse its stdout as JSON (null on empty output). */
-function gh(args: string[]): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("gh", args);
-    const cmd = `gh ${args.join(" ")}`;
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("error", reject); // couldn't spawn (gh not installed) — never transient
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(tag(new Error(`${cmd} -> exit ${code}: ${err.trim()}`), { retryable: transientGhFailure(err) }));
-        return;
-      }
-      try {
-        resolve(out.trim() ? JSON.parse(out) : null);
-      } catch (cause) {
-        // Name the command AND quote what came back, so `gh` printing an
-        // interstitial ("A new release of gh is available…") or an HTML error
-        // page is recognisable rather than a bare parse failure.
-        reject(
-          new Error(`Failed to parse JSON from \`${cmd}\` (${snippetOf(out)}): ${messageOf(cause)}`, { cause }),
-        );
-      }
-    });
-  });
-}
+const runGraphql: GraphqlRun = async (query, vars) => (await gh(graphqlArgs(query, vars)))?.data;
 
-/** Like gh(), but swallows failures (e.g. a repo with issues disabled) → []. */
-async function ghSafe(args: string[]): Promise<any[]> {
-  try {
-    return (await gh(args)) ?? [];
-  } catch {
-    return [];
-  }
+/** Keyed by login: one search per account serves every repo scope (see throttle.ts). */
+const account = new Throttle<AccountData>({ fetch: (login) => searchAccount(runGraphql, login), resetAt: graphqlResetAt });
+
+/** Make the next load ask GitHub again rather than reuse the last answer (the menu's explicit reload). */
+export function invalidate(): void {
+  account.invalidate();
 }
 
 // ── Repo scope: local repo roots → owner/repo slugs ───────────────────────────
@@ -168,15 +139,9 @@ export const urls: EntityUrls = {
 };
 
 // ── PR mapping ────────────────────────────────────────────────────────────────
-// The --json fields we request for every PR. `reviews` and `statusCheckRollup`
-// give us votes and CI without a second round-trip (so enrichPrCI is a no-op).
-const PR_FIELDS =
-  "number,title,url,headRefName,isDraft,reviewDecision,reviews," +
-  "statusCheckRollup,mergeStateStatus,createdAt,updatedAt,author,closingIssuesReferences";
-
-// For the linking query we additionally pull `body`, so "#N" mentions in the PR
-// description count as links (see linkedIssues).
-const LINK_PR_FIELDS = PR_FIELDS + ",body";
+// Each PR arrives with its reviews and status-check rollup (see search.ts), so
+// votes and CI need no second round-trip and enrichPrCI is a no-op. Its `body`
+// comes along too, so "#N" mentions in the description count as links.
 
 /**
  * Which of `issueNums` a PR is linked to. GitHub's own "closing references" only
@@ -332,48 +297,23 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
   items: Omit<WorkItem, "sessions">[];
   currentIterationPath: string | null;
 }> {
-  const refs = reposToRefs(ctx.repos);
   const login = ctx.identity.id;
   const isMe = (l: string | undefined) => !!l && l.toLowerCase() === login.toLowerCase();
-
-  const perRepo = await Promise.all(
-    refs.map(async (ref) => {
-      const slug = slugOf(ref);
-      const owned = ref.owner.toLowerCase() === login.toLowerCase();
-      const issueArgs = owned
-        // Repos you own: every open issue (split into created-by-you vs. the rest).
-        ? ["issue", "list", "--repo", slug, "--state", "open",
-           "--json", "number,title,state,url,labels,author", "--limit", "200"]
-        // Repos you don't own: only the issues you filed.
-        : ["issue", "list", "--repo", slug, "--author", login, "--state", "open",
-           "--json", "number,title,state,url,labels,author", "--limit", "200"];
-      const [issues, prsRaw] = await Promise.all([
-        ghSafe(issueArgs),
-        // Open PRs involving the user, scanned for links to the repo's issues.
-        ghSafe([
-          "pr", "list", "--repo", slug, "--search", `state:open involves:${login}`,
-          "--json", LINK_PR_FIELDS, "--limit", "200",
-        ]),
-      ]);
-      // Map issue number → PRs linked to it (closing ref, #N mention, or branch).
-      const issueNums = new Set<number>((issues as any[]).map((i) => i.number));
-      const prsByIssue = new Map<number, PullRequest[]>();
-      for (const raw of prsRaw) {
-        const pr = mapPR(raw, ref);
-        for (const n of linkedIssues(raw, issueNums)) {
-          const arr = prsByIssue.get(n) ?? [];
-          arr.push(pr);
-          prsByIssue.set(n, arr);
-        }
-      }
-      return { ref, issues, prsByIssue };
-    }),
-  );
+  const { issues, involves } = await account.get(login);
+  const scoped = inScope(ctx);
+  const prsByRepo = scoped(involves);
 
   const items: Omit<WorkItem, "sessions">[] = [];
-  for (const { ref, issues, prsByIssue } of perRepo) {
+  for (const [ref, repoIssues] of scoped(issues)) {
     const slug = slugOf(ref);
-    for (const iss of issues) {
+    // Map issue number → PRs linked to it (closing ref, #N mention, or branch).
+    const issueNums = new Set<number>(repoIssues.map((i) => i.number));
+    const prsByIssue = new Map<number, PullRequest[]>();
+    for (const raw of prsByRepo.get(ref) ?? []) {
+      const pr = mapPR(raw, ref);
+      for (const n of linkedIssues(raw, issueNums)) prsByIssue.set(n, [...(prsByIssue.get(n) ?? []), pr]);
+    }
+    for (const iss of repoIssues) {
       items.push({
         id: iss.number,
         type: "Issue",
@@ -394,39 +334,39 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
   return { items, currentIterationPath: null };
 }
 
+/**
+ * The account-wide search results narrowed to the repos in scope, grouped by
+ * the scope's own RepoRef — so slugs keep the casing of the local `origin`, as
+ * they did when each repo was queried by name.
+ */
+function inScope(ctx: FetchContext): (items: RawItem[]) => Map<RepoRef, RawItem[]> {
+  const bySlug = new Map(reposToRefs(ctx.repos).map((ref) => [slugOf(ref).toLowerCase(), ref]));
+  return (items) => {
+    const out = new Map<RepoRef, RawItem[]>();
+    for (const item of items) {
+      const ref = bySlug.get(item.slug.toLowerCase());
+      if (ref) out.set(ref, [...(out.get(ref) ?? []), item]);
+    }
+    return out;
+  };
+}
+
 // ── PRs you created ───────────────────────────────────────────────────────────
 export async function fetchActivePRs(ctx: FetchContext): Promise<PullRequest[]> {
-  const refs = reposToRefs(ctx.repos);
-  const login = ctx.identity.id;
-  const lists = await Promise.all(
-    refs.map(async (ref) => {
-      const raw = await ghSafe([
-        "pr", "list", "--repo", slugOf(ref), "--search", `state:open author:${login}`,
-        "--json", PR_FIELDS, "--limit", "200",
-      ]);
-      return raw.map((p) => mapPR(p, ref));
-    }),
-  );
-  return lists.flat();
+  const login = ctx.identity.id.toLowerCase();
+  const { involves } = await account.get(ctx.identity.id);
+  return [...inScope(ctx)(involves)].flatMap(([ref, raw]) =>
+    raw.filter((p) => p.author?.login?.toLowerCase() === login).map((p) => mapPR(p, ref)));
 }
 
 // ── PRs awaiting your review ──────────────────────────────────────────────────
 export async function fetchReviewPRs(ctx: FetchContext): Promise<ReviewPR[]> {
-  const refs = reposToRefs(ctx.repos);
   const login = ctx.identity.id;
-  const lists = await Promise.all(
-    refs.map(async (ref) => {
-      const raw = await ghSafe([
-        "pr", "list", "--repo", slugOf(ref), "--search", `state:open review-requested:${login}`,
-        "--json", PR_FIELDS, "--limit", "200",
-      ]);
-      return raw
-        // Don't surface your own PRs in your review queue.
-        .filter((p) => p.author?.login !== login)
-        .map((p): ReviewPR => ({ ...mapPR(p, ref), reviewReason: "you" }));
-    }),
-  );
-  return lists.flat();
+  const { reviewRequested } = await account.get(login);
+  return [...inScope(ctx)(reviewRequested)].flatMap(([ref, raw]) => raw
+    // Don't surface your own PRs in your review queue.
+    .filter((p) => p.author?.login !== login)
+    .map((p): ReviewPR => ({ ...mapPR(p, ref), reviewReason: "you" })));
 }
 
 /**
