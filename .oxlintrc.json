@@ -130,7 +130,12 @@
         // bootstrap (moving the menu window to index 0, however the host session came to
         // exist) is now src/runtime/tmux/launcherSession.ts, and windows.ts is 296. The
         // holder is src/providers/github/index.ts.
-        "max-lines": ["error", { "max": 450, "skipBlankLines": false, "skipComments": false }], // src/providers/github/index.ts
+        //
+        // LOWERED 450 -> 443. src/providers/github/index.ts set 450; running `gh` is now
+        // src/providers/github/gh.ts and its per-repo calls are one account-wide search
+        // (src/providers/github/search.ts, throttled by throttle.ts), and the file is 425.
+        // The holder is src/runtime/tmux/windows.ts.
+        "max-lines": ["error", { "max": 443, "skipBlankLines": false, "skipComments": false }], // src/runtime/tmux/windows.ts
         // `runStatus` used to set this from inside index.tsx's own block, at 215.
         // It is now four functions in src/cli/commands/status.ts, the largest well under
         // this cap. LOWERED 198 -> 197: src/cli/commands/send.ts `runSend` set 198 and is

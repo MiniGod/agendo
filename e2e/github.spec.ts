@@ -36,7 +36,10 @@ const PR_401 = {
 
 // Seed the fake `gh`: logged in as ada, one open issue she filed in ada/appweb
 // (→ the "Created by me" bucket) with a PR linked to it via the branch id.
-async function seedGitHub(mock: { setProvider: (n: "github") => Promise<void>; setGhState: (s: unknown) => Promise<void> }) {
+async function seedGitHub(
+  mock: { setProvider: (n: "github") => Promise<void>; setGhState: (s: unknown) => Promise<void> },
+  extra: Record<string, unknown> = {},
+) {
   await mock.setProvider("github");
   await mock.setGhState({
     authed: true,
@@ -53,6 +56,7 @@ async function seedGitHub(mock: { setProvider: (n: "github") => Promise<void>; s
         "review-requested:ada": [], // nothing awaiting review
       },
     },
+    ...extra,
   });
 }
 
@@ -76,10 +80,92 @@ test("boots into the GitHub backend: issues vocab, data from gh, '#' PR prefix",
   expect(screen).toContain("#401");
   expect(screen).not.toContain("!401");
 
-  // It genuinely went through the gh code path (not a stub): the backend queried
-  // the issues of the repo derived from the local sessions' origin remote.
-  const calls = await mock.callLog();
-  expect(calls.some((l) => l.startsWith("gh ") && l.includes("issue") && l.includes("ada/appweb"))).toBe(true);
+  // It genuinely went through the gh code path (not a stub): ONE account-wide
+  // search, shared by the load's issue, PR and review fetches — never a call per
+  // repo, which is what used to spend the whole GraphQL budget.
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithubSearch"))).toHaveLength(1);
+  expect(calls.some((l) => l.includes('"issue","list"') || l.includes('"pr","list"'))).toBe(false);
+});
+
+test("a rate-limited GitHub says until when, instead of showing empty lists", async ({ launch, mock }) => {
+  const reset = Math.floor(Date.now() / 1000) + 40 * 60;
+  await seedGitHub(mock, {
+    rateLimit: { graphql: { limit: 5000, used: 5000, remaining: 0, reset } },
+    graphql: { AgendoGithubSearch: { errors: [{ type: "RATE_LIMIT", code: "graphql_rate_limit", message: "API rate limit already exceeded for user ID 1." }] } },
+  });
+  const wt = await launch();
+
+  const d = new Date(reset * 1000);
+  const until = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  await wt.waitForText(`GitHub rate limited until ${until}`, 20000);
+  // Not retried: one search, one free budget read, and nothing after them.
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithubSearch"))).toHaveLength(1);
+  expect(calls.filter((l) => l.includes('"rate_limit"'))).toHaveLength(1);
+});
+
+// Scope: only the repos local sessions live in, matched by where each repo
+// lives NOW — case-insensitively, and through a rename — and in a repo someone
+// else owns, only your own issues. One search answers all of it, so the
+// filtering is agendo's, not GitHub's.
+test("the account search is narrowed to the local repos, through renames and other owners", async ({ launch, mock }) => {
+  await mock.setGitState({
+    origins: {
+      appweb: "https://github.com/ada/old-web.git", // renamed to ada/appweb since
+      applib: "https://github.com/Grace/AppLib.git", // grace's repo, mixed case
+    },
+  });
+  const issue = (number: number, title: string, by: string) => ({
+    number, title, state: "OPEN", url: `https://github.com/x/y/issues/${number}`, labels: [], author: { login: by },
+  });
+  await seedGitHub(mock, {
+    renames: { "ada/old-web": "ada/appweb" },
+    issues: {
+      "ada/appweb": [issue(301, "Header overlaps on mobile", ME.login)],
+      "grace/applib": [issue(5, "Ada filed this lib bug", ME.login), issue(6, "Grace filed her own", "grace")],
+      "ada/elsewhere": [issue(9, "Out of scope entirely", ME.login)],
+    },
+  });
+  const wt = await launch();
+
+  const screen = await wt.waitForText("Ada filed this lib bug", 20000);
+  expect(screen).toContain("Header overlaps on mobile"); // found through the rename
+  expect(screen).not.toContain("Grace filed her own"); // grace's repo: only ada's issues
+  expect(screen).not.toContain("Out of scope entirely"); // no local session in it
+  // The renames lookup is one request for every repo, not one per repo.
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithubRepos"))).toHaveLength(1);
+});
+
+test("no GitHub repo in scope: the account is not searched at all", async ({ launch, mock }) => {
+  const ado = (name: string) => `https://dev.azure.com/innovamps/proj/_git/${name}`;
+  await mock.setGitState({ origins: { appweb: ado("appweb"), applib: ado("applib"), standalone: ado("standalone") } });
+  await seedGitHub(mock);
+  const wt = await launch();
+
+  await wt.waitForText("Created by me", 20000);
+  await wt.waitForStable();
+  expect(await wt.screen()).not.toContain("Header overlaps on mobile");
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithub"))).toHaveLength(0);
+});
+
+test("a failed renames lookup still shows the repos under their origins' names", async ({ launch, mock }) => {
+  await seedGitHub(mock, { graphql: { AgendoGithubRepos: { errors: [{ message: "Something went wrong while executing your query." }] } } });
+  const wt = await launch();
+
+  const screen = await wt.waitForText("Header overlaps on mobile", 20000);
+  expect(screen).toContain("#401");
+});
+
+test("a search GitHub answered only in part shows the part, and says something was left out", async ({ launch, mock }) => {
+  await seedGitHub(mock, { searchErrors: [{ message: "Resource protected by organization SAML enforcement." }] });
+  const wt = await launch();
+
+  const screen = await wt.waitForText("Header overlaps on mobile", 20000);
+  expect(screen).toContain("#401");
+  await wt.waitForText("GitHub left part of its answer out");
 });
 
 test("GitHub identity + settings reflect the authenticated gh user", async ({ launch, mock }) => {
