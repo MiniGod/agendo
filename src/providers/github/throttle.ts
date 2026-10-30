@@ -43,6 +43,8 @@ export class Throttle<T> {
   private readonly inflight = new Map<string, Promise<T>>();
   private blockedUntil = 0;
   private backoffMs = 0;
+  /** Bumped by invalidate: a fetch started before it answers its own callers but is not kept. */
+  private generation = 0;
   private readonly now: () => number;
 
   constructor(private readonly deps: ThrottleDeps<T>) {
@@ -56,21 +58,28 @@ export class Throttle<T> {
     if (this.now() < this.blockedUntil) return Promise.resolve().then(() => this.limited(key));
     const running = this.inflight.get(key);
     if (running) return running;
-    const run = this.deps.fetch(key)
-      .then((value) => this.stored(key, value), (e) => this.failed(key, e))
-      .finally(() => this.inflight.delete(key));
+    const generation = this.generation;
+    const run: Promise<T> = this.deps.fetch(key)
+      .then((value) => this.stored(key, value, generation), (e) => this.failed(key, e))
+      .finally(() => this.inflight.get(key) === run && this.inflight.delete(key));
     this.inflight.set(key, run);
     return run;
   }
 
-  /** Make the next `get` ask GitHub again. Keeps the last value to fall back on, and never opens a closed gate. */
+  /**
+   * Make the next `get` ask GitHub again — even while a fetch is in flight, whose
+   * answer may predate whatever prompted the reload. Keeps the last value to fall
+   * back on, and never opens a closed gate.
+   */
   invalidate(): void {
+    this.generation++;
+    this.inflight.clear();
     for (const entry of this.entries.values()) entry.stale = true;
   }
 
-  private stored(key: string, value: T): T {
+  private stored(key: string, value: T, generation: number): T {
     this.backoffMs = 0;
-    this.entries.set(key, { value, at: this.now(), stale: false });
+    if (generation === this.generation) this.entries.set(key, { value, at: this.now(), stale: false });
     return value;
   }
 

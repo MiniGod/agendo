@@ -79,16 +79,23 @@ describe("Throttle", () => {
     expect(takeWarnings()).toHaveLength(1);
   });
 
-  test("invalidate during a fetch: callers still share that fetch, and the next get after it asks again", async () => {
-    const r = rig();
-    const first = r.throttle.get("ada");
-    r.throttle.invalidate();
-    const second = r.throttle.get("ada");
-    expect(await second).toBe(await first);
-    expect(r.fetched).toHaveLength(1);
-    // The value it stored is fresh, so nothing more is asked within the TTL.
-    await r.throttle.get("ada");
-    expect(r.fetched).toHaveLength(1);
+  test("invalidate during a fetch: the next get asks again, and the earlier answer is not kept even if it lands last", async () => {
+    const answers: Array<(v: string) => void> = [];
+    const throttle = new Throttle<string>({
+      fetch: () => new Promise<string>((resolve) => answers.push(resolve)),
+      resetAt: async () => null,
+      now: () => 0,
+    });
+    const before = throttle.get("ada");
+    throttle.invalidate();
+    const after = throttle.get("ada");
+    expect(answers).toHaveLength(2);
+    answers[1]!("new");
+    expect(await after).toBe("new");
+    answers[0]!("old");
+    expect(await before).toBe("old"); // its own callers still get their answer…
+    expect(await throttle.get("ada")).toBe("new"); // …but the cache keeps the later one
+    expect(answers).toHaveLength(2);
   });
 
   test("any other failure is thrown as it is, and the next get tries again", async () => {

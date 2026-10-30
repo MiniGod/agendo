@@ -121,8 +121,20 @@ describe("searchAccount", () => {
     expect(takeWarnings()).toEqual([]);
   });
 
-  test("no data at all is four empty lists", async () => {
-    expect(await searchAccount(async () => null, "ada")).toEqual({ involves: [], reviewRequested: [], issues: [] });
+  test("a search or a page GitHub left out fails the whole answer, rather than reading as no results", async () => {
+    await expect(searchAccount(async () => null, "ada")).rejects.toThrow("out of its answer");
+    const empty = { involves: page([]), reviewRequested: page([]), authored: page([]), owned: page([]) };
+    await expect(searchAccount(async () => ({ ...empty, owned: null }), "ada")).rejects.toThrow(searchQueries("ada").owned);
+    const run: GraphqlRun = async (query) =>
+      query === SEARCH_QUERY ? { ...empty, involves: page([pr("ada/app", 1)], "c1") } : { page: null };
+    await expect(searchAccount(run, "ada")).rejects.toThrow(searchQueries("ada").involves);
+  });
+
+  test("a node GitHub won't show is skipped, and the rest kept", async () => {
+    const run: GraphqlRun = async () => ({
+      involves: page([null, pr("ada/app", 1)]), reviewRequested: page([]), authored: page([]), owned: page([]),
+    });
+    expect((await searchAccount(run, "ada")).involves.map((p) => p.number)).toEqual([1]);
   });
 });
 

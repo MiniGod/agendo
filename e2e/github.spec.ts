@@ -138,6 +138,19 @@ test("the account search is narrowed to the local repos, through renames and oth
   expect(calls.filter((l) => l.includes("query=AgendoGithubRepos"))).toHaveLength(1);
 });
 
+test("no GitHub repo in scope: the account is not searched at all", async ({ launch, mock }) => {
+  const ado = (name: string) => `https://dev.azure.com/innovamps/proj/_git/${name}`;
+  await mock.setGitState({ origins: { appweb: ado("appweb"), applib: ado("applib"), standalone: ado("standalone") } });
+  await seedGitHub(mock);
+  const wt = await launch();
+
+  await wt.waitForText("Created by me", 20000);
+  await wt.waitForStable();
+  expect(await wt.screen()).not.toContain("Header overlaps on mobile");
+  const calls = (await mock.callLog()).filter((l) => l.startsWith("gh "));
+  expect(calls.filter((l) => l.includes("query=AgendoGithub"))).toHaveLength(0);
+});
+
 test("a failed renames lookup still shows the repos under their origins' names", async ({ launch, mock }) => {
   await seedGitHub(mock, { graphql: { AgendoGithubRepos: { errors: [{ message: "Something went wrong while executing your query." }] } } });
   const wt = await launch();

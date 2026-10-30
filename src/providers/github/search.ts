@@ -136,6 +136,17 @@ export function normalise(node: any): RawItem | null {
 /** Runs one GraphQL operation with string variables and returns its `data`. */
 export type GraphqlRun = (query: string, vars: Record<string, string>) => Promise<any>;
 
+/**
+ * A search GitHub left out of its answer altogether. A node it won't show comes
+ * back null inside `nodes` and is merely skipped, but a whole search or page
+ * missing — a timeout, say — must fail the fetch: kept, it would read as "no
+ * results" and be cached as such.
+ */
+function answered(page: SearchPage | null | undefined, q: string): SearchPage {
+  if (!page) throw new Error(`GitHub left the search "${q}" out of its answer`);
+  return page;
+}
+
 /** Where the next page of a search starts, or undefined when GitHub says there is none. */
 function nextCursor(page: SearchPage | undefined): string | undefined {
   const info = page?.pageInfo;
@@ -143,21 +154,21 @@ function nextCursor(page: SearchPage | undefined): string | undefined {
 }
 
 /** Every node of one search, up to GitHub's cap: the first page as given, then the rest one request at a time. */
-async function drain(run: GraphqlRun, name: SearchName, q: string, first: SearchPage | undefined): Promise<any[]> {
+async function drain(run: GraphqlRun, name: SearchName, q: string, first: SearchPage): Promise<any[]> {
   const pr = isPrSearch(name);
   const query = pr ? PAGE_QUERIES.pr : PAGE_QUERIES.issue;
   // Counted in pages, not nodes: a page can come back short (a node GitHub
   // would not show is null), and a short page must not buy an extra request.
   const pages = RESULT_CAP / (pr ? PR_PAGE : ISSUE_PAGE);
-  const nodes = [...(first?.nodes ?? [])];
+  const nodes = [...(first.nodes ?? [])];
   let after = nextCursor(first);
   for (let fetched = 1; after; fetched++) {
     if (fetched >= pages) {
       reportWarning(`GitHub search "${q}" has more than ${RESULT_CAP} results; showing the ${RESULT_CAP} most recently updated`);
       break;
     }
-    const page = (await run(query, { q, after }))?.page as SearchPage | undefined;
-    nodes.push(...(page?.nodes ?? []));
+    const page = answered((await run(query, { q, after }))?.page, q);
+    nodes.push(...(page.nodes ?? []));
     after = nextCursor(page);
   }
   return nodes;
@@ -180,9 +191,9 @@ function items(nodes: any[]): RawItem[] {
 /** The four searches for `login`: one request, plus one per page past the first hundred results of any of them. */
 export async function searchAccount(run: GraphqlRun, login: string): Promise<AccountData> {
   const queries = searchQueries(login);
-  const data = (await run(SEARCH_QUERY, queries)) ?? {};
+  const data = await run(SEARCH_QUERY, queries);
   const [involves, reviewRequested, authored, owned] = await Promise.all(
-    SEARCHES.map((s) => drain(run, s, queries[s], data[s])),
+    SEARCHES.map((s) => drain(run, s, queries[s], answered(data?.[s], queries[s]))),
   );
   return { involves: items(involves), reviewRequested: items(reviewRequested), issues: items([...authored, ...owned]) };
 }

@@ -61,7 +61,7 @@ const account = new Throttle<AccountData>({ fetch: (login) => searchAccount(sear
 // is expected here, not news: it simply keeps its origin's name.
 const reposRun = graphqlRunner(() => {});
 
-/** Keyed by the scope's slugs: their current names (see canonical.ts). Behind the same rate-limit gate as the search. */
+/** Keyed by the scope's slugs: their current names (see canonical.ts). Gated on a rate limit like the search, by its own throttle. */
 const canonical = new Throttle<Map<string, string>>({
   fetch: (key) => canonicalSlugs(reposRun, key ? key.split(" ") : []),
   resetAt: graphqlResetAt,
@@ -325,7 +325,7 @@ export async function fetchWorkItems(ctx: FetchContext): Promise<{
   currentIterationPath: string | null;
 }> {
   const login = ctx.identity.id;
-  const [{ issues, involves }, scoped] = await Promise.all([account.get(login), inScope(ctx)]);
+  const [{ issues, involves }, scoped] = await scopedAccount(ctx);
   const prsByRepo = scoped(involves);
 
   const items: Omit<WorkItem, "sessions">[] = [];
@@ -388,10 +388,18 @@ async function inScope(ctx: FetchContext): Promise<(items: RawItem[]) => Map<Rep
   };
 }
 
+const NOTHING: AccountData = { involves: [], reviewRequested: [], issues: [] };
+
+/** The account's search and the scope to narrow it to; with no GitHub repo in scope, nothing is asked. */
+function scopedAccount(ctx: FetchContext): Promise<[AccountData, Awaited<ReturnType<typeof inScope>>]> {
+  if (reposToRefs(ctx.repos).length === 0) return Promise.resolve([NOTHING, () => new Map()]);
+  return Promise.all([account.get(ctx.identity.id), inScope(ctx)]);
+}
+
 // ── PRs you created ───────────────────────────────────────────────────────────
 export async function fetchActivePRs(ctx: FetchContext): Promise<PullRequest[]> {
   const login = ctx.identity.id;
-  const [{ involves }, scoped] = await Promise.all([account.get(login), inScope(ctx)]);
+  const [{ involves }, scoped] = await scopedAccount(ctx);
   return [...scoped(involves)].flatMap(([ref, raw]) =>
     raw.filter((p) => isMe(login, p.author?.login)).map((p) => mapPR(p, ref)));
 }
@@ -399,7 +407,7 @@ export async function fetchActivePRs(ctx: FetchContext): Promise<PullRequest[]> 
 // ── PRs awaiting your review ──────────────────────────────────────────────────
 export async function fetchReviewPRs(ctx: FetchContext): Promise<ReviewPR[]> {
   const login = ctx.identity.id;
-  const [{ reviewRequested }, scoped] = await Promise.all([account.get(login), inScope(ctx)]);
+  const [{ reviewRequested }, scoped] = await scopedAccount(ctx);
   return [...scoped(reviewRequested)].flatMap(([ref, raw]) => raw
     // Don't surface your own PRs in your review queue.
     .filter((p) => !isMe(login, p.author?.login))
