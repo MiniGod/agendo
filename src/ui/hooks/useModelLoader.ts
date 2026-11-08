@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { loadModelProgressively, type LoadedModel, type ModelStage } from "../../app/model/index.ts";
+import { getProvider } from "../../providers/index.ts";
 import { isRetryable, messageOf, retryAttempts, retryDelayMs, takeWarnings } from "../../shared/errors.ts";
 import type { RepoInfo } from "../../repositories/index.ts";
 import type { Identity, ProviderName } from "../../shared/types.ts";
@@ -83,7 +84,10 @@ export function useModelLoader({
   const [reloadKey, setReloadKey] = useState(0);
   const readyRef = useRef<ReadyState>({ provider: null, items: false, prs: false });
 
-  const reload = () => setReloadKey((k) => k + 1);
+  const reload = () => {
+    getProvider(provider).invalidate?.();
+    setReloadKey((k) => k + 1);
+  };
 
   useEffect(() => {
     if (readyRef.current.provider !== provider) {

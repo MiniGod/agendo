@@ -1,7 +1,7 @@
 // The fake `gh` is a test double, so it does not normally get tested itself —
 // but this one earns a spec, because its failure mode is invisible. It used to
 // answer any subcommand it did not implement with `process.exit(0)` and no
-// output, and `gh()` in src/providers/github/index.ts resolves empty stdout to `null` rather
+// output, and `gh()` in src/providers/github/gh.ts resolves empty stdout to `null` rather
 // than throwing. A call the fake had never heard of therefore looked exactly
 // like a successful call that returned nothing, and every test around it stayed
 // green while the code under test received no data at all.
@@ -116,7 +116,7 @@ test.describe("fake gh: unrecognised input fails instead of exiting 0", () => {
   test("an unmodelled flag fails, because ignoring it would change what stdout means", async ({ mock }) => {
     await mock.setGhState({ authed: true, graphql: { AgendoProject: { data: { ok: true } } } });
     // These two are the dangerous ones. Real `gh api --paginate` emits one JSON
-    // object PER PAGE, concatenated — `JSON.parse` in src/providers/github/index.ts would throw
+    // object PER PAGE, concatenated — `JSON.parse` in src/providers/github/gh.ts would throw
     // on that — and `--jq` emits a transformed value instead of the body. A fake
     // that ignored them would answer with a body shape production never sees:
     // the original silent-success bug, moved down one level.
@@ -173,29 +173,23 @@ test.describe("fake gh: unrecognised input fails instead of exiting 0", () => {
   });
 
   test("a stray positional fails instead of being dropped on the floor", async ({ mock }) => {
-    // `gh issue list ada/appweb` is a plausible typo for `--repo ada/appweb`, and
-    // a parser that only looks at flags answers it with the empty fixture — the
-    // silent-empty result this file exists to remove, hiding in a missing flag
-    // name rather than in a missing branch.
-    await mock.setGhState({ authed: true, issues: { "ada/appweb": [{ number: 301 }] } });
-    const r = runGh(mock.env, "issue", "list", "ada/appweb", "--state", "open");
+    // A parser that only looks at flags would answer `gh api rate_limit graphql`
+    // as if the stray word were not there — the silent-wrong result this file
+    // exists to remove, hiding in an argument nobody reads.
+    await mock.setGhState({ authed: true });
+    const r = runGh(mock.env, "api", "rate_limit", "graphql");
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain("unexpected argument(s) `ada/appweb`");
+    expect(r.stderr).toContain("unexpected argument(s) `graphql`");
   });
 
-  test("a missing or empty --repo fails rather than reporting an empty repo", async ({ mock }) => {
-    // "this repo has no issues" and "you never said which repo" are different
-    // answers, and only one of them is `[]`. src/providers/github/index.ts always passes --repo,
-    // so a call that does not is a caller bug and has to read as one.
+  test("the per-repo list calls the provider no longer makes are refused", async ({ mock }) => {
+    // They used to be four per repo per load. A regression back to them must fail
+    // here rather than be answered from the fixtures the search now reads.
     await mock.setGhState({ authed: true, issues: { "ada/appweb": [{ number: 301 }] } });
-    for (const args of [
-      ["issue", "list", "--state", "open"],
-      ["issue", "list", "--repo=", "--state", "open"],
-      ["pr", "list", "--search", "state:open author:ada"],
-    ]) {
+    for (const args of [["issue", "list", "--repo", "ada/appweb"], ["pr", "list", "--repo", "ada/appweb"]]) {
       const r = runGh(mock.env, ...args);
       expect(r.status, `expected \`gh ${args.join(" ")}\` to be rejected`).toBe(1);
-      expect(r.stderr).toContain("needs a non-empty --repo");
+      expect(r.stderr).toContain("does not implement");
     }
   });
 
@@ -231,11 +225,7 @@ test.describe("fake gh: registered GraphQL operations", () => {
     // Real gh accepts both. Supporting only `--name value` is how `--repo=slug`
     // used to yield an empty fixture SILENTLY — the failure mode this file exists
     // to remove, hiding in the argument parser rather than in the dispatch.
-    await mock.setGhState({
-      authed: true,
-      graphql: { AgendoProject: { data: { ok: true } } },
-      issues: { "ada/appweb": [{ number: 301 }] },
-    });
+    await mock.setGhState({ authed: true, user: { login: "ada" }, graphql: { AgendoProject: { data: { ok: true } } } });
 
     const gql = runGh(mock.env, "api", "graphql", `--field=query=${PROJECT_QUERY}`);
     expect(gql.status).toBe(0);
@@ -245,9 +235,9 @@ test.describe("fake gh: registered GraphQL operations", () => {
     const logged = (await mock.callLog()).find((l) => l.includes("graphql"));
     expect(logged).toContain("--field=query=AgendoProject");
 
-    const issues = runGh(mock.env, "issue", "list", "--repo=ada/appweb", "--state=open");
-    expect(issues.status).toBe(0);
-    expect(JSON.parse(issues.stdout)).toEqual([{ number: 301 }]);
+    const user = runGh(mock.env, "api", "user", "--hostname=github.com");
+    expect(user.status).toBe(0);
+    expect(JSON.parse(user.stdout)).toEqual({ login: "ada" });
   });
 
   test("an array fixture is a sequence: successive calls walk it, and overrunning fails", async ({ mock }) => {
@@ -296,7 +286,7 @@ test.describe("fake gh: registered GraphQL operations", () => {
   });
 
   test("concurrent calls to one sequence get distinct pages, not the same one twice", async ({ mock }) => {
-    // src/providers/github/index.ts fans its fetches out with `Promise.all`, so the same operation
+    // src/providers/github/search.ts fans its pages out with `Promise.all`, so the same operation
     // really can be in flight more than once. The counter therefore cannot be
     // increment-then-read-back — not a read-modify-write on a shared JSON file
     // (both processes read N, both serve page N), and not an atomic append
@@ -333,10 +323,9 @@ test.describe("fake gh: registered GraphQL operations", () => {
     // `process.stdout.write` is ASYNCHRONOUS when stdout is a pipe — which is
     // what every spawned `gh` gets — and `process.exit()` does not drain it. The
     // fake used to lose everything past ~8 KB, silently, and only for bodies big
-    // enough to matter: `JSON.parse` in src/providers/github/index.ts throws on the fragment,
-    // `ghSafe` swallows the throw, and the app sees `[]`. That is precisely the
-    // silent-empty failure this file exists to remove, reintroduced as a function
-    // of size. Every other fixture here is under 100 bytes, so nothing else in
+    // enough to matter: `JSON.parse` in src/providers/github/gh.ts throws on the
+    // fragment, and a load fails on a body that was fine — a failure that is a
+    // function of size, which no fixture author would think to look for. Every other fixture here is under 100 bytes, so nothing else in
     // this spec can see it.
     //
     // 200 KB is well past the 64 KiB Linux pipe buffer, and a GraphQL page of 100
@@ -376,7 +365,7 @@ test.describe("fake gh: registered GraphQL operations", () => {
     expect(r.status).toBe(1);
     expect(JSON.parse(r.stdout)).toEqual(scopeError); // body still on stdout
     expect(r.stderr).toContain("gh: ");
-    expect(r.stderr).toContain("read:project"); // what src/providers/github/index.ts's gh() surfaces
+    expect(r.stderr).toContain("read:project"); // what src/providers/github/gh.ts's gh() surfaces
   });
 });
 
@@ -442,16 +431,10 @@ test.describe("fake gh: call logging", () => {
 });
 
 test.describe("fake gh: the paths the backend already relies on still work", () => {
-  // Regression guard on making the fallthrough strict. src/providers/github/index.ts makes six
-  // distinct `gh` calls; the four shapes below are what the fake can distinguish.
-  // The one it CANNOT is noted where it bites: `issue list --author <login>`
-  // (github.ts:359, the not-owned-repo path) is accepted but ignored for fixture
-  // selection, so the owned/not-owned issue split cannot be expressed by a
-  // fixture at all — a gap this PR does not close. (`issue list --search` is not
-  // in that category: the fake refuses it outright, because production never
-  // sends one and a whitelisted-but-unread flag is how a fixture gets ignored.) If strictness had caught one of them the
-  // whole GitHub suite would go red, so they are pinned here where the cause is
-  // obvious rather than only in the specs that happen to exercise them.
+  // Regression guard on making the fallthrough strict. src/providers/github/ makes
+  // four distinct `gh` calls — auth status, api user, api rate_limit and the
+  // account-wide search — and they are pinned here, where the cause of a failure
+  // is obvious, rather than only in the specs that happen to exercise them.
   test("auth status reflects the authed flag in both directions", async ({ mock }) => {
     await mock.setGhState({ authed: true, user: { login: "ada", name: "Ada Lovelace" } });
     expect(runGh(mock.env, "auth", "status").status).toBe(0);
@@ -467,30 +450,53 @@ test.describe("fake gh: the paths the backend already relies on still work", () 
     expect(JSON.parse(r.stdout)).toEqual({ login: "ada", name: "Ada Lovelace" });
   });
 
-  test("issue list is keyed by repo slug, and an unknown repo is empty rather than an error", async ({ mock }) => {
-    await mock.setGhState({ authed: true, issues: { "ada/appweb": [{ number: 301 }] } });
-    const hit = runGh(mock.env, "issue", "list", "--repo", "ada/appweb", "--state", "open");
-    expect(hit.status).toBe(0);
-    expect(JSON.parse(hit.stdout)).toEqual([{ number: 301 }]);
+  test("api rate_limit reports the configured GraphQL budget, and plenty by default", async ({ mock }) => {
+    await mock.setGhState({ authed: true, rateLimit: { graphql: { remaining: 0, reset: 1793293325 } } });
+    const spent = runGh(mock.env, "api", "rate_limit");
+    expect(spent.status).toBe(0);
+    expect(JSON.parse(spent.stdout).resources.graphql).toEqual({ remaining: 0, reset: 1793293325 });
 
-    // "this repo has no issues" is a real answer, not a missing fixture — unlike
-    // an unimplemented subcommand, it must stay a successful empty result.
-    const miss = runGh(mock.env, "issue", "list", "--repo", "ada/other", "--state", "open");
-    expect(miss.status).toBe(0);
-    expect(JSON.parse(miss.stdout)).toEqual([]);
+    await mock.setGhState({ authed: true });
+    expect(JSON.parse(runGh(mock.env, "api", "rate_limit").stdout).resources.graphql.remaining).toBe(5000);
   });
 
-  test("pr list picks the bucket matching its --search query", async ({ mock }) => {
+  test("the account search is answered from the per-repo fixtures, in GraphQL's shape", async ({ mock }) => {
+    const pr = (number: number, author = "ada") => ({ number, author: { login: author }, reviews: [], statusCheckRollup: [] });
     await mock.setGhState({
       authed: true,
-      prs: { "ada/appweb": { "author:ada": [{ number: 401 }], "review-requested:ada": [] } },
+      issues: {
+        "ada/appweb": [{ number: 1, author: { login: "grace" } }, { number: 2, author: { login: "ada" } }],
+        "grace/lib": [{ number: 3, author: { login: "ada" } }, { number: 4, author: { login: "grace" } }],
+      },
+      prs: {
+        // `involves:` answers with the `author:` bucket too: every PR you wrote involves you.
+        "ada/appweb": { "involves:ada": [pr(10)], "author:ada": [pr(10), pr(11)], "review-requested:ada": [pr(12, "grace")] },
+      },
     });
-    const mine = runGh(mock.env, "pr", "list", "--repo", "ada/appweb", "--search", "state:open author:ada");
-    expect(mine.status).toBe(0);
-    expect(JSON.parse(mine.stdout)).toEqual([{ number: 401 }]);
+    const r = graphql(
+      mock.env, "query AgendoGithubSearch { x }",
+      "-f", "involves=is:pr is:open involves:ada", "-f", "reviewRequested=is:pr is:open review-requested:ada",
+      "-f", "authored=is:issue is:open author:ada", "-f", "owned=is:issue is:open user:ada",
+    );
+    expect(r.status).toBe(0);
+    const { data } = JSON.parse(r.stdout);
+    const ids = (name: string) => data[name].nodes.map((n: any) => `${n.repository.nameWithOwner}#${n.number}`);
+    expect(ids("involves")).toEqual(["ada/appweb#10", "ada/appweb#11"]);
+    expect(ids("reviewRequested")).toEqual(["ada/appweb#12"]);
+    expect(ids("authored")).toEqual(["ada/appweb#2", "grace/lib#3"]);
+    expect(ids("owned")).toEqual(["ada/appweb#1", "ada/appweb#2"]);
+    expect(data.involves.pageInfo).toEqual({ hasNextPage: false, endCursor: null });
+    expect(data.involves.nodes[0]).toMatchObject({
+      __typename: "PullRequest",
+      reviews: { nodes: [] },
+      commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [] } } } }] },
+    });
+  });
 
-    const reviews = runGh(mock.env, "pr", "list", "--repo", "ada/appweb", "--search", "state:open review-requested:ada");
-    expect(reviews.status).toBe(0);
-    expect(JSON.parse(reviews.stdout)).toEqual([]);
+  test("the account search without one of its variables is refused", async ({ mock }) => {
+    await mock.setGhState({ authed: true });
+    const r = graphql(mock.env, "query AgendoGithubSearch { x }", "-f", "involves=is:pr is:open involves:ada");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("without its `reviewRequested` variable");
   });
 });

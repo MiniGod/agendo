@@ -166,6 +166,12 @@ if (args[0] === "remote" && args[1] === "get-url") {
   //   • unset / "github" → a github.com remote (default; forces the GitHub backend)
   //   • "ado"            → an Azure DevOps remote (leaves the default provider)
   //   • "none"           → no origin at all (non-git / no-remote repo)
+  // FAKE_GIT_STATE's `origins` ({ "<repo dir name>": "<url>" }) overrides one
+  // repo's origin outright — a repo someone else owns, or one since renamed.
+  // (Read here, not through readState: its STATE const is declared further down.)
+  let own;
+  try { own = JSON.parse(fs.readFileSync(process.env.FAKE_GIT_STATE, "utf-8")).origins?.[path.basename(root)]; } catch {}
+  if (own) { process.stdout.write(`${own}\n`); process.exit(0); }
   const host = process.env.FAKE_GIT_ORIGIN_HOST;
   if (host === "none") { process.stderr.write("error: No such remote 'origin'\n"); process.exit(1); }
   if (host === "ado") { process.stdout.write(`https://dev.azure.com/innovamps/proj/_git/${path.basename(root)}\n`); process.exit(0); }

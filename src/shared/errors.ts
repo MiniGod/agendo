@@ -137,7 +137,7 @@ const MAX_WARNINGS = 20;
  * must never be crowded out by a run of routine transcript-line skips. The set
  * of such files is small and fixed, so dedup alone bounds that tier.
  */
-function reportWarning(message: string, opts: { always?: boolean } = {}): void {
+export function reportWarning(message: string, opts: { always?: boolean } = {}): void {
   if (warnings.includes(message)) return;
   if (!opts.always && warnings.length >= MAX_WARNINGS) return;
   warnings.push(message);

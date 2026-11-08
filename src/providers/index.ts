@@ -59,9 +59,15 @@ export interface Provider {
   urls: EntityUrls;
   /** Optional per-reload hook: invalidate any per-load caches so a refresh
    *  re-reads mutable state. ADO clears its PR cache here (mutable PR fields
-   *  would otherwise stay frozen across reloads); GitHub fetches fresh every
-   *  time, so it has none. Called at the start of every loadModel. */
+   *  would otherwise stay frozen across reloads). GitHub has none: what it
+   *  keeps is meant to outlive a load (see `invalidate`). Called at the start
+   *  of every loadModel. */
   beginLoad?(): void;
+  /** Optional: drop results kept ACROSS loads, so the next load asks the
+   *  backend again. The menu calls it on every reload it makes; any other
+   *  repeated load in one process reuses them. GitHub keeps its searches for
+   *  minutes (see providers/github/throttle.ts); ADO keeps nothing that long. */
+  invalidate?(): void;
   /** Whether the backend can authenticate right now (CLI installed + logged in).
    *  Cheap, never-throwing probe for the Settings page's auth-status line. */
   checkAuth(): Promise<boolean>;
