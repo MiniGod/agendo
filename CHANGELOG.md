@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.2.4](https://github.com/MiniGod/agendo/compare/v0.2.3...v0.2.4) (2026-11-08)
+
+
+### Features
+
+* **cleanup:** filter the cleanup view, end sessions from it, delete everything safe ([#147](https://github.com/MiniGod/agendo/issues/147)) ([c661a6c](https://github.com/MiniGod/agendo/commit/c661a6ccc0eddd0877c0e73c458aa0c00d2c7f7c)), closes [#146](https://github.com/MiniGod/agendo/issues/146)
+* **cli:** focus an agendo session from an agendo:// link ([#137](https://github.com/MiniGod/agendo/issues/137)) ([23d64f9](https://github.com/MiniGod/agendo/commit/23d64f9534a05533a11ad1a9f1f4205b98d35bf5))
+* **focus:** let agendo:// links and `agendo focus` target a session by its window name ([#143](https://github.com/MiniGod/agendo/issues/143)) ([4e977a6](https://github.com/MiniGod/agendo/commit/4e977a61890f115f99684e562d32f79df19e8f60)), closes [#126](https://github.com/MiniGod/agendo/issues/126)
+* **orchestration:** monitor background sessions through cheap sub-agents ([#149](https://github.com/MiniGod/agendo/issues/149)) ([8858835](https://github.com/MiniGod/agendo/commit/8858835b89121644cc312e8c97d557b008093c05))
+* **orchestrator:** one orchestrator per repo, pinned on the Sessions view ([#134](https://github.com/MiniGod/agendo/issues/134)) ([884ee74](https://github.com/MiniGod/agendo/commit/884ee74d6875f8b5f7dfe64db4f12854cf0e524f))
+* **settings:** edit config.json from the settings page, starting with the team ([#150](https://github.com/MiniGod/agendo/issues/150)) ([67f2df5](https://github.com/MiniGod/agendo/commit/67f2df5e4e392b5c3610d33dee50851dad66d3ff))
+* **tmux:** adopt hand-opened claude windows and panes in the host session ([#127](https://github.com/MiniGod/agendo/issues/127)) ([40159f8](https://github.com/MiniGod/agendo/commit/40159f834ca20edc2fb55b6c23e1542349b4b155))
+* **ui:** add a cleanup view for sessions and worktrees ([#131](https://github.com/MiniGod/agendo/issues/131)) ([37cddc1](https://github.com/MiniGod/agendo/commit/37cddc1b345ef3a53ed3117770a1d5f7f78e62a5)), closes [#130](https://github.com/MiniGod/agendo/issues/130)
+* **ui:** explain the extra-orchestrator line and add K to kill them ([#145](https://github.com/MiniGod/agendo/issues/145)) ([f9d6ec5](https://github.com/MiniGod/agendo/commit/f9d6ec55cb0616b6e529a57432aace77623eccfa))
+* **ui:** pause and kill sessions from the list (p, x, X) ([#130](https://github.com/MiniGod/agendo/issues/130)) ([63f34cf](https://github.com/MiniGod/agendo/commit/63f34cf9e68a310b2e91971cd2c16797318a53be)), closes [#127](https://github.com/MiniGod/agendo/issues/127) [#127](https://github.com/MiniGod/agendo/issues/127) [#127](https://github.com/MiniGod/agendo/issues/127)
+* **ui:** rank exact ids first and search by session id ([#136](https://github.com/MiniGod/agendo/issues/136)) ([9809c4c](https://github.com/MiniGod/agendo/commit/9809c4c2a3ede12cfde245bc2bc7f7115ef1b96b)), closes [#81656](https://github.com/MiniGod/agendo/issues/81656) [#81656](https://github.com/MiniGod/agendo/issues/81656)
+* **userscript:** mount the agendo button inline in ADO's own button rows ([#148](https://github.com/MiniGod/agendo/issues/148)) ([d20505c](https://github.com/MiniGod/agendo/commit/d20505c6aa0dc27b2e5e13b24150048984e2ecde))
+
+
+### Bug Fixes
+
+* **ado:** re-mint a refused az token instead of parsing the sign-in page ([#128](https://github.com/MiniGod/agendo/issues/128)) ([defa98f](https://github.com/MiniGod/agendo/commit/defa98f9987ed73677a8c310f6eedd4967f41c26))
+* **cli:** focus the terminal through i3's IPC when raising it ([#141](https://github.com/MiniGod/agendo/issues/141)) ([521bf1c](https://github.com/MiniGod/agendo/commit/521bf1ca0d7a346ad99c41308840a58bc41fdfd2)), closes [#139](https://github.com/MiniGod/agendo/issues/139)
+* **cli:** register the URL handler in the desktop database and choose link clients by target session ([#138](https://github.com/MiniGod/agendo/issues/138)) ([7601ed3](https://github.com/MiniGod/agendo/commit/7601ed342d636a56beff0067b1197a8bc560845c))
+* **cli:** run the agendo:// handler under a PATH that has bun ([#140](https://github.com/MiniGod/agendo/issues/140)) ([7893ee7](https://github.com/MiniGod/agendo/commit/7893ee7fc0d172c7bf2640cc53da3e6f94bd053b))
+* **codex:** verify send delivery and read codex 0.163 screens ([#132](https://github.com/MiniGod/agendo/issues/132)) ([d4a2713](https://github.com/MiniGod/agendo/commit/d4a2713178bcda6ab3d3c5e883c0ce92be74e39e))
+* **focus:** match a link's repo by its Azure DevOps repository id ([#142](https://github.com/MiniGod/agendo/issues/142)) ([c458fee](https://github.com/MiniGod/agendo/commit/c458feecf953ea87b5d183a31349600af607cc65))
+* **github:** fetch everything in one throttled account search ([#151](https://github.com/MiniGod/agendo/issues/151)) ([161486d](https://github.com/MiniGod/agendo/commit/161486d301dddbad95a604a356981044607d9173))
+* **launch:** attach to a live window instead of resuming a second agent outside tmux ([#146](https://github.com/MiniGod/agendo/issues/146)) ([ae2e426](https://github.com/MiniGod/agendo/commit/ae2e4266d4934cb3b4f26ef5d4743f790cb8b277))
+* **test:** stop the test suites opening real tmux windows ([#129](https://github.com/MiniGod/agendo/issues/129)) ([651be24](https://github.com/MiniGod/agendo/commit/651be247ba512a2e2f7f463ce6765da3131bd28d))
+* **userscript:** follow the link with a beforeunload guard instead of an iframe ([#139](https://github.com/MiniGod/agendo/issues/139)) ([cfa1e25](https://github.com/MiniGod/agendo/commit/cfa1e25e21d5f106fc654d7005362f66a044495a))
+
+
+### Performance
+
+* **focus:** answer links from live tmux windows before the full lookup ([#144](https://github.com/MiniGod/agendo/issues/144)) ([695b30f](https://github.com/MiniGod/agendo/commit/695b30fc42f750219484bfee949dacd871824139)), closes [#143](https://github.com/MiniGod/agendo/issues/143) [#142](https://github.com/MiniGod/agendo/issues/142)
+* **sessions:** stream transcript metadata scan and bound index concurrency ([#135](https://github.com/MiniGod/agendo/issues/135)) ([1c79d43](https://github.com/MiniGod/agendo/commit/1c79d4396d2226365adadff4718aa81142e6811e))
+
 ## [0.2.3](https://github.com/MiniGod/agendo/compare/v0.2.2...v0.2.3) (2026-09-23)
 
 
