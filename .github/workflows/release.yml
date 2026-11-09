@@ -19,7 +19,7 @@ on:
         default: false
 
 permissions:
-  contents: write # push the release commit + tag, create the GitHub release
+  contents: write # create the GitHub release (the push uses RELEASE_TOKEN)
   id-token: write # OIDC token for npm Trusted Publishing (no NPM_TOKEN needed)
 
 concurrency:
@@ -34,8 +34,15 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          # Falls back to GITHUB_TOKEN (github-actions[bot], a ruleset bypass
-          # actor). Set a RELEASE_TOKEN PAT secret if you later remove that bypass.
+          # RELEASE_TOKEN is required. Only admins bypass the master ruleset, so
+          # github.token's push is rejected (GH013: "Changes must be made through
+          # a pull request"); the fallback only gets a dry run through. Use a
+          # fine-grained PAT owned by the repo admin, limited to this repo,
+          # Contents: read and write. Only the push needs it (npm publish is OIDC,
+          # the GitHub release uses github.token).
+          # Expired PAT: checkout fails with "could not read Username". A
+          # rejected push still lands the tag (--follow-tags isn't atomic) on a
+          # commit not on master: delete it before re-running.
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - uses: oven-sh/setup-bun@v2
