@@ -670,3 +670,180 @@ describe("the script as installed", () => {
     expect(p.unload()).toBe(false);
   });
 });
+
+// A PR timeline card with one file thread, from ADO's markup as copied out of
+// devtools and trimmed to what `syncThreadIds` looks at: the card's file header
+// link (`discussionId=`), the first comment's header (time, "Copy link"), a reply
+// and the reply box whose input carries `threadId-<id>`.
+const header = (name: string, extra = "") => `
+  <div class="repos-discussion-comment-header flex-row flex-grow flex-center rhythm-horizontal-4 margin-bottom-8">
+    <div class="scroll-hidden flex-row flex-center"><span class="font-weight-semibold padding-right-8 text-ellipsis">${name}</span>
+      <div class="flex-row flex-center rhythm-horizontal-4 margin-left-4"><span class="text-ellipsis"><time class="body-s secondary-text margin-right-4 bolt-time-item white-space-nowrap" datetime="2026-10-29T15:15:33.660Z">Oct 29</time></span></div>
+    </div>
+    <div class="flex-row flex-grow flex-noshrink justify-end flex-center">${extra}
+      <button aria-label="Copy link" class="comment-viewers bolt-button bolt-icon-button enabled subtle icon-only bolt-focus-treatment" type="button"><span class="fluent-icons-enabled"><span aria-hidden="true" class="left-icon flex-noshrink fabric-icon ms-Icon--Link medium"></span></span></button>
+    </div>
+  </div>`;
+const thread = (opts: { input?: string; reply?: boolean; firstHeader?: boolean; body?: string } = {}) => `
+  <div class="repos-discussion-thread flex-column flex-grow scroll-hidden">
+    <div id="1001" class="repos-comment-viewer"><div class="repos-discussion-comment">${opts.firstHeader === false ? "" : header("Reviewer", '<button aria-label="Like this comment" class="bolt-button" type="button"></button>')}<div class="markdown-content"><p>${opts.body ?? "first"}</p></div></div></div>
+    ${opts.reply === false ? "" : `<div id="1002" class="repos-comment-viewer"><div class="repos-discussion-comment">${header("Author")}<div class="markdown-content"><p>reply</p></div></div></div>`}
+    ${opts.input === undefined ? "" : `<div class="repos-discussion-thread-reply"><input aria-label="Write a reply..." class="${opts.input} bolt-textfield-input flex-grow"></div>`}
+  </div>`;
+const card = (inner: string, discussionId: string | null = "4242") => `
+  <div class="bolt-card">${discussionId === null ? "" : `<div class="comment-file-header"><a class="comment-file-header-link" href="/org/proj/_git/my-repo/pullrequest/81276?_a=files&amp;path=/src/app.ts&amp;discussionId=${discussionId}">src/app.ts</a></div>`}${inner}</div>`;
+
+describe("thread ids", () => {
+  test("parsing the reply input's class and the file header's discussionId", () => {
+    expect(script.threadIdFromClass("threadId-4242 bolt-textfield-input flex-grow")).toBe("4242");
+    expect(script.threadIdFromClass("a threadId-12")).toBe("12");
+    expect(script.threadIdFromClass("xthreadId-12 threadId-12x")).toBeUndefined();
+    expect(script.threadIdFromHref("/x/pullrequest/1?_a=files&path=/a&discussionId=4242")).toBe("4242");
+    expect(script.threadIdFromHref("/x?discussionId=7#c")).toBe("7");
+    expect(script.threadIdFromHref("/x?mydiscussionId=7")).toBeUndefined();
+  });
+
+  const run = (html: string) => {
+    const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
+    script.syncThreadIds(document);
+    const headers = [...document.querySelectorAll(".repos-discussion-comment-header")] as El[];
+    return { document, headers };
+  };
+
+  test("the first comment gets the id after its time and a Copy thread id button before Copy link; replies get neither", () => {
+    const { headers } = run(card(thread({ input: "threadId-4242" })));
+    const [first, reply] = headers;
+    const label = first.querySelector(`.${script.THREAD_ID_CLASS}`)!;
+    expect(label.textContent).toBe("4242");
+    expect(label.previousElementSibling!.querySelector("time")).not.toBeNull();
+    const copy = first.querySelector(`.${script.THREAD_COPY_CLASS}`)!;
+    expect(copy.getAttribute("aria-label")).toBe("Copy thread id");
+    expect(copy.getAttribute("data-thread-id")).toBe("4242");
+    expect(copy.nextElementSibling!.getAttribute("aria-label")).toBe("Copy link");
+    expect(copy.querySelector(".ms-Icon--Copy")).not.toBeNull();
+    expect(copy.querySelector(".ms-Icon--Link")).toBeNull();
+    expect(reply.querySelector(`.${script.THREAD_ID_CLASS}, .${script.THREAD_COPY_CLASS}`)).toBeNull();
+  });
+
+  test("without a reply box, a card holding just this thread gives the id from its header link", () => {
+    const { headers } = run(card(thread({ reply: false }), "42"));
+    expect(headers[0].querySelector(`.${script.THREAD_ID_CLASS}`)!.textContent).toBe("42");
+  });
+
+  test("a card holding several threads (the Files tab) never lends its link: each thread uses its own input or gets nothing", () => {
+    const { headers } = run(card(thread({ input: "threadId-1", reply: false }) + thread({ reply: false }), "999"));
+    expect(headers[0].querySelector(`.${script.THREAD_ID_CLASS}`)!.textContent).toBe("1");
+    expect(headers[1].querySelector(`.${script.THREAD_ID_CLASS}`)).toBeNull();
+  });
+
+  test("a second pass changes nothing; a header reused for another thread is corrected", () => {
+    const { document, headers } = run(card(thread({ input: "threadId-5", reply: false })));
+    const before = document.body.innerHTML;
+    script.syncThreadIds(document);
+    expect(document.body.innerHTML).toBe(before);
+    document.querySelector("input")!.setAttribute("class", "threadId-6 bolt-textfield-input");
+    script.syncThreadIds(document);
+    expect(headers[0].querySelectorAll(`.${script.THREAD_ID_CLASS}`)).toHaveLength(1);
+    expect(headers[0].querySelector(`.${script.THREAD_ID_CLASS}`)!.textContent).toBe("6");
+    expect(headers[0].querySelector(`.${script.THREAD_COPY_CLASS}`)!.getAttribute("data-thread-id")).toBe("6");
+  });
+});
+
+describe("thread ids: the edges", () => {
+  const run = (html: string) => {
+    const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
+    script.syncThreadIds(document);
+    const headers = [...document.querySelectorAll(".repos-discussion-comment-header")] as El[];
+    return { document, headers };
+  };
+  const labelOf = (h: El) => h.querySelector(`.${script.THREAD_ID_CLASS}`)?.textContent ?? null;
+
+  test("a link to another thread pasted in a comment is never taken for this thread's id", () => {
+    const body = '<a href="/org/proj/_git/my-repo/pullrequest/81276?discussionId=777">see</a>';
+    const { headers } = run(card(thread({ reply: false, body }), null));
+    expect(labelOf(headers[0])).toBeNull();
+    // With the file header there, its link wins over the comment's.
+    expect(labelOf(run(card(thread({ reply: false, body }), "42")).headers[0])).toBe("42");
+  });
+
+  test("while the first comment shows no header, the reply's header does not stand in, and loses what it was given", () => {
+    const { document, headers } = run(card(thread({ input: "threadId-5", firstHeader: false })));
+    expect(headers).toHaveLength(1);
+    expect(headers[0].querySelector(`.${script.THREAD_ID_CLASS}, .${script.THREAD_COPY_CLASS}`)).toBeNull();
+    // An earlier pass's label and button in the reply's header are taken out.
+    const stray = document.createElement("span");
+    stray.className = script.THREAD_ID_CLASS;
+    headers[0].appendChild(stray);
+    script.syncThreadIds(document);
+    expect(headers[0].querySelector(`.${script.THREAD_ID_CLASS}`)).toBeNull();
+  });
+});
+
+describe("the Copy thread id button", () => {
+  function make(clip: { writeText: (s: string) => Promise<void> } | undefined) {
+    const { document } = parseHTML(
+      '<!doctype html><html><body><button id="orig" aria-describedby="tt9" aria-label="Copy link" class="bolt-button"><span id="inner" class="fluent-icons-enabled"><span class="fabric-icon ms-Icon--Link medium"></span></span></button></body></html>',
+    );
+    const later: [() => void, number][] = [];
+    const logs: string[] = [];
+    const b = script.makeCopyButton(document.querySelector("button"), () => clip, (fn: () => void, ms: number) => later.push([fn, ms]), (a: string[]) => logs.push(a.join(" "))) as El;
+    document.body.appendChild(b);
+    b.setAttribute("data-thread-id", "4242");
+    const click = () => {
+      const ev = new document.defaultView.Event("click", { bubbles: true, cancelable: true });
+      let reached = false;
+      document.body.addEventListener("click", () => (reached = true));
+      b.dispatchEvent(ev);
+      return { ev, reached };
+    };
+    return { b, later, logs, click };
+  }
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  test("the clone keeps the look but nothing that names or points at the original", () => {
+    const { b } = make(undefined);
+    expect(b.className).toContain("bolt-button");
+    expect([b.id, b.getAttribute("aria-describedby"), b.querySelector("[id]")]).toEqual(["", null, null]);
+    expect(b.querySelector(".ms-Icon--Copy.fabric-icon.medium")).not.toBeNull();
+    expect(b.querySelector(".ms-Icon--Link")).toBeNull();
+  });
+
+  test("a click copies the id it carries then, stops there, and shows a checkmark for a while", async () => {
+    const copied: string[] = [];
+    const { b, later, logs, click } = make({ writeText: async (s) => void copied.push(s) });
+    b.setAttribute("data-thread-id", "7");
+    const { ev, reached } = click();
+    expect([ev.defaultPrevented, reached]).toEqual([true, false]);
+    await flush();
+    expect(copied).toEqual(["7"]);
+    expect(logs).toEqual(["copied thread id 7"]);
+    expect(b.querySelector(".ms-Icon--CheckMark")).not.toBeNull();
+    expect(later.map(([, ms]) => ms)).toEqual([1500]);
+    later[0][0]();
+    expect(b.querySelector(".ms-Icon--Copy")).not.toBeNull();
+    expect(b.title).toBe("Copy thread id 7");
+  });
+
+  test("a refused write, or no clipboard at all, says so instead of claiming a copy", async () => {
+    const refused = make({ writeText: () => Promise.reject(new Error("NotAllowedError")) });
+    refused.click();
+    await flush();
+    expect(refused.logs).toEqual(["could not copy thread id 4242"]);
+    expect(refused.b.querySelector(".ms-Icon--Error")).not.toBeNull();
+    const none = make(undefined);
+    none.click();
+    expect(none.b.title).toBe("Could not copy 4242");
+  });
+
+  test("a second click's reset is not undone by the first click's late timer", async () => {
+    const { b, later, click } = make({ writeText: async () => {} });
+    click();
+    await flush();
+    click();
+    await flush();
+    later[0][0]();
+    expect(b.querySelector(".ms-Icon--CheckMark")).not.toBeNull();
+    later[1][0]();
+    expect(b.querySelector(".ms-Icon--Copy")).not.toBeNull();
+  });
+});
