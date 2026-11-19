@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Open in agendo
 // @namespace    https://github.com/MiniGod/agendo
-// @version      1.5.0
-// @description  Adds an "Open in agendo" button to Azure DevOps and GitHub pull requests and work items. It focuses the agendo session for that PR or work item, resuming it first if it is paused or idle.
+// @version      1.6.0
+// @description  Adds an "Open in agendo" button to Azure DevOps and GitHub pull requests and work items. It focuses the agendo session for that PR or work item, resuming it first if it is paused or idle. On Azure DevOps PRs it also shows each comment thread's id and adds a "Copy thread id" button.
 // @match        https://dev.azure.com/*
 // @match        https://*.visualstudio.com/*
 // @match        https://github.com/*
@@ -61,6 +61,10 @@
 // frame was refused. GitHub's frame-src names two hosts and refuses it too.
 // window.open would dodge CSP but leaves a blank tab behind in some browsers.
 // Nothing in this script assigns window.location or opens a window.
+//
+// On an Azure DevOps PR, the first comment of each thread also shows the
+// thread's id and gets a "Copy thread id" button (`syncThreadIds`), on the same
+// observer batches.
 //
 // Set localStorage["agendo.debug"] = "1" on the page (devtools console) to log
 // to the console what each click did and whether the guard caught the event.
@@ -467,6 +471,151 @@
     };
   }
 
+  // --- Azure DevOps PR comment threads: show and copy the thread id ---------
+  //
+  // ADO gives a thread only a "Copy link" button, while agendo, its agents and
+  // the ADO API all talk about threads by id. So the first comment of every
+  // thread gets the id after its timestamp (`<name> <time> <id>`) and a "Copy
+  // thread id" button just before "Copy link".
+  //
+  // No attribute of the thread itself carries the id. Two things near it do:
+  // the reply box's input has a class `threadId-<id>`, and a file thread's card
+  // header links to `…&discussionId=<id>`. The input is inside the thread, so
+  // it is always the right one; the header link is used only when its card
+  // holds this one thread, since on the Files tab one card holds a whole file.
+
+  /** Class of the id label this script adds to a thread's first comment header. */
+  const THREAD_ID_CLASS = "agendo-thread-id";
+
+  /** Class of the "Copy thread id" button this script adds beside "Copy link". */
+  const THREAD_COPY_CLASS = "agendo-copy-thread-id";
+
+  /** The thread id in a reply input's class list (`threadId-4242`), if any. */
+  function threadIdFromClass(className) {
+    const m = /(?:^|\s)threadId-(\d+)(?=\s|$)/.exec(className || "");
+    return m ? m[1] : undefined;
+  }
+
+  /** The thread id in a link's `discussionId=` query parameter, if any. */
+  function threadIdFromHref(href) {
+    const m = /[?&]discussionId=(\d+)(?=&|#|$)/.exec(href || "");
+    return m ? m[1] : undefined;
+  }
+
+  /** The id of `thread` (a `.repos-discussion-thread`), or undefined while the page does not show it. */
+  function threadIdOf(thread) {
+    for (const el of thread.querySelectorAll('[class*="threadId-"]')) {
+      const id = threadIdFromClass(el.getAttribute("class"));
+      if (id) return id;
+    }
+    const card = thread.closest(".bolt-card");
+    if (!card || card.querySelectorAll(".repos-discussion-thread").length !== 1) return undefined;
+    // The file header's link only: a comment may well hold a pasted "Copy link" URL to another thread.
+    const link = card.querySelector('.comment-file-header a[href*="discussionId="]');
+    return link ? threadIdFromHref(link.getAttribute("href")) : undefined;
+  }
+
+  /** Swap `icon`'s fabric icon (its `ms-Icon--*` class) for `name`. */
+  function setIcon(icon, name) {
+    // Not a loop over classList, which is live: removing from it while iterating skips classes.
+    const old = (icon.getAttribute("class") || "").split(/\s+/).filter((c) => c.startsWith("ms-Icon--"));
+    icon.classList.remove(...old);
+    icon.classList.add(`ms-Icon--${name}`);
+  }
+
+  /**
+   * A "Copy thread id" button made from the header's "Copy link" button
+   * `copyLink`: a clone, so it looks and hovers like its neighbours. cloneNode
+   * copies none of React's handlers, and the click stops at this button's own
+   * listener, before React's bubble listener on the root could see it. The id
+   * is read from `data-thread-id` at click time, which `syncThreadIds` keeps
+   * current. `clipboard`, `later` and `log` are injected for tests.
+   */
+  function makeCopyButton(copyLink, clipboard = () => navigator.clipboard, later = setTimeout, log = debug) {
+    const button = copyLink.cloneNode(true);
+    // Nothing that names or points at the original or its tooltip: ids, and the
+    // description a tooltip may have set while the original was hovered.
+    for (const el of [button, ...button.querySelectorAll("[id], [aria-describedby]")]) {
+      el.removeAttribute("id");
+      el.removeAttribute("aria-describedby");
+    }
+    button.classList.add(THREAD_COPY_CLASS);
+    const icon = button.querySelector(".fabric-icon");
+    if (icon) setIcon(icon, "Copy");
+    let reset = null;
+    button.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = button.getAttribute("data-thread-id");
+      if (!id) return;
+      const token = {};
+      const show = (ok) => {
+        log([ok ? `copied thread id ${id}` : `could not copy thread id ${id}`]);
+        button.title = ok ? `Copied ${id}` : `Could not copy ${id}`;
+        if (icon) setIcon(icon, ok ? "CheckMark" : "Error");
+        reset = token;
+        later(() => {
+          if (reset !== token) return;
+          button.title = `Copy thread id ${button.getAttribute("data-thread-id")}`;
+          if (icon) setIcon(icon, "Copy");
+        }, 1500);
+      };
+      const clip = clipboard();
+      if (!clip) show(false);
+      else clip.writeText(id).then(() => show(true), () => show(false));
+    });
+    return button;
+  }
+
+  /**
+   * Put the id label and copy button in the first comment header of every
+   * thread on `doc` that lacks them, correct any showing another thread's id
+   * (a header the app reused), and remove any that ended up in another
+   * comment's header. Writes nothing where all is already right,
+   * so a call that changes nothing triggers no further mutation.
+   */
+  function syncThreadIds(doc) {
+    for (const thread of doc.querySelectorAll(".repos-discussion-thread")) {
+      // The first comment's header only. While that comment shows none (being
+      // edited, deleted), the next comment's header must not stand in for it,
+      // and whatever an earlier pass put in another header goes.
+      const first = thread.querySelector(".repos-comment-viewer");
+      const header = first && first.querySelector(".repos-discussion-comment-header");
+      for (const el of thread.querySelectorAll(`.${THREAD_ID_CLASS}, .${THREAD_COPY_CLASS}`)) {
+        if (!header || !header.contains(el)) el.remove();
+      }
+      const id = header && threadIdOf(thread);
+      if (!id) continue;
+
+      let label = header.querySelector(`.${THREAD_ID_CLASS}`);
+      if (!label) {
+        const time = header.querySelector("time");
+        const slot = time && time.closest(".rhythm-horizontal-4");
+        if (slot) {
+          label = doc.createElement("span");
+          label.className = `${THREAD_ID_CLASS} body-s secondary-text white-space-nowrap`;
+          label.title = "Thread id";
+          slot.appendChild(label);
+        }
+      }
+      if (label && label.textContent !== id) label.textContent = id;
+
+      let copy = header.querySelector(`.${THREAD_COPY_CLASS}`);
+      if (!copy) {
+        const copyLink = header.querySelector('button[aria-label="Copy link"]');
+        if (copyLink) {
+          copy = makeCopyButton(copyLink);
+          copyLink.before(copy);
+        }
+      }
+      if (copy && copy.getAttribute("data-thread-id") !== id) {
+        copy.setAttribute("data-thread-id", id);
+        copy.setAttribute("aria-label", "Copy thread id");
+        copy.title = `Copy thread id ${id}`;
+      }
+    }
+  }
+
   // Under `bun test` (test/userscript.test.ts), which loads this file as a
   // CommonJS module: hand over the pieces and leave the DOM alone. With
   // `@grant none` the script runs in the page's own realm, where a loader shim
@@ -477,6 +626,7 @@
     module.exports = {
       linkFor, hrefFor, needsRender, NAME_WAIT_MS, debug, guard, onClick, GUARD_MS, DEBUG_KEY,
       mountFor, makeButton, delegate, sync, batched, FALLBACK_MS, MARK, BUTTON_ID,
+      threadIdFromClass, threadIdFromHref, threadIdOf, syncThreadIds, makeCopyButton, THREAD_ID_CLASS, THREAD_COPY_CLASS,
     };
     return;
   }
@@ -498,6 +648,7 @@
     if (!document.body) return;
     // A monotonic clock: a wall clock stepped back would hold the float and the name wait off by the step.
     const wait = sync(document, window.location, state, performance.now());
+    if (isAdo(window.location.hostname) && /\/pullrequest\/\d+(?:\/|$)/i.test(window.location.pathname)) syncThreadIds(document);
     clearTimeout(wake);
     wake = wait > 0 ? setTimeout(schedule, wait + 1) : null;
   });

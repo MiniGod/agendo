@@ -623,6 +623,8 @@ GitHub page can run it. Setup on Linux:
    document-start), so Azure DevOps keeps its live updates instead of warning that
    they were paused. If a click does nothing, run `localStorage["agendo.debug"] = "1"`
    in the page's devtools console, and each click then logs what it did.
+   On an Azure DevOps PR it also shows each comment thread's id after the first
+   comment's timestamp, and adds a **Copy thread id** button next to "Copy link".
 3. **Click it once and allow the prompt:** the browser asks whether to open `agendo`
    links with the registered app. Prefer allowing it per site (dev.azure.com,
    github.com). Some browsers' "always" applies to every site, which lets any page
